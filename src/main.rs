@@ -3,7 +3,10 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     process::{Command, ExitCode},
+    sync::atomic::{AtomicU64, Ordering},
 };
+
+static TEMPORARY_ID: AtomicU64 = AtomicU64::new(0);
 
 fn usage() {
     eprintln!("Usage: ncc [build|check|fmt|lsp|run] <file> [options]");
@@ -64,12 +67,12 @@ fn main() -> ExitCode {
 }
 fn build(source: &str, path: &Path, args: impl Iterator<Item = String>, run: bool) -> ExitCode {
     let mut output = None;
-    let mut want_c = false;
+    let mut requested_format = None;
     let mut it = args.peekable();
     while let Some(a) = it.next() {
         match a.as_str() {
             "-o" | "--output" => output = it.next().map(PathBuf::from),
-            "-f" | "--format" => want_c = it.next().is_some_and(|x| x.eq_ignore_ascii_case("c")),
+            "-f" | "--format" => requested_format = it.next(),
             "-r" | "--release" | "-d" | "--debug" => {}
             _ => {
                 eprintln!("ncc: unknown option {a}");
@@ -84,14 +87,11 @@ fn build(source: &str, path: &Path, args: impl Iterator<Item = String>, run: boo
             return ExitCode::FAILURE;
         }
     };
-    let out = output.unwrap_or_else(|| {
-        if want_c {
-            path.with_extension("c")
-        } else {
-            path.with_extension("")
-        }
-    });
-    if want_c || out.extension().is_some_and(|x| x == "c") {
+    let output_is_c = output
+        .as_ref()
+        .is_some_and(|out| out.extension().is_some_and(|extension| extension == "c"));
+    if !run && output_is_c {
+        let out = output.expect("output was checked above");
         return match fs::write(out, c) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
@@ -100,11 +100,27 @@ fn build(source: &str, path: &Path, args: impl Iterator<Item = String>, run: boo
             }
         };
     }
-    let c_path = out.with_extension("c");
+    if let Some(format) = requested_format {
+        if !matches!(format.to_ascii_lowercase().as_str(), "c" | "obj" | "exe") {
+            eprintln!("ncc: unsupported output format `{format}`");
+            return ExitCode::FAILURE;
+        }
+    }
+    let temporary = TemporaryDirectory::new();
+    if let Err(e) = fs::create_dir_all(temporary.path()) {
+        eprintln!("ncc: cannot create temporary build directory: {e}");
+        return ExitCode::FAILURE;
+    }
+    let c_path = temporary.path().join("program.c");
     if let Err(e) = fs::write(&c_path, c) {
         eprintln!("ncc: {e}");
         return ExitCode::FAILURE;
     }
+    let out = if run {
+        temporary.path().join("program")
+    } else {
+        output.unwrap_or_else(|| path.with_extension(""))
+    };
     let status = match Command::new("cc").arg(&c_path).arg("-o").arg(&out).status() {
         Ok(s) => s,
         Err(e) => {
@@ -126,5 +142,21 @@ fn build(source: &str, path: &Path, args: impl Iterator<Item = String>, run: boo
         }
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+struct TemporaryDirectory(PathBuf);
+impl TemporaryDirectory {
+    fn new() -> Self {
+        let id = TEMPORARY_ID.fetch_add(1, Ordering::Relaxed);
+        Self(env::temp_dir().join(format!("ncc-{}-{id}", std::process::id())))
+    }
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+impl Drop for TemporaryDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
     }
 }
