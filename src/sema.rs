@@ -72,6 +72,7 @@ impl Checker {
                 self.validate_type(&x.ty)?;
                 self.bind_pattern(&x.pattern, x.ty.clone(), x.mutable)?
             }
+            Item::Statement(_) => {}
             _ => {}
         }
         Ok(())
@@ -116,6 +117,7 @@ impl Checker {
                 let got = self.expr(&x.value)?;
                 self.assignable(&x.ty, &got)?
             }
+            Item::Statement(statement) => self.stmt(statement)?,
             Item::Test { body, .. } => {
                 self.push();
                 self.in_test = true;

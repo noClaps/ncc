@@ -26,6 +26,7 @@ pub enum Item {
     },
     Function(Function),
     Global(VarDecl),
+    Statement(Stmt),
     Test {
         name: String,
         body: Block,

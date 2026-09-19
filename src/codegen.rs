@@ -24,8 +24,10 @@ pub fn emit(checked: &CheckedModule) -> String {
     e.line("int main(void) {");
     e.indent += 1;
     for item in &checked.module.items {
-        if let Item::Test { body, .. } = item {
-            e.block(body);
+        match item {
+            Item::Test { body, .. } => e.block(body),
+            Item::Statement(statement) => e.statement(statement),
+            _ => {}
         }
     }
     e.line("return 0;");

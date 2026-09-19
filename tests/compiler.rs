@@ -42,3 +42,11 @@ fn rejects_immutable_assignment() {
     let error = ncc::check_source(source, std::path::Path::new("test.nc")).unwrap_err();
     assert!(error.to_string().contains("cannot mutate immutable"));
 }
+
+#[test]
+fn allows_top_level_builtin_calls() {
+    let source = "@print(\"Hello world\")";
+    ncc::check_source(source, std::path::Path::new("hello-world.nc")).unwrap();
+    let c = ncc::compile_source(source, std::path::Path::new("hello-world.nc")).unwrap();
+    assert!(c.contains("fprintf(stdout, \"%s\", \"Hello world\")"));
+}

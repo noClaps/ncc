@@ -155,7 +155,10 @@ impl Parser {
         if public {
             return self.error("`pub` can only precede a declaration");
         };
-        Ok(Item::Global(self.var_decl()?))
+        match self.stmt()? {
+            Stmt::Var(declaration) => Ok(Item::Global(declaration)),
+            statement => Ok(Item::Statement(statement)),
+        }
     }
     fn generics(&mut self) -> Result<Vec<String>, Diagnostics> {
         if !self.at(&TokenKind::Lt) {
