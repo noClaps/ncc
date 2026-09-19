@@ -407,7 +407,10 @@ impl Checker {
                 }
                 self.fail(format!("type does not have member `{name}`"))
             }
-            Expr::If { arms, .. } => {
+            Expr::If { subject, arms } => {
+                if let Some(subject) = subject {
+                    self.expr(subject)?;
+                }
                 if arms.is_empty() {
                     return Ok(Type::void());
                 }

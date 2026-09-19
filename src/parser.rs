@@ -312,6 +312,44 @@ impl Parser {
         Ok(Block { statements })
     }
     fn stmt(&mut self) -> Result<Stmt, Diagnostics> {
+        let label = if let TokenKind::Ident(name) = &self.current().kind {
+            if matches!(
+                self.tokens.get(self.pos + 1).map(|token| &token.kind),
+                Some(TokenKind::Colon)
+            ) {
+                let name = name.clone();
+                self.bump();
+                self.bump();
+                Some(name)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if self.keyword(Keyword::Break) {
+            let label_target = if self.at(&TokenKind::Colon) {
+                self.bump();
+                Some(self.ident()?)
+            } else {
+                None
+            };
+            let value = if self.at(&TokenKind::RBrace) {
+                None
+            } else {
+                Some(self.expr(0)?)
+            };
+            return Ok(Stmt::Break(value, label_target));
+        }
+        if self.keyword(Keyword::Continue) {
+            let label_target = if self.at(&TokenKind::Colon) {
+                self.bump();
+                Some(self.ident()?)
+            } else {
+                None
+            };
+            return Ok(Stmt::Continue(label_target));
+        }
         if self.keyword(Keyword::Return) {
             return Ok(Stmt::Return(if self.at(&TokenKind::RBrace) {
                 None
@@ -332,7 +370,7 @@ impl Parser {
             };
             let iterable = self.expr(0)?;
             return Ok(Stmt::For {
-                label: None,
+                label,
                 name,
                 iterable,
                 body: self.block()?,
@@ -341,7 +379,7 @@ impl Parser {
         if self.keyword(Keyword::While) {
             let condition = self.expr(0)?;
             return Ok(Stmt::While {
-                label: None,
+                label,
                 condition,
                 body: self.block()?,
             });
@@ -349,10 +387,13 @@ impl Parser {
         if self.keyword(Keyword::Lock) {
             let name = self.ident()?;
             return Ok(Stmt::Lock {
-                label: None,
+                label,
                 name,
                 body: self.block()?,
             });
+        }
+        if label.is_some() {
+            return self.error("labels may only be applied to for, while, or lock blocks");
         }
         let is_decl = self.at(&TokenKind::Keyword(Keyword::Mut))
             || self.at(&TokenKind::Keyword(Keyword::Mutex))

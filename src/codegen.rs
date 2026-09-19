@@ -81,6 +81,7 @@ impl Emitter {
             Stmt::Assign { target, value } => {
                 self.line(&format!("{} = {};", self.expr(target), self.expr(value)))
             }
+            Stmt::Expr(Expr::If { subject, arms }) => self.if_statement(subject.as_deref(), arms),
             Stmt::Expr(e) => {
                 if self.builtin_print(e) {
                     return;
@@ -124,6 +125,38 @@ impl Emitter {
                 self.indent -= 1;
                 self.line("}");
             }
+        }
+    }
+    fn if_statement(&mut self, subject: Option<&Expr>, arms: &[(Vec<Pattern>, Block)]) {
+        for (index, (patterns, body)) in arms.iter().enumerate() {
+            let fallback = matches!(patterns.as_slice(), [Pattern::Wildcard]);
+            let condition = if fallback {
+                None
+            } else {
+                let checks = patterns
+                    .iter()
+                    .map(|pattern| match (subject, pattern) {
+                        (Some(value), Pattern::Literal(literal)) => {
+                            format!("{} == {}", self.expr(value), self.expr(literal))
+                        }
+                        (None, Pattern::Literal(condition)) => self.expr(condition),
+                        _ => "false".into(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" || ");
+                Some(checks)
+            };
+            if index == 0 {
+                self.line(&condition.map_or_else(|| "{".into(), |c| format!("if ({c}) {{")));
+            } else if let Some(condition) = condition {
+                self.line(&format!("else if ({condition}) {{"));
+            } else {
+                self.line("else {");
+            }
+            self.indent += 1;
+            self.block(body);
+            self.indent -= 1;
+            self.line("}");
         }
     }
     fn builtin_print(&mut self, e: &Expr) -> bool {
