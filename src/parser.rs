@@ -75,6 +75,54 @@ impl Parser {
             self.expect(TokenKind::RBrace)?;
             return Ok(Item::Import { path, alias });
         }
+        if self.keyword(Keyword::Extern) {
+            let path = match self.bump().kind {
+                TokenKind::String(path) => path,
+                _ => return self.error("expected external implementation path"),
+            };
+            if !self.keyword(Keyword::As) {
+                return self.error("expected `as` in extern declaration");
+            }
+            let alias = self.ident()?;
+            self.expect(TokenKind::LBrace)?;
+            let mut functions = Vec::new();
+            while !self.at(&TokenKind::RBrace) {
+                if !self.keyword(Keyword::Fn) {
+                    return self.error("extern blocks may only contain functions");
+                }
+                let name = self.ident()?;
+                let params = self.params()?;
+                let return_type = if self.at(&TokenKind::Assign) {
+                    Type::void()
+                } else {
+                    self.ty()?
+                };
+                let throws = if self.at(&TokenKind::Bang) {
+                    self.bump();
+                    true
+                } else {
+                    false
+                };
+                self.expect(TokenKind::Assign)?;
+                let symbol = match self.bump().kind {
+                    TokenKind::String(symbol) => symbol,
+                    _ => return self.error("expected external symbol string"),
+                };
+                functions.push(FunctionDecl {
+                    name,
+                    params,
+                    return_type,
+                    throws,
+                    symbol,
+                });
+            }
+            self.bump();
+            return Ok(Item::Extern {
+                path,
+                alias,
+                functions,
+            });
+        }
         let public = self.keyword(Keyword::Pub);
         if self.keyword(Keyword::Struct) {
             return self.struct_item(public).map(Item::Struct);
