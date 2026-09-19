@@ -1,5 +1,8 @@
 use crate::{ast::*, diagnostic::Diagnostics};
-use std::{collections::HashMap, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+};
 
 #[derive(Clone, Debug)]
 pub struct CheckedModule {
@@ -24,6 +27,7 @@ struct Checker {
     scopes: Vec<HashMap<String, Binding>>,
     function_return: Option<Type>,
     in_test: bool,
+    generics: HashSet<String>,
 }
 
 pub fn check(module: Module, _path: &Path) -> Result<CheckedModule, Diagnostics> {
@@ -52,6 +56,7 @@ impl Checker {
             scopes: vec![HashMap::new()],
             function_return: None,
             in_test: false,
+            generics: HashSet::new(),
         }
     }
     fn fail<T>(&self, s: impl Into<String>) -> Result<T, Diagnostics> {
@@ -80,30 +85,33 @@ impl Checker {
     }
     fn item(&mut self, item: &Item) -> Result<(), Diagnostics> {
         match item {
-            Item::Struct(x) => {
+            Item::Struct(x) => self.with_generics(&x.generics, |this| {
                 for f in &x.fields {
-                    self.validate_type(&f.ty)?
+                    this.validate_type(&f.ty)?
                 }
-            }
-            Item::Enum(x) => {
+                Ok(())
+            })?,
+            Item::Enum(x) => self.with_generics(&x.generics, |this| {
                 for v in &x.variants {
                     for t in &v.values {
-                        self.validate_type(t)?
+                        this.validate_type(t)?
                     }
                 }
-            }
+                Ok(())
+            })?,
             Item::TypeAlias { ty, .. } => self.validate_type(ty)?,
-            Item::Function(x) => {
-                self.push();
+            Item::Function(x) => self.with_generics(&x.generics, |this| {
+                this.push();
                 for p in &x.params {
-                    self.validate_type(&p.ty)?;
-                    self.bind(&p.name, p.ty.clone(), false)?
+                    this.validate_type(&p.ty)?;
+                    this.bind(&p.name, p.ty.clone(), false)?
                 }
-                self.function_return = Some(x.return_type.clone());
-                self.block(&x.body)?;
-                self.function_return = None;
-                self.pop();
-            }
+                this.function_return = Some(x.return_type.clone());
+                this.block(&x.body)?;
+                this.function_return = None;
+                this.pop();
+                Ok(())
+            })?,
             Item::Global(x) => {
                 let got = self.expr(&x.value)?;
                 self.assignable(&x.ty, &got)?
@@ -144,8 +152,19 @@ impl Checker {
         }
         Ok(())
     }
-    fn generic_in_scope(&self, _: &str) -> bool {
-        false
+    fn generic_in_scope(&self, name: &str) -> bool {
+        self.generics.contains(name)
+    }
+    fn with_generics<T>(
+        &mut self,
+        names: &[String],
+        body: impl FnOnce(&mut Self) -> Result<T, Diagnostics>,
+    ) -> Result<T, Diagnostics> {
+        let old = std::mem::take(&mut self.generics);
+        self.generics = names.iter().cloned().collect();
+        let result = body(self);
+        self.generics = old;
+        result
     }
     fn push(&mut self) {
         self.scopes.push(HashMap::new())
