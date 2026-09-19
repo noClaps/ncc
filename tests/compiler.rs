@@ -90,3 +90,43 @@ fn build_only_leaves_the_requested_output() {
     assert!(!directory.join("greeting.c").exists());
     let _ = fs::remove_dir_all(directory);
 }
+
+#[test]
+fn supports_multiple_conditional_patterns() {
+    let source = r#"
+        fn fibonacci(int n) int {
+          if n {
+            0, 1 -> { return n }
+            _ -> { return fibonacci(n - 1) + fibonacci(n - 2) }
+          }
+        }
+        @println(fibonacci(10))
+    "#;
+    let directory = std::env::temp_dir().join(format!("ncc-fibonacci-test-{}", std::process::id()));
+    let _ = fs::create_dir_all(&directory);
+    let source_path = directory.join("fibonacci.nc");
+    fs::write(&source_path, source).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_ncc"))
+        .arg("run")
+        .arg(&source_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "55\n");
+    let _ = fs::remove_dir_all(directory);
+}
+
+#[test]
+fn explains_missing_conditional_arrow() {
+    let source = "test \"bad conditional\" { if 1 { 1 { } } }";
+    let error = ncc::check_source(source, std::path::Path::new("bad.nc")).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("expected `->` after conditional pattern(s)")
+    );
+}

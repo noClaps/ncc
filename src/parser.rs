@@ -586,17 +586,27 @@ impl Parser {
         self.expect(TokenKind::LBrace)?;
         let mut arms = vec![];
         while !self.at(&TokenKind::RBrace) {
-            let pat = if self.at(&TokenKind::Ident("_".into())) {
+            let mut patterns = vec![self.pattern()?];
+            while self.at(&TokenKind::Comma) {
                 self.bump();
-                Pattern::Wildcard
-            } else {
-                Pattern::Literal(Box::new(self.expr(0)?))
-            };
-            self.expect(TokenKind::Arrow)?;
-            arms.push((vec![pat], self.block()?));
+                patterns.push(self.pattern()?);
+            }
+            if !self.at(&TokenKind::Arrow) {
+                return self.error("expected `->` after conditional pattern(s)");
+            }
+            self.bump();
+            arms.push((patterns, self.block()?));
         }
         self.bump();
         Ok(Expr::If { subject, arms })
+    }
+    fn pattern(&mut self) -> Result<Pattern, Diagnostics> {
+        if self.at(&TokenKind::Ident("_".into())) {
+            self.bump();
+            Ok(Pattern::Wildcard)
+        } else {
+            Ok(Pattern::Literal(Box::new(self.expr(0)?)))
+        }
     }
     fn binop(&self) -> Option<(BinaryOp, u8)> {
         Some(match &self.current().kind {
