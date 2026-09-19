@@ -434,6 +434,7 @@ impl Parser {
     fn prefix(&mut self) -> Result<Expr, Diagnostics> {
         let t = self.bump();
         match t.kind {
+            TokenKind::At => Ok(Expr::Name(format!("@{}", self.ident()?))),
             TokenKind::Int(x) => Ok(Expr::Int(x)),
             TokenKind::Float(x) => Ok(Expr::Float(x)),
             TokenKind::String(x) => Ok(Expr::String(x)),

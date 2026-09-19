@@ -278,11 +278,26 @@ impl Checker {
             Expr::Char(_) => Ok(named("char")),
             Expr::Bool(_) => Ok(named("bool")),
             Expr::None => self.fail("cannot infer type of none"),
-            Expr::Name(n) => self
-                .lookup(n)
-                .map(|b| b.ty.clone())
-                .or_else(|| self.types.get(n).map(|_| named(n)))
-                .ok_or_else(|| Diagnostics::one(format!("unknown name `{n}`"), 0..0)),
+            Expr::Name(n) => {
+                if n.starts_with('@') {
+                    return Ok(Type::Function(vec![], Box::new(Type::void())));
+                }
+                self.lookup(n)
+                    .map(|b| b.ty.clone())
+                    .or_else(|| match self.types.get(n) {
+                        Some(TypeInfo::Function(function)) => Some(Type::Function(
+                            function
+                                .params
+                                .iter()
+                                .map(|param| param.ty.clone())
+                                .collect(),
+                            Box::new(function.return_type.clone()),
+                        )),
+                        Some(_) => Some(named(n)),
+                        None => None,
+                    })
+                    .ok_or_else(|| Diagnostics::one(format!("unknown name `{n}`"), 0..0))
+            }
             Expr::Discard => Ok(Type::void()),
             Expr::Array(xs) => {
                 if xs.is_empty() {
@@ -349,6 +364,17 @@ impl Checker {
                 }
             }
             Expr::Call { callee, args, .. } => {
+                if let Expr::Name(name) = &**callee {
+                    if matches!(
+                        name.as_str(),
+                        "@print" | "@println" | "@eprint" | "@eprintln"
+                    ) {
+                        for arg in args {
+                            self.expr(arg)?;
+                        }
+                        return Ok(Type::void());
+                    }
+                }
                 let callee_t = self.expr(callee)?;
                 let Type::Function(params, ret) = callee_t else {
                     return self.fail("called value is not a function");
