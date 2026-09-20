@@ -230,7 +230,10 @@ impl Parser {
         let name = self.ident()?;
         let generics = self.generics()?;
         let params = self.params()?;
-        let return_type = if self.at(&TokenKind::LBrace) {
+        let return_type = if self.at(&TokenKind::Bang) {
+            self.bump();
+            Type::ErrorUnion(Box::new(Type::void()))
+        } else if self.at(&TokenKind::LBrace) {
             Type::void()
         } else {
             self.ty()?
@@ -503,6 +506,30 @@ impl Parser {
     fn expr(&mut self, min: u8) -> Result<Expr, Diagnostics> {
         let mut left = self.prefix()?;
         loop {
+            if min == 0 && self.keyword(Keyword::Else) {
+                let fallback = if self.at(&TokenKind::LBrace) {
+                    self.block()?
+                } else {
+                    Block {
+                        statements: vec![Stmt::Break(Some(self.expr(0)?), None)],
+                    }
+                };
+                left = Expr::Else {
+                    value: Box::new(left),
+                    fallback,
+                };
+                continue;
+            }
+            if min == 0 && self.keyword(Keyword::Catch) {
+                let name = self.ident()?;
+                let body = self.block()?;
+                left = Expr::Catch {
+                    value: Box::new(left),
+                    name,
+                    body,
+                };
+                continue;
+            }
             if self.current().newline_before
                 && matches!(
                     self.current().kind,
@@ -586,6 +613,9 @@ impl Parser {
     fn prefix(&mut self) -> Result<Expr, Diagnostics> {
         let t = self.bump();
         match t.kind {
+            TokenKind::Keyword(Keyword::Try) => Ok(Expr::Try(Box::new(self.expr(12)?))),
+            TokenKind::Keyword(Keyword::Await) => Ok(Expr::Await(Box::new(self.expr(12)?))),
+            TokenKind::Keyword(Keyword::Async) => Ok(Expr::Async(Box::new(self.expr(12)?))),
             TokenKind::Dollar => Ok(Expr::Name("$".into())),
             TokenKind::At => {
                 if self.keyword(Keyword::As) {

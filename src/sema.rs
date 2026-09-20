@@ -32,6 +32,7 @@ struct Checker {
     expression_types: HashMap<usize, Type>,
     loops: Vec<Option<String>>,
     indexing: usize,
+    value_targets: Vec<Type>,
 }
 
 pub fn check(module: Module, _path: &Path) -> Result<CheckedModule, Diagnostics> {
@@ -65,6 +66,7 @@ impl Checker {
             expression_types: HashMap::new(),
             loops: vec![],
             indexing: 0,
+            value_targets: vec![],
         }
     }
     fn fail<T>(&self, s: impl Into<String>) -> Result<T, Diagnostics> {
@@ -115,7 +117,10 @@ impl Checker {
                 }
                 this.function_return = Some(x.return_type.clone());
                 this.block(&x.body)?;
-                if x.return_type != Type::void() && !returns(&x.body) {
+                if x.return_type != Type::void()
+                    && x.return_type != Type::ErrorUnion(Box::new(Type::void()))
+                    && !returns(&x.body)
+                {
                     return this.fail(format!(
                         "function `{}` may finish without returning a value",
                         x.name
@@ -259,12 +264,28 @@ impl Checker {
                 if let Some(value) = x {
                     self.expected(value, &expected)?;
                 } else {
-                    self.assignable(&expected, &Type::void())?;
+                    self.assignable(
+                        if let Type::ErrorUnion(inner) = &expected {
+                            inner
+                        } else {
+                            &expected
+                        },
+                        &Type::void(),
+                    )?;
                 }
             }
             Stmt::Throw(x) => {
+                if self
+                    .function_return
+                    .as_ref()
+                    .is_some_and(|t| !matches!(t, Type::ErrorUnion(_)))
+                {
+                    return self.fail("throw requires a throwing function return type (`!`)");
+                }
                 let actual = self.expr(x)?;
-                self.assignable(&named("str"), &actual)?
+                if actual != named("error") {
+                    self.assignable(&named("str"), &actual)?;
+                }
             }
             Stmt::For {
                 name,
@@ -307,6 +328,10 @@ impl Checker {
                 self.block(body)?;
                 self.pop()
             }
+            Stmt::Break(Some(value), None) if !self.value_targets.is_empty() => {
+                let expected = self.value_targets.last().unwrap().clone();
+                self.expected(value, &expected)?;
+            }
             Stmt::Break(_, label) | Stmt::Continue(label) => {
                 if self.loops.is_empty() {
                     return self.fail("loop control used outside a loop");
@@ -345,6 +370,37 @@ impl Checker {
         Ok(ty)
     }
     fn expected(&mut self, e: &Expr, ty: &Type) -> Result<(), Diagnostics> {
+        if matches!(e, Expr::If { .. }) {
+            self.value_targets.push(ty.clone());
+            let result = self.expr(e);
+            self.value_targets.pop();
+            result?;
+            return Ok(());
+        }
+        if let Type::ErrorUnion(inner) = ty {
+            if matches!(e, Expr::Name(_) | Expr::Call { .. }) {
+                let actual = self.expr(e)?;
+                if &actual == ty {
+                    return Ok(());
+                }
+            }
+            return self.expected(e, inner);
+        }
+        if let Type::Optional(inner) = ty {
+            if matches!(e, Expr::None) {
+                self.expression_types
+                    .insert(e as *const Expr as usize, ty.clone());
+                return Ok(());
+            }
+            if matches!(e, Expr::Name(_) | Expr::Call { .. }) {
+                let actual = self.expr(e)?;
+                if &actual == ty {
+                    return Ok(());
+                }
+            }
+            self.expected(e, inner)?;
+            return Ok(());
+        }
         match (e, ty) {
             (Expr::StructInit { name, fields }, Type::Named(expected, _)) if name == expected => {
                 let Some(TypeInfo::Struct(declaration)) = self.types.get(name).cloned() else {
@@ -676,10 +732,15 @@ impl Checker {
                 if arms.is_empty() {
                     return Ok(Type::void());
                 }
+                let target = self.value_targets.last().cloned();
                 let mut result = None;
                 for (_, b) in arms {
-                    self.block(b)?;
-                    let t = Type::void();
+                    if let Some(ty) = &target {
+                        self.value_block(b, ty)?;
+                    } else {
+                        self.block(b)?;
+                    }
+                    let t = target.clone().unwrap_or_else(Type::void);
                     if let Some(expected) = &result {
                         self.assignable(expected, &t)?
                     } else {
@@ -693,8 +754,46 @@ impl Checker {
                 Type::Future(t) => Ok(*t),
                 _ => self.fail("await expects a future"),
             },
-            Expr::Try(x) => self.expr(x),
-            Expr::Else { value, .. } | Expr::Catch { value, .. } => self.expr(value),
+            Expr::Try(x) => {
+                if self
+                    .function_return
+                    .as_ref()
+                    .is_some_and(|t| !matches!(t, Type::ErrorUnion(_)))
+                {
+                    return self.fail("try requires a throwing function return type (`!`)");
+                }
+                match self.expr(x)? {
+                    Type::ErrorUnion(inner) => Ok(*inner),
+                    _ => self.fail("try requires an error union"),
+                }
+            }
+            Expr::Else { value, fallback } => {
+                let Type::Optional(inner) = self.expr(value)? else {
+                    return self.fail("else requires an optional value");
+                };
+                self.value_targets.push((*inner).clone());
+                let result = self.value_block(fallback, &inner);
+                self.value_targets.pop();
+                result?;
+                Ok(*inner)
+            }
+            Expr::Catch { value, name, body } => {
+                let Type::ErrorUnion(inner) = self.expr(value)? else {
+                    return self.fail("catch requires an error union");
+                };
+                self.push();
+                self.bind(name, named("error"), false)?;
+                self.value_targets.push((*inner).clone());
+                let result = if *inner == Type::void() {
+                    self.block(body)
+                } else {
+                    self.value_block(body, &inner)
+                };
+                self.value_targets.pop();
+                self.pop();
+                result?;
+                Ok(*inner)
+            }
             Expr::StructInit { name, .. } => {
                 let ty = named(name);
                 self.expected(e, &ty)?;
@@ -711,6 +810,29 @@ impl Checker {
         } else {
             self.fail(format!("expected `{expected:?}`, found `{got:?}`"))
         }
+    }
+    fn value_block(&mut self, block: &Block, expected: &Type) -> Result<(), Diagnostics> {
+        self.push();
+        for (i, statement) in block.statements.iter().enumerate() {
+            if i + 1 == block.statements.len() {
+                if let Stmt::Expr(value) = statement {
+                    self.expected(value, expected)?;
+                    continue;
+                }
+            }
+            self.stmt(statement)?;
+        }
+        let exits = block.statements.last().is_some_and(|s| {
+            matches!(
+                s,
+                Stmt::Expr(_) | Stmt::Break(Some(_), _) | Stmt::Return(_) | Stmt::Throw(_)
+            )
+        });
+        self.pop();
+        if !exits {
+            return self.fail("value-producing branch must provide a value or exit the function");
+        }
+        Ok(())
     }
 }
 fn named(x: &str) -> Type {

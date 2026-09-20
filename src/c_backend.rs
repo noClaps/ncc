@@ -19,6 +19,8 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
         array_types: vec![],
         index_context: vec![],
         record_types: vec![],
+        value_targets: vec![],
+        return_type: Type::void(),
     };
     let mut declarations = String::new();
     for item in &checked.module.items {
@@ -61,6 +63,7 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
     let global_names = e.scopes[0].clone();
     for item in &checked.module.items {
         if let Item::Function(f) = item {
+            e.return_type = f.return_type.clone();
             e.scopes.push(HashMap::new());
             let ret = e.c_type(&f.return_type)?;
             let mut params = vec![];
@@ -79,16 +82,21 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
                 }
             ));
             e.block(&f.body)?;
+            if f.return_type == Type::ErrorUnion(Box::new(Type::void())) {
+                let ct = e.c_type(&f.return_type)?;
+                e.line(format!("return ({ct}){{0}};"));
+            }
             e.line("}");
             e.scopes.pop();
         }
     }
     e.scopes[0].clear();
+    e.return_type = Type::void();
     e.line("int main(void) {");
     for item in &checked.module.items {
         match item {
             Item::Global(v) => {
-                let value = e.expr(&v.value)?;
+                let value = e.expr_as(&v.value, &v.ty)?;
                 let n = pattern_name(&v.pattern)?;
                 let name = &global_names[n];
                 e.line(format!("{name} = {value};"));
@@ -170,6 +178,8 @@ struct Emitter<'a> {
     array_types: Vec<(Type, String, String)>,
     index_context: Vec<String>,
     record_types: Vec<(Type, String, Vec<(String, String)>)>,
+    value_targets: Vec<(String, String, Type)>,
+    return_type: Type,
 }
 impl Emitter<'_> {
     fn line(&mut self, text: impl AsRef<str>) {
@@ -231,7 +241,7 @@ impl Emitter<'_> {
             Type::Named(n, _) => match n.as_str() {
                 "void" => "void",
                 "float" => "double",
-                "str" | "char" => "const char *",
+                "str" | "char" | "error" => "const char *",
                 "bool" => {
                     self.headers.insert("stdbool.h");
                     "bool"
@@ -311,7 +321,7 @@ impl Emitter<'_> {
                 if v.mutex {
                     return unsupported("mutexes");
                 }
-                let value = self.expr(&v.value)?;
+                let value = self.expr_as(&v.value, &v.ty)?;
                 let value = self.copy(&v.ty, &value)?;
                 self.declare_pattern(&v.pattern, &v.ty, &value)?;
             }
@@ -335,22 +345,28 @@ impl Emitter<'_> {
                     _ => return unsupported("composite assignment"),
                 }
             }
-            Stmt::Expr(Expr::If { subject, arms }) => self.conditional(subject.as_deref(), arms)?,
+            Stmt::Expr(Expr::If { subject, arms }) => {
+                self.conditional(subject.as_deref(), arms, false)?
+            }
             Stmt::Expr(value) => {
                 self.expr(value)?;
             }
             Stmt::Return(value) => {
+                if value.is_none() && matches!(self.return_type, Type::ErrorUnion(_)) {
+                    let ct = self.c_type(&self.return_type.clone())?;
+                    self.line(format!("return ({ct}){{0}};"));
+                    return Ok(());
+                }
                 let value = value
                     .as_ref()
-                    .map(|v| self.expr(v))
+                    .map(|v| self.expr_as(v, &self.return_type.clone()))
                     .transpose()?
                     .unwrap_or_default();
                 self.line(format!("return {value};"));
             }
             Stmt::Throw(value) => {
                 let value = self.expr(value)?;
-                self.panic_support();
-                self.line(format!("nc_panic({value});"));
+                self.throw_value(&value)?;
             }
             Stmt::Assert(value) => {
                 let value = self.expr(value)?;
@@ -373,8 +389,13 @@ impl Emitter<'_> {
                 self.loops.pop();
             }
             Stmt::Break(value, label) => {
-                if value.is_some() {
-                    return unsupported("value-carrying break");
+                if let Some(value) = value {
+                    let Some((result, end, ty)) = self.value_targets.last().cloned() else {
+                        return unsupported("break value without a target");
+                    };
+                    let value = self.expr_as(value, &ty)?;
+                    self.line(format!("{result} = {value}; goto {end};"));
+                    return Ok(());
                 }
                 let (_, _, end) = self.loop_target(label)?;
                 self.line(format!("goto {end};"));
@@ -428,6 +449,7 @@ impl Emitter<'_> {
         &mut self,
         subject: Option<&Expr>,
         arms: &[(Vec<Pattern>, Block)],
+        yields: bool,
     ) -> Result<(), Diagnostics> {
         let value = subject.map(|x| self.expr(x)).transpose()?;
         let done = self.fresh();
@@ -450,7 +472,11 @@ impl Emitter<'_> {
                 }
             }
             self.line(format!("goto {next};\n{branch}:; {{"));
-            self.block(body)?;
+            if yields {
+                self.value_block(body)?;
+            } else {
+                self.block(body)?;
+            }
             self.line(format!("}} goto {done};\n{next}:;"));
         }
         self.line(format!("{done}:;"));
@@ -498,6 +524,76 @@ impl Emitter<'_> {
     }
     fn expr(&mut self, e: &Expr) -> Result<String, Diagnostics> {
         let value = match e {
+            Expr::Try(value) => {
+                let value = self.expr(value)?;
+                self.line(format!("if ({value}.failed) {{"));
+                self.throw_value(&format!("{value}.error"))?;
+                self.line("}");
+                if self.ty(e)? == Type::void() {
+                    return Ok(String::new());
+                }
+                format!("{value}.value")
+            }
+            Expr::Catch { value, name, body } => {
+                let ty = self.ty(e)?;
+                let void = ty == Type::void();
+                let ct = self.c_type(&ty)?;
+                let value = self.expr(value)?;
+                let result = self.fresh();
+                let end = self.fresh();
+                if !void {
+                    self.line(format!("{ct} {result};"));
+                }
+                self.line(format!("if (!{value}.failed) {{"));
+                if !void {
+                    self.line(format!("{result} = {value}.value;"));
+                }
+                self.line("} else {");
+                self.scopes.push(HashMap::new());
+                let error = self.bind(name);
+                self.line(format!("const char *{error} = {value}.error;"));
+                self.value_targets.push((result.clone(), end.clone(), ty));
+                if void {
+                    self.block(body)?;
+                } else {
+                    self.value_block(body)?;
+                }
+                self.value_targets.pop();
+                self.scopes.pop();
+                self.line(format!("}}\n{end}:;"));
+                return Ok(if void { String::new() } else { result });
+            }
+            Expr::None => {
+                let ct = self.c_type(&self.ty(e)?)?;
+                format!("({ct}){{0}}")
+            }
+            Expr::If { subject, arms } => {
+                let ty = self.ty(e)?;
+                let ct = self.c_type(&ty)?;
+                let result = self.fresh();
+                let end = self.fresh();
+                self.line(format!("{ct} {result};"));
+                self.value_targets.push((result.clone(), end.clone(), ty));
+                self.conditional(subject.as_deref(), arms, true)?;
+                self.value_targets.pop();
+                self.line(format!("{end}:;"));
+                return Ok(result);
+            }
+            Expr::Else { value, fallback } => {
+                let ty = self.ty(e)?;
+                let ct = self.c_type(&ty)?;
+                let value = self.expr(value)?;
+                let result = self.fresh();
+                let end = self.fresh();
+                self.line(format!(
+                    "{ct} {result};\nif ({value}.present) {{ {result} = {value}.value; }} else {{"
+                ));
+                self.value_targets.push((result.clone(), end.clone(), ty));
+                self.value_block(fallback)?;
+                self.value_targets.pop();
+                self.line(format!("}}\n{end}:;"));
+                return Ok(result);
+            }
             Expr::Tuple(values) => {
                 let ty = self.ty(e)?;
                 let ct = self.c_type(&ty)?;
@@ -678,7 +774,7 @@ impl Emitter<'_> {
                             }
                             let (fmt, value) = match ty {
                                 Type::Named(n, _) => match n.as_str() {
-                                    "str" | "char" => ("%s", value),
+                                    "str" | "char" | "error" => ("%s", value),
                                     "bool" => ("%s", format!("{value} ? \"true\" : \"false\"")),
                                     "float" => ("%.17g", value),
                                     "uint" | "byte" => {
@@ -696,10 +792,14 @@ impl Emitter<'_> {
                         return Ok(String::new());
                     }
                 }
+                let Type::Function(params, _) = self.ty(callee)? else {
+                    return unsupported("calling this type");
+                };
                 let callee = self.expr(callee)?;
                 let args = args
                     .iter()
-                    .map(|a| self.expr(a))
+                    .zip(params)
+                    .map(|(a, ty)| self.expr_as(a, &ty))
                     .collect::<Result<Vec<_>, _>>()?;
                 format!("{callee}({})", args.join(", "))
             }
@@ -731,6 +831,22 @@ impl Emitter<'_> {
     }
     fn fields(&self, ty: &Type) -> Option<Vec<(String, Type)>> {
         match ty {
+            Type::ErrorUnion(inner) => Some(vec![
+                ("failed".into(), Type::Named("bool".into(), vec![])),
+                ("error".into(), Type::Named("str".into(), vec![])),
+                (
+                    "value".into(),
+                    if **inner == Type::void() {
+                        Type::Named("byte".into(), vec![])
+                    } else {
+                        (**inner).clone()
+                    },
+                ),
+            ]),
+            Type::Optional(inner) => Some(vec![
+                ("present".into(), Type::Named("bool".into(), vec![])),
+                ("value".into(), (**inner).clone()),
+            ]),
             Type::Tuple(types) => Some(
                 types
                     .iter()
@@ -753,6 +869,49 @@ impl Emitter<'_> {
             }
             _ => None,
         }
+    }
+    fn expr_as(&mut self, e: &Expr, expected: &Type) -> Result<String, Diagnostics> {
+        let value = self.expr(e)?;
+        if let Type::ErrorUnion(_) = expected {
+            if self.ty(e)? != *expected {
+                let ct = self.c_type(expected)?;
+                return Ok(format!("({ct}){{.value = {value}}}"));
+            }
+        }
+        if let Type::Optional(inner) = expected {
+            if self.ty(e)? != *expected {
+                let ct = self.c_type(expected)?;
+                let value = self.copy(inner, &value)?;
+                return Ok(format!("({ct}){{1, {value}}}"));
+            }
+        }
+        Ok(value)
+    }
+    fn throw_value(&mut self, message: &str) -> Result<(), Diagnostics> {
+        if matches!(self.return_type, Type::ErrorUnion(_)) {
+            let ct = self.c_type(&self.return_type.clone())?;
+            self.line(format!("return ({ct}){{.failed = 1, .error = {message}}};"));
+        } else {
+            self.headers.extend(["stdio.h", "stdlib.h"]);
+            self.line(format!("fprintf(stderr, \"%s\\n\", {message}); exit(1);"));
+        }
+        Ok(())
+    }
+    fn value_block(&mut self, body: &Block) -> Result<(), Diagnostics> {
+        self.scopes.push(HashMap::new());
+        for (i, statement) in body.statements.iter().enumerate() {
+            if i + 1 == body.statements.len() {
+                if let Stmt::Expr(value) = statement {
+                    let (result, end, ty) = self.value_targets.last().unwrap().clone();
+                    let value = self.expr_as(value, &ty)?;
+                    self.line(format!("{result} = {value}; goto {end};"));
+                    continue;
+                }
+            }
+            self.statement(statement)?;
+        }
+        self.scopes.pop();
+        Ok(())
     }
     fn arithmetic(
         &mut self,

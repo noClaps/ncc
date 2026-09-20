@@ -7,6 +7,60 @@ use std::{
 static ID: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
+fn error_unions_catch_and_propagation() {
+    success(
+        r#"
+fn checked(int n) int! { if n { 0 -> { throw "zero" } _ -> { return n } } }
+fn forwarded(int n) int! { return try checked(n) }
+fn notify() ! { throw "notification" }
+test "errors" {
+    int good = try checked(3)
+    assert good == 3
+    int bad = forwarded(0) catch error { break 99 }
+    assert bad == 99
+    void! pending = notify()
+    pending catch error { @println(error) }
+}
+"#,
+        "notification\n",
+    );
+    rejects("fn bad() int { throw \"bad\" }", "throwing function");
+    let out = run("fn bad() int! { throw \"failure\" } int n = try bad()");
+    assert!(!out.status.success());
+    assert_eq!(String::from_utf8(out.stderr).unwrap(), "failure\n");
+}
+
+#[test]
+fn optional_values_and_conditional_expressions() {
+    success(
+        r#"
+fn defaulted(int? value, int fallback) int { return value else fallback }
+test "values" {
+    int n = 2
+    char letter = if n {
+        1 -> { break 'A' }
+        2 -> { break 'B' }
+        _ -> { break 'Z' }
+    }
+    assert letter == 'B'
+    int value = if true { true -> { 42 } false -> { 0 } }
+    assert value == 42
+    int? empty = none
+    int? full = 5
+    assert defaulted(empty, 7) == 7
+    assert defaulted(full, 7) == 5
+    assert defaulted(3, 7) == 3
+    int answer = empty else { break 99 }
+    assert answer == 99
+}
+"#,
+        "",
+    );
+    rejects("int value = none", "cannot infer");
+    rejects("int? value = 1 int result = value", "expected");
+}
+
+#[test]
 fn checked_integer_arithmetic() {
     success(
         r#"test "numbers" {
