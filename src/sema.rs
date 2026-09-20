@@ -12,6 +12,7 @@ pub struct CheckedModule {
 }
 #[derive(Clone, Debug)]
 pub enum TypeInfo {
+    External(FunctionDecl),
     Builtin,
     Alias(Type),
     Struct(StructDecl),
@@ -41,7 +42,14 @@ pub fn check(module: Module, _path: &Path) -> Result<CheckedModule, Diagnostics>
         c.declare(item)?;
     }
     for item in &module.items {
-        c.item(item)?;
+        if !matches!(item, Item::Function(_)) {
+            c.item(item)?;
+        }
+    }
+    for item in &module.items {
+        if matches!(item, Item::Function(_)) {
+            c.item(item)?;
+        }
     }
     Ok(CheckedModule {
         module,
@@ -74,6 +82,11 @@ impl Checker {
     }
     fn declare(&mut self, item: &Item) -> Result<(), Diagnostics> {
         match item {
+            Item::Extern { functions, .. } => {
+                for function in functions {
+                    self.add_type(&function.name, TypeInfo::External(function.clone()))?;
+                }
+            }
             Item::Struct(x) => self.add_type(&x.name, TypeInfo::Struct(x.clone()))?,
             Item::Enum(x) => self.add_type(&x.name, TypeInfo::Enum(x.clone()))?,
             Item::TypeAlias { name, ty, .. } => self.add_type(name, TypeInfo::Alias(ty.clone()))?,
@@ -484,6 +497,10 @@ impl Checker {
                 .lookup(n)
                 .map(|b| b.ty.clone())
                 .or_else(|| match self.types.get(n) {
+                    Some(TypeInfo::External(function)) => Some(Type::Function(
+                        function.params.iter().map(|p| p.ty.clone()).collect(),
+                        Box::new(function.return_type.clone()),
+                    )),
                     Some(TypeInfo::Function(function)) => Some(Type::Function(
                         function
                             .params

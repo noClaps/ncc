@@ -57,6 +57,22 @@ impl Parser {
     fn module(&mut self) -> Result<Module, Diagnostics> {
         let mut items = vec![];
         while !self.at(&TokenKind::Eof) {
+            if self.keyword(Keyword::Import) {
+                self.expect(TokenKind::LBrace)?;
+                while !self.at(&TokenKind::RBrace) {
+                    let path = match self.bump().kind {
+                        TokenKind::String(path) => path,
+                        _ => return self.error("expected import path"),
+                    };
+                    if !self.keyword(Keyword::As) {
+                        return self.error("expected `as` after import path");
+                    }
+                    let alias = self.ident()?;
+                    items.push(Item::Import { path, alias });
+                }
+                self.bump();
+                continue;
+            }
             items.push(self.item()?)
         }
         Ok(Module { items })
@@ -156,12 +172,18 @@ impl Parser {
                 body: self.block()?,
             });
         }
-        if public {
-            return self.error("`pub` can only precede a declaration");
-        };
         match self.stmt()? {
-            Stmt::Var(declaration) => Ok(Item::Global(declaration)),
-            statement => Ok(Item::Statement(statement)),
+            Stmt::Var(mut declaration) => {
+                declaration.public = public;
+                Ok(Item::Global(declaration))
+            }
+            statement => {
+                if public {
+                    self.error("`pub` can only precede a declaration")
+                } else {
+                    Ok(Item::Statement(statement))
+                }
+            }
         }
     }
     fn generics(&mut self) -> Result<Vec<String>, Diagnostics> {
@@ -371,6 +393,7 @@ impl Parser {
         self.expect(TokenKind::Assign)?;
         let value = self.expr(0)?;
         Ok(VarDecl {
+            public: false,
             mutable,
             mutex,
             pattern,

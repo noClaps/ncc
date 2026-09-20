@@ -7,6 +7,56 @@ use std::{
 static ID: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
+fn modules_exports_and_external_functions() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("one.nc"),
+        "pub int value = 7 pub fn square(int n) int { return n * n } int hidden = 9",
+    )
+    .unwrap();
+    fs::write(dir.path().join("two.nc"), "pub int value = 2").unwrap();
+    fs::write(
+        dir.path().join("native.c"),
+        "int64_t native_add(int64_t a, int64_t b) { return a + b; }",
+    )
+    .unwrap();
+    let main = dir.path().join("main.nc");
+    fs::write(
+        &main,
+        r#"
+import { "one" as one "two" as two }
+extern "native.c" as native { fn add(int a, int b) int = "native_add" }
+@println(native.add(one.square(one.value), two.value))
+"#,
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_ncc"))
+        .arg("run")
+        .arg(&main)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"51\n");
+    assert!(
+        ncc::check_source("import { \"one\" as one } @println(one.hidden)", &main)
+            .unwrap_err()
+            .to_string()
+            .contains("does not export")
+    );
+    fs::write(dir.path().join("cycle.nc"), "import { \"cycle\" as again }").unwrap();
+    assert!(
+        ncc::check_source("import { \"cycle\" as cycle }", &main)
+            .unwrap_err()
+            .to_string()
+            .contains("cyclic")
+    );
+}
+
+#[test]
 fn error_unions_catch_and_propagation() {
     success(
         r#"

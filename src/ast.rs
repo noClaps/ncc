@@ -81,6 +81,7 @@ pub struct Param {
 }
 #[derive(Clone, Debug)]
 pub struct VarDecl {
+    pub public: bool,
     pub mutable: bool,
     pub mutex: bool,
     pub pattern: Pattern,

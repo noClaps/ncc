@@ -50,8 +50,40 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
                 let name = e.bind(pattern_name(&v.pattern)?);
                 declarations.push_str(&format!("static {ty} {name};\n"));
             }
-            Item::Import { .. } | Item::Extern { .. } => {
-                return unsupported("module or external linkage");
+            Item::Import { .. } => return unsupported("unresolved import"),
+            Item::Extern {
+                path, functions, ..
+            } => {
+                if !path.ends_with(".c") {
+                    return unsupported("non-C external implementations");
+                }
+                for f in functions {
+                    if !f.symbol.chars().enumerate().all(|(i, c)| {
+                        c == '_' || c.is_ascii_alphabetic() || (i > 0 && c.is_ascii_digit())
+                    }) || f.symbol.is_empty()
+                    {
+                        return Err(Diagnostics::one(
+                            "external symbol must be a C identifier",
+                            0..0,
+                        ));
+                    }
+                    let ret = e.c_type(&f.return_type)?;
+                    let params = f
+                        .params
+                        .iter()
+                        .map(|p| e.c_type(&p.ty))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    declarations.push_str(&format!(
+                        "extern {ret} {}({});\n",
+                        f.symbol,
+                        if params.is_empty() {
+                            "void".into()
+                        } else {
+                            params.join(", ")
+                        }
+                    ));
+                }
+                declarations.push_str(&format!("#include {}\n", c_string(path)));
             }
             Item::Struct(_) => {}
             Item::Enum(_) | Item::TypeAlias { .. } => {
@@ -199,6 +231,9 @@ impl Emitter<'_> {
         id
     }
     fn name(&self, name: &str) -> String {
+        if let Some(TypeInfo::External(f)) = self.checked.types.get(name) {
+            return f.symbol.clone();
+        }
         self.scopes
             .iter()
             .rev()
