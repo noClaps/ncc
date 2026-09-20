@@ -842,7 +842,7 @@ impl Parser {
             self.bump();
             Ok(Pattern::Wildcard)
         } else {
-            Ok(Pattern::Literal(Box::new(self.expr(0)?)))
+            Ok(expression_pattern(self.expr(0)?))
         }
     }
     fn binop(&self) -> Option<(BinaryOp, u8)> {
@@ -870,5 +870,35 @@ impl Parser {
             TokenKind::Power => (BinaryOp::Pow, 11),
             _ => return None,
         })
+    }
+}
+
+fn expression_pattern(expr: Expr) -> Pattern {
+    match expr {
+        Expr::Name(n) if n == "_" => Pattern::Wildcard,
+        Expr::Name(n) => Pattern::Name(n),
+        Expr::Tuple(xs) => Pattern::Tuple(xs.into_iter().map(expression_pattern).collect()),
+        Expr::Array(xs) => Pattern::Array(xs.into_iter().map(expression_pattern).collect()),
+        Expr::StructInit { name, fields } => Pattern::Struct {
+            name,
+            fields: fields
+                .into_iter()
+                .map(|(n, e)| (n, expression_pattern(e)))
+                .collect(),
+        },
+        Expr::Call { callee, args, .. } if matches!(&*callee, Expr::Member { object, .. } if matches!(&**object, Expr::Name(_))) =>
+        {
+            let Expr::Member { object, name } = *callee else {
+                unreachable!()
+            };
+            let Expr::Name(ty) = *object else {
+                unreachable!()
+            };
+            Pattern::Variant {
+                name: format!("{ty}.{name}"),
+                values: args.into_iter().map(expression_pattern).collect(),
+            }
+        }
+        expr => Pattern::Literal(Box::new(expr)),
     }
 }

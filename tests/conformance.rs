@@ -7,6 +7,38 @@ use std::{
 static ID: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
+fn enum_payloads_and_binding_patterns() {
+    success(
+        r#"
+enum Node { Empty Text(str) Number(int) }
+fn render(Node node) str {
+    return if node {
+        Node.Empty -> { "empty" }
+        Node.Text(text) -> { text }
+        Node.Number(n) -> { "number {n}" }
+    }
+}
+test "patterns" {
+    Node node = Node.Text("hello")
+    assert render(node) == "hello"
+    assert render(Node.Number(2)) == "number 2"
+    assert node == Node.Text("hello")
+    (str,int) p = ("hello",3)
+    if p { ("hello", n) -> { assert n == 3 } (_,_) -> {} }
+    int[] a = [1,2,3]
+    if a { [1,b,c] -> { assert b + c == 5 } _ -> {} }
+    @println(Node.Text("quoted"))
+}
+"#,
+        "Node.Text(\"quoted\")\n",
+    );
+    rejects(
+        "enum E { A B } E v = E.A if v { E.A -> {} }",
+        "not exhaustive",
+    );
+}
+
+#[test]
 fn maps_mutation_iteration_and_equality() {
     success(
         r#"

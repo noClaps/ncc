@@ -85,8 +85,8 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
                 }
                 declarations.push_str(&format!("#include {}\n", c_string(path)));
             }
-            Item::Struct(_) => {}
-            Item::Enum(_) | Item::TypeAlias { .. } => {
+            Item::Struct(_) | Item::Enum(_) => {}
+            Item::TypeAlias { .. } => {
                 return unsupported("user-defined types");
             }
             _ => {}
@@ -254,6 +254,20 @@ impl Emitter<'_> {
         }
         if let Some((_, name, _)) = self.record_types.iter().find(|(t, _, _)| t == ty) {
             return Ok(name.clone());
+        }
+        if let Type::Named(n, _) = ty {
+            if matches!(self.checked.types.get(n), Some(TypeInfo::Enum(_))) {
+                let name = format!("nc_enum_{n}");
+                self.record_types.push((
+                    ty.clone(),
+                    name.clone(),
+                    vec![
+                        ("tag".into(), "int".into()),
+                        ("payload".into(), "void *".into()),
+                    ],
+                ));
+                return Ok(name);
+            }
         }
         if let Some(fields) = self.fields(ty) {
             let mut c_fields = vec![];
@@ -518,38 +532,55 @@ impl Emitter<'_> {
         arms: &[(Vec<Pattern>, Block)],
         yields: bool,
     ) -> Result<(), Diagnostics> {
-        let value = subject.map(|x| self.expr(x)).transpose()?;
+        let value = subject
+            .map(|x| self.expr(x))
+            .transpose()?
+            .unwrap_or_else(|| "1".into());
+        let ty = subject
+            .map(|x| self.ty(x))
+            .transpose()?
+            .unwrap_or(Type::Named("bool".into(), vec![]));
         let done = self.fresh();
         for (patterns, body) in arms {
-            let branch = self.fresh();
-            let next = self.fresh();
             for pattern in patterns {
-                match pattern {
-                    Pattern::Wildcard => self.line(format!("goto {branch};")),
-                    Pattern::Literal(pattern) => {
-                        let p = self.expr(pattern)?;
-                        let condition = if let Some(value) = &value {
-                            self.equality(value, &p, &self.ty(pattern)?)?
-                        } else {
-                            p
-                        };
-                        self.line(format!("if ({condition}) goto {branch};"));
-                    }
-                    _ => return unsupported("binding patterns"),
+                let next = self.fresh();
+                self.scopes.push(HashMap::new());
+                self.line("{");
+                self.pattern(pattern, &value, &ty, &next)?;
+                if yields {
+                    self.value_block(body)?;
+                } else {
+                    self.block(body)?;
                 }
+                self.line(format!("}} goto {done};\n{next}:;"));
+                self.scopes.pop();
             }
-            self.line(format!("goto {next};\n{branch}:; {{"));
-            if yields {
-                self.value_block(body)?;
-            } else {
-                self.block(body)?;
-            }
-            self.line(format!("}} goto {done};\n{next}:;"));
         }
         self.line(format!("{done}:;"));
         Ok(())
     }
     fn equality(&mut self, left: &str, right: &str, ty: &Type) -> Result<String, Diagnostics> {
+        if let Some(declaration) = self.enum_decl(ty) {
+            self.headers.insert("stdbool.h");
+            let result = self.fresh();
+            self.line(format!("bool {result} = ({left}).tag == ({right}).tag; if ({result}) {{ switch (({left}).tag) {{"));
+            for (tag, variant) in declaration.variants.iter().enumerate() {
+                if variant.values.is_empty() {
+                    continue;
+                }
+                let payload = Type::Tuple(variant.values.clone());
+                let ct = self.c_type(&payload)?;
+                self.line(format!("case {tag}: {{"));
+                let eq = self.equality(
+                    &format!("(*({ct}*)({left}).payload)"),
+                    &format!("(*({ct}*)({right}).payload)"),
+                    &payload,
+                )?;
+                self.line(format!("{result} = {eq}; break; }}"));
+            }
+            self.line("default: break; } }");
+            return Ok(result);
+        }
         if let Type::Map(key, value) = ty {
             self.headers.insert("stdbool.h");
             let result = self.fresh();
@@ -743,6 +774,15 @@ impl Emitter<'_> {
             Expr::Index { object, index } => self.index(object, index)?,
             Expr::Member { object, name } => {
                 let ty = self.ty(object)?;
+                if let Some(declaration) = self.enum_decl(&ty) {
+                    let tag = declaration
+                        .variants
+                        .iter()
+                        .position(|v| v.name == *name)
+                        .unwrap();
+                    let ct = self.c_type(&ty)?;
+                    return self.temp(e, format!("({ct}){{{tag},0}}"));
+                }
                 let object = self.expr(object)?;
                 format!(
                     "({object}).{}{name}",
@@ -888,6 +928,29 @@ impl Emitter<'_> {
                 }
             }
             Expr::Call { callee, args, .. } => {
+                if let Expr::Member { object, name } = &**callee {
+                    let ty = self.ty(object)?;
+                    if let Some(declaration) = self.enum_decl(&ty) {
+                        let tag = declaration
+                            .variants
+                            .iter()
+                            .position(|v| v.name == *name)
+                            .unwrap();
+                        let variant = &declaration.variants[tag];
+                        let payload = self.c_type(&Type::Tuple(variant.values.clone()))?;
+                        let ct = self.c_type(&ty)?;
+                        self.allocation_support();
+                        let pointer = self.fresh();
+                        self.line(format!(
+                            "{payload} *{pointer} = nc_alloc(1,sizeof({payload}));"
+                        ));
+                        for (i, (arg, ty)) in args.iter().zip(&variant.values).enumerate() {
+                            let arg = self.expr_as(arg, ty)?;
+                            self.line(format!("{pointer}->f_{i} = {arg};"));
+                        }
+                        return self.temp(e, format!("({ct}){{{tag},{pointer}}}"));
+                    }
+                }
                 if let Expr::Name(name) = &**callee {
                     if name.starts_with('@') {
                         self.headers.insert("stdio.h");
@@ -901,6 +964,7 @@ impl Emitter<'_> {
                             let ty = self.ty(arg)?;
                             if matches!(ty, Type::Map(_, _) | Type::Tuple(_) | Type::Optional(_))
                                 || self.fields(&ty).is_some()
+                                || self.enum_decl(&ty).is_some()
                                 || matches!(&ty, Type::Named(n, _) if n == "float")
                             {
                                 let string = self.string_value(&value, &ty)?;
@@ -1050,6 +1114,41 @@ impl Emitter<'_> {
         Ok(())
     }
     fn string_value(&mut self, value: &str, ty: &Type) -> Result<String, Diagnostics> {
+        if let Some(declaration) = self.enum_decl(ty) {
+            let result = self.fresh();
+            self.line(format!(
+                "const char *{result} = \"\"; switch (({value}).tag) {{"
+            ));
+            for (tag, variant) in declaration.variants.iter().enumerate() {
+                self.line(format!(
+                    "case {tag}: {{ {result} = {};",
+                    c_string(&format!("{}.{}", declaration.name, variant.name))
+                ));
+                if !variant.values.is_empty() {
+                    let ct = self.c_type(&Type::Tuple(variant.values.clone()))?;
+                    self.append_string(&result, "\"(\"")?;
+                    for (i, ty) in variant.values.iter().enumerate() {
+                        if i > 0 {
+                            self.append_string(&result, "\", \"")?;
+                        }
+                        let s =
+                            self.string_value(&format!("(({ct}*)({value}).payload)->f_{i}"), ty)?;
+                        let quoted = matches!(ty,Type::Named(n,_) if n == "str");
+                        if quoted {
+                            self.append_string(&result, "\"\\\"\"")?;
+                        }
+                        self.append_string(&result, &s)?;
+                        if quoted {
+                            self.append_string(&result, "\"\\\"\"")?;
+                        }
+                    }
+                    self.append_string(&result, "\")\"")?;
+                }
+                self.line("break; }");
+            }
+            self.line("}");
+            return Ok(result);
+        }
         if let Type::Optional(inner) = ty {
             let result = self.fresh();
             self.line(format!(
@@ -1143,6 +1242,88 @@ impl Emitter<'_> {
         let b = self.fresh();
         let text = self.fresh();
         self.line(format!("size_t {a} = strlen({result}), {b} = strlen({suffix}); if ({a} > (size_t)-1 - {b} - 1) nc_panic(\"string length overflow\");\nchar *{text} = nc_alloc({a} + {b} + 1, 1); memcpy({text},{result},{a}); memcpy({text}+{a},{suffix},{b}+1); {result} = {text};"));
+        Ok(())
+    }
+    fn enum_decl(&self, ty: &Type) -> Option<EnumDecl> {
+        if let Type::Named(n, _) = ty {
+            if let Some(TypeInfo::Enum(e)) = self.checked.types.get(n) {
+                return Some(e.clone());
+            }
+        }
+        None
+    }
+    fn pattern(
+        &mut self,
+        p: &Pattern,
+        value: &str,
+        ty: &Type,
+        next: &str,
+    ) -> Result<(), Diagnostics> {
+        match p {
+            Pattern::Wildcard => {}
+            Pattern::Name(n) => {
+                if self.scopes.iter().any(|s| s.contains_key(n)) {
+                    let eq = self.equality(value, &self.name(n), ty)?;
+                    self.line(format!("if (!({eq})) goto {next};"));
+                } else {
+                    let ct = self.c_type(ty)?;
+                    let name = self.bind(n);
+                    self.line(format!("{ct} {name} = {value};"));
+                }
+            }
+            Pattern::Literal(e) => {
+                let e = self.expr(e)?;
+                let eq = self.equality(value, &e, ty)?;
+                self.line(format!("if (!({eq})) goto {next};"));
+            }
+            Pattern::Tuple(patterns) => {
+                let Type::Tuple(types) = ty else {
+                    unreachable!()
+                };
+                for (i, (p, t)) in patterns.iter().zip(types).enumerate() {
+                    self.pattern(p, &format!("({value}).f_{i}"), t, next)?;
+                }
+            }
+            Pattern::Array(patterns) => {
+                let Type::Array(t, _) = ty else {
+                    unreachable!()
+                };
+                self.line(format!(
+                    "if (({value}).len != {}) goto {next};",
+                    patterns.len()
+                ));
+                for (i, p) in patterns.iter().enumerate() {
+                    self.pattern(p, &format!("({value}).vals[{i}]"), t, next)?;
+                }
+            }
+            Pattern::Struct { fields, .. } => {
+                let types = self.fields(ty).unwrap();
+                for (field, p) in fields {
+                    let (_, t) = types
+                        .iter()
+                        .find(|(n, _)| *n == format!("f_{field}"))
+                        .unwrap();
+                    self.pattern(p, &format!("({value}).f_{field}"), t, next)?;
+                }
+            }
+            Pattern::Variant { name, values } => {
+                let declaration = self.enum_decl(ty).unwrap();
+                let variant = name.rsplit('.').next().unwrap();
+                let tag = declaration
+                    .variants
+                    .iter()
+                    .position(|v| v.name == variant)
+                    .unwrap();
+                let types = &declaration.variants[tag].values;
+                self.line(format!("if (({value}).tag != {tag}) goto {next};"));
+                if !values.is_empty() {
+                    let ct = self.c_type(&Type::Tuple(types.clone()))?;
+                    for (i, (p, t)) in values.iter().zip(types).enumerate() {
+                        self.pattern(p, &format!("(({ct}*)({value}).payload)->f_{i}"), t, next)?;
+                    }
+                }
+            }
+        }
         Ok(())
     }
     fn expr_as(&mut self, e: &Expr, expected: &Type) -> Result<String, Diagnostics> {

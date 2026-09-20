@@ -715,6 +715,17 @@ impl Checker {
             Expr::Member { object, name } => {
                 let o = self.expr(object)?;
                 if let Type::Named(n, _) = &o {
+                    if let Some(TypeInfo::Enum(declaration)) = self.types.get(n) {
+                        let Some(variant) = declaration.variants.iter().find(|v| v.name == *name)
+                        else {
+                            return self.fail(format!("unknown enum variant `{name}`"));
+                        };
+                        return Ok(if variant.values.is_empty() {
+                            o.clone()
+                        } else {
+                            Type::Function(variant.values.clone(), Box::new(o.clone()))
+                        });
+                    }
                     if let Some(TypeInfo::Struct(declaration)) = self.types.get(n) {
                         return declaration
                             .fields
@@ -741,42 +752,54 @@ impl Checker {
                 };
                 let mut wildcard = false;
                 let mut booleans = HashSet::new();
-                for (patterns, _) in arms {
+                let mut variants = HashSet::new();
+                let target = self.value_targets.last().cloned();
+                for (patterns, body) in arms {
+                    self.push();
                     for pattern in patterns {
+                        let total = self.check_pattern(pattern, &subject_type)?;
                         match pattern {
                             Pattern::Wildcard => wildcard = true,
                             Pattern::Literal(value) => {
-                                self.expected(value, &subject_type)?;
                                 if let Expr::Bool(b) = &**value {
                                     booleans.insert(*b);
                                 }
+                                if let Expr::Member { name, .. } = &**value {
+                                    variants.insert(name.clone());
+                                }
                             }
-                            _ => return self.fail("unsupported pattern"),
+                            Pattern::Variant { name, .. } if total => {
+                                variants.insert(name.rsplit('.').next().unwrap().to_string());
+                            }
+                            _ => wildcard |= total,
                         }
                     }
+                    if let Some(ty) = &target {
+                        self.value_block(body, ty)?;
+                    } else {
+                        self.block(body)?;
+                    }
+                    self.pop();
                 }
-                if !wildcard && !(subject_type == named("bool") && booleans.len() == 2) {
+                let enum_complete = if let Type::Named(n, _) = &subject_type {
+                    if let Some(TypeInfo::Enum(e)) = self.types.get(n) {
+                        e.variants.iter().all(|v| variants.contains(&v.name))
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if !wildcard
+                    && !enum_complete
+                    && !(subject_type == named("bool") && booleans.len() == 2)
+                {
                     return self.fail("conditional is not exhaustive; add a `_` fallback branch");
                 }
                 if arms.is_empty() {
                     return Ok(Type::void());
                 }
-                let target = self.value_targets.last().cloned();
-                let mut result = None;
-                for (_, b) in arms {
-                    if let Some(ty) = &target {
-                        self.value_block(b, ty)?;
-                    } else {
-                        self.block(b)?;
-                    }
-                    let t = target.clone().unwrap_or_else(Type::void);
-                    if let Some(expected) = &result {
-                        self.assignable(expected, &t)?
-                    } else {
-                        result = Some(t)
-                    }
-                }
-                Ok(result.unwrap())
+                Ok(target.unwrap_or_else(Type::void))
             }
             Expr::Async(x) => Ok(Type::Future(Box::new(self.expr(x)?))),
             Expr::Await(x) => match self.expr(x)? {
@@ -862,6 +885,81 @@ impl Checker {
             return self.fail("value-producing branch must provide a value or exit the function");
         }
         Ok(())
+    }
+    fn check_pattern(&mut self, p: &Pattern, ty: &Type) -> Result<bool, Diagnostics> {
+        match p {
+            Pattern::Wildcard => Ok(true),
+            Pattern::Name(n) => {
+                if let Some(binding) = self.lookup(n) {
+                    self.assignable(ty, &binding.ty)?;
+                    Ok(false)
+                } else {
+                    self.bind(n, ty.clone(), false)?;
+                    Ok(true)
+                }
+            }
+            Pattern::Literal(value) => {
+                self.expected(value, ty)?;
+                Ok(false)
+            }
+            Pattern::Array(patterns) => {
+                let Type::Array(element, size) = ty else {
+                    return self.fail("array pattern requires an array subject");
+                };
+                let mut total = size == &Some(patterns.len());
+                for p in patterns {
+                    total &= self.check_pattern(p, element)?;
+                }
+                Ok(total)
+            }
+            Pattern::Tuple(patterns) => {
+                let Type::Tuple(types) = ty else {
+                    return self.fail("tuple pattern requires a tuple subject");
+                };
+                if patterns.len() != types.len() {
+                    return self.fail("tuple pattern has wrong arity");
+                }
+                let mut total = true;
+                for (p, t) in patterns.iter().zip(types) {
+                    total &= self.check_pattern(p, t)?;
+                }
+                Ok(total)
+            }
+            Pattern::Struct { name, fields } => {
+                self.assignable(ty, &named(name))?;
+                let Some(TypeInfo::Struct(declaration)) = self.types.get(name).cloned() else {
+                    return self.fail("unknown struct pattern");
+                };
+                let mut total = true;
+                for (name, p) in fields {
+                    let Some(f) = declaration.fields.iter().find(|f| f.name == *name) else {
+                        return self.fail("unknown field in struct pattern");
+                    };
+                    total &= self.check_pattern(p, &f.ty)?;
+                }
+                Ok(total)
+            }
+            Pattern::Variant { name, values } => {
+                let Some((owner, variant)) = name.rsplit_once('.') else {
+                    return self.fail("invalid enum pattern");
+                };
+                self.assignable(ty, &named(owner))?;
+                let Some(TypeInfo::Enum(declaration)) = self.types.get(owner).cloned() else {
+                    return self.fail("unknown enum pattern");
+                };
+                let Some(v) = declaration.variants.iter().find(|v| v.name == variant) else {
+                    return self.fail("unknown enum variant");
+                };
+                if values.len() != v.values.len() {
+                    return self.fail("incorrect enum payload arity");
+                }
+                let mut total = true;
+                for (p, t) in values.iter().zip(&v.values) {
+                    total &= self.check_pattern(p, t)?;
+                }
+                Ok(total)
+            }
+        }
     }
 }
 fn named(x: &str) -> Type {
