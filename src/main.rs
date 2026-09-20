@@ -8,6 +8,13 @@ use std::{
 
 static TEMPORARY_ID: AtomicU64 = AtomicU64::new(0);
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OutputFormat {
+    C,
+    Object,
+    Executable,
+}
+
 fn usage() {
     eprintln!("Usage: ncc [build|check|fmt|lsp|run] <file> [options]");
 }
@@ -80,6 +87,16 @@ fn build(source: &str, path: &Path, args: impl Iterator<Item = String>, run: boo
             }
         }
     }
+    let requested_format = match requested_format.as_deref() {
+        None => None,
+        Some(format) if format.eq_ignore_ascii_case("c") => Some(OutputFormat::C),
+        Some(format) if format.eq_ignore_ascii_case("obj") => Some(OutputFormat::Object),
+        Some(format) if format.eq_ignore_ascii_case("exe") => Some(OutputFormat::Executable),
+        Some(format) => {
+            eprintln!("ncc: unsupported output format `{format}` (expected C, obj, or exe)");
+            return ExitCode::FAILURE;
+        }
+    };
     let c = match compile_source(source, path) {
         Ok(c) => c,
         Err(e) => {
@@ -87,11 +104,30 @@ fn build(source: &str, path: &Path, args: impl Iterator<Item = String>, run: boo
             return ExitCode::FAILURE;
         }
     };
-    let output_is_c = output
-        .as_ref()
-        .is_some_and(|out| out.extension().is_some_and(|extension| extension == "c"));
-    if !run && output_is_c {
-        let out = output.expect("output was checked above");
+    let format = if run {
+        OutputFormat::Executable
+    } else {
+        requested_format.unwrap_or_else(|| {
+            output.as_ref().map_or(OutputFormat::Executable, |out| {
+                match out.extension().and_then(|extension| extension.to_str()) {
+                    Some("c") => OutputFormat::C,
+                    Some("o") => OutputFormat::Object,
+                    _ => OutputFormat::Executable,
+                }
+            })
+        })
+    };
+    let out = if run {
+        None
+    } else {
+        Some(output.unwrap_or_else(|| match format {
+            OutputFormat::C => path.with_extension("c"),
+            OutputFormat::Object => path.with_extension("o"),
+            OutputFormat::Executable => path.with_extension(""),
+        }))
+    };
+    if format == OutputFormat::C {
+        let out = out.expect("C output is only used by build");
         return match fs::write(out, c) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
@@ -99,12 +135,6 @@ fn build(source: &str, path: &Path, args: impl Iterator<Item = String>, run: boo
                 ExitCode::FAILURE
             }
         };
-    }
-    if let Some(format) = requested_format {
-        if !matches!(format.to_ascii_lowercase().as_str(), "c" | "obj" | "exe") {
-            eprintln!("ncc: unsupported output format `{format}`");
-            return ExitCode::FAILURE;
-        }
     }
     let temporary = TemporaryDirectory::new();
     if let Err(e) = fs::create_dir_all(temporary.path()) {
@@ -119,9 +149,14 @@ fn build(source: &str, path: &Path, args: impl Iterator<Item = String>, run: boo
     let out = if run {
         temporary.path().join("program")
     } else {
-        output.unwrap_or_else(|| path.with_extension(""))
+        out.expect("build output was determined above")
     };
-    let status = match Command::new("cc").arg(&c_path).arg("-o").arg(&out).status() {
+    let mut compiler = Command::new("cc");
+    compiler.arg(&c_path);
+    if format == OutputFormat::Object {
+        compiler.arg("-c");
+    }
+    let status = match compiler.arg("-o").arg(&out).status() {
         Ok(s) => s,
         Err(e) => {
             eprintln!("ncc: cannot run C compiler: {e}");
