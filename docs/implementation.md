@@ -26,8 +26,8 @@ must stay explicit about features still under construction.
 ## Known remaining work
 
 - Complete all specified casts and operators; settle numeric byte-array encoding.
-- Complete generic inference in nested contextual expressions and imported type
-  syntax. Validate recursive type layouts without backend recursion failures.
+- Complete generic inference in nested contextual expressions. Validate recursive
+  type layouts without backend recursion failures.
 - Complete pattern/label coverage and restrictions on escaping futures.
 - Audit value-copy and evaluation-order behavior across all composite operations.
 - Finish standard modules, external ABI coverage, and source-aware diagnostics

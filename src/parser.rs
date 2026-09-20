@@ -335,7 +335,12 @@ impl Parser {
                 Type::Tuple(xs)
             }
         } else {
-            let name = self.ident()?;
+            let mut name = self.ident()?;
+            while self.at(&TokenKind::Dot) {
+                self.bump();
+                name.push('.');
+                name.push_str(&self.ident()?);
+            }
             Type::Named(name, self.type_args()?)
         };
         loop {
@@ -597,10 +602,9 @@ impl Parser {
                 let position = self.pos;
                 let tokens = self.tokens.clone();
                 if let Ok(generics) = self.type_args() {
-                    if let Expr::Name(name) = &left
+                    if let Some(name) = expression_path(&left)
                         && self.at(&TokenKind::LBrace)
                     {
-                        let name = name.clone();
                         self.bump();
                         let mut fields = vec![];
                         while !self.at(&TokenKind::RBrace) {
@@ -677,7 +681,7 @@ impl Parser {
                     .tokens
                     .get(self.pos + 1)
                     .is_some_and(|t| t.kind == TokenKind::Dot)
-                && let Expr::Name(name) = left
+                && let Some(name) = expression_path(&left)
             {
                 self.bump();
                 let mut fields = vec![];
@@ -982,6 +986,13 @@ impl Parser {
     }
 }
 
+fn expression_path(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Name(n) => Some(n.clone()),
+        Expr::Member { object, name } => Some(format!("{}.{name}", expression_path(object)?)),
+        _ => None,
+    }
+}
 fn expression_pattern(expr: Expr) -> Pattern {
     match expr {
         Expr::Name(n) if n == "_" => Pattern::Wildcard,
@@ -995,14 +1006,12 @@ fn expression_pattern(expr: Expr) -> Pattern {
                 .map(|(n, e)| (n, expression_pattern(e)))
                 .collect(),
         },
-        Expr::Call { callee, args, .. } if matches!(&*callee, Expr::Member { object, .. } if matches!(&**object, Expr::Name(_))) =>
+        Expr::Call { callee, args, .. } if matches!(&*callee, Expr::Member { object, .. } if expression_path(object).is_some()) =>
         {
             let Expr::Member { object, name } = *callee else {
                 unreachable!()
             };
-            let Expr::Name(ty) = *object else {
-                unreachable!()
-            };
+            let ty = expression_path(&object).unwrap();
             Pattern::Variant {
                 name: format!("{ty}.{name}"),
                 values: args.into_iter().map(expression_pattern).collect(),

@@ -114,6 +114,11 @@ impl Loader {
                 _ => {}
             }
         }
+        for (alias, exports) in &aliases {
+            for (name, qualified) in exports {
+                names.insert(format!("{alias}.{name}"), qualified.clone());
+            }
+        }
         for mut item in module.items {
             if matches!(item, Item::Import { .. }) {
                 continue;
@@ -185,10 +190,10 @@ fn qualify_item(
                 local.remove(generic);
             }
             for p in &mut f.params {
-                qualify_type(&mut p.ty, names);
-                local.remove(&p.name);
+                qualify_type(&mut p.ty, &local);
+                local.insert(p.name.clone(), p.name.clone());
             }
-            qualify_type(&mut f.return_type, names);
+            qualify_type(&mut f.return_type, &local);
             block(&mut f.body, &local, aliases)?;
         }
         Item::Global(v) => {
@@ -206,15 +211,23 @@ fn qualify_item(
         Item::Test { body, .. } => block(body, names, aliases)?,
         Item::Struct(s) => {
             s.name = names[&s.name].clone();
+            let mut local = names.clone();
+            for n in &s.generics {
+                local.remove(n);
+            }
             for f in &mut s.fields {
-                qualify_type(&mut f.ty, names);
+                qualify_type(&mut f.ty, &local);
             }
         }
         Item::Enum(e) => {
             e.name = names[&e.name].clone();
+            let mut local = names.clone();
+            for n in &e.generics {
+                local.remove(n);
+            }
             for v in &mut e.variants {
                 for ty in &mut v.values {
-                    qualify_type(ty, names);
+                    qualify_type(ty, &local);
                 }
             }
         }
@@ -237,10 +250,15 @@ fn qualify_item(
 fn hide(pattern: &Pattern, names: &mut Names) {
     match pattern {
         Pattern::Name(n) => {
-            names.remove(n);
+            names.insert(n.clone(), n.clone());
         }
-        Pattern::Tuple(p) => {
+        Pattern::Tuple(p) | Pattern::Array(p) | Pattern::Variant { values: p, .. } => {
             for p in p {
+                hide(p, names);
+            }
+        }
+        Pattern::Struct { fields, .. } => {
+            for (_, p) in fields {
                 hide(p, names);
             }
         }
@@ -288,7 +306,7 @@ fn statement(
         } => {
             expr(iterable, names, aliases)?;
             let mut local = names.clone();
-            local.remove(name);
+            local.insert(name.clone(), name.clone());
             block(body, &local, aliases)?;
         }
         Stmt::While {
@@ -313,7 +331,7 @@ fn expr(e: &mut Expr, names: &Names, aliases: &HashMap<String, Names>) -> Result
             let mut local = names.clone();
             for p in &mut f.params {
                 qualify_type(&mut p.ty, names);
-                local.remove(&p.name);
+                local.insert(p.name.clone(), p.name.clone());
             }
             qualify_type(&mut f.return_type, names);
             block(&mut f.body, &local, aliases)?;
@@ -325,6 +343,7 @@ fn expr(e: &mut Expr, names: &Names, aliases: &HashMap<String, Names>) -> Result
         }
         Expr::Member { object, name } => {
             if let Expr::Name(alias) = &**object
+                && !names.contains_key(alias)
                 && let Some(exports) = aliases.get(alias)
             {
                 *e = Expr::Name(exports.get(name).cloned().ok_or_else(|| {
@@ -386,12 +405,12 @@ fn expr(e: &mut Expr, names: &Names, aliases: &HashMap<String, Names>) -> Result
                 expr(e, names, aliases)?;
             }
             for (patterns, b) in arms {
+                let mut local = names.clone();
                 for p in patterns {
-                    if let Pattern::Literal(e) = p {
-                        expr(e, names, aliases)?;
-                    }
+                    qualify_pattern(p, names, aliases)?;
+                    hide(p, &mut local);
                 }
-                block(b, names, aliases)?;
+                block(b, &local, aliases)?;
             }
         }
         Expr::Else { value, fallback } => {
@@ -401,10 +420,49 @@ fn expr(e: &mut Expr, names: &Names, aliases: &HashMap<String, Names>) -> Result
         Expr::Catch { value, name, body } => {
             expr(value, names, aliases)?;
             let mut local = names.clone();
-            local.remove(name);
+            local.insert(name.clone(), name.clone());
             block(body, &local, aliases)?;
         }
         _ => {}
+    }
+    Ok(())
+}
+fn qualify_pattern(
+    p: &mut Pattern,
+    names: &Names,
+    aliases: &HashMap<String, Names>,
+) -> Result<(), Diagnostics> {
+    match p {
+        Pattern::Name(n) => {
+            if let Some(qualified) = names.get(n) {
+                *p = Pattern::Literal(Box::new(Expr::Name(qualified.clone())));
+            }
+        }
+        Pattern::Literal(e) => expr(e, names, aliases)?,
+        Pattern::Tuple(ps) | Pattern::Array(ps) => {
+            for p in ps {
+                qualify_pattern(p, names, aliases)?;
+            }
+        }
+        Pattern::Variant { name, values } => {
+            if let Some((owner, variant)) = name.rsplit_once('.')
+                && let Some(qualified) = names.get(owner)
+            {
+                *name = format!("{qualified}.{variant}");
+            }
+            for p in values {
+                qualify_pattern(p, names, aliases)?;
+            }
+        }
+        Pattern::Struct { name, fields } => {
+            if let Some(qualified) = names.get(name) {
+                *name = qualified.clone();
+            }
+            for (_, p) in fields {
+                qualify_pattern(p, names, aliases)?;
+            }
+        }
+        Pattern::Wildcard => {}
     }
     Ok(())
 }

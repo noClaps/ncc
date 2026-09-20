@@ -453,6 +453,50 @@ extern "native.c" as native { fn add(int a, int b) int = "native_add" }
 }
 
 #[test]
+fn imported_types_and_patterns() {
+    let dir = ncc::temp::Directory::new().unwrap();
+    fs::write(
+        dir.path().join("data.nc"),
+        r#"
+pub struct Point { int x }
+pub struct Box<type T> { T value }
+pub enum Choice { Point(Point) Empty }
+pub fn number(Choice choice) int {
+    return if choice { Choice.Point(p) -> { p.x } Choice.Empty -> { 0 } }
+}
+"#,
+    )
+    .unwrap();
+    let main = dir.path().join("main.nc");
+    fs::write(
+        &main,
+        r#"
+import { "data" as data }
+test "imported types" {
+    data.Point point = data.Point{.x = 7}
+    data.Box<data.Point> boxed = data.Box<data.Point>{.value = point}
+    data.Choice choice = data.Choice.Point(boxed.value)
+    assert data.number(choice) == 7
+    if choice { data.Choice.Point(p) -> { assert p.x == 7 } data.Choice.Empty -> { assert false } }
+    data.Point data = point
+    assert data.x == 7
+}
+"#,
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_ncc"))
+        .arg("run")
+        .arg(&main)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn error_unions_catch_and_propagation() {
     success(
         r#"
