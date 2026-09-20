@@ -198,6 +198,12 @@ impl Checker {
         Ok(())
     }
     fn bind_pattern(&mut self, p: &Pattern, ty: Type, mutable: bool) -> Result<(), Diagnostics> {
+        if let (Pattern::Tuple(patterns), Type::Tuple(types)) = (p, &ty) {
+            for (pattern, ty) in patterns.iter().zip(types) {
+                self.bind_pattern(pattern, ty.clone(), mutable)?;
+            }
+            return Ok(());
+        }
         if let Pattern::Name(n) = p {
             if n != "_" {
                 self.bind(n, ty, mutable)?
@@ -340,6 +346,24 @@ impl Checker {
     }
     fn expected(&mut self, e: &Expr, ty: &Type) -> Result<(), Diagnostics> {
         match (e, ty) {
+            (Expr::StructInit { name, fields }, Type::Named(expected, _)) if name == expected => {
+                let Some(TypeInfo::Struct(declaration)) = self.types.get(name).cloned() else {
+                    return self.fail(format!("`{name}` is not a struct"));
+                };
+                let mut seen = HashSet::new();
+                for (name, value) in fields {
+                    if !seen.insert(name) {
+                        return self.fail(format!("duplicate field `{name}`"));
+                    }
+                    let Some(field) = declaration.fields.iter().find(|f| f.name == *name) else {
+                        return self.fail(format!("unknown field `{name}`"));
+                    };
+                    self.expected(value, &field.ty)?;
+                }
+                if seen.len() != declaration.fields.len() {
+                    return self.fail("missing struct fields");
+                }
+            }
             (Expr::Int(text), Type::Named(n, _))
                 if matches!(n.as_str(), "byte" | "int" | "uint") =>
             {
@@ -560,6 +584,17 @@ impl Checker {
             }
             Expr::Index { object, index } => {
                 let o = self.expr(object)?;
+                if let Type::Tuple(types) = &o {
+                    if let Expr::Int(text) = &**index {
+                        let n = integer(text)? as usize;
+                        self.expr(index)?;
+                        return types
+                            .get(n)
+                            .cloned()
+                            .ok_or_else(|| Diagnostics::one("tuple index out of bounds", 0..0));
+                    }
+                    return self.fail("tuple index must be an integer literal");
+                }
                 self.indexing += 1;
                 let index_type = self.expr(index)?;
                 self.indexing -= 1;
@@ -574,6 +609,18 @@ impl Checker {
             }
             Expr::Member { object, name } => {
                 let o = self.expr(object)?;
+                if let Type::Named(n, _) = &o {
+                    if let Some(TypeInfo::Struct(declaration)) = self.types.get(n) {
+                        return declaration
+                            .fields
+                            .iter()
+                            .find(|f| f.name == *name)
+                            .map(|f| f.ty.clone())
+                            .ok_or_else(|| {
+                                Diagnostics::one(format!("unknown field `{name}`"), 0..0)
+                            });
+                    }
+                }
                 let has_len = matches!(o, Type::Array(_, _) | Type::Map(_, _))
                     || matches!(o, Type::Named(ref n, _) if n == "str");
                 if name == "len" && has_len {
@@ -628,7 +675,11 @@ impl Checker {
             },
             Expr::Try(x) => self.expr(x),
             Expr::Else { value, .. } | Expr::Catch { value, .. } => self.expr(value),
-            Expr::StructInit { name, .. } => Ok(named(name)),
+            Expr::StructInit { name, .. } => {
+                let ty = named(name);
+                self.expected(e, &ty)?;
+                Ok(ty)
+            }
         }
     }
     fn assignable(&self, expected: &Type, got: &Type) -> Result<(), Diagnostics> {

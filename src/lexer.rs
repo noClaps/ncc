@@ -4,6 +4,7 @@ use crate::diagnostic::Diagnostics;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Token {
+    pub newline_before: bool,
     pub kind: TokenKind,
     pub span: Range<usize>,
 }
@@ -156,6 +157,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, Diagnostics> {
             let raw = &source[body_start..i];
             i += 3;
             out.push(Token {
+                newline_before: false,
                 kind: TokenKind::String(dedent(raw)),
                 span: start..i,
             });
@@ -165,6 +167,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, Diagnostics> {
             let (value, end) = quoted(source, i, '"')?;
             i = end;
             out.push(Token {
+                newline_before: false,
                 kind: TokenKind::String(value),
                 span: start..i,
             });
@@ -180,6 +183,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, Diagnostics> {
             }
             i = end;
             out.push(Token {
+                newline_before: false,
                 kind: TokenKind::Char(value),
                 span: start..i,
             });
@@ -200,11 +204,13 @@ pub fn lex(source: &str) -> Result<Vec<Token>, Diagnostics> {
                     i += 1;
                 }
                 out.push(Token {
+                    newline_before: false,
                     kind: TokenKind::Float(source[start..i].into()),
                     span: start..i,
                 });
             } else {
                 out.push(Token {
+                    newline_before: false,
                     kind: TokenKind::Int(source[start..i].into()),
                     span: start..i,
                 });
@@ -220,6 +226,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, Diagnostics> {
             }
             let s = &source[start..i];
             out.push(Token {
+                newline_before: false,
                 kind: keyword(s)
                     .map(TokenKind::Keyword)
                     .unwrap_or_else(|| TokenKind::Ident(s.into())),
@@ -272,14 +279,21 @@ pub fn lex(source: &str) -> Result<Vec<Token>, Diagnostics> {
         };
         i += width;
         out.push(Token {
+            newline_before: false,
             kind,
             span: start..i,
         });
     }
     out.push(Token {
+        newline_before: false,
         kind: TokenKind::Eof,
         span: bytes.len()..bytes.len(),
     });
+    let mut previous = 0;
+    for token in &mut out {
+        token.newline_before = source[previous..token.span.start].contains('\n');
+        previous = token.span.end;
+    }
     Ok(out)
 }
 

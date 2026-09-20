@@ -352,8 +352,19 @@ impl Parser {
     fn var_decl(&mut self) -> Result<VarDecl, Diagnostics> {
         let mutex = self.keyword(Keyword::Mutex);
         let mutable = self.keyword(Keyword::Mut);
-        let ty = self.ty()?;
-        let pattern = Pattern::Name(self.ident()?);
+        let mut ty = self.ty()?;
+        let mut pattern = Pattern::Name(self.ident()?);
+        if self.at(&TokenKind::Comma) {
+            let mut types = vec![ty];
+            let mut patterns = vec![pattern];
+            while self.at(&TokenKind::Comma) {
+                self.bump();
+                types.push(self.ty()?);
+                patterns.push(Pattern::Name(self.ident()?));
+            }
+            ty = Type::Tuple(types);
+            pattern = Pattern::Tuple(patterns);
+        }
         self.expect(TokenKind::Assign)?;
         let value = self.expr(0)?;
         Ok(VarDecl {
@@ -399,7 +410,10 @@ impl Parser {
             } else {
                 None
             };
-            let value = if label_target.is_some() || self.at(&TokenKind::RBrace) {
+            let value = if label_target.is_some()
+                || self.at(&TokenKind::RBrace)
+                || self.current().newline_before
+            {
                 None
             } else {
                 Some(self.expr(0)?)
@@ -416,11 +430,19 @@ impl Parser {
             return Ok(Stmt::Continue(label_target));
         }
         if self.keyword(Keyword::Return) {
-            return Ok(Stmt::Return(if self.at(&TokenKind::RBrace) {
-                None
-            } else {
-                Some(self.expr(0)?)
-            }));
+            if self.at(&TokenKind::RBrace) || self.current().newline_before {
+                return Ok(Stmt::Return(None));
+            }
+            let mut value = self.expr(0)?;
+            if self.at(&TokenKind::Comma) {
+                let mut values = vec![value];
+                while self.at(&TokenKind::Comma) {
+                    self.bump();
+                    values.push(self.expr(0)?);
+                }
+                value = Expr::Tuple(values);
+            }
+            return Ok(Stmt::Return(Some(value)));
         }
         if self.keyword(Keyword::Throw) {
             return Ok(Stmt::Throw(self.expr(0)?));
@@ -481,6 +503,37 @@ impl Parser {
     fn expr(&mut self, min: u8) -> Result<Expr, Diagnostics> {
         let mut left = self.prefix()?;
         loop {
+            if self.current().newline_before
+                && matches!(
+                    self.current().kind,
+                    TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace
+                )
+            {
+                break;
+            }
+            if self.at(&TokenKind::LBrace)
+                && self
+                    .tokens
+                    .get(self.pos + 1)
+                    .is_some_and(|t| t.kind == TokenKind::Dot)
+            {
+                if let Expr::Name(name) = left {
+                    self.bump();
+                    let mut fields = vec![];
+                    while !self.at(&TokenKind::RBrace) {
+                        self.expect(TokenKind::Dot)?;
+                        let field = self.ident()?;
+                        self.expect(TokenKind::Assign)?;
+                        fields.push((field, self.expr(0)?));
+                        if !self.at(&TokenKind::RBrace) {
+                            self.expect(TokenKind::Comma)?;
+                        }
+                    }
+                    self.bump();
+                    left = Expr::StructInit { name, fields };
+                    continue;
+                }
+            }
             if self.at(&TokenKind::LParen) {
                 self.bump();
                 let mut args = vec![];

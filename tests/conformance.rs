@@ -6,6 +6,29 @@ use std::{
 };
 static ID: AtomicUsize = AtomicUsize::new(0);
 
+#[test]
+fn tuples_and_structs() {
+    success(
+        r#"
+struct Fraction { int numerator int denominator }
+fn pair(int a, int b) (int, int) { return a + b, a - b }
+test "records" {
+    mut Fraction f = Fraction{.numerator = 1, .denominator = 10}
+    f.numerator = f.numerator * 2
+    assert f == Fraction{.numerator = 2, .denominator = 10}
+    (int, int) vals = pair(2, 4)
+    int a, int b = vals
+    assert vals == (6, -2)
+    assert a == 6 and b == -2
+    assert vals[0] == 6
+}
+"#,
+        "",
+    );
+    rejects("struct A { int x } A a = A{.x = true}", "expected");
+    rejects("struct A { int x } A a = A{.y = 1}", "unknown field");
+}
+
 fn run(source: &str) -> std::process::Output {
     let dir = std::env::temp_dir().join(format!(
         "nc-conformance-{}-{}",

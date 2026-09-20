@@ -3,7 +3,7 @@
 use crate::{
     ast::*,
     diagnostic::Diagnostics,
-    sema::{CheckedModule, integer},
+    sema::{CheckedModule, TypeInfo, integer},
 };
 use std::collections::{BTreeSet, HashMap};
 
@@ -18,6 +18,7 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
         loops: vec![],
         array_types: vec![],
         index_context: vec![],
+        record_types: vec![],
     };
     let mut declarations = String::new();
     for item in &checked.module.items {
@@ -50,7 +51,8 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
             Item::Import { .. } | Item::Extern { .. } => {
                 return unsupported("module or external linkage");
             }
-            Item::Struct(_) | Item::Enum(_) | Item::TypeAlias { .. } => {
+            Item::Struct(_) => {}
+            Item::Enum(_) | Item::TypeAlias { .. } => {
                 return unsupported("user-defined types");
             }
             _ => {}
@@ -106,9 +108,22 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
     for header in &e.headers {
         output.push_str(&format!("#include <{header}>\n"));
     }
+    for (_, name, _) in &e.record_types {
+        output.push_str(&format!("typedef struct {name} {name};\n"));
+    }
     for (_, name, element) in &e.array_types {
         output.push_str(&format!(
             "typedef struct {{ uint64_t len, cap; {element} *vals; }} {name};\n"
+        ));
+    }
+    for (_, name, fields) in &e.record_types {
+        output.push_str(&format!(
+            "struct {name} {{ {} }};\n",
+            fields
+                .iter()
+                .map(|(field, ct)| format!("{ct} {field};"))
+                .collect::<Vec<_>>()
+                .join(" ")
         ));
     }
     for helper in &e.helpers {
@@ -154,6 +169,7 @@ struct Emitter<'a> {
     loops: Vec<(Option<String>, String, String)>,
     array_types: Vec<(Type, String, String)>,
     index_context: Vec<String>,
+    record_types: Vec<(Type, String, Vec<(String, String)>)>,
 }
 impl Emitter<'_> {
     fn line(&mut self, text: impl AsRef<str>) {
@@ -188,6 +204,18 @@ impl Emitter<'_> {
             .ok_or_else(|| Diagnostics::one("internal error: missing expression type", 0..0))
     }
     fn c_type(&mut self, ty: &Type) -> Result<String, Diagnostics> {
+        if let Some((_, name, _)) = self.record_types.iter().find(|(t, _, _)| t == ty) {
+            return Ok(name.clone());
+        }
+        if let Some(fields) = self.fields(ty) {
+            let mut c_fields = vec![];
+            for (field, ty) in fields {
+                c_fields.push((field, self.c_type(&ty)?));
+            }
+            let name = format!("nc_record_{}", self.record_types.len());
+            self.record_types.push((ty.clone(), name.clone(), c_fields));
+            return Ok(name);
+        }
         if let Type::Array(element, _) = ty {
             let key = Type::Array(element.clone(), None);
             if let Some((_, name, _)) = self.array_types.iter().find(|(t, _, _)| *t == key) {
@@ -285,13 +313,14 @@ impl Emitter<'_> {
                 }
                 let value = self.expr(&v.value)?;
                 let value = self.copy(&v.ty, &value)?;
-                let ty = self.c_type(&v.ty)?;
-                let name = self.bind(pattern_name(&v.pattern)?);
-                self.line(format!("{ty} {name} = {value};"));
+                self.declare_pattern(&v.pattern, &v.ty, &value)?;
             }
             Stmt::Assign { target, value } => {
                 let target_code = match target {
                     Expr::Index { object, index } => Some(self.index(object, index)?),
+                    Expr::Member { object, name } => {
+                        Some(format!("({}).f_{name}", self.expr(object)?))
+                    }
                     _ => None,
                 };
                 let value_type = self.ty(value)?;
@@ -300,7 +329,9 @@ impl Emitter<'_> {
                 match target {
                     Expr::Name(n) if n == "_" => {}
                     Expr::Name(n) => self.line(format!("{} = {value};", self.name(n))),
-                    Expr::Index { .. } => self.line(format!("{} = {value};", target_code.unwrap())),
+                    Expr::Index { .. } | Expr::Member { .. } => {
+                        self.line(format!("{} = {value};", target_code.unwrap()))
+                    }
                     _ => return unsupported("composite assignment"),
                 }
             }
@@ -426,6 +457,25 @@ impl Emitter<'_> {
         Ok(())
     }
     fn equality(&mut self, left: &str, right: &str, ty: &Type) -> Result<String, Diagnostics> {
+        if let Some(fields) = self.fields(ty) {
+            let mut checks = vec![];
+            for (field, ty) in fields {
+                checks.push(self.equality(
+                    &format!("({left}).{field}"),
+                    &format!("({right}).{field}"),
+                    &ty,
+                )?);
+            }
+            return Ok(if checks.is_empty() {
+                "1".into()
+            } else {
+                checks
+                    .into_iter()
+                    .map(|c| format!("({c})"))
+                    .collect::<Vec<_>>()
+                    .join(" && ")
+            });
+        }
         if let Type::Array(element, _) = ty {
             self.headers.insert("stdbool.h");
             let result = self.fresh();
@@ -448,6 +498,28 @@ impl Emitter<'_> {
     }
     fn expr(&mut self, e: &Expr) -> Result<String, Diagnostics> {
         let value = match e {
+            Expr::Tuple(values) => {
+                let ty = self.ty(e)?;
+                let ct = self.c_type(&ty)?;
+                let result = self.fresh();
+                self.line(format!("{ct} {result};"));
+                for (i, value) in values.iter().enumerate() {
+                    let v = self.expr(value)?;
+                    self.line(format!("{result}.f_{i} = {v};"));
+                }
+                return Ok(result);
+            }
+            Expr::StructInit { fields, .. } => {
+                let ty = self.ty(e)?;
+                let ct = self.c_type(&ty)?;
+                let result = self.fresh();
+                self.line(format!("{ct} {result};"));
+                for (field, value) in fields {
+                    let v = self.expr(value)?;
+                    self.line(format!("{result}.f_{field} = {v};"));
+                }
+                return Ok(result);
+            }
             Expr::Array(values) => {
                 let ty = self.ty(e)?;
                 let Type::Array(element, _) = &ty else {
@@ -472,8 +544,12 @@ impl Emitter<'_> {
             }
             Expr::Index { object, index } => self.index(object, index)?,
             Expr::Member { object, name } => {
+                let ty = self.ty(object)?;
                 let object = self.expr(object)?;
-                format!("({object}).{name}")
+                format!(
+                    "({object}).{}{name}",
+                    if self.fields(&ty).is_some() { "f_" } else { "" }
+                )
             }
             Expr::Int(n) => {
                 let n = integer(n)?;
@@ -620,6 +696,13 @@ impl Emitter<'_> {
         }
     }
     fn index(&mut self, object: &Expr, index: &Expr) -> Result<String, Diagnostics> {
+        if matches!(self.ty(object)?, Type::Tuple(_)) {
+            let object = self.expr(object)?;
+            let Expr::Int(index) = index else {
+                return unsupported("dynamic tuple indexing");
+            };
+            return Ok(format!("({object}).f_{}", integer(index)?));
+        }
         let object = self.expr(object)?;
         self.index_context.push(object.clone());
         let index = self.expr(index)?;
@@ -629,6 +712,52 @@ impl Emitter<'_> {
             "if ((uint64_t)({index}) >= ({object}).len) nc_panic(\"array index out of bounds\");"
         ));
         Ok(format!("({object}).vals[{index}]"))
+    }
+    fn fields(&self, ty: &Type) -> Option<Vec<(String, Type)>> {
+        match ty {
+            Type::Tuple(types) => Some(
+                types
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| (format!("f_{i}"), t.clone()))
+                    .collect(),
+            ),
+            Type::Named(n, _) => {
+                if let Some(TypeInfo::Struct(declaration)) = self.checked.types.get(n) {
+                    Some(
+                        declaration
+                            .fields
+                            .iter()
+                            .map(|f| (format!("f_{}", f.name), f.ty.clone()))
+                            .collect(),
+                    )
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+    fn declare_pattern(
+        &mut self,
+        pattern: &Pattern,
+        ty: &Type,
+        value: &str,
+    ) -> Result<(), Diagnostics> {
+        match (pattern, ty) {
+            (Pattern::Tuple(patterns), Type::Tuple(types)) => {
+                for (i, (pattern, ty)) in patterns.iter().zip(types).enumerate() {
+                    self.declare_pattern(pattern, ty, &format!("({value}).f_{i}"))?;
+                }
+            }
+            (Pattern::Name(n), _) => {
+                let ct = self.c_type(ty)?;
+                let name = self.bind(n);
+                self.line(format!("{ct} {name} = {value};"));
+            }
+            _ => return unsupported("this binding pattern"),
+        }
+        Ok(())
     }
     fn print_array(&mut self, stream: &str, value: &str, ty: &Type) -> Result<(), Diagnostics> {
         let Type::Array(element, _) = ty else {
