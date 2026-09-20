@@ -704,7 +704,11 @@ impl Emitter<'_> {
             ),
             Expr::Name(n) => self.name(n),
             Expr::Cast { ty, value } => {
+                let from = self.ty(value)?;
                 let value = self.expr(value)?;
+                if matches!(ty, Type::Named(n, _) if n == "str") {
+                    return self.string_value(&value, &from);
+                }
                 let ct = self.c_type(ty)?;
                 format!("(({ct})({value}))")
             }
@@ -774,7 +778,13 @@ impl Emitter<'_> {
                             }
                             return Ok(result);
                         }
-                        return unsupported("string concatenation");
+                        self.allocation_support();
+                        self.headers.insert("string.h");
+                        let result = self.fresh();
+                        let a = self.fresh();
+                        let b = self.fresh();
+                        self.line(format!("size_t {a} = strlen({l}), {b} = strlen({r});\nif ({a} > (size_t)-1 - {b} - 1) nc_panic(\"string length overflow\");\nchar *{result} = nc_alloc({a} + {b} + 1, 1);\nmemcpy({result}, {l}, {a}); memcpy({result} + {a}, {r}, {b} + 1);"));
+                        return Ok(result);
                     }
                     BinaryOp::In => {
                         if let Type::Array(element, _) = self.ty(right)? {
@@ -786,7 +796,8 @@ impl Emitter<'_> {
                             self.line(format!("if ({eq}) {{ {result} = true; break; }}\n}}"));
                             return Ok(result);
                         }
-                        return unsupported("string inclusion");
+                        self.headers.insert("string.h");
+                        format!("strstr({r}, {l}) != 0")
                     }
                     _ => format!("({l} {} {r})", operator(*op)),
                 }
@@ -904,6 +915,36 @@ impl Emitter<'_> {
             }
             _ => None,
         }
+    }
+    fn string_value(&mut self, value: &str, ty: &Type) -> Result<String, Diagnostics> {
+        let Type::Named(name, _) = ty else {
+            return unsupported("composite-to-string conversion");
+        };
+        if matches!(name.as_str(), "str" | "char" | "error") {
+            return Ok(value.into());
+        }
+        if name == "bool" {
+            return Ok(format!("({value} ? \"true\" : \"false\")"));
+        }
+        self.allocation_support();
+        self.headers.insert("stdio.h");
+        let result = self.fresh();
+        let (fmt, value) = match name.as_str() {
+            "int" => ("%lld", format!("(long long){value}")),
+            "uint" | "byte" => ("%llu", format!("(unsigned long long){value}")),
+            "float" => ("%.17g", value.into()),
+            _ => return unsupported("conversion of this type to str"),
+        };
+        self.line(format!(
+            "char *{result} = nc_alloc(128, 1); snprintf({result}, 128, \"{fmt}\", {value});"
+        ));
+        if name == "float" {
+            self.headers.insert("string.h");
+            self.line(format!(
+                "if (!strpbrk({result}, \".eE\")) strcat({result}, \".0\");"
+            ));
+        }
+        Ok(result)
     }
     fn expr_as(&mut self, e: &Expr, expected: &Type) -> Result<String, Diagnostics> {
         let value = self.expr(e)?;

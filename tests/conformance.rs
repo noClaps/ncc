@@ -7,6 +7,26 @@ use std::{
 static ID: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
+fn strings_interpolation_and_conversion() {
+    success(
+        r#"
+fn describe(int n) str { return "value: {n}" }
+@println(describe(7))
+@println("nested: {describe(2)}")
+@println("escaped: \{2 + 3}")
+test "strings" {
+    str x = "hello" <> " " <> "world"
+    assert "hello" in x
+    assert 'w' in x
+    assert x == "hello world"
+    assert @as(str, 5.0) == "5.0"
+}
+"#,
+        "value: 7\nnested: value: 2\nescaped: {2 + 3}\n",
+    );
+}
+
+#[test]
 fn generic_function_specialization() {
     success(
         r#"

@@ -473,7 +473,7 @@ impl Checker {
             Expr::Cast { ty, value } => {
                 self.validate_type(ty)?;
                 let from = self.expr(value)?;
-                if !(numeric(ty) && numeric(&from)) && ty != &from {
+                if !(numeric(ty) && numeric(&from)) && ty != &from && *ty != named("str") {
                     return self.fail("this cast is not implemented");
                 }
                 Ok(ty.clone())

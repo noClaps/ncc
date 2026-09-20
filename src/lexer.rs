@@ -299,12 +299,42 @@ pub fn lex(source: &str) -> Result<Vec<Token>, Diagnostics> {
 }
 
 fn quoted(source: &str, start: usize, quote: char) -> Result<(String, usize), Diagnostics> {
+    let mut braces = 0usize;
+    let mut nested_quote = None;
+    let mut nested_escape = false;
     let mut i = start + quote.len_utf8();
     let mut value = String::new();
     let bytes = source.as_bytes();
     while i < bytes.len() {
         let c = source[i..].chars().next().unwrap();
         i += c.len_utf8();
+        if braces > 0 {
+            value.push(c);
+            if nested_escape {
+                nested_escape = false;
+                continue;
+            }
+            if let Some(q) = nested_quote {
+                if c == '\\' {
+                    nested_escape = true;
+                } else if c == q {
+                    nested_quote = None;
+                }
+            } else {
+                match c {
+                    '\'' | '"' => nested_quote = Some(c),
+                    '{' => braces += 1,
+                    '}' => braces -= 1,
+                    _ => {}
+                }
+            }
+            continue;
+        }
+        if c == '{' && quote == '"' {
+            braces = 1;
+            value.push(c);
+            continue;
+        }
         if c == quote {
             return Ok((value, i));
         }
@@ -313,16 +343,25 @@ fn quoted(source: &str, start: usize, quote: char) -> Result<(String, usize), Di
                 break;
             };
             i += next.len_utf8();
-            value.push(match next {
+            let escaped = match next {
                 'n' => '\n',
                 'r' => '\r',
                 't' => '\t',
                 '\\' => '\\',
                 '\'' => '\'',
                 '"' => '"',
-                '{' => '{',
-                other => other,
-            });
+                '{' => {
+                    value.push('\\');
+                    '{'
+                }
+                other => {
+                    return Err(Diagnostics::one(
+                        format!("unknown escape `\\{other}`"),
+                        i - 2..i,
+                    ));
+                }
+            };
+            value.push(escaped);
         } else {
             value.push(c);
         }

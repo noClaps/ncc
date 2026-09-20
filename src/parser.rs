@@ -677,7 +677,7 @@ impl Parser {
             }
             TokenKind::Int(x) => Ok(Expr::Int(x)),
             TokenKind::Float(x) => Ok(Expr::Float(x)),
-            TokenKind::String(x) => Ok(Expr::String(x)),
+            TokenKind::String(x) => self.string_expression(&x),
             TokenKind::Char(x) => Ok(Expr::Char(x)),
             TokenKind::Ident(x) => Ok(Expr::Name(x)),
             TokenKind::Keyword(Keyword::True) => Ok(Expr::Bool(true)),
@@ -766,6 +766,76 @@ impl Parser {
         }
         self.bump();
         Ok(Expr::If { subject, arms })
+    }
+    fn string_expression(&self, text: &str) -> Result<Expr, Diagnostics> {
+        let mut parts = vec![];
+        let mut literal = String::new();
+        let mut chars = text.char_indices().peekable();
+        while let Some((_, c)) = chars.next() {
+            if c == '\\' && chars.peek().is_some_and(|(_, c)| *c == '{') {
+                chars.next();
+                literal.push('{');
+                continue;
+            }
+            if c != '{' {
+                literal.push(c);
+                continue;
+            }
+            parts.push(Expr::String(std::mem::take(&mut literal)));
+            let start = chars.peek().map_or(text.len(), |(i, _)| *i);
+            let mut depth = 1usize;
+            let mut end = None;
+            let mut quote = None;
+            let mut escape = false;
+            for (i, c) in chars.by_ref() {
+                if escape {
+                    escape = false;
+                    continue;
+                }
+                if let Some(q) = quote {
+                    if c == '\\' {
+                        escape = true;
+                    } else if c == q {
+                        quote = None;
+                    }
+                    continue;
+                }
+                match c {
+                    '\'' | '"' => quote = Some(c),
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = Some(i);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let Some(end) = end else {
+                return self.error("unterminated format-string expression");
+            };
+            let mut parser = Parser {
+                tokens: crate::lexer::lex(&text[start..end])?,
+                pos: 0,
+            };
+            let value = parser.expr(0)?;
+            parser.expect(TokenKind::Eof)?;
+            parts.push(Expr::Cast {
+                ty: Type::Named("str".into(), vec![]),
+                value: Box::new(value),
+            });
+        }
+        parts.push(Expr::String(literal));
+        Ok(parts
+            .into_iter()
+            .reduce(|left, right| Expr::Binary {
+                left: Box::new(left),
+                op: BinaryOp::Concat,
+                right: Box::new(right),
+            })
+            .unwrap())
     }
     fn pattern(&mut self) -> Result<Pattern, Diagnostics> {
         if self.at(&TokenKind::Ident("_".into())) {
