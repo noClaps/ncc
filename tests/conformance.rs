@@ -7,6 +7,30 @@ use std::{
 static ID: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
+fn generic_function_specialization() {
+    success(
+        r#"
+struct Vec2 { int x int y }
+fn get_x<type T>(T value) int { return value.x }
+fn identity<type T>(T value) T { return value }
+fn first<type T>(T[] values) T { return values[0] }
+test "generic" {
+    Vec2 v = Vec2{.x = 3, .y = 4}
+    assert get_x<Vec2>(v) == 3
+    assert identity<int>(42) == 42
+    assert identity<str>("yes") == "yes"
+    assert first<int>([1,2,3]) == 1
+}
+"#,
+        "",
+    );
+    rejects(
+        "fn bad<type T>(T x) int { return x.missing } int x = bad<int>(1)",
+        "member",
+    );
+}
+
+#[test]
 fn modules_exports_and_external_functions() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(

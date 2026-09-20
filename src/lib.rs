@@ -4,6 +4,7 @@ pub mod ast;
 pub mod codegen;
 pub mod diagnostic;
 pub mod formatter;
+pub mod generics;
 pub mod lexer;
 pub mod lsp;
 pub mod modules;
@@ -18,7 +19,7 @@ use diagnostic::Diagnostics;
 pub fn compile_source(source: &str, path: &Path) -> Result<String, Diagnostics> {
     let tokens = lexer::lex(source)?;
     let module = modules::load(parser::parse(tokens)?, path)?;
-    let checked = sema::check(module, path)?;
+    let checked = sema::check(generics::specialize(module)?, path)?;
     codegen::emit(&checked)
 }
 
@@ -26,5 +27,5 @@ pub fn compile_source(source: &str, path: &Path) -> Result<String, Diagnostics> 
 pub fn check_source(source: &str, path: &Path) -> Result<(), Diagnostics> {
     let tokens = lexer::lex(source)?;
     let module = modules::load(parser::parse(tokens)?, path)?;
-    sema::check(module, path).map(|_| ())
+    sema::check(generics::specialize(module)?, path).map(|_| ())
 }

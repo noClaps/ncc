@@ -529,6 +529,29 @@ impl Parser {
     fn expr(&mut self, min: u8) -> Result<Expr, Diagnostics> {
         let mut left = self.prefix()?;
         loop {
+            if self.at(&TokenKind::Lt) && matches!(left, Expr::Name(_) | Expr::Member { .. }) {
+                let position = self.pos;
+                if let Ok(generics) = self.type_args() {
+                    if self.at(&TokenKind::LParen) {
+                        self.bump();
+                        let mut args = vec![];
+                        while !self.at(&TokenKind::RParen) {
+                            args.push(self.expr(0)?);
+                            if !self.at(&TokenKind::RParen) {
+                                self.expect(TokenKind::Comma)?;
+                            }
+                        }
+                        self.bump();
+                        left = Expr::Call {
+                            callee: Box::new(left),
+                            args,
+                            generics,
+                        };
+                        continue;
+                    }
+                }
+                self.pos = position;
+            }
             if min == 0 && self.keyword(Keyword::Else) {
                 let fallback = if self.at(&TokenKind::LBrace) {
                     self.block()?
