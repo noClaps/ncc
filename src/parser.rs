@@ -353,13 +353,19 @@ impl Parser {
         }
         self.bump();
         let mut out = vec![];
-        while !self.at(&TokenKind::Gt) {
+        while !self.at(&TokenKind::Gt) && !self.at(&TokenKind::Shr) {
             out.push(self.ty()?);
-            if !self.at(&TokenKind::Gt) {
+            if !self.at(&TokenKind::Gt) && !self.at(&TokenKind::Shr) {
                 self.expect(TokenKind::Comma)?
             }
         }
-        self.bump();
+        if self.at(&TokenKind::Shr) {
+            // Leave the second angle bracket for the enclosing type application.
+            self.tokens[self.pos].kind = TokenKind::Gt;
+            self.tokens[self.pos].span.start += 1;
+        } else {
+            self.bump();
+        }
         Ok(out)
     }
     fn params_types(&mut self) -> Result<Vec<Type>, Diagnostics> {
@@ -509,10 +515,12 @@ impl Parser {
             return self.error("labels may only be applied to for, while, or lock blocks");
         }
         let saved = self.pos;
+        let saved_tokens = self.tokens.clone();
         self.keyword(Keyword::Mut);
         self.keyword(Keyword::Mutex);
         let is_decl = self.ty().is_ok() && matches!(self.current().kind, TokenKind::Ident(_));
         self.pos = saved;
+        self.tokens = saved_tokens;
         if is_decl {
             return self.var_decl().map(Stmt::Var);
         }
@@ -531,7 +539,30 @@ impl Parser {
         loop {
             if self.at(&TokenKind::Lt) && matches!(left, Expr::Name(_) | Expr::Member { .. }) {
                 let position = self.pos;
+                let tokens = self.tokens.clone();
                 if let Ok(generics) = self.type_args() {
+                    if let Expr::Name(name) = &left {
+                        if self.at(&TokenKind::LBrace) {
+                            let name = name.clone();
+                            self.bump();
+                            let mut fields = vec![];
+                            while !self.at(&TokenKind::RBrace) {
+                                self.expect(TokenKind::Dot)?;
+                                let field = self.ident()?;
+                                self.expect(TokenKind::Assign)?;
+                                fields.push((field, self.expr(0)?));
+                                if !self.at(&TokenKind::RBrace) {
+                                    self.expect(TokenKind::Comma)?;
+                                }
+                            }
+                            self.bump();
+                            left = Expr::Cast {
+                                ty: Type::Named(name.clone(), generics),
+                                value: Box::new(Expr::StructInit { name, fields }),
+                            };
+                            continue;
+                        }
+                    }
                     if self.at(&TokenKind::LParen) {
                         self.bump();
                         let mut args = vec![];
@@ -551,6 +582,7 @@ impl Parser {
                     }
                 }
                 self.pos = position;
+                self.tokens = tokens;
             }
             if min == 0 && self.keyword(Keyword::Else) {
                 let fallback = if self.at(&TokenKind::LBrace) {

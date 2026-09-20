@@ -7,6 +7,44 @@ use std::{
 static ID: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
+fn generic_structs_and_enums() {
+    success(
+        r#"
+struct Data<type T> { T data }
+enum Result<type T, type E> { Ok(T) Err(E) }
+fn wrap<type T>(T value) Data<T> { return Data<T>{.data = value} }
+fn result() Result<int,str> { return Result.Ok(42) }
+test "generic data" {
+    Data<str> text = Data<str>{.data = "hello"}
+    assert text.data == "hello"
+    Data<Data<int>> nested = Data<Data<int>>{.data = wrap<int>(3)}
+    assert nested.data.data == 3
+    Result<Data<str>,str> val = Result.Ok(text)
+    if val {
+        Result.Ok(v) -> { assert v.data == "hello" }
+        Result.Err(e) -> { assert false }
+    }
+    Result<int,str> number = result()
+    if number {
+        Result.Ok(n) -> { assert n == 42 }
+        Result.Err(e) -> { assert false }
+    }
+    assert (16 >> 2) == 4
+}
+"#,
+        "",
+    );
+    rejects(
+        "struct Data<type T> { T data } Data<int,str> bad = Data<int>{.data = 1}",
+        "incorrect number",
+    );
+    rejects(
+        "struct Data<type T> { T data } Data<int> bad = Data<int>{.data = \"bad\"}",
+        "expected",
+    );
+}
+
+#[test]
 fn nominal_types_and_checked_casts() {
     success(
         r#"type Name = str
