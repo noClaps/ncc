@@ -471,6 +471,13 @@ impl Checker {
                 xs.iter().map(|x| self.expr(x)).collect::<Result<_, _>>()?,
             )),
             Expr::Unary { op, value } => {
+                if *op == UnaryOp::Neg
+                    && matches!(&**value, Expr::Int(text) if !text.ends_with('u') && integer(text).ok() == Some(1u64 << 63))
+                {
+                    self.expression_types
+                        .insert(&**value as *const Expr as usize, named("uint"));
+                    return Ok(named("int"));
+                }
                 let t = self.expr(value)?;
                 match op {
                     UnaryOp::Not => self.assignable(&named("bool"), &t)?,
@@ -486,7 +493,20 @@ impl Checker {
                 Ok(t)
             }
             Expr::Binary { left, op, right } => {
-                let l = self.expr(left)?;
+                let l = if matches!(&**left, Expr::Int(_))
+                    && !matches!(&**right, Expr::Int(_))
+                    && *op != BinaryOp::In
+                {
+                    let r = self.expr(right)?;
+                    if numeric(&r) && r != named("float") {
+                        self.expected(left, &r)?;
+                        r
+                    } else {
+                        self.expr(left)?
+                    }
+                } else {
+                    self.expr(left)?
+                };
                 let r = if matches!(&**right, Expr::Int(_)) && numeric(&l) && l != named("float") {
                     self.expected(right, &l)?;
                     l.clone()

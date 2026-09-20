@@ -7,6 +7,42 @@ use std::{
 static ID: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
+fn checked_integer_arithmetic() {
+    success(
+        r#"test "numbers" {
+        assert 2 ** 6 == 64
+        assert 2 ** 3 ** 2 == 512
+        assert 0b1011 == 11
+        assert 0o777 == 511
+        assert 5 / 2 == 2
+        int low = -9223372036854775808
+        uint high = 18446744073709551615u
+        assert low < 0
+        assert high > 0
+        byte b = 255
+        assert b == 255
+        assert (1 << 4) == 16
+    }"#,
+        "",
+    );
+    for source in [
+        "int n = 9223372036854775807 @println(n + 1)",
+        "byte b = 255 @println(b + 1)",
+        "int n = 0 @println(1 / n)",
+        "@println(1 << 64)",
+        "@println(2 ** 63)",
+    ] {
+        let out = run(source);
+        assert!(!out.status.success());
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("panic:"),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+#[test]
 fn tuples_and_structs() {
     success(
         r#"

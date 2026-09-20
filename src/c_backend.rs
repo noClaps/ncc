@@ -578,7 +578,16 @@ impl Emitter<'_> {
                 format!("(({ct})({value}))")
             }
             Expr::Unary { op, value } => {
+                if *op == UnaryOp::Neg
+                    && matches!(&**value, Expr::Int(text) if !text.ends_with('u') && integer(text).ok() == Some(1u64 << 63))
+                {
+                    return self.temp(e, "(-9223372036854775807LL - 1LL)".into());
+                }
                 let value = self.expr(value)?;
+                if *op == UnaryOp::Neg && !matches!(self.ty(e)?, Type::Named(n, _) if n == "float")
+                {
+                    return self.arithmetic(e, "0", BinaryOp::Sub, &value);
+                }
                 format!(
                     "({}{value})",
                     match op {
@@ -608,7 +617,14 @@ impl Emitter<'_> {
                         let eq = self.equality(&l, &r, &self.ty(left)?)?;
                         format!("{}({eq})", if *op == BinaryOp::Ne { "!" } else { "" })
                     }
-                    BinaryOp::Pow => return unsupported("exponentiation"),
+                    BinaryOp::Add
+                    | BinaryOp::Sub
+                    | BinaryOp::Mul
+                    | BinaryOp::Div
+                    | BinaryOp::Mod
+                    | BinaryOp::Pow
+                    | BinaryOp::Shl
+                    | BinaryOp::Shr => return self.arithmetic(e, &l, *op, &r),
                     BinaryOp::Concat => {
                         let ty = self.ty(left)?;
                         if let Type::Array(element, _) = &ty {
@@ -737,6 +753,75 @@ impl Emitter<'_> {
             }
             _ => None,
         }
+    }
+    fn arithmetic(
+        &mut self,
+        expr: &Expr,
+        left: &str,
+        op: BinaryOp,
+        right: &str,
+    ) -> Result<String, Diagnostics> {
+        let ty = self.ty(expr)?;
+        let ct = self.c_type(&ty)?;
+        self.panic_support();
+        let result = self.fresh();
+        self.line(format!("{ct} {result};"));
+        if matches!(&ty, Type::Named(n, _) if n == "float") {
+            self.headers.insert("math.h");
+            let operation = match op {
+                BinaryOp::Pow => format!("pow({left}, {right})"),
+                BinaryOp::Mod => format!("fmod({left}, {right})"),
+                _ => format!("{left} {} {right}", operator(op)),
+            };
+            self.line(format!("{result} = {operation};\nif (!isfinite({result})) nc_panic(\"floating-point overflow or invalid arithmetic\");"));
+            return Ok(result);
+        }
+        match op {
+            BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul => {
+                let operation = match op {
+                    BinaryOp::Add => "add",
+                    BinaryOp::Sub => "sub",
+                    _ => "mul",
+                };
+                self.line(format!("if (__builtin_{operation}_overflow({left}, {right}, &{result})) nc_panic(\"integer overflow\");"));
+            }
+            BinaryOp::Div | BinaryOp::Mod => {
+                self.line(format!("if ({right} == 0) nc_panic(\"division by zero\");"));
+                if matches!(&ty, Type::Named(n, _) if n == "int") {
+                    self.line(format!(
+                        "if ({left} == INT64_MIN && {right} == -1) nc_panic(\"integer overflow\");"
+                    ));
+                }
+                self.line(format!("{result} = {left} {} {right};", operator(op)));
+            }
+            BinaryOp::Pow => {
+                self.headers.insert("stdint.h");
+                if matches!(&ty, Type::Named(n, _) if n == "int") {
+                    self.line(format!(
+                        "if ({right} < 0) nc_panic(\"negative integer exponent\");"
+                    ));
+                }
+                let base = self.fresh();
+                let power = self.fresh();
+                self.line(format!("{result} = 1; {ct} {base} = {left}; uint64_t {power} = (uint64_t){right};\nwhile ({power}) {{\nif (({power} & 1) && __builtin_mul_overflow({result}, {base}, &{result})) nc_panic(\"integer overflow\");\n{power} >>= 1;\nif ({power} && __builtin_mul_overflow({base}, {base}, &{base})) nc_panic(\"integer overflow\");\n}}"));
+            }
+            BinaryOp::Shl | BinaryOp::Shr => {
+                let bits = if matches!(&ty, Type::Named(n, _) if n == "byte") {
+                    8
+                } else {
+                    64
+                };
+                self.line(format!("if ((uint64_t){right} >= {bits}) nc_panic(\"shift count out of range\");\n{result} = {left};"));
+                if op == BinaryOp::Shl {
+                    let i = self.fresh();
+                    self.line(format!("for (uint64_t {i} = 0; {i} < (uint64_t){right}; ++{i}) if (__builtin_mul_overflow({result}, 2, &{result})) nc_panic(\"integer overflow\");"));
+                } else {
+                    self.line(format!("{result} = {left} >> {right};"));
+                }
+            }
+            _ => unreachable!(),
+        }
+        Ok(result)
     }
     fn declare_pattern(
         &mut self,
