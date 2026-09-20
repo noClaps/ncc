@@ -1169,7 +1169,7 @@ pub fn integer(text: &str) -> Result<u64, Diagnostics> {
 fn returns(block: &Block) -> bool {
     block.statements.iter().any(|statement| match statement {
         Stmt::Return(_) | Stmt::Throw(_) => true,
-        Stmt::Block(block) | Stmt::Lock {body: block, ..} => returns(block),
+        Stmt::Block(block) | Stmt::Lock { body: block, .. } => returns(block),
         Stmt::Expr(Expr::If { arms, .. }) => {
             !arms.is_empty() && arms.iter().all(|(_, block)| returns(block))
         }

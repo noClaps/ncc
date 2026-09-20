@@ -6,11 +6,14 @@ pub mod diagnostic;
 pub mod formatter;
 pub mod generics;
 pub mod lexer;
+pub mod lint;
 pub mod lsp;
 pub mod modules;
 pub mod optimizer;
 pub mod parser;
 pub mod sema;
+pub mod temp;
+mod visit;
 
 use std::path::Path;
 
@@ -26,10 +29,10 @@ pub fn compile_source_with_options(
     release: bool,
 ) -> Result<String, Diagnostics> {
     let tokens = lexer::lex(source)?;
-    let module = modules::load(parser::parse(tokens)?, path)?;
+    let module = modules::load(parser::parse_at(tokens, path)?, path)?;
     let checked = sema::check(generics::specialize(module)?, path)?;
     if release {
-        let checked = sema::check(optimizer::optimize(checked.module), path)?;
+        let checked = sema::check(optimizer::optimize(checked.module)?, path)?;
         return codegen::emit(&checked);
     }
     codegen::emit(&checked)
@@ -38,6 +41,6 @@ pub fn compile_source_with_options(
 /// Parse and type-check one NC source module.
 pub fn check_source(source: &str, path: &Path) -> Result<(), Diagnostics> {
     let tokens = lexer::lex(source)?;
-    let module = modules::load(parser::parse(tokens)?, path)?;
+    let module = modules::load(parser::parse_at(tokens, path)?, path)?;
     sema::check(generics::specialize(module)?, path).map(|_| ())
 }

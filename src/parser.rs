@@ -5,11 +5,20 @@ use crate::{
 };
 
 pub fn parse(tokens: Vec<Token>) -> Result<Module, Diagnostics> {
-    Parser { tokens, pos: 0 }.module()
+    parse_at(tokens, std::path::Path::new("<source>"))
+}
+pub fn parse_at(tokens: Vec<Token>, path: &std::path::Path) -> Result<Module, Diagnostics> {
+    Parser {
+        tokens,
+        pos: 0,
+        path: path.to_path_buf(),
+    }
+    .module()
 }
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    path: std::path::PathBuf,
 }
 impl Parser {
     fn current(&self) -> &Token {
@@ -255,6 +264,7 @@ impl Parser {
         })
     }
     fn function(&mut self, public: bool) -> Result<Function, Diagnostics> {
+        let start = self.current().span.start;
         let name = self.ident()?;
         let generics = self.generics()?;
         let params = self.params()?;
@@ -274,6 +284,8 @@ impl Parser {
         };
         let body = self.block()?;
         Ok(Function {
+            source_path: self.path.clone(),
+            span: start..self.tokens[self.pos - 1].span.end,
             public,
             name,
             generics,
@@ -733,6 +745,7 @@ impl Parser {
         Ok(left)
     }
     fn prefix(&mut self) -> Result<Expr, Diagnostics> {
+        let start = self.current().span.start;
         if self.keyword(Keyword::Fn) {
             let params = self.params()?;
             let return_type = if self.at(&TokenKind::LBrace) {
@@ -742,6 +755,8 @@ impl Parser {
             };
             let body = self.block()?;
             return Ok(Expr::Lambda(Box::new(Function {
+                source_path: self.path.clone(),
+                span: start..self.tokens[self.pos - 1].span.end,
                 public: false,
                 name: "anonymous".into(),
                 generics: vec![],
@@ -911,6 +926,7 @@ impl Parser {
                 return self.error("unterminated format-string expression");
             };
             let mut parser = Parser {
+                path: self.path.clone(),
                 tokens: crate::lexer::lex(&text[start..end])?,
                 pos: 0,
             };

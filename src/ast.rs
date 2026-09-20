@@ -66,6 +66,8 @@ pub struct FunctionDecl {
 }
 #[derive(Clone, Debug)]
 pub struct Function {
+    pub source_path: std::path::PathBuf,
+    pub span: Span,
     pub public: bool,
     pub name: String,
     pub generics: Vec<String>,

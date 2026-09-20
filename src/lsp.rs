@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     io::{self, BufRead, Write},
-    path::Path,
+    path::PathBuf,
 };
 
 pub fn serve(mut input: impl BufRead, mut output: impl Write) -> io::Result<()> {
@@ -80,8 +80,10 @@ pub fn serve(mut input: impl BufRead, mut output: impl Write) -> io::Result<()> 
                     };
                     if let Some(text) = text {
                         documents.insert(uri.into(), text.into());
-                        let diagnostics = match crate::check_source(text, Path::new(uri)) {
-                            Ok(()) => vec![], Err(errors) => errors.0.iter().map(|e| json!({"range":{"start":position(text, e.span.start),"end":position(text,e.span.end)},"severity":1,"source":"ncc","message":e.message})).collect::<Vec<_>>()
+                        let path = document_path(uri);
+                        let diagnostics = match crate::lint::check(text, &path) {
+                            Ok(warnings) => warnings.iter().filter(|w| w.path == path).map(|w| json!({"range":{"start":position(text,w.span.start),"end":position(text,w.span.end)},"severity":2,"source":"ncc","code":w.code,"message":w.message})).collect(),
+                            Err(errors) => errors.0.iter().map(|e| json!({"range":{"start":position(text, e.span.start),"end":position(text,e.span.end)},"severity":1,"source":"ncc","message":e.message})).collect::<Vec<_>>()
                         };
                         send(
                             &mut output,
@@ -133,6 +135,28 @@ pub fn serve(mut input: impl BufRead, mut output: impl Write) -> io::Result<()> 
             )?;
         }
     }
+}
+fn document_path(uri: &str) -> PathBuf {
+    let Some(path) = uri.strip_prefix("file://") else {
+        return PathBuf::from(uri);
+    };
+    let path = path
+        .strip_prefix("localhost/")
+        .map_or_else(|| path.to_owned(), |p| format!("/{p}"));
+    let mut bytes = Vec::new();
+    let mut i = 0;
+    while i < path.len() {
+        if path.as_bytes()[i] == b'%' && i + 2 < path.len() {
+            if let Ok(byte) = u8::from_str_radix(&path[i + 1..i + 3], 16) {
+                bytes.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        bytes.push(path.as_bytes()[i]);
+        i += 1;
+    }
+    PathBuf::from(String::from_utf8_lossy(&bytes).into_owned())
 }
 fn send(output: &mut impl Write, message: Value) -> io::Result<()> {
     let body = serde_json::to_vec(&message)?;

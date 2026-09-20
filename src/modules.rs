@@ -77,8 +77,11 @@ impl Loader {
                             0..0,
                         )
                     })?;
-                    let exports =
-                        self.visit(parser::parse(lexer::lex(&source)?)?, &imported_path, false)?;
+                    let exports = self.visit(
+                        parser::parse_at(lexer::lex(&source)?, &imported_path)?,
+                        &imported_path,
+                        false,
+                    )?;
                     aliases.insert(alias.clone(), exports);
                 }
                 Item::Extern {

@@ -362,7 +362,7 @@ test "generic" {
 
 #[test]
 fn modules_exports_and_external_functions() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = ncc::temp::Directory::new().unwrap();
     fs::write(
         dir.path().join("one.nc"),
         "pub int value = 7 pub fn square(int n) int { return n * n } int hidden = 9",
