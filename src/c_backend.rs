@@ -27,6 +27,8 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
         runtime_functions: vec![],
         function_types: vec![],
         type_definitions: vec![],
+        mutexes: HashSet::new(),
+        mutex_types: vec![],
     };
     let mut declarations = String::new();
     let mut global_slots = HashMap::new();
@@ -53,8 +55,15 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
                 ));
             }
             Item::Global(v) => {
-                let ty = e.c_type(&v.ty)?;
+                let ty = if v.mutex {
+                    format!("{} *", e.mutex_type(&v.ty)?)
+                } else {
+                    e.c_type(&v.ty)?
+                };
                 let name = e.bind(pattern_name(&v.pattern)?);
+                if v.mutex {
+                    e.mutexes.insert(name.clone());
+                }
                 global_slots.insert(v as *const VarDecl as usize, name.clone());
                 declarations.push_str(&format!("static {ty} {name};\n"));
             }
@@ -137,7 +146,11 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
                 let value = e.copy(&v.ty, &value)?;
                 let n = pattern_name(&v.pattern)?;
                 let name = &global_slots[&(v as *const VarDecl as usize)];
-                e.line(format!("{name} = {value};"));
+                if v.mutex {
+                    e.init_mutex(name, &v.ty, &value)?;
+                } else {
+                    e.line(format!("{name} = {value};"));
+                }
                 e.scopes[0].insert(n.into(), name.clone());
             }
             Item::Statement(s) => e.statement(s)?,
@@ -154,6 +167,9 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
     for header in &e.headers {
         output.push_str(&format!("#include <{header}>\n"));
     }
+    if e.helpers.contains("/* async runtime */") {
+        output.push_str(include_str!("runtime_async.h"));
+    }
     for (_, name, _) in &e.record_types {
         output.push_str(&format!("typedef struct {name} {name};\n"));
     }
@@ -161,8 +177,15 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
         output.push_str(definition);
         output.push('\n');
     }
+    if e.headers.contains("pthread.h") {
+        output.push_str("static pthread_mutex_t nc_allocation_lock = PTHREAD_MUTEX_INITIALIZER;\n");
+    }
     for helper in &e.helpers {
-        output.push_str(helper);
+        if e.headers.contains("pthread.h") {
+            output.push_str(&helper.replace("node->next = nc_allocations; nc_allocations = node;", "pthread_mutex_lock(&nc_allocation_lock); node->next = nc_allocations; nc_allocations = node; pthread_mutex_unlock(&nc_allocation_lock);").replace("exit(1);", "_Exit(1);"));
+        } else {
+            output.push_str(helper);
+        }
         output.push('\n');
     }
     output.push_str(&declarations);
@@ -180,7 +203,11 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
     {
         output.push_str(&e.out.replacen(
             "int main(void) {",
-            "int main(void) {\natexit(nc_cleanup);",
+            if e.helpers.contains("/* async runtime */") {
+                "int main(void) {\natexit(nc_cleanup);\natexit(nc_async_cleanup);"
+            } else {
+                "int main(void) {\natexit(nc_cleanup);"
+            },
             1,
         ));
     } else {
@@ -221,6 +248,8 @@ struct Emitter<'a> {
     runtime_functions: Vec<String>,
     function_types: Vec<(Type, String)>,
     type_definitions: Vec<String>,
+    mutexes: HashSet<String>,
+    mutex_types: Vec<(Type, String)>,
 }
 impl Emitter<'_> {
     fn line(&mut self, text: impl AsRef<str>) {
@@ -258,6 +287,10 @@ impl Emitter<'_> {
             .ok_or_else(|| Diagnostics::one("internal error: missing expression type", 0..0))
     }
     fn c_type(&mut self, ty: &Type) -> Result<String, Diagnostics> {
+        if matches!(ty, Type::Future(_)) {
+            self.async_support();
+            return Ok("nc_future *".into());
+        }
         if let Type::Named(n, _) = ty {
             if let Some(TypeInfo::Alias(base)) = self.checked.types.get(n) {
                 return self.c_type(&base.clone());
@@ -437,7 +470,14 @@ impl Emitter<'_> {
             }
             Stmt::Var(v) => {
                 if v.mutex {
-                    return unsupported("mutexes");
+                    let value = self.expr_as(&v.value, &v.ty)?;
+                    let value = self.copy(&v.ty, &value)?;
+                    let ty = self.mutex_type(&v.ty)?;
+                    let name = self.bind(pattern_name(&v.pattern)?);
+                    self.line(format!("{ty} *{name};"));
+                    self.init_mutex(&name, &v.ty, &value)?;
+                    self.mutexes.insert(name);
+                    return Ok(());
                 }
                 let value = self.expr_as(&v.value, &v.ty)?;
                 let value = self.copy(&v.ty, &value)?;
@@ -565,7 +605,19 @@ impl Emitter<'_> {
                 self.loops.pop();
                 self.scopes.pop();
             }
-            Stmt::Lock { .. } => return unsupported("mutex locks"),
+            Stmt::Lock { name, body, label } => {
+                let mutex = self.name(name);
+                let guard = self.fresh();
+                let end = self.fresh();
+                self.line(format!("{{ pthread_mutex_lock(&({mutex})->lock); nc_lock_guard {guard} __attribute__((cleanup(nc_unlock))) = {{ &({mutex})->lock }};"));
+                self.scopes
+                    .push(HashMap::from([(name.clone(), format!("({mutex})->value"))]));
+                self.loops.push((label.clone(), end.clone(), end.clone()));
+                self.block(body)?;
+                self.loops.pop();
+                self.scopes.pop();
+                self.line(format!("}} {end}:;"));
+            }
         }
         Ok(())
     }
@@ -884,6 +936,14 @@ impl Emitter<'_> {
                     .ok_or_else(|| Diagnostics::one("$ outside indexing", 0..0))?
             ),
             Expr::Name(n) => {
+                let name = self.name(n);
+                if self.mutexes.contains(&name) {
+                    self.line(format!("pthread_mutex_lock(&({name})->lock);"));
+                    let value = self.copy(&self.ty(e)?, &format!("({name})->value"))?;
+                    let value = self.temp(e, value)?;
+                    self.line(format!("pthread_mutex_unlock(&({name})->lock);"));
+                    return Ok(value);
+                }
                 if matches!(self.ty(e)?, Type::Function(_, _))
                     && !self.scopes.iter().any(|s| s.contains_key(n))
                 {
@@ -892,6 +952,17 @@ impl Emitter<'_> {
                 self.name(n)
             }
             Expr::Lambda(f) => return self.lambda(e, f),
+            Expr::Async(call) => return self.spawn(e, call),
+            Expr::Await(future) => {
+                let value = self.expr(future)?;
+                self.line(format!("nc_wait({value});"));
+                let ty = self.ty(e)?;
+                if ty == Type::void() {
+                    return Ok(String::new());
+                }
+                let ct = self.c_type(&ty)?;
+                format!("*({ct}*)({value}->result)")
+            }
             Expr::Cast { ty, value } => {
                 let from = self.ty(value)?;
                 let value = self.expr(value)?;
@@ -1145,6 +1216,75 @@ impl Emitter<'_> {
         };
         self.temp(e, value)
     }
+    fn mutex_type(&mut self, ty: &Type) -> Result<String, Diagnostics> {
+        if let Some((_, name)) = self.mutex_types.iter().find(|(t, _)| t == ty) {
+            return Ok(name.clone());
+        }
+        self.allocation_support();
+        self.headers.insert("pthread.h");
+        self.helpers.insert("typedef struct { pthread_mutex_t *lock; } nc_lock_guard; static void nc_unlock(nc_lock_guard *guard) { pthread_mutex_unlock(guard->lock); }".into());
+        let ct = self.c_type(ty)?;
+        let name = self.fresh();
+        self.type_definitions.push(format!(
+            "typedef struct {{ pthread_mutex_t lock; {ct} value; }} {name};"
+        ));
+        self.mutex_types.push((ty.clone(), name.clone()));
+        Ok(name)
+    }
+    fn init_mutex(&mut self, name: &str, ty: &Type, value: &str) -> Result<(), Diagnostics> {
+        let ct = self.mutex_type(ty)?;
+        self.line(format!("{name} = nc_alloc(1,sizeof({ct})); if (pthread_mutex_init(&{name}->lock,0)) nc_panic(\"cannot initialize mutex\"); {name}->value = {value};"));
+        Ok(())
+    }
+    fn async_support(&mut self) {
+        self.allocation_support();
+        self.headers.insert("pthread.h");
+        self.helpers.insert("/* async runtime */".into());
+    }
+    fn spawn(&mut self, e: &Expr, call: &Expr) -> Result<String, Diagnostics> {
+        self.async_support();
+        let Expr::Call { callee, args, .. } = call else {
+            return unsupported("async non-call");
+        };
+        let callee_type = self.ty(callee)?;
+        let Type::Function(params, ret) = &callee_type else {
+            return unsupported("async builtin call");
+        };
+        let callee_value = self.expr(callee)?;
+        let mut values = vec![callee_value];
+        for (arg, ty) in args.iter().zip(params) {
+            let value = self.expr_as(arg, ty)?;
+            values.push(self.copy(ty, &value)?);
+        }
+        let mut fields = vec![callee_type.clone()];
+        fields.extend(params.clone());
+        let payload_type = self.c_type(&Type::Tuple(fields))?;
+        let result_type = if **ret == Type::void() {
+            "unsigned char".into()
+        } else {
+            self.c_type(ret)?
+        };
+        let job_type = self.fresh();
+        self.type_definitions.push(format!("typedef struct {{ nc_future future; {payload_type} args; {result_type} result; }} {job_type};"));
+        let worker = self.fresh();
+        let call_args = (0..params.len())
+            .map(|i| format!(", job->args.f_{}", i + 1))
+            .collect::<String>();
+        self.runtime_prototypes
+            .push(format!("static void *{worker}(void *raw);"));
+        self.runtime_functions.push(format!("static void *{worker}(void *raw) {{ {job_type} *job = raw; {}job->args.f_0.call(job->args.f_0.env{call_args}); return 0; }}", if **ret == Type::void() { "" } else { "job->result = " }));
+        let job = self.fresh();
+        self.line(format!(
+            "{job_type} *{job} = nc_alloc(1,sizeof({job_type}));"
+        ));
+        for (i, value) in values.iter().enumerate() {
+            self.line(format!("{job}->args.f_{i} = {value};"));
+        }
+        self.line(format!(
+            "{job}->future.result = &{job}->result; nc_start(&{job}->future, {worker}, {job});"
+        ));
+        self.temp(e, format!("&{job}->future"))
+    }
     fn function_value(&mut self, e: &Expr, name: &str) -> Result<String, Diagnostics> {
         let ty = self.ty(e)?;
         let Type::Function(params, ret) = &ty else {
@@ -1170,18 +1310,33 @@ impl Emitter<'_> {
     }
     fn lambda(&mut self, e: &Expr, f: &Function) -> Result<String, Diagnostics> {
         let captures = self.checked.captures[&(e as *const Expr as usize)].clone();
-        let env_type = Type::Tuple(captures.iter().map(|(_, t)| t.clone()).collect());
         let env_ct = if captures.is_empty() {
             None
         } else {
-            Some(self.c_type(&env_type)?)
+            let name = self.fresh();
+            let mut fields = vec![];
+            for (i, (_, ty, mutex)) in captures.iter().enumerate() {
+                let ct = if *mutex {
+                    format!("{} *", self.mutex_type(ty)?)
+                } else {
+                    self.c_type(ty)?
+                };
+                fields.push(format!("{ct} f_{i};"));
+            }
+            self.type_definitions
+                .push(format!("typedef struct {{ {} }} {name};", fields.join(" ")));
+            Some(name)
         };
         let ct = self.c_type(&self.ty(e)?)?;
         let function = self.fresh();
         let ret_ct = self.c_type(&f.return_type)?;
         let mut params = vec!["void *nc_env".into()];
         let mut scope = HashMap::new();
-        for (i, (n, _)) in captures.iter().enumerate() {
+        for (i, (n, _, mutex)) in captures.iter().enumerate() {
+            let code = format!("(({}*)nc_env)->f_{i}", env_ct.as_ref().unwrap());
+            if *mutex {
+                self.mutexes.insert(code);
+            }
             scope.insert(
                 n.clone(),
                 format!("(({}*)nc_env)->f_{i}", env_ct.as_ref().unwrap()),
@@ -1217,8 +1372,12 @@ impl Emitter<'_> {
             self.allocation_support();
             let env = self.fresh();
             self.line(format!("{env_ct} *{env} = nc_alloc(1,sizeof({env_ct}));"));
-            for (i, (name, ty)) in captures.iter().enumerate() {
-                let value = self.copy(ty, &self.name(name))?;
+            for (i, (name, ty, mutex)) in captures.iter().enumerate() {
+                let value = if *mutex {
+                    self.name(name)
+                } else {
+                    self.copy(ty, &self.name(name))?
+                };
                 self.line(format!("{env}->f_{i} = {value};"));
             }
             env

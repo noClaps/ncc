@@ -9,7 +9,7 @@ pub struct CheckedModule {
     pub module: Module,
     pub types: HashMap<String, TypeInfo>,
     pub expression_types: HashMap<usize, Type>,
-    pub captures: HashMap<usize, Vec<(String, Type)>>,
+    pub captures: HashMap<usize, Vec<(String, Type, bool)>>,
 }
 #[derive(Clone, Debug)]
 pub enum TypeInfo {
@@ -24,6 +24,7 @@ pub enum TypeInfo {
 struct Binding {
     ty: Type,
     mutable: bool,
+    mutex: bool,
 }
 struct Checker {
     types: HashMap<String, TypeInfo>,
@@ -35,8 +36,8 @@ struct Checker {
     loops: Vec<Option<String>>,
     indexing: usize,
     value_targets: Vec<Type>,
-    capture_frames: Vec<(usize, HashMap<String, Type>)>,
-    captures: HashMap<usize, Vec<(String, Type)>>,
+    capture_frames: Vec<(usize, HashMap<String, Binding>)>,
+    captures: HashMap<usize, Vec<(String, Type, bool)>>,
 }
 
 pub fn check(module: Module, _path: &Path) -> Result<CheckedModule, Diagnostics> {
@@ -62,6 +63,17 @@ pub fn check(module: Module, _path: &Path) -> Result<CheckedModule, Diagnostics>
     })
 }
 impl Checker {
+    fn future_variable(&self, v: &VarDecl) -> Result<(), Diagnostics> {
+        if matches!(v.ty, Type::Future(_)) {
+            if v.mutable || v.mutex {
+                return self.fail("futures cannot be mutable or mutex protected");
+            }
+            if !matches!(v.value, Expr::Async(_)) {
+                return self.fail("a future must be initialized by an async function call");
+            }
+        }
+        Ok(())
+    }
     fn new() -> Self {
         let mut types = HashMap::new();
         for n in [
@@ -142,6 +154,9 @@ impl Checker {
                 }
             }
             Item::Function(x) => self.with_generics(&x.generics, |this| {
+                if contains_future(&x.return_type) {
+                    return this.fail("futures cannot be returned from functions");
+                }
                 this.validate_type(&x.return_type)?;
                 this.push();
                 for p in &x.params {
@@ -164,9 +179,11 @@ impl Checker {
                 Ok(())
             })?,
             Item::Global(x) => {
+                self.future_variable(x)?;
                 self.validate_type(&x.ty)?;
                 self.expected(&x.value, &x.ty)?;
                 self.bind_pattern(&x.pattern, x.ty.clone(), x.mutable)?;
+                self.mark_mutex(x);
             }
             Item::Statement(statement) => self.stmt(statement)?,
             Item::Test { body, .. } => {
@@ -229,10 +246,14 @@ impl Checker {
         self.scopes.pop();
     }
     fn bind(&mut self, n: &str, ty: Type, mutable: bool) -> Result<(), Diagnostics> {
-        self.scopes
-            .last_mut()
-            .unwrap()
-            .insert(n.into(), Binding { ty, mutable });
+        self.scopes.last_mut().unwrap().insert(
+            n.into(),
+            Binding {
+                ty,
+                mutable,
+                mutex: false,
+            },
+        );
         Ok(())
     }
     fn bind_pattern(&mut self, p: &Pattern, ty: Type, mutable: bool) -> Result<(), Diagnostics> {
@@ -252,6 +273,13 @@ impl Checker {
     fn lookup(&self, n: &str) -> Option<&Binding> {
         self.scopes.iter().rev().find_map(|s| s.get(n))
     }
+    fn mark_mutex(&mut self, v: &VarDecl) {
+        if let Pattern::Name(name) = &v.pattern {
+            if let Some(binding) = self.scopes.last_mut().unwrap().get_mut(name) {
+                binding.mutex = v.mutex;
+            }
+        }
+    }
     fn block(&mut self, b: &Block) -> Result<(), Diagnostics> {
         self.push();
         for s in &b.statements {
@@ -264,9 +292,11 @@ impl Checker {
         match s {
             Stmt::Block(b) => self.block(b)?,
             Stmt::Var(x) => {
+                self.future_variable(x)?;
                 self.validate_type(&x.ty)?;
                 self.expected(&x.value, &x.ty)?;
-                self.bind_pattern(&x.pattern, x.ty.clone(), x.mutable)?
+                self.bind_pattern(&x.pattern, x.ty.clone(), x.mutable)?;
+                self.mark_mutex(x);
             }
             Stmt::Assign { target, value } => {
                 if matches!(target, Expr::Name(n) if n == "_") {
@@ -353,14 +383,32 @@ impl Checker {
                 self.block(body)?;
                 self.loops.pop();
             }
-            Stmt::Lock { name, body, .. } => {
+            Stmt::Lock { name, body, label } => {
+                if let Some((i, binding)) = self
+                    .scopes
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find_map(|(i, s)| s.get(name).map(|v| (i, v.clone())))
+                {
+                    for (depth, captures) in &mut self.capture_frames {
+                        if i < *depth {
+                            captures.insert(name.clone(), binding.clone());
+                        }
+                    }
+                }
                 let b = self
                     .lookup(name)
                     .ok_or_else(|| Diagnostics::one(format!("unknown variable `{name}`"), 0..0))?
                     .clone();
+                if !b.mutex {
+                    return self.fail("lock requires a mutex variable");
+                }
                 self.push();
                 self.bind(name, b.ty, true)?;
+                self.loops.push(label.clone());
                 self.block(body)?;
+                self.loops.pop();
                 self.pop()
             }
             Stmt::Break(Some(value), None) if !self.value_targets.is_empty() => {
@@ -518,6 +566,9 @@ impl Checker {
     fn expr_inner(&mut self, e: &Expr) -> Result<Type, Diagnostics> {
         match e {
             Expr::Lambda(f) => {
+                if contains_future(&f.return_type) {
+                    return self.fail("futures cannot be returned from functions");
+                }
                 self.validate_type(&f.return_type)?;
                 let old_scopes = self.scopes.clone();
                 for scope in &mut self.scopes {
@@ -550,8 +601,14 @@ impl Checker {
                 self.value_targets = targets;
                 self.indexing = indexing;
                 self.in_test = in_test;
-                let mut captures: Vec<_> =
-                    self.capture_frames.pop().unwrap().1.into_iter().collect();
+                let mut captures: Vec<_> = self
+                    .capture_frames
+                    .pop()
+                    .unwrap()
+                    .1
+                    .into_iter()
+                    .map(|(n, b)| (n, b.ty, b.mutex))
+                    .collect();
                 captures.sort_by(|a, b| a.0.cmp(&b.0));
                 self.captures.insert(e as *const Expr as usize, captures);
                 Ok(Type::Function(
@@ -598,16 +655,16 @@ impl Checker {
             Expr::None => self.fail("cannot infer type of none"),
             Expr::Name(n) if n == "$" && self.indexing > 0 => Ok(named("uint")),
             Expr::Name(n) => {
-                if let Some((i, ty)) = self
+                if let Some((i, binding)) = self
                     .scopes
                     .iter()
                     .enumerate()
                     .rev()
-                    .find_map(|(i, s)| s.get(n).map(|v| (i, v.ty.clone())))
+                    .find_map(|(i, s)| s.get(n).map(|v| (i, v.clone())))
                 {
                     for (depth, captures) in &mut self.capture_frames {
                         if i < *depth {
-                            captures.insert(n.clone(), ty.clone());
+                            captures.insert(n.clone(), binding.clone());
                         }
                     }
                 }
@@ -912,7 +969,12 @@ impl Checker {
                 }
                 Ok(target.unwrap_or_else(Type::void))
             }
-            Expr::Async(x) => Ok(Type::Future(Box::new(self.expr(x)?))),
+            Expr::Async(x) => {
+                if !matches!(&**x, Expr::Call { .. }) {
+                    return self.fail("async requires a function call");
+                }
+                Ok(Type::Future(Box::new(self.expr(x)?)))
+            }
             Expr::Await(x) => match self.expr(x)? {
                 Type::Future(t) => Ok(*t),
                 _ => self.fail("await expects a future"),
@@ -1076,6 +1138,15 @@ impl Checker {
 fn named(x: &str) -> Type {
     Type::Named(x.into(), vec![])
 }
+fn contains_future(ty: &Type) -> bool {
+    match ty {
+        Type::Future(_) => true,
+        Type::Array(t, _) | Type::Optional(t) | Type::ErrorUnion(t) => contains_future(t),
+        Type::Tuple(ts) | Type::Named(_, ts) => ts.iter().any(contains_future),
+        Type::Map(k, v) => contains_future(k) || contains_future(v),
+        _ => false,
+    }
+}
 fn numeric(t: &Type) -> bool {
     matches!(t,Type::Named(n,_)if matches!(n.as_str(),"byte"|"int"|"uint"|"float"))
 }
@@ -1098,7 +1169,7 @@ pub fn integer(text: &str) -> Result<u64, Diagnostics> {
 fn returns(block: &Block) -> bool {
     block.statements.iter().any(|statement| match statement {
         Stmt::Return(_) | Stmt::Throw(_) => true,
-        Stmt::Block(block) => returns(block),
+        Stmt::Block(block) | Stmt::Lock {body: block, ..} => returns(block),
         Stmt::Expr(Expr::If { arms, .. }) => {
             !arms.is_empty() && arms.iter().all(|(_, block)| returns(block))
         }

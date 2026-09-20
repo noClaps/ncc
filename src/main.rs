@@ -160,6 +160,9 @@ fn build(source: &str, path: &Path, args: impl Iterator<Item = String>, run: boo
     let mut compiler = Command::new("cc");
     compiler.arg(&c_path);
     compiler.arg(if release { "-O3" } else { "-O0" });
+    if c.contains("#include <pthread.h>") {
+        compiler.arg("-pthread");
+    }
     if format == OutputFormat::Object {
         compiler.arg("-c");
     } else if c.contains("#include <math.h>") {

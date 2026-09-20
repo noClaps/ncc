@@ -424,6 +424,24 @@ impl Parser {
     }
     fn stmt(&mut self) -> Result<Stmt, Diagnostics> {
         if self.keyword(Keyword::Fn) {
+            if matches!(
+                self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                Some(TokenKind::LParen)
+            ) {
+                let function = self.function(false)?;
+                let ty = Type::Function(
+                    function.params.iter().map(|p| p.ty.clone()).collect(),
+                    Box::new(function.return_type.clone()),
+                );
+                return Ok(Stmt::Var(VarDecl {
+                    public: false,
+                    mutable: false,
+                    mutex: false,
+                    pattern: Pattern::Name(function.name.clone()),
+                    ty,
+                    value: Expr::Lambda(Box::new(function)),
+                }));
+            }
             let name = self.ident()?;
             self.expect(TokenKind::Assign)?;
             let value = self.expr(0)?;

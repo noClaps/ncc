@@ -7,6 +7,74 @@ use std::{
 static ID: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
+fn mutexes_share_between_tasks_and_unlock_on_exit() {
+    success(
+        r#"
+test "mutexes" {
+    mutex int[] numbers = [1,2,3]
+    fn add_1() bool {
+        lock numbers {
+            for i in numbers { numbers[i] = numbers[i] + 1 }
+            return true
+        }
+    }
+    fn add_2() bool {
+        lock numbers { for i in numbers { numbers[i] = numbers[i] + 2 } }
+        return true
+    }
+    fut bool first = async add_1()
+    fut bool second = async add_2()
+    assert await first
+    assert await second
+    assert numbers == [4,5,6]
+    escape: lock numbers {
+        for i in numbers { numbers[i] = 10 break :escape }
+    }
+    lock numbers { assert numbers[0] == 10 }
+    fn fail() int! { lock numbers { throw "failed" } }
+    int fallback = fail() catch err { 7 }
+    assert fallback == 7
+    lock numbers { numbers[0] = 11 }
+    assert numbers[0] == 11
+}
+"#,
+        "",
+    );
+    rejects("int value = 1 lock value {}", "lock requires a mutex");
+    rejects("mutex int value = 1 value = 2", "immutable");
+}
+
+#[test]
+fn background_futures_and_await() {
+    success(
+        r#"
+fn square(int n) int { return n*n }
+fn checked(int n) int! { if n { 0 -> { throw "zero" } _ -> { return n } } }
+test "futures" {
+    fut int a = async square(7)
+    fut int b = async square(8)
+    assert (await a) + (await b) == 113
+    assert await a == 49
+    int captured = 5
+    fn closure = fn(int n) int { return captured+n }
+    fut int c = async closure(4)
+    assert await c == 9
+    fut int! error = async checked(0)
+    int value = await error catch err { 42 }
+    assert value == 42
+}
+"#,
+        "",
+    );
+    rejects(
+        "mut fut int f = async missing()",
+        "futures cannot be mutable",
+    );
+    rejects("fn bad() fut int { }", "futures cannot be returned");
+    rejects("fut int f = async 1", "async requires a function call");
+}
+
+#[test]
 fn anonymous_functions_capture_by_value() {
     success(
         r#"
