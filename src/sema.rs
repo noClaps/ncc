@@ -9,6 +9,7 @@ pub struct CheckedModule {
     pub module: Module,
     pub types: HashMap<String, TypeInfo>,
     pub expression_types: HashMap<usize, Type>,
+    pub captures: HashMap<usize, Vec<(String, Type)>>,
 }
 #[derive(Clone, Debug)]
 pub enum TypeInfo {
@@ -34,6 +35,8 @@ struct Checker {
     loops: Vec<Option<String>>,
     indexing: usize,
     value_targets: Vec<Type>,
+    capture_frames: Vec<(usize, HashMap<String, Type>)>,
+    captures: HashMap<usize, Vec<(String, Type)>>,
 }
 
 pub fn check(module: Module, _path: &Path) -> Result<CheckedModule, Diagnostics> {
@@ -55,6 +58,7 @@ pub fn check(module: Module, _path: &Path) -> Result<CheckedModule, Diagnostics>
         module,
         types: c.types,
         expression_types: c.expression_types,
+        captures: c.captures,
     })
 }
 impl Checker {
@@ -75,6 +79,8 @@ impl Checker {
             loops: vec![],
             indexing: 0,
             value_targets: vec![],
+            capture_frames: vec![],
+            captures: HashMap::new(),
         }
     }
     fn fail<T>(&self, s: impl Into<String>) -> Result<T, Diagnostics> {
@@ -511,6 +517,48 @@ impl Checker {
     }
     fn expr_inner(&mut self, e: &Expr) -> Result<Type, Diagnostics> {
         match e {
+            Expr::Lambda(f) => {
+                self.validate_type(&f.return_type)?;
+                let old_scopes = self.scopes.clone();
+                for scope in &mut self.scopes {
+                    for binding in scope.values_mut() {
+                        binding.mutable = false;
+                    }
+                }
+                self.capture_frames
+                    .push((self.scopes.len(), HashMap::new()));
+                self.push();
+                for p in &f.params {
+                    self.validate_type(&p.ty)?;
+                    self.bind(&p.name, p.ty.clone(), false)?;
+                }
+                let ret = self.function_return.replace(f.return_type.clone());
+                let loops = std::mem::take(&mut self.loops);
+                let targets = std::mem::take(&mut self.value_targets);
+                let indexing = std::mem::replace(&mut self.indexing, 0);
+                let in_test = std::mem::replace(&mut self.in_test, false);
+                self.block(&f.body)?;
+                if f.return_type != Type::void()
+                    && f.return_type != Type::ErrorUnion(Box::new(Type::void()))
+                    && !returns(&f.body)
+                {
+                    return self.fail("anonymous function may finish without returning a value");
+                }
+                self.scopes = old_scopes;
+                self.function_return = ret;
+                self.loops = loops;
+                self.value_targets = targets;
+                self.indexing = indexing;
+                self.in_test = in_test;
+                let mut captures: Vec<_> =
+                    self.capture_frames.pop().unwrap().1.into_iter().collect();
+                captures.sort_by(|a, b| a.0.cmp(&b.0));
+                self.captures.insert(e as *const Expr as usize, captures);
+                Ok(Type::Function(
+                    f.params.iter().map(|p| p.ty.clone()).collect(),
+                    Box::new(f.return_type.clone()),
+                ))
+            }
             Expr::Cast { ty, value } => {
                 self.validate_type(ty)?;
                 let from = self.expr(value)?;
@@ -549,26 +597,40 @@ impl Checker {
             Expr::Bool(_) => Ok(named("bool")),
             Expr::None => self.fail("cannot infer type of none"),
             Expr::Name(n) if n == "$" && self.indexing > 0 => Ok(named("uint")),
-            Expr::Name(n) => self
-                .lookup(n)
-                .map(|b| b.ty.clone())
-                .or_else(|| match self.types.get(n) {
-                    Some(TypeInfo::External(function)) => Some(Type::Function(
-                        function.params.iter().map(|p| p.ty.clone()).collect(),
-                        Box::new(function.return_type.clone()),
-                    )),
-                    Some(TypeInfo::Function(function)) => Some(Type::Function(
-                        function
-                            .params
-                            .iter()
-                            .map(|param| param.ty.clone())
-                            .collect(),
-                        Box::new(function.return_type.clone()),
-                    )),
-                    Some(_) => Some(named(n)),
-                    None => None,
-                })
-                .ok_or_else(|| Diagnostics::one(format!("unknown name `{n}`"), 0..0)),
+            Expr::Name(n) => {
+                if let Some((i, ty)) = self
+                    .scopes
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find_map(|(i, s)| s.get(n).map(|v| (i, v.ty.clone())))
+                {
+                    for (depth, captures) in &mut self.capture_frames {
+                        if i < *depth {
+                            captures.insert(n.clone(), ty.clone());
+                        }
+                    }
+                }
+                self.lookup(n)
+                    .map(|b| b.ty.clone())
+                    .or_else(|| match self.types.get(n) {
+                        Some(TypeInfo::External(function)) => Some(Type::Function(
+                            function.params.iter().map(|p| p.ty.clone()).collect(),
+                            Box::new(function.return_type.clone()),
+                        )),
+                        Some(TypeInfo::Function(function)) => Some(Type::Function(
+                            function
+                                .params
+                                .iter()
+                                .map(|param| param.ty.clone())
+                                .collect(),
+                            Box::new(function.return_type.clone()),
+                        )),
+                        Some(_) => Some(named(n)),
+                        None => None,
+                    })
+                    .ok_or_else(|| Diagnostics::one(format!("unknown name `{n}`"), 0..0))
+            }
             Expr::Discard => Ok(Type::void()),
             Expr::Array(xs) => {
                 if xs.is_empty() {

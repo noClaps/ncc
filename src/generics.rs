@@ -390,6 +390,13 @@ impl Pass {
     }
     fn expr(&mut self, e: &mut Expr, b: &HashMap<String, Type>) -> Result<(), Diagnostics> {
         match e {
+            Expr::Lambda(f) => {
+                for p in &mut f.params {
+                    self.ty(&mut p.ty, b)?;
+                }
+                self.ty(&mut f.return_type, b)?;
+                self.function_body(f, b)?;
+            }
             Expr::Call {
                 callee,
                 args,

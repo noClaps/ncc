@@ -306,6 +306,15 @@ fn statement(
 }
 fn expr(e: &mut Expr, names: &Names, aliases: &HashMap<String, Names>) -> Result<(), Diagnostics> {
     match e {
+        Expr::Lambda(f) => {
+            let mut local = names.clone();
+            for p in &mut f.params {
+                qualify_type(&mut p.ty, names);
+                local.remove(&p.name);
+            }
+            qualify_type(&mut f.return_type, names);
+            block(&mut f.body, &local, aliases)?;
+        }
         Expr::Name(n) => {
             if let Some(name) = names.get(n) {
                 *n = name.clone();

@@ -7,6 +7,57 @@ use std::{
 static ID: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
+fn anonymous_functions_capture_by_value() {
+    success(
+        r#"
+fn map<type T, type U>(T[] arr, (fn(T) U) apply) U[] {
+    mut U[] result = []
+    for i in arr { result = result <> [apply(arr[i])] }
+    return result
+}
+fn make(int n) (fn(int) int) { return fn(int x) int { return n+x } }
+test "closures" {
+    mut int original = 3
+    mut int[] numbers = [2]
+    fn add = fn(int x) int { return original + numbers[0] + x }
+    original = 30
+    numbers[0] = 20
+    assert add(1) == 6
+    assert make(5)(2) == 7
+    str[] strings = map<int,str>([1,2,3], fn(int n) str { return "{n}" })
+    assert strings == ["1","2","3"]
+    fn outer = fn(int n) (fn(int) int) { return fn(int x) int { return original+n+x } }
+    (fn(int) int) inner = outer(4)
+    original = 300
+    assert inner(5) == 39
+}
+"#,
+        "",
+    );
+    rejects("mut int a = 1 fn f = fn() { a = 2 }", "immutable");
+}
+
+#[test]
+fn function_values_and_callbacks() {
+    success(
+        r#"
+fn add(int a, int b) int { return a+b }
+fn apply(int a, int b, (fn(int,int) int) op) int { return op(a,b) }
+struct Calculator { (fn(int,int) int) operation }
+test "callbacks" {
+    (fn(int,int) int) operation = add
+    assert apply(2,3,operation) == 5
+    Calculator calculator = Calculator{.operation = add}
+    assert calculator.operation(3,4) == 7
+    (fn(int,int) int)[] operations = [add]
+    assert operations[0](4,5) == 9
+}
+"#,
+        "",
+    );
+}
+
+#[test]
 fn writable_places_and_evaluation_order() {
     success(
         r#"

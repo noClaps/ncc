@@ -25,6 +25,8 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
         enum_strings: HashSet::new(),
         runtime_prototypes: vec![],
         runtime_functions: vec![],
+        function_types: vec![],
+        type_definitions: vec![],
     };
     let mut declarations = String::new();
     let mut global_slots = HashMap::new();
@@ -155,20 +157,9 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
     for (_, name, _) in &e.record_types {
         output.push_str(&format!("typedef struct {name} {name};\n"));
     }
-    for (_, name, element) in &e.array_types {
-        output.push_str(&format!(
-            "typedef struct {{ uint64_t len, cap; {element} *vals; }} {name};\n"
-        ));
-    }
-    for (_, name, fields) in &e.record_types {
-        output.push_str(&format!(
-            "struct {name} {{ {} }};\n",
-            fields
-                .iter()
-                .map(|(field, ct)| format!("{ct} {field};"))
-                .collect::<Vec<_>>()
-                .join(" ")
-        ));
+    for definition in &e.type_definitions {
+        output.push_str(definition);
+        output.push('\n');
     }
     for helper in &e.helpers {
         output.push_str(helper);
@@ -228,6 +219,8 @@ struct Emitter<'a> {
     enum_strings: HashSet<Type>,
     runtime_prototypes: Vec<String>,
     runtime_functions: Vec<String>,
+    function_types: Vec<(Type, String)>,
+    type_definitions: Vec<String>,
 }
 impl Emitter<'_> {
     fn line(&mut self, text: impl AsRef<str>) {
@@ -273,12 +266,35 @@ impl Emitter<'_> {
         if let Type::Map(key, value) = ty {
             return self.c_type(&map_array(key, value));
         }
+        if let Type::Function(params, ret) = ty {
+            if let Some((_, name)) = self.function_types.iter().find(|(t, _)| t == ty) {
+                return Ok(name.clone());
+            }
+            let ret = self.c_type(ret)?;
+            let params = params
+                .iter()
+                .map(|t| self.c_type(t))
+                .collect::<Result<Vec<_>, _>>()?;
+            let name = format!("nc_callable_{}", self.function_types.len());
+            let suffix = if params.is_empty() {
+                String::new()
+            } else {
+                format!(", {}", params.join(", "))
+            };
+            self.type_definitions.push(format!(
+                "typedef struct {{ {ret} (*call)(void *{suffix}); void *env; }} {name};"
+            ));
+            self.function_types.push((ty.clone(), name.clone()));
+            return Ok(name);
+        }
         if let Some((_, name, _)) = self.record_types.iter().find(|(t, _, _)| t == ty) {
             return Ok(name.clone());
         }
         if let Type::Named(n, _) = ty {
             if matches!(self.checked.types.get(n), Some(TypeInfo::Enum(_))) {
                 let name = format!("nc_enum_{n}");
+                self.type_definitions
+                    .push(format!("struct {name} {{ int tag; void *payload; }};"));
                 self.record_types.push((
                     ty.clone(),
                     name.clone(),
@@ -296,6 +312,14 @@ impl Emitter<'_> {
                 c_fields.push((field, self.c_type(&ty)?));
             }
             let name = format!("nc_record_{}", self.record_types.len());
+            self.type_definitions.push(format!(
+                "struct {name} {{ {} }};",
+                c_fields
+                    .iter()
+                    .map(|(field, ct)| format!("{ct} {field};"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ));
             self.record_types.push((ty.clone(), name.clone(), c_fields));
             return Ok(name);
         }
@@ -307,6 +331,9 @@ impl Emitter<'_> {
             let element_type = self.c_type(element)?;
             self.headers.insert("stdint.h");
             let name = format!("nc_arr_{}", self.array_types.len());
+            self.type_definitions.push(format!(
+                "typedef struct {{ uint64_t len, cap; {element_type} *vals; }} {name};"
+            ));
             self.array_types.push((key, name.clone(), element_type));
             return Ok(name);
         }
@@ -856,7 +883,15 @@ impl Emitter<'_> {
                     .last()
                     .ok_or_else(|| Diagnostics::one("$ outside indexing", 0..0))?
             ),
-            Expr::Name(n) => self.name(n),
+            Expr::Name(n) => {
+                if matches!(self.ty(e)?, Type::Function(_, _))
+                    && !self.scopes.iter().any(|s| s.contains_key(n))
+                {
+                    return self.function_value(e, n);
+                }
+                self.name(n)
+            }
+            Expr::Lambda(f) => return self.lambda(e, f),
             Expr::Cast { ty, value } => {
                 let from = self.ty(value)?;
                 let value = self.expr(value)?;
@@ -1077,6 +1112,19 @@ impl Emitter<'_> {
                 let Type::Function(params, _) = self.ty(callee)? else {
                     return unsupported("calling this type");
                 };
+                if let Expr::Name(name) = &**callee {
+                    if !self.scopes.iter().any(|s| s.contains_key(name)) {
+                        let values = args
+                            .iter()
+                            .zip(&params)
+                            .map(|(arg, ty)| {
+                                let value = self.expr_as(arg, ty)?;
+                                self.copy(ty, &value)
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        return self.temp(e, format!("{}({})", self.name(name), values.join(", ")));
+                    }
+                }
                 let callee = self.expr(callee)?;
                 let args = args
                     .iter()
@@ -1086,15 +1134,98 @@ impl Emitter<'_> {
                         self.copy(&ty, &value)
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                format!("{callee}({})", args.join(", "))
+                let suffix = if args.is_empty() {
+                    String::new()
+                } else {
+                    format!(", {}", args.join(", "))
+                };
+                format!("{callee}.call({callee}.env{suffix})")
             }
             _ => return unsupported("this expression"),
         };
-        if matches!(self.ty(e)?, Type::Function(_, _)) {
-            Ok(value)
-        } else {
-            self.temp(e, value)
+        self.temp(e, value)
+    }
+    fn function_value(&mut self, e: &Expr, name: &str) -> Result<String, Diagnostics> {
+        let ty = self.ty(e)?;
+        let Type::Function(params, ret) = &ty else {
+            unreachable!()
+        };
+        let ct = self.c_type(&ty)?;
+        let ret_c = self.c_type(ret)?;
+        let wrapper = self.fresh();
+        let mut decls = vec!["void *env".into()];
+        let mut args = vec![];
+        for (i, t) in params.iter().enumerate() {
+            decls.push(format!("{} a{i}", self.c_type(t)?));
+            args.push(format!("a{i}"));
         }
+        let signature = format!("static {ret_c} {wrapper}({})", decls.join(", "));
+        self.runtime_prototypes.push(format!("{signature};"));
+        let call = format!("{}({})", self.name(name), args.join(", "));
+        self.runtime_functions.push(format!(
+            "{signature} {{ (void)env; {}{call}; }}",
+            if **ret == Type::void() { "" } else { "return " }
+        ));
+        self.temp(e, format!("({ct}){{{wrapper},0}}"))
+    }
+    fn lambda(&mut self, e: &Expr, f: &Function) -> Result<String, Diagnostics> {
+        let captures = self.checked.captures[&(e as *const Expr as usize)].clone();
+        let env_type = Type::Tuple(captures.iter().map(|(_, t)| t.clone()).collect());
+        let env_ct = if captures.is_empty() {
+            None
+        } else {
+            Some(self.c_type(&env_type)?)
+        };
+        let ct = self.c_type(&self.ty(e)?)?;
+        let function = self.fresh();
+        let ret_ct = self.c_type(&f.return_type)?;
+        let mut params = vec!["void *nc_env".into()];
+        let mut scope = HashMap::new();
+        for (i, (n, _)) in captures.iter().enumerate() {
+            scope.insert(
+                n.clone(),
+                format!("(({}*)nc_env)->f_{i}", env_ct.as_ref().unwrap()),
+            );
+        }
+        for p in &f.params {
+            let name = self.fresh();
+            params.push(format!("{} {name}", self.c_type(&p.ty)?));
+            scope.insert(p.name.clone(), name);
+        }
+        let signature = format!("static {ret_ct} {function}({})", params.join(", "));
+        self.runtime_prototypes.push(format!("{signature};"));
+        let out = std::mem::take(&mut self.out);
+        let scopes = std::mem::replace(&mut self.scopes, vec![scope]);
+        let ret = std::mem::replace(&mut self.return_type, f.return_type.clone());
+        let loops = std::mem::take(&mut self.loops);
+        let targets = std::mem::take(&mut self.value_targets);
+        let indices = std::mem::take(&mut self.index_context);
+        self.line(format!("{signature} {{"));
+        self.block(&f.body)?;
+        if f.return_type == Type::ErrorUnion(Box::new(Type::void())) {
+            self.line(format!("return ({ret_ct}){{0}};"));
+        }
+        self.line("}");
+        let body = std::mem::replace(&mut self.out, out);
+        self.runtime_functions.push(body);
+        self.scopes = scopes;
+        self.return_type = ret;
+        self.loops = loops;
+        self.value_targets = targets;
+        self.index_context = indices;
+        let environment = if let Some(env_ct) = env_ct {
+            self.allocation_support();
+            let env = self.fresh();
+            self.line(format!("{env_ct} *{env} = nc_alloc(1,sizeof({env_ct}));"));
+            for (i, (name, ty)) in captures.iter().enumerate() {
+                let value = self.copy(ty, &self.name(name))?;
+                self.line(format!("{env}->f_{i} = {value};"));
+            }
+            env
+        } else {
+            "0".into()
+        };
+        self.temp(e, format!("({ct}){{{function},{environment}}}"))
     }
     // A writable place must retain the original storage, not an expression copy.
     fn place(&mut self, e: &Expr) -> Result<String, Diagnostics> {

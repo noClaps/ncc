@@ -159,7 +159,13 @@ impl Parser {
                 ty: self.ty()?,
             });
         }
-        if self.keyword(Keyword::Fn) {
+        if self.at(&TokenKind::Keyword(Keyword::Fn))
+            && !matches!(
+                self.tokens.get(self.pos + 2).map(|t| &t.kind),
+                Some(TokenKind::Assign)
+            )
+        {
+            self.bump();
             return self.function(public).map(Item::Function);
         }
         if !public && self.keyword(Keyword::Test) {
@@ -417,6 +423,26 @@ impl Parser {
         Ok(Block { statements })
     }
     fn stmt(&mut self) -> Result<Stmt, Diagnostics> {
+        if self.keyword(Keyword::Fn) {
+            let name = self.ident()?;
+            self.expect(TokenKind::Assign)?;
+            let value = self.expr(0)?;
+            let Expr::Lambda(f) = &value else {
+                return self.error("inferred `fn` declarations require an anonymous function");
+            };
+            let ty = Type::Function(
+                f.params.iter().map(|p| p.ty.clone()).collect(),
+                Box::new(f.return_type.clone()),
+            );
+            return Ok(Stmt::Var(VarDecl {
+                public: false,
+                mutable: false,
+                mutex: false,
+                pattern: Pattern::Name(name),
+                ty,
+                value,
+            }));
+        }
         if self.at(&TokenKind::LBrace) {
             return self.block().map(Stmt::Block);
         }
@@ -689,6 +715,24 @@ impl Parser {
         Ok(left)
     }
     fn prefix(&mut self) -> Result<Expr, Diagnostics> {
+        if self.keyword(Keyword::Fn) {
+            let params = self.params()?;
+            let return_type = if self.at(&TokenKind::LBrace) {
+                Type::void()
+            } else {
+                self.ty()?
+            };
+            let body = self.block()?;
+            return Ok(Expr::Lambda(Box::new(Function {
+                public: false,
+                name: "anonymous".into(),
+                generics: vec![],
+                params,
+                return_type,
+                throws: false,
+                body,
+            })));
+        }
         let t = self.bump();
         match t.kind {
             TokenKind::Keyword(Keyword::Try) => Ok(Expr::Try(Box::new(self.expr(12)?))),

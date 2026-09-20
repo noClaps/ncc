@@ -763,6 +763,12 @@ hello() // error: return value of function not used
 
 You can pass a function as an argument to other functions, or assign them as values to variables.
 
+Anonymous functions capture referenced surrounding variables by value when the
+function value is created. Captured arrays and other composite values are copied,
+so later changes to the originals do not change the captured values. Captures
+are immutable inside the function, like arguments; a mutable local copy may be
+declared when needed. A returned function keeps its captured values alive.
+
 ```nc
 // This function takes a function `operation` as its third parameter
 // `operation` should be a function that takes in 2 int values and returns an int value

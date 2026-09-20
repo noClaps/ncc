@@ -125,6 +125,7 @@ pub enum Stmt {
 }
 #[derive(Clone, Debug)]
 pub enum Expr {
+    Lambda(Box<Function>),
     Cast {
         ty: Type,
         value: Box<Expr>,
