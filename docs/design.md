@@ -2305,7 +2305,7 @@ Usage: ncc [command]
 
 Commands:
   build       Build the given file to the desired target.
-  check       Check the types in the given file.
+  check       Lint the given file.
   fmt         Format the given file.
   lsp         Start the NC LSP.
   run         Build and execute the given file.
@@ -2336,13 +2336,16 @@ Options:
 
 #### Check
 
+> [!NOTE]
+> Specific lints can be turned off using `// @ncc lint disable [lint]` comments. This is not recommended unless you're sure you know what you're doing.
+
 ```
 Usage: ncc check <file>
 
-Check the types in the given file.
+Lint the given file.
 
 Arguments:
-  <file>      The file to type-check. Other files imported by this file are also type-checked.
+  <file>      The file to lint. Other files imported by this file are also checked.
 
 Options:
   -h, --help  Show this help and exit.
