@@ -1,3 +1,4 @@
+#[cfg(feature = "lsp")]
 use serde_json::{Value, json};
 
 #[test]
@@ -18,6 +19,7 @@ fn formatter_preserves_comments_literals_and_is_idempotent() {
 }
 
 #[test]
+#[cfg(feature = "lsp")]
 fn lsp_lifecycle_diagnostics_and_formatting() {
     let messages = [
         json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),

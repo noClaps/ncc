@@ -134,9 +134,14 @@ fn main() -> ExitCode {
 }
 fn execute(o: Options) -> Result<ExitCode, String> {
     if o.command == "lsp" {
-        ncc::lsp::serve(std::io::stdin().lock(), std::io::stdout().lock())
-            .map_err(|e| e.to_string())?;
-        return Ok(ExitCode::SUCCESS);
+        #[cfg(not(feature = "lsp"))]
+        return Err("this compiler was built without language-server support".into());
+        #[cfg(feature = "lsp")]
+        {
+            ncc::lsp::serve(std::io::stdin().lock(), std::io::stdout().lock())
+                .map_err(|e| e.to_string())?;
+            return Ok(ExitCode::SUCCESS);
+        }
     }
     let source = fs::read_to_string(&o.input).map_err(|e| format!("{}: {e}", o.input.display()))?;
     match o.command.as_str() {

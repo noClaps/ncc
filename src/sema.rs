@@ -439,6 +439,14 @@ impl Checker {
                 }
                 Ok(b.ty.clone())
             }
+            Expr::Member { object, name } if name == "len" => {
+                let ty = self.expr(object)?;
+                if matches!(ty, Type::Array(_, _) | Type::Map(_, _)) || ty == named("str") {
+                    return self.fail("container length is read-only");
+                }
+                self.lvalue(object)?;
+                self.expr(e)
+            }
             Expr::Index { object, .. } | Expr::Member { object, .. } => {
                 self.lvalue(object)?;
                 self.expr(e)
@@ -633,7 +641,15 @@ impl Checker {
                 {
                     return Ok(ty.clone());
                 }
-                if !(numeric(ty) && numeric(&from)) && ty != &from && *ty != named("str") {
+                let string_array = matches!(ty,Type::Array(t,None) if (**t == named("char") && from == named("str")) || (**t == named("byte") && (from == named("str") || from == named("char"))));
+                let bool_integer =
+                    from == named("bool") && (*ty == named("int") || *ty == named("uint"));
+                if !(numeric(ty) && numeric(&from))
+                    && ty != &from
+                    && *ty != named("str")
+                    && !string_array
+                    && !bool_integer
+                {
                     return self.fail("this cast is not implemented");
                 }
                 Ok(ty.clone())
@@ -875,6 +891,7 @@ impl Checker {
                 }
                 match o {
                     Type::Array(t, _) => Ok(*t),
+                    Type::Named(n, _) if n == "str" => Ok(named("char")),
                     Type::Tuple(_) => self.fail("tuple index must be a compile-time value"),
                     _ => self.fail("value is not indexable"),
                 }

@@ -170,6 +170,10 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
     if e.helpers.contains("/* async runtime */") {
         output.push_str(include_str!("runtime_async.h"));
     }
+    if e.helpers.contains("/* unicode runtime */") {
+        output.push_str(&crate::unicode::c_tables());
+        output.push_str(include_str!("runtime_unicode.h"));
+    }
     for (_, name, _) in &e.record_types {
         output.push_str(&format!("typedef struct {name} {name};\n"));
     }
@@ -486,6 +490,20 @@ impl Emitter<'_> {
             }
             Stmt::Assign { target, value } => {
                 if let Expr::Index { object, index } = target
+                    && self.ty(object)? == Type::Named("str".into(), vec![])
+                {
+                    self.unicode_support();
+                    let location = self.place(object)?;
+                    self.index_context.push(format!("nc_str_len({location})"));
+                    let index = self.expr(index)?;
+                    self.index_context.pop();
+                    let value = self.expr(value)?;
+                    self.line(format!(
+                        "{location} = nc_str_replace({location},(uint64_t){index},{value});"
+                    ));
+                    return Ok(());
+                }
+                if let Expr::Index { object, index } = target
                     && let Type::Map(key, val) = self.ty(object)?
                 {
                     let map = self.place(object)?;
@@ -580,20 +598,29 @@ impl Emitter<'_> {
                 body,
             } => {
                 let ty = self.ty(iterable)?;
-                if !matches!(ty, Type::Array(_, _) | Type::Map(_, _)) {
+                let string = ty == Type::Named("str".into(), vec![]);
+                if !matches!(ty, Type::Array(_, _) | Type::Map(_, _)) && !string {
                     return unsupported("iteration over this type");
                 }
                 let value = self.expr(iterable)?;
                 let ct = self.c_type(&ty)?;
                 let snapshot = self.fresh();
                 self.line(format!("{ct} {snapshot} = {value};"));
+                let length = if string {
+                    self.unicode_support();
+                    format!("nc_str_len({snapshot})")
+                } else {
+                    format!("{snapshot}.len")
+                };
                 self.scopes.push(HashMap::new());
                 let index = self.fresh();
                 let start = self.fresh();
                 let end = self.fresh();
                 let next = self.fresh();
                 self.loops.push((label.clone(), next.clone(), end.clone()));
-                self.line(format!("uint64_t {index} = 0;\n{start}:; {{\nif ({index} >= {snapshot}.len) goto {end};"));
+                self.line(format!(
+                    "uint64_t {index} = 0;\n{start}:; {{\nif ({index} >= {length}) goto {end};"
+                ));
                 let binding = self.bind(name);
                 if let Type::Map(key, _) = &ty {
                     let ct = self.c_type(key)?;
@@ -901,6 +928,11 @@ impl Emitter<'_> {
             Expr::Index { object, index } => self.index(object, index)?,
             Expr::Member { object, name } => {
                 let ty = self.ty(object)?;
+                if name == "len" && ty == Type::Named("str".into(), vec![]) {
+                    self.unicode_support();
+                    let object = self.expr(object)?;
+                    return self.temp(e, format!("nc_str_len({object})"));
+                }
                 if let Some(declaration) = self.enum_decl(&ty) {
                     let tag = declaration
                         .variants
@@ -931,7 +963,7 @@ impl Emitter<'_> {
                 b.to_string()
             }
             Expr::Name(n) if n == "$" => format!(
-                "({}).len - 1",
+                "({}) - 1",
                 self.index_context
                     .last()
                     .ok_or_else(|| Diagnostics::one("$ outside indexing", 0..0))?
@@ -967,6 +999,28 @@ impl Emitter<'_> {
             Expr::Cast { ty, value } => {
                 let from = self.ty(value)?;
                 let value = self.expr(value)?;
+                if let Type::Array(element, None) = ty
+                    && matches!(&from,Type::Named(n,_) if n == "str" || n == "char")
+                {
+                    self.unicode_support();
+                    let ct = self.c_type(ty)?;
+                    let elem = self.c_type(element)?;
+                    let bytes = **element == Type::Named("byte".into(), vec![]);
+                    let length = if bytes {
+                        format!("strlen({value})")
+                    } else {
+                        format!("nc_str_len({value})")
+                    };
+                    let result = self.fresh();
+                    self.line(format!("{ct} {result} = {{ {length}, {length}, nc_alloc({length},sizeof({elem})) }};"));
+                    if bytes {
+                        self.line(format!("memcpy({result}.vals,{value},{result}.len);"));
+                    } else {
+                        let i = self.fresh();
+                        self.line(format!("for (uint64_t {i}=0; {i}<{result}.len; ++{i}) {result}.vals[{i}]=nc_str_index({value},{i});"));
+                    }
+                    return Ok(result);
+                }
                 if matches!(ty, Type::Named(n, _) if n == "str") {
                     return self.string_value(&value, &from);
                 }
@@ -1241,6 +1295,11 @@ impl Emitter<'_> {
         self.headers.insert("pthread.h");
         self.helpers.insert("/* async runtime */".into());
     }
+    fn unicode_support(&mut self) {
+        self.allocation_support();
+        self.headers.extend(["stdint.h", "string.h"]);
+        self.helpers.insert("/* unicode runtime */".into());
+    }
     fn spawn(&mut self, e: &Expr, call: &Expr) -> Result<String, Diagnostics> {
         self.async_support();
         let Expr::Call { callee, args, .. } = call else {
@@ -1400,7 +1459,7 @@ impl Emitter<'_> {
                     };
                     return Ok(format!("({storage}).f_{}", integer(i)?));
                 }
-                self.index_context.push(storage.clone());
+                self.index_context.push(format!("({storage}).len"));
                 let i = self.expr(index)?;
                 self.index_context.pop();
                 self.panic_support();
@@ -1419,6 +1478,14 @@ impl Emitter<'_> {
         }
     }
     fn index(&mut self, object: &Expr, index: &Expr) -> Result<String, Diagnostics> {
+        if self.ty(object)? == Type::Named("str".into(), vec![]) {
+            self.unicode_support();
+            let object = self.expr(object)?;
+            self.index_context.push(format!("nc_str_len({object})"));
+            let index = self.expr(index)?;
+            self.index_context.pop();
+            return Ok(format!("nc_str_index({object},(uint64_t){index})"));
+        }
         if let Type::Map(key, _) = self.ty(object)? {
             let map = self.expr(object)?;
             let key_value = self.expr(index)?;
@@ -1437,7 +1504,7 @@ impl Emitter<'_> {
             return Ok(format!("({object}).f_{}", integer(index)?));
         }
         let object = self.expr(object)?;
-        self.index_context.push(object.clone());
+        self.index_context.push(format!("({object}).len"));
         let index = self.expr(index)?;
         self.index_context.pop();
         self.panic_support();
