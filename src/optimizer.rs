@@ -39,6 +39,9 @@ pub fn optimize(mut module: Module) -> Module {
         match item {
             Item::Global(v) => {
                 fold(&mut v.value, &env, &functions);
+                if let Pattern::Name(n) = &v.pattern {
+                    env.remove(n);
+                }
                 if !v.mutable && !v.mutex {
                     if let Pattern::Name(n) = &v.pattern {
                         if let Some(value) = evaluate(&v.value, &env, &functions, &mut 100_000) {

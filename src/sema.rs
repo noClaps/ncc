@@ -4,7 +4,7 @@ use std::{
     path::Path,
 };
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct CheckedModule {
     pub module: Module,
     pub types: HashMap<String, TypeInfo>,
@@ -120,7 +120,21 @@ impl Checker {
                 }
                 Ok(())
             })?,
-            Item::TypeAlias { ty, .. } => self.validate_type(ty)?,
+            Item::TypeAlias { name, ty, .. } => {
+                self.validate_type(ty)?;
+                let mut seen = HashSet::new();
+                let mut current = named(name);
+                while let Type::Named(n, _) = current {
+                    if !seen.insert(n.clone()) {
+                        return self.fail("cyclic nominal type definition");
+                    }
+                    if let Some(TypeInfo::Alias(base)) = self.types.get(&n) {
+                        current = base.clone();
+                    } else {
+                        break;
+                    }
+                }
+            }
             Item::Function(x) => self.with_generics(&x.generics, |this| {
                 this.validate_type(&x.return_type)?;
                 this.push();
@@ -383,6 +397,24 @@ impl Checker {
         Ok(ty)
     }
     fn expected(&mut self, e: &Expr, ty: &Type) -> Result<(), Diagnostics> {
+        if let Type::Named(n, _) = ty {
+            if let Some(TypeInfo::Alias(base)) = self.types.get(n).cloned() {
+                if matches!(
+                    e,
+                    Expr::Int(_)
+                        | Expr::Float(_)
+                        | Expr::String(_)
+                        | Expr::Char(_)
+                        | Expr::Bool(_)
+                        | Expr::Array(_)
+                        | Expr::Tuple(_)
+                        | Expr::Map(_)
+                ) {
+                    self.expected(e, &base)?;
+                    return Ok(());
+                }
+            }
+        }
         if matches!(e, Expr::If { .. }) {
             self.value_targets.push(ty.clone());
             let result = self.expr(e);
@@ -480,6 +512,21 @@ impl Checker {
             Expr::Cast { ty, value } => {
                 self.validate_type(ty)?;
                 let from = self.expr(value)?;
+                if let Type::Named(n, _) = ty {
+                    if matches!(self.types.get(n),Some(TypeInfo::Alias(base)) if *base == from) {
+                        return Ok(ty.clone());
+                    }
+                }
+                if let Type::Named(n, _) = &from {
+                    if matches!(self.types.get(n),Some(TypeInfo::Alias(base)) if base == ty) {
+                        return Ok(ty.clone());
+                    }
+                }
+                if let (Type::Array(a, None), Type::Array(b, Some(_))) = (ty, &from) {
+                    if a == b {
+                        return Ok(ty.clone());
+                    }
+                }
                 if !(numeric(ty) && numeric(&from)) && ty != &from && *ty != named("str") {
                     return self.fail("this cast is not implemented");
                 }

@@ -5,7 +5,7 @@ use crate::{
     diagnostic::Diagnostics,
     sema::{CheckedModule, TypeInfo, integer},
 };
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
     let mut e = Emitter {
@@ -21,6 +21,10 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
         record_types: vec![],
         value_targets: vec![],
         return_type: Type::void(),
+        enum_equalities: HashSet::new(),
+        enum_strings: HashSet::new(),
+        runtime_prototypes: vec![],
+        runtime_functions: vec![],
     };
     let mut declarations = String::new();
     for item in &checked.module.items {
@@ -86,9 +90,7 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
                 declarations.push_str(&format!("#include {}\n", c_string(path)));
             }
             Item::Struct(_) | Item::Enum(_) => {}
-            Item::TypeAlias { .. } => {
-                return unsupported("user-defined types");
-            }
+            Item::TypeAlias { .. } => {}
             _ => {}
         }
     }
@@ -171,6 +173,14 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
         output.push('\n');
     }
     output.push_str(&declarations);
+    for prototype in &e.runtime_prototypes {
+        output.push_str(prototype);
+        output.push('\n');
+    }
+    for function in &e.runtime_functions {
+        output.push_str(function);
+        output.push('\n');
+    }
     if e.helpers
         .iter()
         .any(|helper| helper.contains("nc_allocations"))
@@ -212,6 +222,10 @@ struct Emitter<'a> {
     record_types: Vec<(Type, String, Vec<(String, String)>)>,
     value_targets: Vec<(String, String, Type)>,
     return_type: Type,
+    enum_equalities: HashSet<Type>,
+    enum_strings: HashSet<Type>,
+    runtime_prototypes: Vec<String>,
+    runtime_functions: Vec<String>,
 }
 impl Emitter<'_> {
     fn line(&mut self, text: impl AsRef<str>) {
@@ -249,6 +263,11 @@ impl Emitter<'_> {
             .ok_or_else(|| Diagnostics::one("internal error: missing expression type", 0..0))
     }
     fn c_type(&mut self, ty: &Type) -> Result<String, Diagnostics> {
+        if let Type::Named(n, _) = ty {
+            if let Some(TypeInfo::Alias(base)) = self.checked.types.get(n) {
+                return self.c_type(&base.clone());
+            }
+        }
         if let Type::Map(key, value) = ty {
             return self.c_type(&map_array(key, value));
         }
@@ -337,6 +356,7 @@ impl Emitter<'_> {
         self.helpers.insert("static void nc_panic(const char *message);\ntypedef struct nc_allocation { void *data; struct nc_allocation *next; } nc_allocation;\nstatic nc_allocation *nc_allocations;\nstatic void nc_cleanup(void) { while (nc_allocations) { nc_allocation *next = nc_allocations->next; free(nc_allocations->data); free(nc_allocations); nc_allocations = next; } }\nstatic void *nc_alloc(size_t count, size_t size) { if (size && count > (size_t)-1 / size) nc_panic(\"allocation overflow\"); void *data = calloc(count ? count : 1, size); nc_allocation *node = malloc(sizeof(*node)); if (!data || !node) nc_panic(\"out of memory\"); node->data = data; node->next = nc_allocations; nc_allocations = node; return data; }".into());
     }
     fn copy(&mut self, ty: &Type, value: &str) -> Result<String, Diagnostics> {
+        if let Type::Named(n,_) = ty { if let Some(TypeInfo::Alias(base)) = self.checked.types.get(n) { return self.copy(&base.clone(),value); } }
         if let Type::Map(key, inner) = ty {
             return self.copy(&map_array(key, inner), value);
         }
@@ -560,7 +580,20 @@ impl Emitter<'_> {
         Ok(())
     }
     fn equality(&mut self, left: &str, right: &str, ty: &Type) -> Result<String, Diagnostics> {
+        if let Type::Named(n,_) = ty { if let Some(TypeInfo::Alias(base)) = self.checked.types.get(n) { return self.equality(left,right,&base.clone()); } }
         if let Some(declaration) = self.enum_decl(ty) {
+            let helper = format!("nc_equal_{}", declaration.name);
+            let ct = self.c_type(ty)?;
+            let call = format!("{helper}({left},{right})");
+            if !self.enum_equalities.insert(ty.clone()) {
+                return Ok(call);
+            }
+            self.runtime_prototypes
+                .push(format!("static int {helper}({ct} left, {ct} right);"));
+            let saved = std::mem::take(&mut self.out);
+            self.line(format!("static int {helper}({ct} left, {ct} right) {{"));
+            let left = "left";
+            let right = "right";
             self.headers.insert("stdbool.h");
             let result = self.fresh();
             self.line(format!("bool {result} = ({left}).tag == ({right}).tag; if ({result}) {{ switch (({left}).tag) {{"));
@@ -579,7 +612,10 @@ impl Emitter<'_> {
                 self.line(format!("{result} = {eq}; break; }}"));
             }
             self.line("default: break; } }");
-            return Ok(result);
+            self.line(format!("return {result}; }}"));
+            let function = std::mem::replace(&mut self.out, saved);
+            self.runtime_functions.push(function);
+            return Ok(call);
         }
         if let Type::Map(key, value) = ty {
             self.headers.insert("stdbool.h");
@@ -816,6 +852,37 @@ impl Emitter<'_> {
                 if matches!(ty, Type::Named(n, _) if n == "str") {
                     return self.string_value(&value, &from);
                 }
+                if matches!((ty, &from), (Type::Array(_, None), Type::Array(_, Some(_)))) {
+                    return Ok(value);
+                }
+                if let Type::Named(n, _) = ty {
+                    match n.as_str() {
+                        "byte" => {
+                            self.panic_support();
+                            self.line(format!(
+                                "if ({value} < 0 || {value} > 255) nc_panic(\"cast out of range\");"
+                            ));
+                        }
+                        "uint" => {
+                            self.panic_support();
+                            self.line(format!("if ({value} < 0) nc_panic(\"cast out of range\");"));
+                            if matches!(&from,Type::Named(n,_) if n=="float") {
+                                self.headers.insert("math.h");
+                                self.line(format!("if (!isfinite({value}) || {value} >= 18446744073709551616.0) nc_panic(\"cast out of range\");"));
+                            }
+                        }
+                        "int" if matches!(&from,Type::Named(n,_) if n=="uint") => {
+                            self.panic_support();
+                            self.line(format!("if ({value} > 9223372036854775807ULL) nc_panic(\"cast out of range\");"));
+                        }
+                        "int" if matches!(&from,Type::Named(n,_) if n=="float") => {
+                            self.panic_support();
+                            self.headers.insert("math.h");
+                            self.line(format!("if (!isfinite({value}) || {value} < -9223372036854775808.0 || {value} >= 9223372036854775808.0) nc_panic(\"cast out of range\");"));
+                        }
+                        _ => {}
+                    }
+                }
                 let ct = self.c_type(ty)?;
                 format!("(({ct})({value}))")
             }
@@ -965,6 +1032,7 @@ impl Emitter<'_> {
                             if matches!(ty, Type::Map(_, _) | Type::Tuple(_) | Type::Optional(_))
                                 || self.fields(&ty).is_some()
                                 || self.enum_decl(&ty).is_some()
+                                || matches!(&ty,Type::Named(n,_) if matches!(self.checked.types.get(n),Some(TypeInfo::Alias(_))))
                                 || matches!(&ty, Type::Named(n, _) if n == "float")
                             {
                                 let string = self.string_value(&value, &ty)?;
@@ -1114,7 +1182,23 @@ impl Emitter<'_> {
         Ok(())
     }
     fn string_value(&mut self, value: &str, ty: &Type) -> Result<String, Diagnostics> {
+        if let Type::Named(n, _) = ty {
+            if let Some(TypeInfo::Alias(base)) = self.checked.types.get(n) {
+                return self.string_value(value, &base.clone());
+            }
+        }
         if let Some(declaration) = self.enum_decl(ty) {
+            let helper = format!("nc_string_{}", declaration.name);
+            let ct = self.c_type(ty)?;
+            let call = format!("{helper}({value})");
+            if !self.enum_strings.insert(ty.clone()) {
+                return Ok(call);
+            }
+            self.runtime_prototypes
+                .push(format!("static const char *{helper}({ct} value);"));
+            let saved = std::mem::take(&mut self.out);
+            self.line(format!("static const char *{helper}({ct} value) {{"));
+            let value = "value";
             let result = self.fresh();
             self.line(format!(
                 "const char *{result} = \"\"; switch (({value}).tag) {{"
@@ -1147,7 +1231,10 @@ impl Emitter<'_> {
                 self.line("break; }");
             }
             self.line("}");
-            return Ok(result);
+            self.line(format!("return {result}; }}"));
+            let function = std::mem::replace(&mut self.out, saved);
+            self.runtime_functions.push(function);
+            return Ok(call);
         }
         if let Type::Optional(inner) = ty {
             let result = self.fresh();

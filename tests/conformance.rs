@@ -7,6 +7,46 @@ use std::{
 static ID: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
+fn nominal_types_and_checked_casts() {
+    success(
+        r#"type Name = str
+test "nominal" {
+    Name name = "hello"
+    str plain = @as(str,name)
+    assert plain == "hello"
+    Name again = @as(Name,plain)
+    int[2] fixed = [1,2]
+    int[] dynamic = @as(int[],fixed)
+    assert dynamic == fixed
+    assert @as(int,3.5) == 3
+}"#,
+        "",
+    );
+    rejects(
+        "type Name = str fn plain(str s) {} Name n = \"hello\" plain(n)",
+        "expected",
+    );
+    let out = run("@println(@as(uint,-1))");
+    assert!(!out.status.success());
+}
+
+#[test]
+fn recursive_enum_representation() {
+    success(
+        r#"
+enum Tree { Leaf(int) Branch(Tree[]) }
+test "recursive" {
+    Tree a = Tree.Branch([Tree.Leaf(1), Tree.Leaf(2)])
+    Tree b = Tree.Branch([Tree.Leaf(1), Tree.Leaf(2)])
+    assert a == b
+    @println(a)
+}
+"#,
+        "Tree.Branch([Tree.Leaf(1), Tree.Leaf(2)])\n",
+    );
+}
+
+#[test]
 fn release_evaluates_pure_functions_and_preserves_effects() {
     let source = r#"fn fib(int n) int { if n { 0,1 -> { return n } _ -> { return fib(n-1)+fib(n-2) } } } @println(fib(10))"#;
     let c = ncc::compile_source_with_options(source, Path::new("fib.nc"), true).unwrap();
