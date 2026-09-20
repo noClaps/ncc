@@ -7,6 +7,34 @@ use std::{
 static ID: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
+fn maps_mutation_iteration_and_equality() {
+    success(
+        r#"
+test "maps" {
+    mut [str]int counts = ["a": 1, "b": 2,]
+    counts["c"] = 3
+    counts["a"] = 4
+    assert counts.len == 3
+    assert "a" in counts
+    assert not ("z" in counts)
+    assert counts["a"] == 4
+    mut int total = 0
+    for key in counts { total = total + counts[key] }
+    assert total == 9
+    [str]int reordered = ["c": 3, "a": 4, "b": 2]
+    assert counts == reordered
+    [str]int combined = counts <> ["a": 5]
+    assert combined["a"] == 5
+    assert counts["a"] == 4
+    [str]int empty = []
+    assert empty.len == 0
+}
+"#,
+        "",
+    );
+}
+
+#[test]
 fn strings_interpolation_and_conversion() {
     success(
         r#"

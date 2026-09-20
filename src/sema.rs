@@ -415,6 +415,13 @@ impl Checker {
             return Ok(());
         }
         match (e, ty) {
+            (Expr::Map(entries), Type::Map(key, value)) => {
+                for (k, v) in entries {
+                    self.expected(k, key)?;
+                    self.expected(v, value)?;
+                }
+            }
+            (Expr::Array(values), Type::Map(_, _)) if values.is_empty() => {}
             (Expr::StructInit { name, fields }, Type::Named(expected, _)) if name == expected => {
                 let Some(TypeInfo::Struct(declaration)) = self.types.get(name).cloned() else {
                     return self.fail(format!("`{name}` is not a struct"));
@@ -589,6 +596,7 @@ impl Checker {
                 if *op == BinaryOp::In {
                     match &r {
                         Type::Array(element, _) => self.assignable(element, &l)?,
+                        Type::Map(key, _) => self.assignable(key, &l)?,
                         Type::Named(n, _)
                             if n == "str"
                                 && matches!(&l, Type::Named(n, _) if n == "str" || n == "char") => {
@@ -608,7 +616,7 @@ impl Checker {
                         _ => self.fail("unsupported operator for arrays"),
                     };
                 }
-                if *op == BinaryOp::Concat && l != named("str") {
+                if *op == BinaryOp::Concat && l != named("str") && !matches!(l, Type::Map(_, _)) {
                     return self.fail("concatenation requires arrays, maps, or strings");
                 }
                 self.assignable(&l, &r)?;
@@ -677,6 +685,10 @@ impl Checker {
             }
             Expr::Index { object, index } => {
                 let o = self.expr(object)?;
+                if let Type::Map(key, value) = &o {
+                    self.expected(index, key)?;
+                    return Ok((**value).clone());
+                }
                 if let Type::Tuple(types) = &o {
                     if let Expr::Int(text) = &**index {
                         let n = integer(text)? as usize;

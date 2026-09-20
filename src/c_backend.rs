@@ -249,6 +249,9 @@ impl Emitter<'_> {
             .ok_or_else(|| Diagnostics::one("internal error: missing expression type", 0..0))
     }
     fn c_type(&mut self, ty: &Type) -> Result<String, Diagnostics> {
+        if let Type::Map(key, value) = ty {
+            return self.c_type(&map_array(key, value));
+        }
         if let Some((_, name, _)) = self.record_types.iter().find(|(t, _, _)| t == ty) {
             return Ok(name.clone());
         }
@@ -320,6 +323,19 @@ impl Emitter<'_> {
         self.helpers.insert("static void nc_panic(const char *message);\ntypedef struct nc_allocation { void *data; struct nc_allocation *next; } nc_allocation;\nstatic nc_allocation *nc_allocations;\nstatic void nc_cleanup(void) { while (nc_allocations) { nc_allocation *next = nc_allocations->next; free(nc_allocations->data); free(nc_allocations); nc_allocations = next; } }\nstatic void *nc_alloc(size_t count, size_t size) { if (size && count > (size_t)-1 / size) nc_panic(\"allocation overflow\"); void *data = calloc(count ? count : 1, size); nc_allocation *node = malloc(sizeof(*node)); if (!data || !node) nc_panic(\"out of memory\"); node->data = data; node->next = nc_allocations; nc_allocations = node; return data; }".into());
     }
     fn copy(&mut self, ty: &Type, value: &str) -> Result<String, Diagnostics> {
+        if let Type::Map(key, inner) = ty {
+            return self.copy(&map_array(key, inner), value);
+        }
+        if let Some(fields) = self.fields(ty) {
+            let ct = self.c_type(ty)?;
+            let copy = self.fresh();
+            self.line(format!("{ct} {copy} = {value};"));
+            for (field, ty) in fields {
+                let v = self.copy(&ty, &format!("({value}).{field}"))?;
+                self.line(format!("{copy}.{field} = {v};"));
+            }
+            return Ok(copy);
+        }
         if let Type::Array(element, _) = ty {
             self.allocation_support();
             let ct = self.c_type(ty)?;
@@ -361,6 +377,15 @@ impl Emitter<'_> {
                 self.declare_pattern(&v.pattern, &v.ty, &value)?;
             }
             Stmt::Assign { target, value } => {
+                if let Expr::Index { object, index } = target {
+                    if let Type::Map(key, val) = self.ty(object)? {
+                        let map = self.expr(object)?;
+                        let k = self.expr(index)?;
+                        let v = self.expr_as(value, &val)?;
+                        self.map_set(&map, &k, &v, &key, &val)?;
+                        return Ok(());
+                    }
+                }
                 let target_code = match target {
                     Expr::Index { object, index } => Some(self.index(object, index)?),
                     Expr::Member { object, name } => {
@@ -446,7 +471,7 @@ impl Emitter<'_> {
                 body,
             } => {
                 let ty = self.ty(iterable)?;
-                if !matches!(ty, Type::Array(_, _)) {
+                if !matches!(ty, Type::Array(_, _) | Type::Map(_, _)) {
                     return unsupported("iteration over this type");
                 }
                 let value = self.expr(iterable)?;
@@ -454,12 +479,19 @@ impl Emitter<'_> {
                 let snapshot = self.fresh();
                 self.line(format!("{ct} {snapshot} = {value};"));
                 self.scopes.push(HashMap::new());
-                let index = self.bind(name);
+                let index = self.fresh();
                 let start = self.fresh();
                 let end = self.fresh();
                 let next = self.fresh();
                 self.loops.push((label.clone(), next.clone(), end.clone()));
                 self.line(format!("uint64_t {index} = 0;\n{start}:; {{\nif ({index} >= {snapshot}.len) goto {end};"));
+                let binding = self.bind(name);
+                if let Type::Map(key, _) = &ty {
+                    let ct = self.c_type(key)?;
+                    self.line(format!("{ct} {binding} = {snapshot}.vals[{index}].f_0;"));
+                } else {
+                    self.line(format!("uint64_t {binding} = {index};"));
+                }
                 self.block(body)?;
                 self.line(format!("}}\n{next}:; ++{index}; goto {start};\n{end}:;"));
                 self.loops.pop();
@@ -518,6 +550,23 @@ impl Emitter<'_> {
         Ok(())
     }
     fn equality(&mut self, left: &str, right: &str, ty: &Type) -> Result<String, Diagnostics> {
+        if let Type::Map(key, value) = ty {
+            self.headers.insert("stdbool.h");
+            let result = self.fresh();
+            let i = self.fresh();
+            self.line(format!("bool {result} = {left}.len == {right}.len; for (uint64_t {i} = 0; {result} && {i} < {left}.len; ++{i}) {{"));
+            let found = self.map_find(right, &format!("{left}.vals[{i}].f_0"), key)?;
+            self.line(format!(
+                "if ({found} == {right}.len) {{ {result} = false; }} else {{"
+            ));
+            let eq = self.equality(
+                &format!("{left}.vals[{i}].f_1"),
+                &format!("{right}.vals[{found}].f_1"),
+                value,
+            )?;
+            self.line(format!("{result} = {eq}; }} }}"));
+            return Ok(result);
+        }
         if let Some(fields) = self.fields(ty) {
             let mut checks = vec![];
             for (field, ty) in fields {
@@ -559,6 +608,20 @@ impl Emitter<'_> {
     }
     fn expr(&mut self, e: &Expr) -> Result<String, Diagnostics> {
         let value = match e {
+            Expr::Map(entries) => {
+                let Type::Map(key, value) = self.ty(e)? else {
+                    unreachable!()
+                };
+                let ct = self.c_type(&self.ty(e)?)?;
+                let result = self.fresh();
+                self.line(format!("{ct} {result} = {{0}};"));
+                for (k, v) in entries {
+                    let k = self.expr(k)?;
+                    let v = self.expr(v)?;
+                    self.map_set(&result, &k, &v, &key, &value)?;
+                }
+                return Ok(result);
+            }
             Expr::Try(value) => {
                 let value = self.expr(value)?;
                 self.line(format!("if ({value}.failed) {{"));
@@ -653,6 +716,10 @@ impl Emitter<'_> {
             }
             Expr::Array(values) => {
                 let ty = self.ty(e)?;
+                if matches!(ty, Type::Map(_, _)) && values.is_empty() {
+                    let ct = self.c_type(&ty)?;
+                    return self.temp(e, format!("({ct}){{0}}"));
+                }
                 let Type::Array(element, _) = &ty else {
                     return unsupported("array literal in this context");
                 };
@@ -762,6 +829,20 @@ impl Emitter<'_> {
                     | BinaryOp::Shr => return self.arithmetic(e, &l, *op, &r),
                     BinaryOp::Concat => {
                         let ty = self.ty(left)?;
+                        if let Type::Map(key, value) = &ty {
+                            let result = self.copy(&ty, &l)?;
+                            let i = self.fresh();
+                            self.line(format!("for (uint64_t {i} = 0; {i} < {r}.len; ++{i}) {{"));
+                            self.map_set(
+                                &result,
+                                &format!("{r}.vals[{i}].f_0"),
+                                &format!("{r}.vals[{i}].f_1"),
+                                key,
+                                value,
+                            )?;
+                            self.line("}");
+                            return Ok(result);
+                        }
                         if let Type::Array(element, _) = &ty {
                             let ct = self.c_type(&ty)?;
                             let elem = self.c_type(element)?;
@@ -787,6 +868,10 @@ impl Emitter<'_> {
                         return Ok(result);
                     }
                     BinaryOp::In => {
+                        if let Type::Map(key, _) = self.ty(right)? {
+                            let found = self.map_find(&r, &l, &key)?;
+                            return self.temp(e, format!("{found} < {r}.len"));
+                        }
                         if let Type::Array(element, _) = self.ty(right)? {
                             self.headers.insert("stdbool.h");
                             let result = self.fresh();
@@ -814,6 +899,14 @@ impl Emitter<'_> {
                         for arg in args {
                             let value = self.expr(arg)?;
                             let ty = self.ty(arg)?;
+                            if matches!(ty, Type::Map(_, _) | Type::Tuple(_) | Type::Optional(_))
+                                || self.fields(&ty).is_some()
+                                || matches!(&ty, Type::Named(n, _) if n == "float")
+                            {
+                                let string = self.string_value(&value, &ty)?;
+                                self.line(format!("fprintf({stream}, \"%s\", {string});"));
+                                continue;
+                            }
                             if matches!(ty, Type::Array(_, _)) {
                                 self.print_array(stream, &value, &ty)?;
                                 continue;
@@ -858,6 +951,16 @@ impl Emitter<'_> {
         }
     }
     fn index(&mut self, object: &Expr, index: &Expr) -> Result<String, Diagnostics> {
+        if let Type::Map(key, _) = self.ty(object)? {
+            let map = self.expr(object)?;
+            let key_value = self.expr(index)?;
+            let found = self.map_find(&map, &key_value, &key)?;
+            self.panic_support();
+            self.line(format!(
+                "if ({found} == {map}.len) nc_panic(\"map key not found\");"
+            ));
+            return Ok(format!("{map}.vals[{found}].f_1"));
+        }
         if matches!(self.ty(object)?, Type::Tuple(_)) {
             let object = self.expr(object)?;
             let Expr::Int(index) = index else {
@@ -916,7 +1019,94 @@ impl Emitter<'_> {
             _ => None,
         }
     }
+    fn map_find(&mut self, map: &str, key: &str, ty: &Type) -> Result<String, Diagnostics> {
+        self.headers.insert("stdint.h");
+        let index = self.fresh();
+        self.line(format!(
+            "uint64_t {index} = 0; for (; {index} < ({map}).len; ++{index}) {{"
+        ));
+        let eq = self.equality(&format!("({map}).vals[{index}].f_0"), key, ty)?;
+        self.line(format!("if ({eq}) break; }}"));
+        Ok(index)
+    }
+    fn map_set(
+        &mut self,
+        map: &str,
+        key: &str,
+        value: &str,
+        key_ty: &Type,
+        value_ty: &Type,
+    ) -> Result<(), Diagnostics> {
+        let found = self.map_find(map, key, key_ty)?;
+        self.allocation_support();
+        let entry_ty = self.c_type(&Type::Tuple(vec![key_ty.clone(), value_ty.clone()]))?;
+        let new = self.fresh();
+        self.line(format!("if ({found} == ({map}).len) {{\n{entry_ty} *{new} = nc_alloc(({map}).len + 1, sizeof({entry_ty}));\nfor (uint64_t nc_i = 0; nc_i < ({map}).len; ++nc_i) {new}[nc_i] = ({map}).vals[nc_i];\n({map}).vals = {new}; ++({map}).len; ({map}).cap = ({map}).len; }}"));
+        let key = self.copy(key_ty, key)?;
+        let value = self.copy(value_ty, value)?;
+        self.line(format!(
+            "({map}).vals[{found}].f_0 = {key}; ({map}).vals[{found}].f_1 = {value};"
+        ));
+        Ok(())
+    }
     fn string_value(&mut self, value: &str, ty: &Type) -> Result<String, Diagnostics> {
+        if let Type::Optional(inner) = ty {
+            let result = self.fresh();
+            self.line(format!(
+                "const char *{result} = \"none\"; if ({value}.present) {{"
+            ));
+            let s = self.string_value(&format!("{value}.value"), inner)?;
+            self.line(format!("{result} = {s}; }}"));
+            return Ok(result);
+        }
+        if matches!(ty, Type::Array(_, _) | Type::Map(_, _)) {
+            let result = self.fresh();
+            let i = self.fresh();
+            self.line(format!("const char *{result} = \"[\"; for (uint64_t {i} = 0; {i} < ({value}).len; ++{i}) {{\nif ({i}) {{"));
+            self.append_string(&result, "\", \"")?;
+            self.line("}");
+            match ty {
+                Type::Array(element, _) => {
+                    let s = self.string_value(&format!("({value}).vals[{i}]"), element)?;
+                    self.append_string(&result, &s)?;
+                }
+                Type::Map(key, val) => {
+                    let k = self.string_value(&format!("({value}).vals[{i}].f_0"), key)?;
+                    self.append_string(&result, &k)?;
+                    self.append_string(&result, "\": \"")?;
+                    let v = self.string_value(&format!("({value}).vals[{i}].f_1"), val)?;
+                    self.append_string(&result, &v)?;
+                }
+                _ => unreachable!(),
+            }
+            self.line("}");
+            self.append_string(&result, "\"]\"")?;
+            return Ok(result);
+        }
+        if let Some(fields) = self.fields(ty) {
+            let (open, close) = if let Type::Named(n, _) = ty {
+                (format!("{n}{{"), "}")
+            } else {
+                ("(".into(), ")")
+            };
+            let result = self.fresh();
+            self.line(format!("const char *{result} = {};", c_string(&open)));
+            for (i, (field, ty_field)) in fields.iter().enumerate() {
+                if i > 0 {
+                    self.append_string(&result, "\", \"")?;
+                }
+                if matches!(ty, Type::Named(_, _)) {
+                    self.append_string(
+                        &result,
+                        &c_string(&format!(".{} = ", field.trim_start_matches("f_"))),
+                    )?;
+                }
+                let s = self.string_value(&format!("({value}).{field}"), ty_field)?;
+                self.append_string(&result, &s)?;
+            }
+            self.append_string(&result, &c_string(close))?;
+            return Ok(result);
+        }
         let Type::Named(name, _) = ty else {
             return unsupported("composite-to-string conversion");
         };
@@ -945,6 +1135,15 @@ impl Emitter<'_> {
             ));
         }
         Ok(result)
+    }
+    fn append_string(&mut self, result: &str, suffix: &str) -> Result<(), Diagnostics> {
+        self.allocation_support();
+        self.headers.insert("string.h");
+        let a = self.fresh();
+        let b = self.fresh();
+        let text = self.fresh();
+        self.line(format!("size_t {a} = strlen({result}), {b} = strlen({suffix}); if ({a} > (size_t)-1 - {b} - 1) nc_panic(\"string length overflow\");\nchar *{text} = nc_alloc({a} + {b} + 1, 1); memcpy({text},{result},{a}); memcpy({text}+{a},{suffix},{b}+1); {result} = {text};"));
+        Ok(())
     }
     fn expr_as(&mut self, e: &Expr, expected: &Type) -> Result<String, Diagnostics> {
         let value = self.expr(e)?;
@@ -1125,6 +1324,12 @@ fn operator(op: BinaryOp) -> &'static str {
         BinaryOp::Shr => ">>",
         _ => unreachable!(),
     }
+}
+fn map_array(key: &Type, value: &Type) -> Type {
+    Type::Array(
+        Box::new(Type::Tuple(vec![key.clone(), value.clone()])),
+        None,
+    )
 }
 fn c_string(value: &str) -> String {
     let mut s = String::from("\"");
