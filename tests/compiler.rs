@@ -176,3 +176,17 @@ fn explains_missing_conditional_arrow() {
             .contains("expected `->` after conditional pattern(s)")
     );
 }
+
+#[test]
+fn emits_only_headers_required_by_the_program() {
+    let no_headers = ncc::compile_source("fn noop() {}", std::path::Path::new("empty.nc")).unwrap();
+    assert!(!no_headers.contains("#include"));
+
+    let print_only =
+        ncc::compile_source("@println(\"hello\")", std::path::Path::new("print.nc")).unwrap();
+    assert!(print_only.contains("#include <stdio.h>"));
+    assert!(!print_only.contains("#include <stdint.h>"));
+    assert!(!print_only.contains("#include <stdbool.h>"));
+    assert!(!print_only.contains("#include <stdlib.h>"));
+    assert!(!print_only.contains("#include <math.h>"));
+}
