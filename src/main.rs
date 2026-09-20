@@ -1,4 +1,4 @@
-use ncc::{check_source, compile_source};
+use ncc::{check_source, compile_source_with_options};
 use std::{
     env, fs,
     path::{Path, PathBuf},
@@ -77,12 +77,14 @@ fn main() -> ExitCode {
 fn build(source: &str, path: &Path, args: impl Iterator<Item = String>, run: bool) -> ExitCode {
     let mut output = None;
     let mut requested_format = None;
+    let mut release = false;
     let mut it = args.peekable();
     while let Some(a) = it.next() {
         match a.as_str() {
             "-o" | "--output" => output = it.next().map(PathBuf::from),
             "-f" | "--format" => requested_format = it.next(),
-            "-r" | "--release" | "-d" | "--debug" => {}
+            "-r" | "--release" => release = true,
+            "-d" | "--debug" => release = false,
             _ => {
                 eprintln!("ncc: unknown option {a}");
                 return ExitCode::FAILURE;
@@ -99,7 +101,7 @@ fn build(source: &str, path: &Path, args: impl Iterator<Item = String>, run: boo
             return ExitCode::FAILURE;
         }
     };
-    let c = match compile_source(source, path) {
+    let c = match compile_source_with_options(source, path, release) {
         Ok(c) => c,
         Err(e) => {
             eprint!("{}", e.render(source, path));
@@ -146,7 +148,7 @@ fn build(source: &str, path: &Path, args: impl Iterator<Item = String>, run: boo
         }
     };
     let c_path = temporary.path().join("program.c");
-    if let Err(e) = fs::write(&c_path, c) {
+    if let Err(e) = fs::write(&c_path, &c) {
         eprintln!("ncc: {e}");
         return ExitCode::FAILURE;
     }
@@ -157,8 +159,11 @@ fn build(source: &str, path: &Path, args: impl Iterator<Item = String>, run: boo
     };
     let mut compiler = Command::new("cc");
     compiler.arg(&c_path);
+    compiler.arg(if release { "-O3" } else { "-O0" });
     if format == OutputFormat::Object {
         compiler.arg("-c");
+    } else if c.contains("#include <math.h>") {
+        compiler.arg("-lm");
     }
     let status = match compiler.arg("-o").arg(&out).status() {
         Ok(s) => s,

@@ -7,6 +7,23 @@ use std::{
 static ID: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
+fn release_evaluates_pure_functions_and_preserves_effects() {
+    let source = r#"fn fib(int n) int { if n { 0,1 -> { return n } _ -> { return fib(n-1)+fib(n-2) } } } @println(fib(10))"#;
+    let c = ncc::compile_source_with_options(source, Path::new("fib.nc"), true).unwrap();
+    let main = c.split("int main(void)").last().unwrap();
+    assert!(main.contains("55LL"));
+    assert!(!main.contains("nc_fn_fib"));
+    let effect = "fn effect() int { @println(\"keep\") return 2 } @println(effect())";
+    let c = ncc::compile_source_with_options(effect, Path::new("effect.nc"), true).unwrap();
+    assert!(
+        c.split("int main(void)")
+            .last()
+            .unwrap()
+            .contains("nc_fn_effect")
+    );
+}
+
+#[test]
 fn enum_payloads_and_binding_patterns() {
     success(
         r#"
