@@ -90,3 +90,38 @@ test "control" {
         "",
     );
 }
+
+#[test]
+fn arrays_indexing_iteration_and_value_copies() {
+    success(
+        r#"
+fn first(int[] values) int { return values[0] }
+test "arrays" {
+    int[2] a = [1, 2]
+    int[3] b = [3, 4, 5]
+    int[5] all = a <> b
+    assert all == [1, 2, 3, 4, 5]
+    assert all[$] == 5
+    assert all[$-1] == 4
+    assert all.len == 5
+    assert 3 in all
+    mut int[] copy = all
+    copy[0] = 99
+    assert all[0] == 1
+    mut int sum = 0
+    for i in all { sum = sum + all[i] }
+    assert sum == 15
+    assert first(all) == 1
+    int[] empty = []
+    assert empty.len == 0
+    @println(copy)
+}
+"#,
+        "[99, 2, 3, 4, 5]\n",
+    );
+    rejects("test \"bad\" { int[] a = [1] a[0] = 2 }", "immutable");
+    rejects("int[2] a = [1]", "length");
+    let out = run("int[] a = [1] @println(a[2])");
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("out of bounds"));
+}

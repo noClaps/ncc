@@ -31,6 +31,7 @@ struct Checker {
     generics: HashSet<String>,
     expression_types: HashMap<usize, Type>,
     loops: Vec<Option<String>>,
+    indexing: usize,
 }
 
 pub fn check(module: Module, _path: &Path) -> Result<CheckedModule, Diagnostics> {
@@ -63,6 +64,7 @@ impl Checker {
             generics: HashSet::new(),
             expression_types: HashMap::new(),
             loops: vec![],
+            indexing: 0,
         }
     }
     fn fail<T>(&self, s: impl Into<String>) -> Result<T, Diagnostics> {
@@ -397,6 +399,7 @@ impl Checker {
             Expr::Char(_) => Ok(named("char")),
             Expr::Bool(_) => Ok(named("bool")),
             Expr::None => self.fail("cannot infer type of none"),
+            Expr::Name(n) if n == "$" && self.indexing > 0 => Ok(named("uint")),
             Expr::Name(n) => self
                 .lookup(n)
                 .map(|b| b.ty.clone())
@@ -423,7 +426,7 @@ impl Checker {
                     let actual = self.expr(x)?;
                     self.assignable(&t, &actual)?
                 }
-                Ok(Type::Array(Box::new(t), None))
+                Ok(Type::Array(Box::new(t), Some(xs.len())))
             }
             Expr::Map(xs) => {
                 if xs.is_empty() {
@@ -460,9 +463,36 @@ impl Checker {
             }
             Expr::Binary { left, op, right } => {
                 let l = self.expr(left)?;
-                let r = self.expr(right)?;
+                let r = if matches!(&**right, Expr::Int(_)) && numeric(&l) && l != named("float") {
+                    self.expected(right, &l)?;
+                    l.clone()
+                } else {
+                    self.expr(right)?
+                };
                 if *op == BinaryOp::In {
+                    match &r {
+                        Type::Array(element, _) => self.assignable(element, &l)?,
+                        Type::Named(n, _)
+                            if n == "str"
+                                && matches!(&l, Type::Named(n, _) if n == "str" || n == "char") => {
+                        }
+                        _ => return self.fail("in requires a compatible container and element"),
+                    }
                     return Ok(named("bool"));
+                }
+                if let (Type::Array(a, n), Type::Array(b, m)) = (&l, &r) {
+                    self.assignable(a, b)?;
+                    return match op {
+                        BinaryOp::Concat => Ok(Type::Array(
+                            a.clone(),
+                            n.zip(*m).and_then(|(n, m)| n.checked_add(m)),
+                        )),
+                        BinaryOp::Eq | BinaryOp::Ne => Ok(named("bool")),
+                        _ => self.fail("unsupported operator for arrays"),
+                    };
+                }
+                if *op == BinaryOp::Concat && l != named("str") {
+                    return self.fail("concatenation requires arrays, maps, or strings");
                 }
                 self.assignable(&l, &r)?;
                 match op {
@@ -530,8 +560,12 @@ impl Checker {
             }
             Expr::Index { object, index } => {
                 let o = self.expr(object)?;
+                self.indexing += 1;
                 let index_type = self.expr(index)?;
-                self.assignable(&named("uint"), &index_type)?;
+                self.indexing -= 1;
+                if index_type != named("uint") && index_type != named("int") {
+                    return self.fail("array index must be int or uint");
+                }
                 match o {
                     Type::Array(t, _) => Ok(*t),
                     Type::Tuple(_) => self.fail("tuple index must be a compile-time value"),
@@ -598,6 +632,9 @@ impl Checker {
         }
     }
     fn assignable(&self, expected: &Type, got: &Type) -> Result<(), Diagnostics> {
+        if let (Type::Array(a, None), Type::Array(b, _)) = (expected, got) {
+            return self.assignable(a, b);
+        }
         if expected == got || matches!(expected,Type::Optional(x)if **x==*got) {
             Ok(())
         } else {

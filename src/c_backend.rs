@@ -16,6 +16,8 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
         scopes: vec![HashMap::new()],
         next: 0,
         loops: vec![],
+        array_types: vec![],
+        index_context: vec![],
     };
     let mut declarations = String::new();
     for item in &checked.module.items {
@@ -104,12 +106,28 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
     for header in &e.headers {
         output.push_str(&format!("#include <{header}>\n"));
     }
+    for (_, name, element) in &e.array_types {
+        output.push_str(&format!(
+            "typedef struct {{ uint64_t len, cap; {element} *vals; }} {name};\n"
+        ));
+    }
     for helper in &e.helpers {
         output.push_str(helper);
         output.push('\n');
     }
     output.push_str(&declarations);
-    output.push_str(&e.out);
+    if e.helpers
+        .iter()
+        .any(|helper| helper.contains("nc_allocations"))
+    {
+        output.push_str(&e.out.replacen(
+            "int main(void) {",
+            "int main(void) {\natexit(nc_cleanup);",
+            1,
+        ));
+    } else {
+        output.push_str(&e.out);
+    }
     Ok(output)
 }
 fn unsupported<T>(feature: &str) -> Result<T, Diagnostics> {
@@ -134,6 +152,8 @@ struct Emitter<'a> {
     scopes: Vec<HashMap<String, String>>,
     next: usize,
     loops: Vec<(Option<String>, String, String)>,
+    array_types: Vec<(Type, String, String)>,
+    index_context: Vec<String>,
 }
 impl Emitter<'_> {
     fn line(&mut self, text: impl AsRef<str>) {
@@ -167,7 +187,18 @@ impl Emitter<'_> {
             .cloned()
             .ok_or_else(|| Diagnostics::one("internal error: missing expression type", 0..0))
     }
-    fn c_type(&mut self, ty: &Type) -> Result<&'static str, Diagnostics> {
+    fn c_type(&mut self, ty: &Type) -> Result<String, Diagnostics> {
+        if let Type::Array(element, _) = ty {
+            let key = Type::Array(element.clone(), None);
+            if let Some((_, name, _)) = self.array_types.iter().find(|(t, _, _)| *t == key) {
+                return Ok(name.clone());
+            }
+            let element_type = self.c_type(element)?;
+            self.headers.insert("stdint.h");
+            let name = format!("nc_arr_{}", self.array_types.len());
+            self.array_types.push((key, name.clone(), element_type));
+            return Ok(name);
+        }
         Ok(match ty {
             Type::Named(n, _) => match n.as_str() {
                 "void" => "void",
@@ -192,7 +223,8 @@ impl Emitter<'_> {
                 _ => return unsupported("this value type"),
             },
             _ => return unsupported("composite value types"),
-        })
+        }
+        .into())
     }
     fn temp(&mut self, expr: &Expr, value: String) -> Result<String, Diagnostics> {
         let ty = self.ty(expr)?;
@@ -208,6 +240,29 @@ impl Emitter<'_> {
     fn panic_support(&mut self) {
         self.headers.extend(["stdio.h", "stdlib.h"]);
         self.helpers.insert("static void nc_panic(const char *message) { fprintf(stderr, \"panic: %s\\n\", message); exit(1); }".into());
+    }
+    fn allocation_support(&mut self) {
+        self.panic_support();
+        self.headers.insert("stddef.h");
+        self.helpers.insert("static void nc_panic(const char *message);\ntypedef struct nc_allocation { void *data; struct nc_allocation *next; } nc_allocation;\nstatic nc_allocation *nc_allocations;\nstatic void nc_cleanup(void) { while (nc_allocations) { nc_allocation *next = nc_allocations->next; free(nc_allocations->data); free(nc_allocations); nc_allocations = next; } }\nstatic void *nc_alloc(size_t count, size_t size) { if (size && count > (size_t)-1 / size) nc_panic(\"allocation overflow\"); void *data = calloc(count ? count : 1, size); nc_allocation *node = malloc(sizeof(*node)); if (!data || !node) nc_panic(\"out of memory\"); node->data = data; node->next = nc_allocations; nc_allocations = node; return data; }".into());
+    }
+    fn copy(&mut self, ty: &Type, value: &str) -> Result<String, Diagnostics> {
+        if let Type::Array(element, _) = ty {
+            self.allocation_support();
+            let ct = self.c_type(ty)?;
+            let elem = self.c_type(element)?;
+            let copy = self.fresh();
+            self.line(format!("{ct} {copy} = {{ ({value}).len, ({value}).len, nc_alloc(({value}).len, sizeof({elem})) }};"));
+            let index = self.fresh();
+            self.line(format!(
+                "for (uint64_t {index} = 0; {index} < ({value}).len; ++{index}) {{"
+            ));
+            let child = self.copy(element, &format!("({value}).vals[{index}]"))?;
+            self.line(format!("{copy}.vals[{index}] = {child};\n}}"));
+            Ok(copy)
+        } else {
+            Ok(value.into())
+        }
     }
     fn block(&mut self, body: &Block) -> Result<(), Diagnostics> {
         self.scopes.push(HashMap::new());
@@ -229,15 +284,23 @@ impl Emitter<'_> {
                     return unsupported("mutexes");
                 }
                 let value = self.expr(&v.value)?;
+                let value = self.copy(&v.ty, &value)?;
                 let ty = self.c_type(&v.ty)?;
                 let name = self.bind(pattern_name(&v.pattern)?);
                 self.line(format!("{ty} {name} = {value};"));
             }
             Stmt::Assign { target, value } => {
+                let target_code = match target {
+                    Expr::Index { object, index } => Some(self.index(object, index)?),
+                    _ => None,
+                };
+                let value_type = self.ty(value)?;
                 let value = self.expr(value)?;
+                let value = self.copy(&value_type, &value)?;
                 match target {
                     Expr::Name(n) if n == "_" => {}
                     Expr::Name(n) => self.line(format!("{} = {value};", self.name(n))),
+                    Expr::Index { .. } => self.line(format!("{} = {value};", target_code.unwrap())),
                     _ => return unsupported("composite assignment"),
                 }
             }
@@ -289,7 +352,32 @@ impl Emitter<'_> {
                 let (_, start, _) = self.loop_target(label)?;
                 self.line(format!("goto {start};"));
             }
-            Stmt::For { .. } => return unsupported("for loops"),
+            Stmt::For {
+                label,
+                name,
+                iterable,
+                body,
+            } => {
+                let ty = self.ty(iterable)?;
+                if !matches!(ty, Type::Array(_, _)) {
+                    return unsupported("iteration over this type");
+                }
+                let value = self.expr(iterable)?;
+                let ct = self.c_type(&ty)?;
+                let snapshot = self.fresh();
+                self.line(format!("{ct} {snapshot} = {value};"));
+                self.scopes.push(HashMap::new());
+                let index = self.bind(name);
+                let start = self.fresh();
+                let end = self.fresh();
+                let next = self.fresh();
+                self.loops.push((label.clone(), next.clone(), end.clone()));
+                self.line(format!("uint64_t {index} = 0;\n{start}:; {{\nif ({index} >= {snapshot}.len) goto {end};"));
+                self.block(body)?;
+                self.line(format!("}}\n{next}:; ++{index}; goto {start};\n{end}:;"));
+                self.loops.pop();
+                self.scopes.pop();
+            }
             Stmt::Lock { .. } => return unsupported("mutex locks"),
         }
         Ok(())
@@ -338,6 +426,19 @@ impl Emitter<'_> {
         Ok(())
     }
     fn equality(&mut self, left: &str, right: &str, ty: &Type) -> Result<String, Diagnostics> {
+        if let Type::Array(element, _) = ty {
+            self.headers.insert("stdbool.h");
+            let result = self.fresh();
+            let index = self.fresh();
+            self.line(format!("bool {result} = ({left}).len == ({right}).len;\nfor (uint64_t {index} = 0; {result} && {index} < ({left}).len; ++{index}) {{"));
+            let eq = self.equality(
+                &format!("({left}).vals[{index}]"),
+                &format!("({right}).vals[{index}]"),
+                element,
+            )?;
+            self.line(format!("{result} = {eq};\n}}"));
+            return Ok(result);
+        }
         if matches!(ty, Type::Named(n, _) if n == "str" || n == "char") {
             self.headers.insert("string.h");
             Ok(format!("strcmp({left}, {right}) == 0"))
@@ -347,6 +448,33 @@ impl Emitter<'_> {
     }
     fn expr(&mut self, e: &Expr) -> Result<String, Diagnostics> {
         let value = match e {
+            Expr::Array(values) => {
+                let ty = self.ty(e)?;
+                let Type::Array(element, _) = &ty else {
+                    return unsupported("array literal in this context");
+                };
+                let ct = self.c_type(&ty)?;
+                let elem = self.c_type(element)?;
+                self.allocation_support();
+                let name = self.fresh();
+                self.line(format!(
+                    "{ct} {name} = {{ {}, {}, nc_alloc({}, sizeof({elem})) }};",
+                    values.len(),
+                    values.len(),
+                    values.len()
+                ));
+                for (index, value) in values.iter().enumerate() {
+                    let v = self.expr(value)?;
+                    let v = self.copy(element, &v)?;
+                    self.line(format!("{name}.vals[{index}] = {v};"));
+                }
+                return Ok(name);
+            }
+            Expr::Index { object, index } => self.index(object, index)?,
+            Expr::Member { object, name } => {
+                let object = self.expr(object)?;
+                format!("({object}).{name}")
+            }
             Expr::Int(n) => {
                 let n = integer(n)?;
                 if matches!(self.ty(e)?, Type::Named(n, _) if n == "uint") {
@@ -361,6 +489,12 @@ impl Emitter<'_> {
                 self.headers.insert("stdbool.h");
                 b.to_string()
             }
+            Expr::Name(n) if n == "$" => format!(
+                "({}).len - 1",
+                self.index_context
+                    .last()
+                    .ok_or_else(|| Diagnostics::one("$ outside indexing", 0..0))?
+            ),
             Expr::Name(n) => self.name(n),
             Expr::Cast { ty, value } => {
                 let value = self.expr(value)?;
@@ -399,7 +533,38 @@ impl Emitter<'_> {
                         format!("{}({eq})", if *op == BinaryOp::Ne { "!" } else { "" })
                     }
                     BinaryOp::Pow => return unsupported("exponentiation"),
-                    BinaryOp::Concat | BinaryOp::In => return unsupported("container operators"),
+                    BinaryOp::Concat => {
+                        let ty = self.ty(left)?;
+                        if let Type::Array(element, _) = &ty {
+                            let ct = self.c_type(&ty)?;
+                            let elem = self.c_type(element)?;
+                            self.allocation_support();
+                            let result = self.fresh();
+                            self.line(format!("if ({l}.len > UINT64_MAX - {r}.len) nc_panic(\"array length overflow\");\n{ct} {result} = {{ {l}.len + {r}.len, {l}.len + {r}.len, nc_alloc({l}.len + {r}.len, sizeof({elem})) }};"));
+                            for (src, offset) in [(&l, "0".into()), (&r, format!("{l}.len"))] {
+                                let i = self.fresh();
+                                self.line(format!(
+                                    "for (uint64_t {i} = 0; {i} < {src}.len; ++{i}) {{"
+                                ));
+                                let v = self.copy(element, &format!("{src}.vals[{i}]"))?;
+                                self.line(format!("{result}.vals[{offset} + {i}] = {v};\n}}"));
+                            }
+                            return Ok(result);
+                        }
+                        return unsupported("string concatenation");
+                    }
+                    BinaryOp::In => {
+                        if let Type::Array(element, _) = self.ty(right)? {
+                            self.headers.insert("stdbool.h");
+                            let result = self.fresh();
+                            let i = self.fresh();
+                            self.line(format!("bool {result} = false;\nfor (uint64_t {i} = 0; {i} < {r}.len; ++{i}) {{"));
+                            let eq = self.equality(&l, &format!("{r}.vals[{i}]"), &element)?;
+                            self.line(format!("if ({eq}) {{ {result} = true; break; }}\n}}"));
+                            return Ok(result);
+                        }
+                        return unsupported("string inclusion");
+                    }
                     _ => format!("({l} {} {r})", operator(*op)),
                 }
             }
@@ -415,6 +580,10 @@ impl Emitter<'_> {
                         for arg in args {
                             let value = self.expr(arg)?;
                             let ty = self.ty(arg)?;
+                            if matches!(ty, Type::Array(_, _)) {
+                                self.print_array(stream, &value, &ty)?;
+                                continue;
+                            }
                             let (fmt, value) = match ty {
                                 Type::Named(n, _) => match n.as_str() {
                                     "str" | "char" => ("%s", value),
@@ -449,6 +618,44 @@ impl Emitter<'_> {
         } else {
             self.temp(e, value)
         }
+    }
+    fn index(&mut self, object: &Expr, index: &Expr) -> Result<String, Diagnostics> {
+        let object = self.expr(object)?;
+        self.index_context.push(object.clone());
+        let index = self.expr(index)?;
+        self.index_context.pop();
+        self.panic_support();
+        self.line(format!(
+            "if ((uint64_t)({index}) >= ({object}).len) nc_panic(\"array index out of bounds\");"
+        ));
+        Ok(format!("({object}).vals[{index}]"))
+    }
+    fn print_array(&mut self, stream: &str, value: &str, ty: &Type) -> Result<(), Diagnostics> {
+        let Type::Array(element, _) = ty else {
+            unreachable!()
+        };
+        self.headers.insert("stdio.h");
+        let i = self.fresh();
+        self.line(format!("fputc('[', {stream});\nfor (uint64_t {i} = 0; {i} < ({value}).len; ++{i}) {{\nif ({i}) fputs(\", \", {stream});"));
+        let item = format!("({value}).vals[{i}]");
+        if matches!(&**element, Type::Array(_, _)) {
+            self.print_array(stream, &item, element)?;
+        } else {
+            let (fmt, item) = match &**element {
+                Type::Named(n, _) if n == "str" || n == "char" => ("%s", item),
+                Type::Named(n, _) if n == "float" => ("%.17g", item),
+                Type::Named(n, _) if n == "bool" => {
+                    ("%s", format!("{item} ? \"true\" : \"false\""))
+                }
+                Type::Named(n, _) if n == "uint" || n == "byte" => {
+                    ("%llu", format!("(unsigned long long){item}"))
+                }
+                _ => ("%lld", format!("(long long){item}")),
+            };
+            self.line(format!("fprintf({stream}, \"{fmt}\", {item});"));
+        }
+        self.line(format!("}} fputc(']', {stream});"));
+        Ok(())
     }
 }
 fn operator(op: BinaryOp) -> &'static str {
