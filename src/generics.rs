@@ -104,35 +104,9 @@ impl Pass {
     fn hint(&self, e: &mut Expr, ty: &Type) {
         match (e, ty) {
             (Expr::Call { callee, args, .. }, Type::Named(instance, _)) => {
-                if let Expr::Member { object, name } = &mut **callee {
-                    if let Expr::Name(owner) = &mut **object {
-                        if self
-                            .type_instances
-                            .iter()
-                            .any(|((base, _), n)| base == owner && n == instance)
-                        {
-                            *owner = instance.clone();
-                        }
-                        if owner == instance {
-                            if let Some(Item::Enum(decl)) = self
-                                .generated_types
-                                .iter()
-                                .find(|i| matches!(i, Item::Enum(d) if d.name == *instance))
-                            {
-                                if let Some(variant) =
-                                    decl.variants.iter().find(|v| v.name == *name)
-                                {
-                                    for (arg, t) in args.iter_mut().zip(&variant.values) {
-                                        self.hint(arg, t);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            (Expr::Member { object, .. }, Type::Named(instance, _)) => {
-                if let Expr::Name(owner) = &mut **object {
+                if let Expr::Member { object, name } = &mut **callee
+                    && let Expr::Name(owner) = &mut **object
+                {
                     if self
                         .type_instances
                         .iter()
@@ -140,6 +114,27 @@ impl Pass {
                     {
                         *owner = instance.clone();
                     }
+                    if owner == instance
+                        && let Some(Item::Enum(decl)) = self
+                            .generated_types
+                            .iter()
+                            .find(|i| matches!(i, Item::Enum(d) if d.name == *instance))
+                        && let Some(variant) = decl.variants.iter().find(|v| v.name == *name)
+                    {
+                        for (arg, t) in args.iter_mut().zip(&variant.values) {
+                            self.hint(arg, t);
+                        }
+                    }
+                }
+            }
+            (Expr::Member { object, .. }, Type::Named(instance, _)) => {
+                if let Expr::Name(owner) = &mut **object
+                    && self
+                        .type_instances
+                        .iter()
+                        .any(|((base, _), n)| base == owner && n == instance)
+                {
+                    *owner = instance.clone();
                 }
             }
             (Expr::Array(xs), Type::Array(t, _)) => {
@@ -352,24 +347,18 @@ impl Pass {
             }
             Stmt::Block(body) | Stmt::Lock { body, .. } => self.block(body, b)?,
             Stmt::Expr(e) | Stmt::Assert(e) | Stmt::Throw(e) => self.expr(e, b)?,
-            Stmt::Return(e) => {
-                if let Some(e) = e {
-                    if let Some(t) = &self.return_type {
-                        self.hint(e, t);
-                    }
-                    self.expr(e, b)?;
+            Stmt::Return(Some(e)) => {
+                if let Some(t) = &self.return_type {
+                    self.hint(e, t);
                 }
+                self.expr(e, b)?;
             }
-            Stmt::Break(e, _) => {
-                if let Some(e) = e {
-                    self.expr(e, b)?;
-                }
-            }
+            Stmt::Break(Some(e), _) => self.expr(e, b)?,
             Stmt::Assign { target, value } => {
-                if let Expr::Name(name) = target {
-                    if let Some(t) = self.values.get(name) {
-                        self.hint(value, t);
-                    }
+                if let Expr::Name(name) = target
+                    && let Some(t) = self.values.get(name)
+                {
+                    self.hint(value, t);
                 }
                 self.expr(target, b)?;
                 self.expr(value, b)?;
@@ -418,13 +407,13 @@ impl Pass {
                     let name = self.instance(name, generics)?;
                     **callee = Expr::Name(name);
                     generics.clear();
-                } else if let Expr::Name(name) = &**callee {
-                    if self.templates.contains_key(name) {
-                        return Err(Diagnostics::one(
-                            format!("generic function `{name}` requires explicit type arguments"),
-                            0..0,
-                        ));
-                    }
+                } else if let Expr::Name(name) = &**callee
+                    && self.templates.contains_key(name)
+                {
+                    return Err(Diagnostics::one(
+                        format!("generic function `{name}` requires explicit type arguments"),
+                        0..0,
+                    ));
                 }
             }
             Expr::Cast { ty, value } => {
@@ -485,18 +474,15 @@ impl Pass {
                 }
                 for (patterns, body) in arms {
                     for p in patterns {
-                        if let Some(Type::Named(instance, _)) = &subject_type {
-                            if let Pattern::Variant { name, .. } = p {
-                                if let Some((owner, variant)) = name.rsplit_once('.') {
-                                    if self
-                                        .type_instances
-                                        .iter()
-                                        .any(|((base, _), n)| base == owner && n == instance)
-                                    {
-                                        *name = format!("{instance}.{variant}");
-                                    }
-                                }
-                            }
+                        if let Some(Type::Named(instance, _)) = &subject_type
+                            && let Pattern::Variant { name, .. } = p
+                            && let Some((owner, variant)) = name.rsplit_once('.')
+                            && self
+                                .type_instances
+                                .iter()
+                                .any(|((base, _), n)| base == owner && n == instance)
+                        {
+                            *name = format!("{instance}.{variant}");
                         }
                         if let Pattern::Literal(e) = p {
                             if let Some(t) = &subject_type {

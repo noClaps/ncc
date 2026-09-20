@@ -194,10 +194,10 @@ fn qualify_item(
         Item::Global(v) => {
             qualify_type(&mut v.ty, names);
             expr(&mut v.value, names, aliases)?;
-            if let Pattern::Name(n) = &mut v.pattern {
-                if let Some(name) = names.get(n) {
-                    *n = name.clone();
-                }
+            if let Pattern::Name(n) = &mut v.pattern
+                && let Some(name) = names.get(n)
+            {
+                *n = name.clone();
             }
         }
         Item::Statement(s) => {
@@ -324,13 +324,13 @@ fn expr(e: &mut Expr, names: &Names, aliases: &HashMap<String, Names>) -> Result
             }
         }
         Expr::Member { object, name } => {
-            if let Expr::Name(alias) = &**object {
-                if let Some(exports) = aliases.get(alias) {
-                    *e = Expr::Name(exports.get(name).cloned().ok_or_else(|| {
-                        Diagnostics::one(format!("module `{alias}` does not export `{name}`"), 0..0)
-                    })?);
-                    return Ok(());
-                }
+            if let Expr::Name(alias) = &**object
+                && let Some(exports) = aliases.get(alias)
+            {
+                *e = Expr::Name(exports.get(name).cloned().ok_or_else(|| {
+                    Diagnostics::one(format!("module `{alias}` does not export `{name}`"), 0..0)
+                })?);
+                return Ok(());
             }
             expr(object, names, aliases)?;
         }

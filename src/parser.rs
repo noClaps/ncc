@@ -597,27 +597,27 @@ impl Parser {
                 let position = self.pos;
                 let tokens = self.tokens.clone();
                 if let Ok(generics) = self.type_args() {
-                    if let Expr::Name(name) = &left {
-                        if self.at(&TokenKind::LBrace) {
-                            let name = name.clone();
-                            self.bump();
-                            let mut fields = vec![];
-                            while !self.at(&TokenKind::RBrace) {
-                                self.expect(TokenKind::Dot)?;
-                                let field = self.ident()?;
-                                self.expect(TokenKind::Assign)?;
-                                fields.push((field, self.expr(0)?));
-                                if !self.at(&TokenKind::RBrace) {
-                                    self.expect(TokenKind::Comma)?;
-                                }
+                    if let Expr::Name(name) = &left
+                        && self.at(&TokenKind::LBrace)
+                    {
+                        let name = name.clone();
+                        self.bump();
+                        let mut fields = vec![];
+                        while !self.at(&TokenKind::RBrace) {
+                            self.expect(TokenKind::Dot)?;
+                            let field = self.ident()?;
+                            self.expect(TokenKind::Assign)?;
+                            fields.push((field, self.expr(0)?));
+                            if !self.at(&TokenKind::RBrace) {
+                                self.expect(TokenKind::Comma)?;
                             }
-                            self.bump();
-                            left = Expr::Cast {
-                                ty: Type::Named(name.clone(), generics),
-                                value: Box::new(Expr::StructInit { name, fields }),
-                            };
-                            continue;
                         }
+                        self.bump();
+                        left = Expr::Cast {
+                            ty: Type::Named(name.clone(), generics),
+                            value: Box::new(Expr::StructInit { name, fields }),
+                        };
+                        continue;
                     }
                     if self.at(&TokenKind::LParen) {
                         self.bump();
@@ -677,23 +677,22 @@ impl Parser {
                     .tokens
                     .get(self.pos + 1)
                     .is_some_and(|t| t.kind == TokenKind::Dot)
+                && let Expr::Name(name) = left
             {
-                if let Expr::Name(name) = left {
-                    self.bump();
-                    let mut fields = vec![];
-                    while !self.at(&TokenKind::RBrace) {
-                        self.expect(TokenKind::Dot)?;
-                        let field = self.ident()?;
-                        self.expect(TokenKind::Assign)?;
-                        fields.push((field, self.expr(0)?));
-                        if !self.at(&TokenKind::RBrace) {
-                            self.expect(TokenKind::Comma)?;
-                        }
+                self.bump();
+                let mut fields = vec![];
+                while !self.at(&TokenKind::RBrace) {
+                    self.expect(TokenKind::Dot)?;
+                    let field = self.ident()?;
+                    self.expect(TokenKind::Assign)?;
+                    fields.push((field, self.expr(0)?));
+                    if !self.at(&TokenKind::RBrace) {
+                        self.expect(TokenKind::Comma)?;
                     }
-                    self.bump();
-                    left = Expr::StructInit { name, fields };
-                    continue;
                 }
+                self.bump();
+                left = Expr::StructInit { name, fields };
+                continue;
             }
             if self.at(&TokenKind::LParen) {
                 self.bump();

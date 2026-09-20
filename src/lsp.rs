@@ -19,10 +19,10 @@ pub fn serve(mut input: impl BufRead, mut output: impl Write) -> io::Result<()> 
             if header == "\r\n" || header == "\n" {
                 break;
             }
-            if let Some((key, value)) = header.split_once(':') {
-                if key.eq_ignore_ascii_case("content-length") {
-                    length = value.trim().parse::<usize>().ok();
-                }
+            if let Some((key, value)) = header.split_once(':')
+                && key.eq_ignore_ascii_case("content-length")
+            {
+                length = value.trim().parse::<usize>().ok();
             }
         }
         let length = length
@@ -146,12 +146,14 @@ fn document_path(uri: &str) -> PathBuf {
     let mut bytes = Vec::new();
     let mut i = 0;
     while i < path.len() {
-        if path.as_bytes()[i] == b'%' && i + 2 < path.len() {
-            if let Ok(byte) = u8::from_str_radix(&path[i + 1..i + 3], 16) {
-                bytes.push(byte);
-                i += 3;
-                continue;
-            }
+        if path.as_bytes()[i] == b'%'
+            && i + 2 < path.len()
+            && let Some(hex) = path.get(i + 1..i + 3)
+            && let Ok(byte) = u8::from_str_radix(hex, 16)
+        {
+            bytes.push(byte);
+            i += 3;
+            continue;
         }
         bytes.push(path.as_bytes()[i]);
         i += 1;

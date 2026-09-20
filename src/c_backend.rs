@@ -229,6 +229,7 @@ fn pattern_name(pattern: &Pattern) -> Result<&str, Diagnostics> {
     }
 }
 
+type RecordType = (Type, String, Vec<(String, String)>);
 struct Emitter<'a> {
     checked: &'a CheckedModule,
     headers: BTreeSet<&'static str>,
@@ -239,7 +240,7 @@ struct Emitter<'a> {
     loops: Vec<(Option<String>, String, String)>,
     array_types: Vec<(Type, String, String)>,
     index_context: Vec<String>,
-    record_types: Vec<(Type, String, Vec<(String, String)>)>,
+    record_types: Vec<RecordType>,
     value_targets: Vec<(String, String, Type)>,
     return_type: Type,
     enum_equalities: HashSet<Type>,
@@ -291,10 +292,10 @@ impl Emitter<'_> {
             self.async_support();
             return Ok("nc_future *".into());
         }
-        if let Type::Named(n, _) = ty {
-            if let Some(TypeInfo::Alias(base)) = self.checked.types.get(n) {
-                return self.c_type(&base.clone());
-            }
+        if let Type::Named(n, _) = ty
+            && let Some(TypeInfo::Alias(base)) = self.checked.types.get(n)
+        {
+            return self.c_type(&base.clone());
         }
         if let Type::Map(key, value) = ty {
             return self.c_type(&map_array(key, value));
@@ -323,21 +324,21 @@ impl Emitter<'_> {
         if let Some((_, name, _)) = self.record_types.iter().find(|(t, _, _)| t == ty) {
             return Ok(name.clone());
         }
-        if let Type::Named(n, _) = ty {
-            if matches!(self.checked.types.get(n), Some(TypeInfo::Enum(_))) {
-                let name = format!("nc_enum_{n}");
-                self.type_definitions
-                    .push(format!("struct {name} {{ int tag; void *payload; }};"));
-                self.record_types.push((
-                    ty.clone(),
-                    name.clone(),
-                    vec![
-                        ("tag".into(), "int".into()),
-                        ("payload".into(), "void *".into()),
-                    ],
-                ));
-                return Ok(name);
-            }
+        if let Type::Named(n, _) = ty
+            && matches!(self.checked.types.get(n), Some(TypeInfo::Enum(_)))
+        {
+            let name = format!("nc_enum_{n}");
+            self.type_definitions
+                .push(format!("struct {name} {{ int tag; void *payload; }};"));
+            self.record_types.push((
+                ty.clone(),
+                name.clone(),
+                vec![
+                    ("tag".into(), "int".into()),
+                    ("payload".into(), "void *".into()),
+                ],
+            ));
+            return Ok(name);
         }
         if let Some(fields) = self.fields(ty) {
             let mut c_fields = vec![];
@@ -418,10 +419,10 @@ impl Emitter<'_> {
         self.helpers.insert("static void nc_panic(const char *message);\ntypedef struct nc_allocation { void *data; struct nc_allocation *next; } nc_allocation;\nstatic nc_allocation *nc_allocations;\nstatic void nc_cleanup(void) { while (nc_allocations) { nc_allocation *next = nc_allocations->next; free(nc_allocations->data); free(nc_allocations); nc_allocations = next; } }\nstatic void *nc_alloc(size_t count, size_t size) { if (size && count > (size_t)-1 / size) nc_panic(\"allocation overflow\"); void *data = calloc(count ? count : 1, size); nc_allocation *node = malloc(sizeof(*node)); if (!data || !node) nc_panic(\"out of memory\"); node->data = data; node->next = nc_allocations; nc_allocations = node; return data; }".into());
     }
     fn copy(&mut self, ty: &Type, value: &str) -> Result<String, Diagnostics> {
-        if let Type::Named(n, _) = ty {
-            if let Some(TypeInfo::Alias(base)) = self.checked.types.get(n) {
-                return self.copy(&base.clone(), value);
-            }
+        if let Type::Named(n, _) = ty
+            && let Some(TypeInfo::Alias(base)) = self.checked.types.get(n)
+        {
+            return self.copy(&base.clone(), value);
         }
         if let Type::Map(key, inner) = ty {
             return self.copy(&map_array(key, inner), value);
@@ -484,14 +485,14 @@ impl Emitter<'_> {
                 self.declare_pattern(&v.pattern, &v.ty, &value)?;
             }
             Stmt::Assign { target, value } => {
-                if let Expr::Index { object, index } = target {
-                    if let Type::Map(key, val) = self.ty(object)? {
-                        let map = self.place(object)?;
-                        let k = self.expr(index)?;
-                        let v = self.expr_as(value, &val)?;
-                        self.map_set(&map, &k, &v, &key, &val)?;
-                        return Ok(());
-                    }
+                if let Expr::Index { object, index } = target
+                    && let Type::Map(key, val) = self.ty(object)?
+                {
+                    let map = self.place(object)?;
+                    let k = self.expr(index)?;
+                    let v = self.expr_as(value, &val)?;
+                    self.map_set(&map, &k, &v, &key, &val)?;
+                    return Ok(());
                 }
                 let target_code = match target {
                     Expr::Index { .. } | Expr::Member { .. } => Some(self.place(target)?),
@@ -666,10 +667,10 @@ impl Emitter<'_> {
         Ok(())
     }
     fn equality(&mut self, left: &str, right: &str, ty: &Type) -> Result<String, Diagnostics> {
-        if let Type::Named(n, _) = ty {
-            if let Some(TypeInfo::Alias(base)) = self.checked.types.get(n) {
-                return self.equality(left, right, &base.clone());
-            }
+        if let Type::Named(n, _) = ty
+            && let Some(TypeInfo::Alias(base)) = self.checked.types.get(n)
+        {
+            return self.equality(left, right, &base.clone());
         }
         if let Some(declaration) = self.enum_decl(ty) {
             let helper = format!("nc_equal_{}", declaration.name);
@@ -1130,71 +1131,70 @@ impl Emitter<'_> {
                         ));
                         for (i, (arg, ty)) in args.iter().zip(&variant.values).enumerate() {
                             let arg = self.expr_as(arg, ty)?;
+                            let arg = self.copy(ty, &arg)?;
                             self.line(format!("{pointer}->f_{i} = {arg};"));
                         }
                         return self.temp(e, format!("({ct}){{{tag},{pointer}}}"));
                     }
                 }
-                if let Expr::Name(name) = &**callee {
-                    if name.starts_with('@') {
-                        self.headers.insert("stdio.h");
-                        let stream = if name.starts_with("@e") {
-                            "stderr"
-                        } else {
-                            "stdout"
+                if let Expr::Name(name) = &**callee
+                    && name.starts_with('@')
+                {
+                    self.headers.insert("stdio.h");
+                    let stream = if name.starts_with("@e") {
+                        "stderr"
+                    } else {
+                        "stdout"
+                    };
+                    for arg in args {
+                        let value = self.expr(arg)?;
+                        let ty = self.ty(arg)?;
+                        if matches!(ty, Type::Map(_, _) | Type::Tuple(_) | Type::Optional(_))
+                            || self.fields(&ty).is_some()
+                            || self.enum_decl(&ty).is_some()
+                            || matches!(&ty,Type::Named(n,_) if matches!(self.checked.types.get(n),Some(TypeInfo::Alias(_))))
+                            || matches!(&ty, Type::Named(n, _) if n == "float")
+                        {
+                            let string = self.string_value(&value, &ty)?;
+                            self.line(format!("fprintf({stream}, \"%s\", {string});"));
+                            continue;
+                        }
+                        if matches!(ty, Type::Array(_, _)) {
+                            self.print_array(stream, &value, &ty)?;
+                            continue;
+                        }
+                        let (fmt, value) = match ty {
+                            Type::Named(n, _) => match n.as_str() {
+                                "str" | "char" | "error" => ("%s", value),
+                                "bool" => ("%s", format!("{value} ? \"true\" : \"false\"")),
+                                "float" => ("%.17g", value),
+                                "uint" | "byte" => ("%llu", format!("(unsigned long long){value}")),
+                                _ => ("%lld", format!("(long long){value}")),
+                            },
+                            _ => return unsupported("printing composite types"),
                         };
-                        for arg in args {
-                            let value = self.expr(arg)?;
-                            let ty = self.ty(arg)?;
-                            if matches!(ty, Type::Map(_, _) | Type::Tuple(_) | Type::Optional(_))
-                                || self.fields(&ty).is_some()
-                                || self.enum_decl(&ty).is_some()
-                                || matches!(&ty,Type::Named(n,_) if matches!(self.checked.types.get(n),Some(TypeInfo::Alias(_))))
-                                || matches!(&ty, Type::Named(n, _) if n == "float")
-                            {
-                                let string = self.string_value(&value, &ty)?;
-                                self.line(format!("fprintf({stream}, \"%s\", {string});"));
-                                continue;
-                            }
-                            if matches!(ty, Type::Array(_, _)) {
-                                self.print_array(stream, &value, &ty)?;
-                                continue;
-                            }
-                            let (fmt, value) = match ty {
-                                Type::Named(n, _) => match n.as_str() {
-                                    "str" | "char" | "error" => ("%s", value),
-                                    "bool" => ("%s", format!("{value} ? \"true\" : \"false\"")),
-                                    "float" => ("%.17g", value),
-                                    "uint" | "byte" => {
-                                        ("%llu", format!("(unsigned long long){value}"))
-                                    }
-                                    _ => ("%lld", format!("(long long){value}")),
-                                },
-                                _ => return unsupported("printing composite types"),
-                            };
-                            self.line(format!("fprintf({stream}, \"{fmt}\", {value});"));
-                        }
-                        if name.ends_with("println") {
-                            self.line(format!("fputc('\\n', {stream});"));
-                        }
-                        return Ok(String::new());
+                        self.line(format!("fprintf({stream}, \"{fmt}\", {value});"));
                     }
+                    if name.ends_with("println") {
+                        self.line(format!("fputc('\\n', {stream});"));
+                    }
+                    return Ok(String::new());
                 }
                 let Type::Function(params, _) = self.ty(callee)? else {
                     return unsupported("calling this type");
                 };
-                if let Expr::Name(name) = &**callee {
-                    if !self.scopes.iter().any(|s| s.contains_key(name)) {
-                        let values = args
-                            .iter()
-                            .zip(&params)
-                            .map(|(arg, ty)| {
-                                let value = self.expr_as(arg, ty)?;
-                                self.copy(ty, &value)
-                            })
-                            .collect::<Result<Vec<_>, _>>()?;
-                        return self.temp(e, format!("{}({})", self.name(name), values.join(", ")));
-                    }
+                if let Expr::Name(name) = &**callee
+                    && !self.scopes.iter().any(|s| s.contains_key(name))
+                {
+                    let values = args
+                        .iter()
+                        .zip(&params)
+                        .map(|(arg, ty)| {
+                            let value = self.expr_as(arg, ty)?;
+                            self.copy(ty, &value)
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    return self.temp(e, format!("{}({})", self.name(name), values.join(", ")));
                 }
                 let callee = self.expr(callee)?;
                 let args = args
@@ -1518,10 +1518,10 @@ impl Emitter<'_> {
         Ok(())
     }
     fn string_value(&mut self, value: &str, ty: &Type) -> Result<String, Diagnostics> {
-        if let Type::Named(n, _) = ty {
-            if let Some(TypeInfo::Alias(base)) = self.checked.types.get(n) {
-                return self.string_value(value, &base.clone());
-            }
+        if let Type::Named(n, _) = ty
+            && let Some(TypeInfo::Alias(base)) = self.checked.types.get(n)
+        {
+            return self.string_value(value, &base.clone());
         }
         if let Some(declaration) = self.enum_decl(ty) {
             let helper = format!("nc_string_{}", declaration.name);
@@ -1668,10 +1668,10 @@ impl Emitter<'_> {
         Ok(())
     }
     fn enum_decl(&self, ty: &Type) -> Option<EnumDecl> {
-        if let Type::Named(n, _) = ty {
-            if let Some(TypeInfo::Enum(e)) = self.checked.types.get(n) {
-                return Some(e.clone());
-            }
+        if let Type::Named(n, _) = ty
+            && let Some(TypeInfo::Enum(e)) = self.checked.types.get(n)
+        {
+            return Some(e.clone());
         }
         None
     }
@@ -1751,18 +1751,18 @@ impl Emitter<'_> {
     }
     fn expr_as(&mut self, e: &Expr, expected: &Type) -> Result<String, Diagnostics> {
         let value = self.expr(e)?;
-        if let Type::ErrorUnion(_) = expected {
-            if self.ty(e)? != *expected {
-                let ct = self.c_type(expected)?;
-                return Ok(format!("({ct}){{.value = {value}}}"));
-            }
+        if let Type::ErrorUnion(_) = expected
+            && self.ty(e)? != *expected
+        {
+            let ct = self.c_type(expected)?;
+            return Ok(format!("({ct}){{.value = {value}}}"));
         }
-        if let Type::Optional(inner) = expected {
-            if self.ty(e)? != *expected {
-                let ct = self.c_type(expected)?;
-                let value = self.copy(inner, &value)?;
-                return Ok(format!("({ct}){{1, {value}}}"));
-            }
+        if let Type::Optional(inner) = expected
+            && self.ty(e)? != *expected
+        {
+            let ct = self.c_type(expected)?;
+            let value = self.copy(inner, &value)?;
+            return Ok(format!("({ct}){{1, {value}}}"));
         }
         Ok(value)
     }
@@ -1779,13 +1779,13 @@ impl Emitter<'_> {
     fn value_block(&mut self, body: &Block) -> Result<(), Diagnostics> {
         self.scopes.push(HashMap::new());
         for (i, statement) in body.statements.iter().enumerate() {
-            if i + 1 == body.statements.len() {
-                if let Stmt::Expr(value) = statement {
-                    let (result, end, ty) = self.value_targets.last().unwrap().clone();
-                    let value = self.expr_as(value, &ty)?;
-                    self.line(format!("{result} = {value}; goto {end};"));
-                    continue;
-                }
+            if i + 1 == body.statements.len()
+                && let Stmt::Expr(value) = statement
+            {
+                let (result, end, ty) = self.value_targets.last().unwrap().clone();
+                let value = self.expr_as(value, &ty)?;
+                self.line(format!("{result} = {value}; goto {end};"));
+                continue;
             }
             self.statement(statement)?;
         }

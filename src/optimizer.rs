@@ -23,7 +23,7 @@ impl Value {
     }
 }
 pub fn optimize(mut module: Module) -> Result<Module, Diagnostics> {
-    let functions: HashMap<String, Function> = module
+    let mut functions: HashMap<String, Function> = module
         .items
         .iter()
         .filter_map(|item| {
@@ -41,13 +41,14 @@ pub fn optimize(mut module: Module) -> Result<Module, Diagnostics> {
                 fold(&mut v.value, &env, &functions)?;
                 if let Pattern::Name(n) = &v.pattern {
                     env.remove(n);
+                    functions.remove(n);
                 }
-                if !v.mutable && !v.mutex {
-                    if let Pattern::Name(n) = &v.pattern {
-                        if let Some(value) = evaluate(&v.value, &env, &functions, &mut 100_000)? {
-                            env.insert(n.clone(), value);
-                        }
-                    }
+                if !v.mutable
+                    && !v.mutex
+                    && let Pattern::Name(n) = &v.pattern
+                    && let Some(value) = evaluate(&v.value, &env, &functions, &mut 100_000)?
+                {
+                    env.insert(n.clone(), value);
                 }
             }
             Item::Statement(Stmt::Expr(e)) => fold(e, &env, &functions)?,
@@ -70,10 +71,10 @@ pub fn optimize(mut module: Module) -> Result<Module, Diagnostics> {
     loop {
         let before = reachable.len();
         for item in &module.items {
-            if let Item::Function(f) = item {
-                if reachable.contains(&f.name) {
-                    references(item, &mut reachable);
-                }
+            if let Item::Function(f) = item
+                && reachable.contains(&f.name)
+            {
+                references(item, &mut reachable);
             }
         }
         if reachable.len() == before {
@@ -94,12 +95,12 @@ fn fold(
     // short-circuited or potentially effectful expression independently.
     if let Some(v) = evaluate(e, env, functions, &mut 100_000)? {
         *e = v.expr();
-    } else if let Expr::Call { callee, args, .. } = e {
-        if matches!(&**callee,Expr::Name(n) if n.starts_with('@')) {
-            for arg in args {
-                if let Some(v) = evaluate(arg, env, functions, &mut 100_000)? {
-                    *arg = v.expr();
-                }
+    } else if let Expr::Call { callee, args, .. } = e
+        && matches!(&**callee,Expr::Name(n) if n.starts_with('@'))
+    {
+        for arg in args {
+            if let Some(v) = evaluate(arg, env, functions, &mut 100_000)? {
+                *arg = v.expr();
             }
         }
     }
@@ -255,7 +256,6 @@ enum Flow {
 }
 impl Evaluator<'_> {
     fn block(&mut self, b: &Block, env: &mut HashMap<String, Value>) -> Option<Flow> {
-        let before = env.clone();
         let mut declared = vec![];
         let mut result = Flow::Next;
         for s in &b.statements {
@@ -271,8 +271,8 @@ impl Evaluator<'_> {
                         return None;
                     };
                     let value = self.evaluate(&v.value, env)?;
-                    env.insert(n.clone(), value);
-                    declared.push(n.clone());
+                    let previous = env.insert(n.clone(), value);
+                    declared.push((n.clone(), previous));
                     Flow::Next
                 }
                 Stmt::Assign { target, value } => {
@@ -333,9 +333,9 @@ impl Evaluator<'_> {
                 break;
             }
         }
-        for n in declared {
-            if let Some(value) = before.get(&n) {
-                env.insert(n, value.clone());
+        for (n, previous) in declared.into_iter().rev() {
+            if let Some(value) = previous {
+                env.insert(n, value);
             } else {
                 env.remove(&n);
             }

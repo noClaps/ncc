@@ -54,10 +54,10 @@ fn disabled(source: &str, lint: &str) -> bool {
     let mut start = 0;
     for token in tokens {
         for line in source[start..token.span.start].lines() {
-            if let Some(names) = line.trim().strip_prefix("// @ncc lint disable ") {
-                if names.split([',', ' ', '[', ']']).any(|name| name == lint) {
-                    return true;
-                }
+            if let Some(names) = line.trim().strip_prefix("// @ncc lint disable ")
+                && names.split([',', ' ', '[', ']']).any(|name| name == lint)
+            {
+                return true;
             }
         }
         start = token.span.end;

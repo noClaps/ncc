@@ -263,10 +263,10 @@ impl Checker {
             }
             return Ok(());
         }
-        if let Pattern::Name(n) = p {
-            if n != "_" {
-                self.bind(n, ty, mutable)?
-            }
+        if let Pattern::Name(n) = p
+            && n != "_"
+        {
+            self.bind(n, ty, mutable)?
         }
         Ok(())
     }
@@ -274,10 +274,10 @@ impl Checker {
         self.scopes.iter().rev().find_map(|s| s.get(n))
     }
     fn mark_mutex(&mut self, v: &VarDecl) {
-        if let Pattern::Name(name) = &v.pattern {
-            if let Some(binding) = self.scopes.last_mut().unwrap().get_mut(name) {
-                binding.mutex = v.mutex;
-            }
+        if let Pattern::Name(name) = &v.pattern
+            && let Some(binding) = self.scopes.last_mut().unwrap().get_mut(name)
+        {
+            binding.mutex = v.mutex;
         }
     }
     fn block(&mut self, b: &Block) -> Result<(), Diagnostics> {
@@ -419,10 +419,10 @@ impl Checker {
                 if self.loops.is_empty() {
                     return self.fail("loop control used outside a loop");
                 }
-                if let Some(label) = label {
-                    if !self.loops.iter().any(|x| x.as_ref() == Some(label)) {
-                        return self.fail(format!("unknown loop label `{label}`"));
-                    }
+                if let Some(label) = label
+                    && !self.loops.iter().any(|x| x.as_ref() == Some(label))
+                {
+                    return self.fail(format!("unknown loop label `{label}`"));
                 }
             }
         }
@@ -453,23 +453,22 @@ impl Checker {
         Ok(ty)
     }
     fn expected(&mut self, e: &Expr, ty: &Type) -> Result<(), Diagnostics> {
-        if let Type::Named(n, _) = ty {
-            if let Some(TypeInfo::Alias(base)) = self.types.get(n).cloned() {
-                if matches!(
-                    e,
-                    Expr::Int(_)
-                        | Expr::Float(_)
-                        | Expr::String(_)
-                        | Expr::Char(_)
-                        | Expr::Bool(_)
-                        | Expr::Array(_)
-                        | Expr::Tuple(_)
-                        | Expr::Map(_)
-                ) {
-                    self.expected(e, &base)?;
-                    return Ok(());
-                }
-            }
+        if let Type::Named(n, _) = ty
+            && let Some(TypeInfo::Alias(base)) = self.types.get(n).cloned()
+            && matches!(
+                e,
+                Expr::Int(_)
+                    | Expr::Float(_)
+                    | Expr::String(_)
+                    | Expr::Char(_)
+                    | Expr::Bool(_)
+                    | Expr::Array(_)
+                    | Expr::Tuple(_)
+                    | Expr::Map(_)
+            )
+        {
+            self.expected(e, &base)?;
+            return Ok(());
         }
         if matches!(e, Expr::If { .. }) {
             self.value_targets.push(ty.clone());
@@ -619,20 +618,20 @@ impl Checker {
             Expr::Cast { ty, value } => {
                 self.validate_type(ty)?;
                 let from = self.expr(value)?;
-                if let Type::Named(n, _) = ty {
-                    if matches!(self.types.get(n),Some(TypeInfo::Alias(base)) if *base == from) {
-                        return Ok(ty.clone());
-                    }
+                if let Type::Named(n, _) = ty
+                    && matches!(self.types.get(n),Some(TypeInfo::Alias(base)) if *base == from)
+                {
+                    return Ok(ty.clone());
                 }
-                if let Type::Named(n, _) = &from {
-                    if matches!(self.types.get(n),Some(TypeInfo::Alias(base)) if base == ty) {
-                        return Ok(ty.clone());
-                    }
+                if let Type::Named(n, _) = &from
+                    && matches!(self.types.get(n),Some(TypeInfo::Alias(base)) if base == ty)
+                {
+                    return Ok(ty.clone());
                 }
-                if let (Type::Array(a, None), Type::Array(b, Some(_))) = (ty, &from) {
-                    if a == b {
-                        return Ok(ty.clone());
-                    }
+                if let (Type::Array(a, None), Type::Array(b, Some(_))) = (ty, &from)
+                    && a == b
+                {
+                    return Ok(ty.clone());
                 }
                 if !(numeric(ty) && numeric(&from)) && ty != &from && *ty != named("str") {
                     return self.fail("this cast is not implemented");
@@ -804,10 +803,10 @@ impl Checker {
                     | BinaryOp::BitOr
                     | BinaryOp::BitXor
                     | BinaryOp::Shl
-                    | BinaryOp::Shr => {
-                        if !numeric(&l) || l == named("float") {
-                            return self.fail("bitwise operations require integers");
-                        }
+                    | BinaryOp::Shr
+                        if (!numeric(&l) || l == named("float")) =>
+                    {
+                        return self.fail("bitwise operations require integers");
                     }
                     _ => {}
                 }
@@ -828,16 +827,16 @@ impl Checker {
                 }
             }
             Expr::Call { callee, args, .. } => {
-                if let Expr::Name(name) = &**callee {
-                    if matches!(
+                if let Expr::Name(name) = &**callee
+                    && matches!(
                         name.as_str(),
                         "@print" | "@println" | "@eprint" | "@eprintln"
-                    ) {
-                        for arg in args {
-                            self.expr(arg)?;
-                        }
-                        return Ok(Type::void());
+                    )
+                {
+                    for arg in args {
+                        self.expr(arg)?;
                     }
+                    return Ok(Type::void());
                 }
                 let callee_t = self.expr(callee)?;
                 let Type::Function(params, ret) = callee_t else {
@@ -1039,11 +1038,11 @@ impl Checker {
     fn value_block(&mut self, block: &Block, expected: &Type) -> Result<(), Diagnostics> {
         self.push();
         for (i, statement) in block.statements.iter().enumerate() {
-            if i + 1 == block.statements.len() {
-                if let Stmt::Expr(value) = statement {
-                    self.expected(value, expected)?;
-                    continue;
-                }
+            if i + 1 == block.statements.len()
+                && let Stmt::Expr(value) = statement
+            {
+                self.expected(value, expected)?;
+                continue;
             }
             self.stmt(statement)?;
         }
