@@ -1,4 +1,5 @@
 use std::ops::Range;
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::diagnostic::Diagnostics;
 
@@ -175,9 +176,9 @@ pub fn lex(source: &str) -> Result<Vec<Token>, Diagnostics> {
         }
         if c == '\'' {
             let (value, end) = quoted(source, i, '\'')?;
-            if value.chars().count() != 1 {
+            if value.graphemes(true).count() != 1 {
                 return Err(Diagnostics::one(
-                    "a char literal must contain one Unicode scalar",
+                    "a char literal must contain one Unicode grapheme cluster",
                     start..end,
                 ));
             }

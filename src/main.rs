@@ -3,10 +3,7 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     process::{Command, ExitCode},
-    sync::atomic::{AtomicU64, Ordering},
 };
-
-static TEMPORARY_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum OutputFormat {
@@ -29,8 +26,13 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     if command == "lsp" {
-        eprintln!("ncc: LSP is not yet available");
-        return ExitCode::FAILURE;
+        return match ncc::lsp::serve(std::io::stdin().lock(), std::io::stdout().lock()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("ncc: {e}");
+                ExitCode::FAILURE
+            }
+        };
     }
     let Some(file) = args.next() else {
         usage();
@@ -136,11 +138,13 @@ fn build(source: &str, path: &Path, args: impl Iterator<Item = String>, run: boo
             }
         };
     }
-    let temporary = TemporaryDirectory::new();
-    if let Err(e) = fs::create_dir_all(temporary.path()) {
-        eprintln!("ncc: cannot create temporary build directory: {e}");
-        return ExitCode::FAILURE;
-    }
+    let temporary = match tempfile::Builder::new().prefix("ncc-").tempdir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            eprintln!("ncc: cannot create temporary build directory: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     let c_path = temporary.path().join("program.c");
     if let Err(e) = fs::write(&c_path, c) {
         eprintln!("ncc: {e}");
@@ -177,21 +181,5 @@ fn build(source: &str, path: &Path, args: impl Iterator<Item = String>, run: boo
         }
     } else {
         ExitCode::SUCCESS
-    }
-}
-
-struct TemporaryDirectory(PathBuf);
-impl TemporaryDirectory {
-    fn new() -> Self {
-        let id = TEMPORARY_ID.fetch_add(1, Ordering::Relaxed);
-        Self(env::temp_dir().join(format!("ncc-{}-{id}", std::process::id())))
-    }
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-impl Drop for TemporaryDirectory {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
     }
 }
