@@ -268,6 +268,8 @@ impl Checker {
                     return Ok(());
                 }
                 let expected = self.lvalue(target)?;
+                self.expression_types
+                    .insert(target as *const Expr as usize, expected.clone());
                 self.expected(value, &expected)?;
             }
             Stmt::Expr(x) | Stmt::Assert(x) => {

@@ -27,6 +27,7 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
         runtime_functions: vec![],
     };
     let mut declarations = String::new();
+    let mut global_slots = HashMap::new();
     for item in &checked.module.items {
         match item {
             Item::Function(f) => {
@@ -52,6 +53,7 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
             Item::Global(v) => {
                 let ty = e.c_type(&v.ty)?;
                 let name = e.bind(pattern_name(&v.pattern)?);
+                global_slots.insert(v as *const VarDecl as usize, name.clone());
                 declarations.push_str(&format!("static {ty} {name};\n"));
             }
             Item::Import { .. } => return unsupported("unresolved import"),
@@ -94,7 +96,6 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
             _ => {}
         }
     }
-    let global_names = e.scopes[0].clone();
     for item in &checked.module.items {
         if let Item::Function(f) = item {
             e.return_type = f.return_type.clone();
@@ -131,8 +132,9 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
         match item {
             Item::Global(v) => {
                 let value = e.expr_as(&v.value, &v.ty)?;
+                let value = e.copy(&v.ty, &value)?;
                 let n = pattern_name(&v.pattern)?;
-                let name = &global_names[n];
+                let name = &global_slots[&(v as *const VarDecl as usize)];
                 e.line(format!("{name} = {value};"));
                 e.scopes[0].insert(n.into(), name.clone());
             }
@@ -356,7 +358,11 @@ impl Emitter<'_> {
         self.helpers.insert("static void nc_panic(const char *message);\ntypedef struct nc_allocation { void *data; struct nc_allocation *next; } nc_allocation;\nstatic nc_allocation *nc_allocations;\nstatic void nc_cleanup(void) { while (nc_allocations) { nc_allocation *next = nc_allocations->next; free(nc_allocations->data); free(nc_allocations); nc_allocations = next; } }\nstatic void *nc_alloc(size_t count, size_t size) { if (size && count > (size_t)-1 / size) nc_panic(\"allocation overflow\"); void *data = calloc(count ? count : 1, size); nc_allocation *node = malloc(sizeof(*node)); if (!data || !node) nc_panic(\"out of memory\"); node->data = data; node->next = nc_allocations; nc_allocations = node; return data; }".into());
     }
     fn copy(&mut self, ty: &Type, value: &str) -> Result<String, Diagnostics> {
-        if let Type::Named(n,_) = ty { if let Some(TypeInfo::Alias(base)) = self.checked.types.get(n) { return self.copy(&base.clone(),value); } }
+        if let Type::Named(n, _) = ty {
+            if let Some(TypeInfo::Alias(base)) = self.checked.types.get(n) {
+                return self.copy(&base.clone(), value);
+            }
+        }
         if let Type::Map(key, inner) = ty {
             return self.copy(&map_array(key, inner), value);
         }
@@ -413,7 +419,7 @@ impl Emitter<'_> {
             Stmt::Assign { target, value } => {
                 if let Expr::Index { object, index } = target {
                     if let Type::Map(key, val) = self.ty(object)? {
-                        let map = self.expr(object)?;
+                        let map = self.place(object)?;
                         let k = self.expr(index)?;
                         let v = self.expr_as(value, &val)?;
                         self.map_set(&map, &k, &v, &key, &val)?;
@@ -421,14 +427,15 @@ impl Emitter<'_> {
                     }
                 }
                 let target_code = match target {
-                    Expr::Index { object, index } => Some(self.index(object, index)?),
-                    Expr::Member { object, name } => {
-                        Some(format!("({}).f_{name}", self.expr(object)?))
-                    }
+                    Expr::Index { .. } | Expr::Member { .. } => Some(self.place(target)?),
                     _ => None,
                 };
-                let value_type = self.ty(value)?;
-                let value = self.expr(value)?;
+                let value_type = if matches!(target, Expr::Name(n) if n == "_") {
+                    self.ty(value)?
+                } else {
+                    self.ty(target)?
+                };
+                let value = self.expr_as(value, &value_type)?;
                 let value = self.copy(&value_type, &value)?;
                 match target {
                     Expr::Name(n) if n == "_" => {}
@@ -580,7 +587,11 @@ impl Emitter<'_> {
         Ok(())
     }
     fn equality(&mut self, left: &str, right: &str, ty: &Type) -> Result<String, Diagnostics> {
-        if let Type::Named(n,_) = ty { if let Some(TypeInfo::Alias(base)) = self.checked.types.get(n) { return self.equality(left,right,&base.clone()); } }
+        if let Type::Named(n, _) = ty {
+            if let Some(TypeInfo::Alias(base)) = self.checked.types.get(n) {
+                return self.equality(left, right, &base.clone());
+            }
+        }
         if let Some(declaration) = self.enum_decl(ty) {
             let helper = format!("nc_equal_{}", declaration.name);
             let ct = self.c_type(ty)?;
@@ -1070,16 +1081,51 @@ impl Emitter<'_> {
                 let args = args
                     .iter()
                     .zip(params)
-                    .map(|(a, ty)| self.expr_as(a, &ty))
+                    .map(|(a, ty)| {
+                        let value = self.expr_as(a, &ty)?;
+                        self.copy(&ty, &value)
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
                 format!("{callee}({})", args.join(", "))
             }
             _ => return unsupported("this expression"),
         };
-        if matches!(e, Expr::Name(_)) {
+        if matches!(self.ty(e)?, Type::Function(_, _)) {
             Ok(value)
         } else {
             self.temp(e, value)
+        }
+    }
+    // A writable place must retain the original storage, not an expression copy.
+    fn place(&mut self, e: &Expr) -> Result<String, Diagnostics> {
+        match e {
+            Expr::Name(name) => Ok(self.name(name)),
+            Expr::Member { object, name } => Ok(format!("({}).f_{name}", self.place(object)?)),
+            Expr::Index { object, index } => {
+                let storage = self.place(object)?;
+                let ty = self.ty(object)?;
+                if let Type::Tuple(_) = ty {
+                    let Expr::Int(i) = &**index else {
+                        return unsupported("dynamic tuple indexing");
+                    };
+                    return Ok(format!("({storage}).f_{}", integer(i)?));
+                }
+                self.index_context.push(storage.clone());
+                let i = self.expr(index)?;
+                self.index_context.pop();
+                self.panic_support();
+                if let Type::Map(key, _) = ty {
+                    let found = self.map_find(&storage, &i, &key)?;
+                    self.line(format!(
+                        "if ({found} == ({storage}).len) nc_panic(\"map key not found\");"
+                    ));
+                    Ok(format!("({storage}).vals[{found}].f_1"))
+                } else {
+                    self.line(format!("if ((uint64_t)({i}) >= ({storage}).len) nc_panic(\"array index out of bounds\");"));
+                    Ok(format!("({storage}).vals[{i}]"))
+                }
+            }
+            _ => unsupported("assignment target"),
         }
     }
     fn index(&mut self, object: &Expr, index: &Expr) -> Result<String, Diagnostics> {

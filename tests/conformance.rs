@@ -7,6 +7,42 @@ use std::{
 static ID: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
+fn writable_places_and_evaluation_order() {
+    success(
+        r#"
+struct Inner { int x }
+struct Outer { Inner inner [str]int counts }
+mut int counter = 1
+fn update() int { counter = 9 return 2 }
+fn pair(int a, int b) int { return a * 10 + b }
+int shadow = 2
+int shadow = shadow + 3
+test "places" {
+    assert shadow == 5
+    assert pair(counter, update()) == 12
+    counter = 1
+    assert counter + update() == 3
+    mut Outer item = Outer{.inner = Inner{.x = 1}, .counts = ["one":1]}
+    item.inner.x = 4
+    item.counts["two"] = 2
+    assert item.inner.x == 4
+    assert item.counts["two"] == 2
+    mut Inner[] items = [Inner{.x = 1}]
+    items[0].x = 5
+    assert items[0].x == 5
+    mut (int,int) tup = (1,2)
+    tup[0] = 3
+    assert tup[0] == 3
+    mut int? optional = none
+    optional = 7
+    assert (optional else 0) == 7
+}
+"#,
+        "",
+    );
+}
+
+#[test]
 fn generic_structs_and_enums() {
     success(
         r#"
