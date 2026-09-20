@@ -1,5 +1,6 @@
 //! NC compiler front end and C backend.
 pub mod ast;
+#[path = "c_backend.rs"]
 pub mod codegen;
 pub mod diagnostic;
 pub mod formatter;
@@ -16,7 +17,7 @@ pub fn compile_source(source: &str, path: &Path) -> Result<String, Diagnostics> 
     let tokens = lexer::lex(source)?;
     let module = parser::parse(tokens)?;
     let checked = sema::check(module, path)?;
-    Ok(codegen::emit(&checked))
+    codegen::emit(&checked)
 }
 
 /// Parse and type-check one NC source module.

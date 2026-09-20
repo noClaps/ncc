@@ -48,7 +48,7 @@ fn main() -> ExitCode {
         "check" => match check_source(&source, &path) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                eprint!("{e}");
+                eprint!("{}", e.render(&source, &path));
                 ExitCode::FAILURE
             }
         },
@@ -61,7 +61,7 @@ fn main() -> ExitCode {
                 }
             },
             Err(e) => {
-                eprint!("{e}");
+                eprint!("{}", e.render(&source, &path));
                 ExitCode::FAILURE
             }
         },
@@ -100,7 +100,7 @@ fn build(source: &str, path: &Path, args: impl Iterator<Item = String>, run: boo
     let c = match compile_source(source, path) {
         Ok(c) => c,
         Err(e) => {
-            eprint!("{e}");
+            eprint!("{}", e.render(source, path));
             return ExitCode::FAILURE;
         }
     };

@@ -48,7 +48,8 @@ fn allows_top_level_builtin_calls() {
     let source = "@print(\"Hello world\")";
     ncc::check_source(source, std::path::Path::new("hello-world.nc")).unwrap();
     let c = ncc::compile_source(source, std::path::Path::new("hello-world.nc")).unwrap();
-    assert!(c.contains("fprintf(stdout, \"%s\", \"Hello world\")"));
+    assert!(c.contains("fprintf(stdout, \"%s\","));
+    assert!(c.contains("\"Hello world\""));
 }
 
 #[test]

@@ -8,6 +8,7 @@ use std::{
 pub struct CheckedModule {
     pub module: Module,
     pub types: HashMap<String, TypeInfo>,
+    pub expression_types: HashMap<usize, Type>,
 }
 #[derive(Clone, Debug)]
 pub enum TypeInfo {
@@ -28,6 +29,8 @@ struct Checker {
     function_return: Option<Type>,
     in_test: bool,
     generics: HashSet<String>,
+    expression_types: HashMap<usize, Type>,
+    loops: Vec<Option<String>>,
 }
 
 pub fn check(module: Module, _path: &Path) -> Result<CheckedModule, Diagnostics> {
@@ -41,6 +44,7 @@ pub fn check(module: Module, _path: &Path) -> Result<CheckedModule, Diagnostics>
     Ok(CheckedModule {
         module,
         types: c.types,
+        expression_types: c.expression_types,
     })
 }
 impl Checker {
@@ -57,6 +61,8 @@ impl Checker {
             function_return: None,
             in_test: false,
             generics: HashSet::new(),
+            expression_types: HashMap::new(),
+            loops: vec![],
         }
     }
     fn fail<T>(&self, s: impl Into<String>) -> Result<T, Diagnostics> {
@@ -68,10 +74,7 @@ impl Checker {
             Item::Enum(x) => self.add_type(&x.name, TypeInfo::Enum(x.clone()))?,
             Item::TypeAlias { name, ty, .. } => self.add_type(name, TypeInfo::Alias(ty.clone()))?,
             Item::Function(x) => self.add_type(&x.name, TypeInfo::Function(x.clone()))?,
-            Item::Global(x) => {
-                self.validate_type(&x.ty)?;
-                self.bind_pattern(&x.pattern, x.ty.clone(), x.mutable)?
-            }
+            Item::Global(_) => {}
             Item::Statement(_) => {}
             _ => {}
         }
@@ -102,6 +105,7 @@ impl Checker {
             })?,
             Item::TypeAlias { ty, .. } => self.validate_type(ty)?,
             Item::Function(x) => self.with_generics(&x.generics, |this| {
+                this.validate_type(&x.return_type)?;
                 this.push();
                 for p in &x.params {
                     this.validate_type(&p.ty)?;
@@ -109,13 +113,20 @@ impl Checker {
                 }
                 this.function_return = Some(x.return_type.clone());
                 this.block(&x.body)?;
+                if x.return_type != Type::void() && !returns(&x.body) {
+                    return this.fail(format!(
+                        "function `{}` may finish without returning a value",
+                        x.name
+                    ));
+                }
                 this.function_return = None;
                 this.pop();
                 Ok(())
             })?,
             Item::Global(x) => {
-                let got = self.expr(&x.value)?;
-                self.assignable(&x.ty, &got)?
+                self.validate_type(&x.ty)?;
+                self.expected(&x.value, &x.ty)?;
+                self.bind_pattern(&x.pattern, x.ty.clone(), x.mutable)?;
             }
             Item::Statement(statement) => self.stmt(statement)?,
             Item::Test { body, .. } => {
@@ -149,6 +160,9 @@ impl Checker {
             Type::Tuple(xs) | Type::Function(xs, _) => {
                 for x in xs {
                     self.validate_type(x)?
+                }
+                if let Type::Function(_, ret) = t {
+                    self.validate_type(ret)?;
                 }
             }
         }
@@ -202,19 +216,29 @@ impl Checker {
     }
     fn stmt(&mut self, s: &Stmt) -> Result<(), Diagnostics> {
         match s {
+            Stmt::Block(b) => self.block(b)?,
             Stmt::Var(x) => {
                 self.validate_type(&x.ty)?;
-                let got = self.expr(&x.value)?;
-                self.assignable(&x.ty, &got)?;
+                self.expected(&x.value, &x.ty)?;
                 self.bind_pattern(&x.pattern, x.ty.clone(), x.mutable)?
             }
             Stmt::Assign { target, value } => {
-                let got = self.expr(value)?;
+                if matches!(target, Expr::Name(n) if n == "_") {
+                    self.expr(value)?;
+                    return Ok(());
+                }
                 let expected = self.lvalue(target)?;
-                self.assignable(&expected, &got)?
+                self.expected(value, &expected)?;
             }
             Stmt::Expr(x) | Stmt::Assert(x) => {
                 let t = self.expr(x)?;
+                if matches!(s, Stmt::Assert(_)) && !self.in_test {
+                    return self.fail("assert is only available inside test blocks");
+                }
+                if matches!(s, Stmt::Expr(Expr::Call { .. })) && t != Type::void() {
+                    return self
+                        .fail("return value of function not used; assign it to `_` to discard it");
+                }
                 if matches!(s, Stmt::Assert(_)) && t != named("bool") {
                     return self.fail("assertion requires bool");
                 }
@@ -224,10 +248,11 @@ impl Checker {
                     .function_return
                     .clone()
                     .ok_or_else(|| Diagnostics::one("return outside function", 0..0))?;
-                let got = x
-                    .as_ref()
-                    .map_or(Type::void(), |e| self.expr(e).unwrap_or(Type::void()));
-                self.assignable(&expected, &got)?
+                if let Some(value) = x {
+                    self.expected(value, &expected)?;
+                } else {
+                    self.assignable(&expected, &Type::void())?;
+                }
             }
             Stmt::Throw(x) => {
                 let actual = self.expr(x)?;
@@ -237,7 +262,7 @@ impl Checker {
                 name,
                 iterable,
                 body,
-                ..
+                label,
             } => {
                 let iter = self.expr(iterable)?;
                 let key = match iter {
@@ -248,15 +273,21 @@ impl Checker {
                 };
                 self.push();
                 self.bind(name, key, false)?;
+                self.loops.push(label.clone());
                 self.block(body)?;
+                self.loops.pop();
                 self.pop()
             }
             Stmt::While {
-                condition, body, ..
+                condition,
+                body,
+                label,
             } => {
                 let actual = self.expr(condition)?;
                 self.assignable(&named("bool"), &actual)?;
-                self.block(body)?
+                self.loops.push(label.clone());
+                self.block(body)?;
+                self.loops.pop();
             }
             Stmt::Lock { name, body, .. } => {
                 let b = self
@@ -268,7 +299,16 @@ impl Checker {
                 self.block(body)?;
                 self.pop()
             }
-            Stmt::Break(_, _) | Stmt::Continue(_) => {}
+            Stmt::Break(_, label) | Stmt::Continue(label) => {
+                if self.loops.is_empty() {
+                    return self.fail("loop control used outside a loop");
+                }
+                if let Some(label) = label {
+                    if !self.loops.iter().any(|x| x.as_ref() == Some(label)) {
+                        return self.fail(format!("unknown loop label `{label}`"));
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -283,15 +323,73 @@ impl Checker {
                 }
                 Ok(b.ty.clone())
             }
-            Expr::Index { object, .. } | Expr::Member { object, .. } => self.expr(object),
+            Expr::Index { object, .. } | Expr::Member { object, .. } => {
+                self.lvalue(object)?;
+                self.expr(e)
+            }
             _ => self.fail("invalid assignment target"),
         }
     }
     fn expr(&mut self, e: &Expr) -> Result<Type, Diagnostics> {
+        let ty = self.expr_inner(e)?;
+        self.expression_types
+            .insert(e as *const Expr as usize, ty.clone());
+        Ok(ty)
+    }
+    fn expected(&mut self, e: &Expr, ty: &Type) -> Result<(), Diagnostics> {
+        match (e, ty) {
+            (Expr::Int(text), Type::Named(n, _))
+                if matches!(n.as_str(), "byte" | "int" | "uint") =>
+            {
+                let v = integer(text)?;
+                let max = match n.as_str() {
+                    "byte" => 255,
+                    "int" => i64::MAX as u64,
+                    _ => u64::MAX,
+                };
+                if v > max || (text.ends_with('u') && n != "uint") {
+                    return self.fail(format!("integer literal does not fit `{n}`"));
+                }
+            }
+            (Expr::Array(values), Type::Array(element, size)) => {
+                if size.is_some_and(|n| n != values.len()) {
+                    return self.fail("array literal length does not match fixed-size array type");
+                }
+                for value in values {
+                    self.expected(value, element)?;
+                }
+            }
+            (Expr::Tuple(values), Type::Tuple(types)) if values.len() == types.len() => {
+                for (value, ty) in values.iter().zip(types) {
+                    self.expected(value, ty)?;
+                }
+            }
+            _ => {
+                let got = self.expr(e)?;
+                self.assignable(ty, &got)?;
+            }
+        }
+        self.expression_types
+            .insert(e as *const Expr as usize, ty.clone());
+        Ok(())
+    }
+    fn expr_inner(&mut self, e: &Expr) -> Result<Type, Diagnostics> {
         match e {
+            Expr::Cast { ty, value } => {
+                self.validate_type(ty)?;
+                let from = self.expr(value)?;
+                if !(numeric(ty) && numeric(&from)) && ty != &from {
+                    return self.fail("this cast is not implemented");
+                }
+                Ok(ty.clone())
+            }
             Expr::Int(s) => Ok(if s.ends_with('u') {
+                integer(s)?;
                 named("uint")
             } else {
+                if integer(s)? > i64::MAX as u64 {
+                    return self.fail("integer literal exceeds int range");
+                }
                 named("int")
             }),
             Expr::Float(_) => Ok(named("float")),
@@ -299,26 +397,22 @@ impl Checker {
             Expr::Char(_) => Ok(named("char")),
             Expr::Bool(_) => Ok(named("bool")),
             Expr::None => self.fail("cannot infer type of none"),
-            Expr::Name(n) => {
-                if n.starts_with('@') {
-                    return Ok(Type::Function(vec![], Box::new(Type::void())));
-                }
-                self.lookup(n)
-                    .map(|b| b.ty.clone())
-                    .or_else(|| match self.types.get(n) {
-                        Some(TypeInfo::Function(function)) => Some(Type::Function(
-                            function
-                                .params
-                                .iter()
-                                .map(|param| param.ty.clone())
-                                .collect(),
-                            Box::new(function.return_type.clone()),
-                        )),
-                        Some(_) => Some(named(n)),
-                        None => None,
-                    })
-                    .ok_or_else(|| Diagnostics::one(format!("unknown name `{n}`"), 0..0))
-            }
+            Expr::Name(n) => self
+                .lookup(n)
+                .map(|b| b.ty.clone())
+                .or_else(|| match self.types.get(n) {
+                    Some(TypeInfo::Function(function)) => Some(Type::Function(
+                        function
+                            .params
+                            .iter()
+                            .map(|param| param.ty.clone())
+                            .collect(),
+                        Box::new(function.return_type.clone()),
+                    )),
+                    Some(_) => Some(named(n)),
+                    None => None,
+                })
+                .ok_or_else(|| Diagnostics::one(format!("unknown name `{n}`"), 0..0)),
             Expr::Discard => Ok(Type::void()),
             Expr::Array(xs) => {
                 if xs.is_empty() {
@@ -357,6 +451,9 @@ impl Checker {
                         if !numeric(&t) {
                             return self.fail("numeric unary operation required");
                         }
+                        if *op == UnaryOp::BitNot && t == named("float") {
+                            return self.fail("bitwise operations require integers");
+                        }
                     }
                 }
                 Ok(t)
@@ -368,6 +465,29 @@ impl Checker {
                     return Ok(named("bool"));
                 }
                 self.assignable(&l, &r)?;
+                match op {
+                    BinaryOp::And | BinaryOp::Or => self.assignable(&named("bool"), &l)?,
+                    BinaryOp::Add
+                    | BinaryOp::Sub
+                    | BinaryOp::Mul
+                    | BinaryOp::Div
+                    | BinaryOp::Mod
+                    | BinaryOp::Pow => {
+                        if !numeric(&l) {
+                            return self.fail("arithmetic requires numeric operands");
+                        }
+                    }
+                    BinaryOp::BitAnd
+                    | BinaryOp::BitOr
+                    | BinaryOp::BitXor
+                    | BinaryOp::Shl
+                    | BinaryOp::Shr => {
+                        if !numeric(&l) || l == named("float") {
+                            return self.fail("bitwise operations require integers");
+                        }
+                    }
+                    _ => {}
+                }
                 if matches!(
                     op,
                     BinaryOp::Eq
@@ -404,8 +524,7 @@ impl Checker {
                     return self.fail("incorrect number of arguments");
                 };
                 for (p, a) in params.iter().zip(args) {
-                    let actual = self.expr(a)?;
-                    self.assignable(p, &actual)?
+                    self.expected(a, p)?;
                 }
                 Ok(*ret)
             }
@@ -429,8 +548,29 @@ impl Checker {
                 self.fail(format!("type does not have member `{name}`"))
             }
             Expr::If { subject, arms } => {
-                if let Some(subject) = subject {
-                    self.expr(subject)?;
+                let subject_type = if let Some(subject) = subject {
+                    self.expr(subject)?
+                } else {
+                    named("bool")
+                };
+                let mut wildcard = false;
+                let mut booleans = HashSet::new();
+                for (patterns, _) in arms {
+                    for pattern in patterns {
+                        match pattern {
+                            Pattern::Wildcard => wildcard = true,
+                            Pattern::Literal(value) => {
+                                self.expected(value, &subject_type)?;
+                                if let Expr::Bool(b) = &**value {
+                                    booleans.insert(*b);
+                                }
+                            }
+                            _ => return self.fail("unsupported pattern"),
+                        }
+                    }
+                }
+                if !wildcard && !(subject_type == named("bool") && booleans.len() == 2) {
+                    return self.fail("conditional is not exhaustive; add a `_` fallback branch");
                 }
                 if arms.is_empty() {
                     return Ok(Type::void());
@@ -470,4 +610,30 @@ fn named(x: &str) -> Type {
 }
 fn numeric(t: &Type) -> bool {
     matches!(t,Type::Named(n,_)if matches!(n.as_str(),"byte"|"int"|"uint"|"float"))
+}
+
+pub fn integer(text: &str) -> Result<u64, Diagnostics> {
+    let text = text.strip_suffix('u').unwrap_or(text);
+    let (digits, base) = if let Some(x) = text.strip_prefix("0x") {
+        (x, 16)
+    } else if let Some(x) = text.strip_prefix("0b") {
+        (x, 2)
+    } else if let Some(x) = text.strip_prefix("0o") {
+        (x, 8)
+    } else {
+        (text, 10)
+    };
+    u64::from_str_radix(digits, base)
+        .map_err(|_| Diagnostics::one("invalid or overflowing integer literal", 0..0))
+}
+
+fn returns(block: &Block) -> bool {
+    block.statements.iter().any(|statement| match statement {
+        Stmt::Return(_) | Stmt::Throw(_) => true,
+        Stmt::Block(block) => returns(block),
+        Stmt::Expr(Expr::If { arms, .. }) => {
+            !arms.is_empty() && arms.iter().all(|(_, block)| returns(block))
+        }
+        _ => false,
+    })
 }

@@ -93,6 +93,7 @@ pub struct Block {
 }
 #[derive(Clone, Debug)]
 pub enum Stmt {
+    Block(Block),
     Var(VarDecl),
     Assign {
         target: Expr,
@@ -123,6 +124,10 @@ pub enum Stmt {
 }
 #[derive(Clone, Debug)]
 pub enum Expr {
+    Cast {
+        ty: Type,
+        value: Box<Expr>,
+    },
     Int(String),
     Float(String),
     String(String),

@@ -45,9 +45,13 @@ impl Parser {
         }
     }
     fn ident(&mut self) -> Result<String, Diagnostics> {
-        match self.bump().kind {
+        let token = self.bump();
+        match token.kind {
             TokenKind::Ident(s) => Ok(s),
-            x => self.error(format!("expected identifier, found {:?}", x)),
+            x => Err(Diagnostics::one(
+                format!("expected identifier, found {:?}", x),
+                token.span,
+            )),
         }
     }
     fn module(&mut self) -> Result<Module, Diagnostics> {
@@ -263,6 +267,9 @@ impl Parser {
         Ok(out)
     }
     fn ty(&mut self) -> Result<Type, Diagnostics> {
+        if self.keyword(Keyword::Fut) {
+            return Ok(Type::Future(Box::new(self.ty()?)));
+        }
         let mut ty = if self.at(&TokenKind::LBracket) {
             self.bump();
             let key = self.ty()?;
@@ -273,6 +280,7 @@ impl Parser {
             if self.keyword(Keyword::Fn) {
                 let args = self.params_types()?;
                 let ret = self.ty()?;
+                self.expect(TokenKind::RParen)?;
                 Type::Function(args, Box::new(ret))
             } else {
                 let mut xs = vec![self.ty()?];
@@ -305,6 +313,9 @@ impl Parser {
             } else if self.at(&TokenKind::Question) {
                 self.bump();
                 ty = Type::Optional(Box::new(ty))
+            } else if self.at(&TokenKind::Bang) {
+                self.bump();
+                ty = Type::ErrorUnion(Box::new(ty));
             } else {
                 break;
             }
@@ -363,6 +374,9 @@ impl Parser {
         Ok(Block { statements })
     }
     fn stmt(&mut self) -> Result<Stmt, Diagnostics> {
+        if self.at(&TokenKind::LBrace) {
+            return self.block().map(Stmt::Block);
+        }
         let label = if let TokenKind::Ident(name) = &self.current().kind {
             if matches!(
                 self.tokens.get(self.pos + 1).map(|token| &token.kind),
@@ -385,7 +399,7 @@ impl Parser {
             } else {
                 None
             };
-            let value = if self.at(&TokenKind::RBrace) {
+            let value = if label_target.is_some() || self.at(&TokenKind::RBrace) {
                 None
             } else {
                 Some(self.expr(0)?)
@@ -446,13 +460,11 @@ impl Parser {
         if label.is_some() {
             return self.error("labels may only be applied to for, while, or lock blocks");
         }
-        let is_decl = self.at(&TokenKind::Keyword(Keyword::Mut))
-            || self.at(&TokenKind::Keyword(Keyword::Mutex))
-            || matches!(self.current().kind, TokenKind::Ident(_))
-                && matches!(
-                    self.tokens.get(self.pos + 1).map(|t| &t.kind),
-                    Some(TokenKind::Ident(_))
-                );
+        let saved = self.pos;
+        self.keyword(Keyword::Mut);
+        self.keyword(Keyword::Mutex);
+        let is_decl = self.ty().is_ok() && matches!(self.current().kind, TokenKind::Ident(_));
+        self.pos = saved;
         if is_decl {
             return self.var_decl().map(Stmt::Var);
         }
@@ -488,12 +500,7 @@ impl Parser {
             }
             if self.at(&TokenKind::LBracket) {
                 self.bump();
-                let index = if self.at(&TokenKind::Dollar) {
-                    self.bump();
-                    Expr::Name("$".into())
-                } else {
-                    self.expr(0)?
-                };
+                let index = self.expr(0)?;
                 self.expect(TokenKind::RBracket)?;
                 left = Expr::Index {
                     object: Box::new(left),
@@ -514,7 +521,7 @@ impl Parser {
                 break;
             }
             self.bump();
-            let right = self.expr(p + 1)?;
+            let right = self.expr(if op == BinaryOp::Pow { p } else { p + 1 })?;
             left = Expr::Binary {
                 left: Box::new(left),
                 op,
@@ -526,7 +533,19 @@ impl Parser {
     fn prefix(&mut self) -> Result<Expr, Diagnostics> {
         let t = self.bump();
         match t.kind {
-            TokenKind::At => Ok(Expr::Name(format!("@{}", self.ident()?))),
+            TokenKind::Dollar => Ok(Expr::Name("$".into())),
+            TokenKind::At => {
+                if self.keyword(Keyword::As) {
+                    self.expect(TokenKind::LParen)?;
+                    let ty = self.ty()?;
+                    self.expect(TokenKind::Comma)?;
+                    let value = Box::new(self.expr(0)?);
+                    self.expect(TokenKind::RParen)?;
+                    Ok(Expr::Cast { ty, value })
+                } else {
+                    Ok(Expr::Name(format!("@{}", self.ident()?)))
+                }
+            }
             TokenKind::Int(x) => Ok(Expr::Int(x)),
             TokenKind::Float(x) => Ok(Expr::Float(x)),
             TokenKind::String(x) => Ok(Expr::String(x)),
@@ -565,14 +584,33 @@ impl Parser {
             }
             TokenKind::LBracket => {
                 let mut x = vec![];
+                let mut entries = vec![];
+                let mut is_map = false;
                 while !self.at(&TokenKind::RBracket) {
-                    x.push(self.expr(0)?);
+                    let value = self.expr(0)?;
+                    if self.at(&TokenKind::Colon) {
+                        if !x.is_empty() {
+                            return self.error("cannot mix map entries and array elements");
+                        }
+                        self.bump();
+                        is_map = true;
+                        entries.push((value, self.expr(0)?));
+                    } else {
+                        if is_map {
+                            return self.error("expected `:` after map key");
+                        }
+                        x.push(value);
+                    }
                     if !self.at(&TokenKind::RBracket) {
                         self.expect(TokenKind::Comma)?
                     }
                 }
                 self.bump();
-                Ok(Expr::Array(x))
+                Ok(if is_map {
+                    Expr::Map(entries)
+                } else {
+                    Expr::Array(x)
+                })
             }
             x => self.error(format!("expected expression, found {:?}", x)),
         }
