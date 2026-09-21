@@ -39,6 +39,42 @@ fn folded(source: &str, names: &[&str], expected: &str) {
 }
 
 #[test]
+fn loops_labels_and_local_places_are_evaluated() {
+    folded(
+        r#"
+struct State { int sum int[] values }
+fn compute() int {
+    mut State s = State{.sum = 0, .values = [1, 2, 3]}
+    for i in s.values { s.values[i] = s.values[i] + 1 s.sum = s.sum + s.values[i] }
+    s.values[$] = 10
+    mut [str]int counts = ["a": 2]
+    counts["b"] = 3
+    for key in counts { s.sum = s.sum + counts[key] }
+    outer: for i in [1, 2, 3] {
+        for j in [1, 2, 3] {
+            if i == 1 { true -> { continue :outer } false -> {} }
+            if j == 1 { true -> { break :outer } false -> {} }
+            s.sum = s.sum + 1
+        }
+    }
+    done: if true { true -> { break :done } false -> {} }
+    return s.sum + s.values[$]
+}
+fn text() str {
+    mut str s = "a🍪c"
+    for i in s { if i == 1 { true -> { s[i] = '界' } false -> {} } }
+    s[$] = 'd'
+    return s
+}
+@println(compute())
+@println(text())
+"#,
+        &["compute", "text"],
+        "25\na界d\n",
+    );
+}
+
+#[test]
 fn typed_operations_match_runtime_semantics() {
     folded(
         r#"

@@ -289,6 +289,7 @@ fn evaluate(
         memo: HashMap::new(),
         depth: 0,
         arithmetic_failure: false,
+        indices: vec![],
     };
     let value = evaluator.evaluate(e, env);
     if evaluator.arithmetic_failure {
@@ -307,8 +308,48 @@ struct Evaluator<'a> {
     memo: HashMap<(String, Vec<Value>), Value>,
     depth: usize,
     arithmetic_failure: bool,
+    indices: Vec<u64>,
 }
 impl Evaluator<'_> {
+    fn index(
+        &mut self,
+        index: &Expr,
+        object: &Value,
+        env: &HashMap<String, Value>,
+    ) -> Option<Value> {
+        let length = match object {
+            Value::Array(values) | Value::Tuple(values) => values.len(),
+            Value::Map(entries) => entries.len(),
+            Value::String(text) => crate::unicode::boundaries(text).len(),
+            _ => return None,
+        };
+        self.indices.push(length as u64);
+        let result = self.evaluate(index, env);
+        self.indices.pop();
+        result
+    }
+    fn place(
+        &mut self,
+        e: &Expr,
+        env: &HashMap<String, Value>,
+        path: &mut Vec<Access>,
+    ) -> Option<String> {
+        match e {
+            Expr::Name(name) => Some(name.clone()),
+            Expr::Member { object, name } => {
+                let root = self.place(object, env, path)?;
+                path.push(Access::Field(name.clone()));
+                Some(root)
+            }
+            Expr::Index { object, index } => {
+                let root = self.place(object, env, path)?;
+                let object = self.evaluate(object, env)?;
+                path.push(Access::Index(self.index(index, &object, env)?));
+                Some(root)
+            }
+            _ => None,
+        }
+    }
     fn coerce(&self, value: Value, ty: &Type) -> Option<Value> {
         match (value, self.base_type(ty)) {
             (value @ Value::Optional(_, _), Type::Optional(inner)) if matches!(&value, Value::Optional(actual, _) if actual == &**inner) => {
@@ -669,7 +710,7 @@ impl Evaluator<'_> {
             }
             Expr::Index { object, index } => {
                 let object = self.evaluate(object, env)?;
-                let index = self.evaluate(index, env)?;
+                let index = self.index(index, &object, env)?;
                 if let Value::Map(entries) = object {
                     return entries
                         .into_iter()
@@ -701,6 +742,11 @@ impl Evaluator<'_> {
                 let value = self.evaluate(value, env)?;
                 self.cast(ty, value)
             }
+            Expr::Name(n) if n == "$" => self
+                .indices
+                .last()
+                .and_then(|n| n.checked_sub(1))
+                .map(Value::Uint),
             Expr::Name(n) => env.get(n).cloned().or_else(|| {
                 self.functions
                     .contains_key(n)
@@ -905,8 +951,59 @@ enum Flow {
     Next,
     Return(Value),
     Value(Value),
-    Break,
-    Continue,
+    Break(Option<String>),
+    Continue(Option<String>),
+}
+enum Access {
+    Field(String),
+    Index(Value),
+}
+
+fn assign(value: &mut Value, path: &[Access], replacement: Value) -> Option<()> {
+    let Some((first, rest)) = path.split_first() else {
+        *value = replacement;
+        return Some(());
+    };
+    match (value, first) {
+        (Value::Struct(_, fields), Access::Field(name)) => assign(
+            &mut fields.iter_mut().find(|(n, _)| n == name)?.1,
+            rest,
+            replacement,
+        ),
+        (Value::Array(values) | Value::Tuple(values), Access::Index(index)) => {
+            let n = index_number(index)?;
+            assign(values.get_mut(n)?, rest, replacement)
+        }
+        (Value::Map(entries), Access::Index(key)) => {
+            if let Some((_, value)) = entries.iter_mut().find(|(k, _)| k.equals(key)) {
+                assign(value, rest, replacement)
+            } else if rest.is_empty() {
+                entries.push((key.clone(), replacement));
+                Some(())
+            } else {
+                None
+            }
+        }
+        (Value::String(text), Access::Index(index)) if rest.is_empty() => {
+            let Value::Char(replacement) = replacement else {
+                return None;
+            };
+            let n = index_number(index)?;
+            let bounds = crate::unicode::boundaries(text);
+            let start = *bounds.get(n)?;
+            let end = bounds.get(n + 1).copied().unwrap_or(text.len());
+            text.replace_range(start..end, &replacement);
+            Some(())
+        }
+        _ => None,
+    }
+}
+fn index_number(value: &Value) -> Option<usize> {
+    match value {
+        Value::Int(n) => usize::try_from(*n).ok(),
+        Value::Uint(n) => usize::try_from(*n).ok(),
+        _ => None,
+    }
 }
 fn declaration_value(v: &VarDecl, value: Value) -> Option<Value> {
     if let (Pattern::Tuple(_), Type::Tuple(types), Value::Tuple(values)) =
@@ -1063,12 +1160,17 @@ impl Evaluator<'_> {
                     Flow::Next
                 }
                 Stmt::Assign { target, value } => {
-                    let Expr::Name(n) = target else { return None };
-                    if !env.contains_key(n) {
-                        return None;
-                    }
+                    let mut path = Vec::new();
+                    let name = self.place(target, env, &mut path)?;
                     let v = self.evaluate(value, env)?;
-                    env.insert(n.clone(), v);
+                    if name != "_" {
+                        let ty = self
+                            .checked
+                            .expression_types
+                            .get(&(target as *const Expr as usize))?;
+                        let v = self.coerce(v, ty)?;
+                        assign(env.get_mut(&name)?, &path, v)?;
+                    }
                     Flow::Next
                 }
                 Stmt::Return(Some(e)) => Flow::Return(self.evaluate(e, env)?),
@@ -1084,22 +1186,69 @@ impl Evaluator<'_> {
                 Stmt::While {
                     condition,
                     body,
-                    label: None,
+                    label,
                 } => loop {
                     if self.evaluate(condition, env)? != Value::Bool(true) {
                         break Flow::Next;
                     }
                     match self.block(body, env)? {
-                        Flow::Return(v) => break Flow::Return(v),
-                        Flow::Value(v) => break Flow::Value(v),
-                        Flow::Break => break Flow::Next,
-                        _ => {}
+                        Flow::Break(target) if target.is_none() || &target == label => {
+                            break Flow::Next;
+                        }
+                        Flow::Continue(target) if target.is_none() || &target == label => {}
+                        Flow::Next => {}
+                        flow => break flow,
                     }
                 },
+                Stmt::For {
+                    name,
+                    iterable,
+                    body,
+                    label,
+                } => {
+                    let keys = match self.evaluate(iterable, env)? {
+                        Value::Array(values) => (0..values.len())
+                            .map(|i| Value::Uint(i as u64))
+                            .collect::<Vec<_>>(),
+                        Value::Map(entries) => entries.into_iter().map(|(key, _)| key).collect(),
+                        Value::String(text) => (0..crate::unicode::boundaries(&text).len())
+                            .map(|i| Value::Uint(i as u64))
+                            .collect(),
+                        _ => return None,
+                    };
+                    let previous = env.remove(name);
+                    let mut flow = Flow::Next;
+                    for key in keys {
+                        *self.fuel = self.fuel.checked_sub(1)?;
+                        env.insert(name.clone(), key);
+                        match self.block(body, env)? {
+                            Flow::Break(target) if target.is_none() || &target == label => break,
+                            Flow::Continue(target) if target.is_none() || &target == label => {}
+                            Flow::Next => {}
+                            result => {
+                                flow = result;
+                                break;
+                            }
+                        }
+                    }
+                    if let Some(previous) = previous {
+                        env.insert(name.clone(), previous);
+                    } else {
+                        env.remove(name);
+                    }
+                    flow
+                }
+                Stmt::LabeledIf {
+                    label,
+                    value: Expr::If { subject, arms },
+                } => match self.conditional(subject.as_deref(), arms, env, false)? {
+                    Flow::Break(Some(target)) if target == *label => Flow::Next,
+                    flow => flow,
+                },
                 Stmt::Block(body) => self.block(body, env)?,
-                Stmt::Break(None, None) => Flow::Break,
+                Stmt::Break(None, label) => Flow::Break(label.clone()),
                 Stmt::Break(Some(e), None) => Flow::Value(self.evaluate(e, env)?),
-                Stmt::Continue(None) => Flow::Continue,
+                Stmt::Continue(label) => Flow::Continue(label.clone()),
                 _ => return None,
             };
             if !matches!(flow, Flow::Next) {
