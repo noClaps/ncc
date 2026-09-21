@@ -7,26 +7,37 @@ use std::{
 type Names = HashMap<String, String>;
 
 pub fn load(module: Module, path: &Path) -> Result<Module, Diagnostics> {
+    load_with_sources(module, path, &HashMap::new())
+}
+
+/// Unsaved editor buffers take precedence over files, including new files.
+pub fn load_with_sources(
+    module: Module,
+    path: &Path,
+    sources: &HashMap<PathBuf, String>,
+) -> Result<Module, Diagnostics> {
     let mut loader = Loader {
         done: HashMap::new(),
         active: HashSet::new(),
         items: vec![],
         next: 0,
+        sources,
     };
     loader.visit(module, path, true)?;
     Ok(Module {
         items: loader.items,
     })
 }
-struct Loader {
+struct Loader<'a> {
     done: HashMap<PathBuf, Names>,
     active: HashSet<PathBuf>,
     items: Vec<Item>,
     next: usize,
+    sources: &'a HashMap<PathBuf, String>,
 }
-impl Loader {
+impl Loader<'_> {
     fn visit(&mut self, mut module: Module, path: &Path, root: bool) -> Result<Names, Diagnostics> {
-        let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let key = source_key(path);
         if let Some(exports) = self.done.get(&key) {
             return Ok(exports.clone());
         }
@@ -71,7 +82,7 @@ impl Loader {
                         .unwrap_or(Path::new("."))
                         .join(&*imported)
                         .with_extension("nc");
-                    let source = std::fs::read_to_string(&imported_path).map_err(|e| {
+                    let source = read_source(&imported_path, self.sources).map_err(|e| {
                         Diagnostics::one(
                             format!("cannot import {}: {e}", imported_path.display()),
                             0..0,
@@ -130,6 +141,29 @@ impl Loader {
         self.done.insert(key, exports.clone());
         Ok(exports)
     }
+}
+pub fn source_key(path: &Path) -> PathBuf {
+    if let Ok(path) = path.canonicalize() {
+        return path;
+    }
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+pub fn read_source(path: &Path, sources: &HashMap<PathBuf, String>) -> std::io::Result<String> {
+    sources
+        .get(&source_key(path))
+        .cloned()
+        .map_or_else(|| std::fs::read_to_string(path), Ok)
 }
 fn symbol(item: &Item) -> Option<(&str, bool)> {
     match item {

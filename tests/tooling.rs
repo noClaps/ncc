@@ -121,3 +121,71 @@ fn lsp_navigation_docs_and_completion() {
     assert!(!completions.iter().any(|item| item["label"] == "n"));
     assert_eq!(responses[4]["result"].as_array().unwrap().len(), 3);
 }
+
+#[test]
+#[cfg(feature = "lsp")]
+fn lsp_rechecks_importers_against_unsaved_buffers() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    std::fs::write(
+        directory.path().join("dependency.nc"),
+        "pub fn value() str { return \"disk\" }",
+    )
+    .unwrap();
+    let root = format!("file://{}/main.nc", directory.path().display());
+    let dependency = format!("file://{}/dependency.nc", directory.path().display());
+    let messages = [
+        json!({"method":"textDocument/didOpen","params":{"textDocument":{"uri":root,"version":1,"text":"import { \"dependency\" as dep } int n = dep.value()"}}}),
+        json!({"method":"textDocument/didOpen","params":{"textDocument":{"uri":dependency,"version":1,"text":"pub fn value() int { return 42 }"}}}),
+        json!({"method":"textDocument/didChange","params":{"textDocument":{"uri":dependency,"version":2},"contentChanges":[{"text":"pub fn value() bool { return true }"}]}}),
+        json!({"method":"textDocument/didClose","params":{"textDocument":{"uri":dependency}}}),
+        json!({"id":1,"method":"shutdown"}),
+        json!({"method":"exit"}),
+    ];
+    let input: String = messages
+        .iter()
+        .map(|message| {
+            let text = message.to_string();
+            format!("Content-Length: {}\r\n\r\n{text}", text.len())
+        })
+        .collect();
+    let mut output = Vec::new();
+    ncc::lsp::serve(std::io::Cursor::new(input), &mut output).unwrap();
+    let text = String::from_utf8(output).unwrap();
+    let notifications: Vec<Value> = text
+        .split("Content-Length: ")
+        .skip(1)
+        .map(|part| serde_json::from_str(part.split_once("\r\n\r\n").unwrap().1).unwrap())
+        .collect();
+    let root_errors: Vec<bool> = notifications
+        .iter()
+        .filter(|message| message["params"]["uri"] == root)
+        .map(|message| {
+            !message["params"]["diagnostics"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        })
+        .collect();
+    assert_eq!(root_errors, [true, false, true, true]);
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("dependency.nc")).unwrap(),
+        "pub fn value() str { return \"disk\" }"
+    );
+}
+
+#[test]
+fn checks_can_import_new_unsaved_files() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let root = directory.path().join("main.nc");
+    let sources = std::collections::HashMap::from([(
+        ncc::modules::source_key(&directory.path().join("new.nc")),
+        "pub fn value() int { return 42 }".into(),
+    )]);
+    ncc::lint::check_with_sources(
+        "import { \"./new\" as fresh } int n = fresh.value()",
+        &root,
+        &sources,
+    )
+    .unwrap();
+    assert!(!directory.path().join("new.nc").exists());
+}

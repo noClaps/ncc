@@ -85,16 +85,7 @@ pub fn serve(mut input: impl BufRead, mut output: impl Write) -> io::Result<()> 
                     };
                     if let Some(document) = updated {
                         documents.insert(uri.into(), document);
-                        let text = &documents[uri].text;
-                        let path = document_path(uri);
-                        let diagnostics = match crate::lint::check(text, &path) {
-                            Ok(warnings) => warnings.iter().filter(|w| w.path == path).map(|w| json!({"range":{"start":position(text,w.span.start),"end":position(text,w.span.end)},"severity":2,"source":"ncc","code":w.code,"message":w.message})).collect(),
-                            Err(errors) => errors.0.iter().map(|e| json!({"range":{"start":position(text, e.span.start),"end":position(text,e.span.end)},"severity":1,"source":"ncc","message":e.message})).collect::<Vec<_>>()
-                        };
-                        send(
-                            &mut output,
-                            json!({"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{"uri":uri,"version":p["textDocument"]["version"],"diagnostics":diagnostics}}),
-                        )?;
+                        publish_diagnostics(&documents, &mut output)?;
                     }
                 }
                 None
@@ -106,7 +97,12 @@ pub fn serve(mut input: impl BufRead, mut output: impl Write) -> io::Result<()> 
                         &mut output,
                         json!({"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{"uri":uri,"diagnostics":[]}}),
                     )?;
+                    publish_diagnostics(&documents, &mut output)?;
                 }
+                None
+            }
+            "textDocument/didSave" | "workspace/didChangeWatchedFiles" => {
+                publish_diagnostics(&documents, &mut output)?;
                 None
             }
             "textDocument/formatting" => {
@@ -177,6 +173,35 @@ pub fn serve(mut input: impl BufRead, mut output: impl Write) -> io::Result<()> 
 struct Document {
     text: String,
     version: i64,
+}
+fn publish_diagnostics(
+    documents: &HashMap<String, Document>,
+    output: &mut impl Write,
+) -> io::Result<()> {
+    let sources = documents
+        .iter()
+        .map(|(uri, document)| {
+            (
+                crate::modules::source_key(&document_path(uri)),
+                document.text.clone(),
+            )
+        })
+        .collect();
+    let mut ordered = documents.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|(uri, _)| *uri);
+    for (uri, document) in ordered {
+        let text = &document.text;
+        let path = document_path(uri);
+        let diagnostics = match crate::lint::check_with_sources(text, &path, &sources) {
+            Ok(warnings) => warnings.iter().filter(|w| crate::modules::source_key(&w.path) == crate::modules::source_key(&path)).map(|w| json!({"range":{"start":position(text,w.span.start),"end":position(text,w.span.end)},"severity":2,"source":"ncc","code":w.code,"message":w.message})).collect(),
+            Err(errors) => errors.0.iter().map(|e| json!({"range":{"start":position(text, e.span.start),"end":position(text,e.span.end)},"severity":1,"source":"ncc","message":e.message})).collect::<Vec<_>>()
+        };
+        send(
+            output,
+            json!({"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{"uri":uri,"version":document.version,"diagnostics":diagnostics}}),
+        )?;
+    }
+    Ok(())
 }
 impl Document {
     /// Apply a batch atomically: each range refers to the preceding edit's text.

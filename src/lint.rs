@@ -1,7 +1,7 @@
 //! Non-fatal diagnostics, separate from mandatory type checking.
 use crate::{ast::Expr, diagnostic::Diagnostics, lexer, modules, parser, sema};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     ops::Range,
     path::{Path, PathBuf},
 };
@@ -15,7 +15,15 @@ pub struct Warning {
 }
 
 pub fn check(source: &str, path: &Path) -> Result<Vec<Warning>, Diagnostics> {
-    let module = modules::load(parser::parse_at(lexer::lex(source)?, path)?, path)?;
+    check_with_sources(source, path, &HashMap::new())
+}
+pub fn check_with_sources(
+    source: &str,
+    path: &Path,
+    sources: &HashMap<PathBuf, String>,
+) -> Result<Vec<Warning>, Diagnostics> {
+    let module =
+        modules::load_with_sources(parser::parse_at(lexer::lex(source)?, path)?, path, sources)?;
     let checked = sema::check(crate::generics::specialize(module)?, path)?;
     let mut warnings = vec![];
     let mut seen = HashSet::new();
@@ -33,7 +41,7 @@ pub fn check(source: &str, path: &Path) -> Result<Vec<Warning>, Diagnostics> {
             let text = if f.source_path == path {
                 source.into()
             } else {
-                std::fs::read_to_string(&f.source_path).unwrap_or_default()
+                modules::read_source(&f.source_path, sources).unwrap_or_default()
             };
             if disabled(&text, "capture") {
                 return;

@@ -29,7 +29,8 @@ must stay explicit about features still under construction.
 - Tree-sitter syntax grammar, corpus tests and shared highlight queries; a
   WebAssembly-built Zed extension with local grammar packaging and LSP launch.
 - Incremental UTF-16 LSP edits, local definitions, documentation hover,
-  completions and open-document symbols.
+  completions and open-document symbols. Unsaved imported buffers participate in
+  checking, and changes/closure trigger fresh diagnostics in open importers.
 
 ## Known remaining work
 
@@ -44,7 +45,7 @@ must stay explicit about features still under construction.
   within function bodies. The evaluation fuel/depth limits intentionally retain
   runtime code for work that cannot safely be completed at compile time.
 - Improve multiline strings, embedded-NUL handling, canonical formatting, and
-  editor indexing of imported members, pattern bindings and unsaved dependencies.
+  editor indexing of imported members and pattern bindings.
 - Increase negative, differential, concurrency, and full-specification tests.
 
 The Unicode crate is now a test oracle only. The compiler core can be built with
