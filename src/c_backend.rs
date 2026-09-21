@@ -56,17 +56,21 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
                 ));
             }
             Item::Global(v) => {
-                let ty = if v.mutex {
-                    format!("{} *", e.mutex_type(&v.ty)?)
-                } else {
-                    e.c_type(&v.ty)?
-                };
-                let name = e.bind(pattern_name(&v.pattern)?);
-                if v.mutex {
-                    e.mutexes.insert(name.clone());
+                let mut slots = Vec::new();
+                for (binding, ty, _) in binding_values(&v.pattern, &v.ty, "")? {
+                    let ct = if v.mutex {
+                        format!("{} *", e.mutex_type(ty)?)
+                    } else {
+                        e.c_type(ty)?
+                    };
+                    let name = e.bind(binding);
+                    if v.mutex {
+                        e.mutexes.insert(name.clone());
+                    }
+                    declarations.push_str(&format!("static {ct} {name};\n"));
+                    slots.push(name);
                 }
-                global_slots.insert(v as *const VarDecl as usize, name.clone());
-                declarations.push_str(&format!("static {ty} {name};\n"));
+                global_slots.insert(v as *const VarDecl as usize, slots);
             }
             Item::Import { .. } => return unsupported("unresolved import"),
             Item::Extern {
@@ -146,14 +150,18 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
             Item::Global(v) => {
                 let value = e.expr_as(&v.value, &v.ty)?;
                 let value = e.copy(&v.ty, &value)?;
-                let n = pattern_name(&v.pattern)?;
-                let name = &global_slots[&(v as *const VarDecl as usize)];
-                if v.mutex {
-                    e.init_mutex(name, &v.ty, &value)?;
-                } else {
-                    e.line(format!("{name} = {value};"));
+                let slots = &global_slots[&(v as *const VarDecl as usize)];
+                for ((binding, ty, value), name) in binding_values(&v.pattern, &v.ty, &value)?
+                    .into_iter()
+                    .zip(slots)
+                {
+                    if v.mutex {
+                        e.init_mutex(name, ty, &value)?;
+                    } else {
+                        e.line(format!("{name} = {value};"));
+                    }
+                    e.scopes[0].insert(binding.into(), name.clone());
                 }
-                e.scopes[0].insert(n.into(), name.clone());
             }
             Item::Statement(s) => e.statement(s)?,
             Item::Test { body, .. } => {
@@ -245,6 +253,24 @@ fn pattern_name(pattern: &Pattern) -> Result<&str, Diagnostics> {
         Ok(name)
     } else {
         unsupported("destructuring")
+    }
+}
+fn binding_values<'a>(
+    pattern: &'a Pattern,
+    ty: &'a Type,
+    value: &str,
+) -> Result<Vec<(&'a str, &'a Type, String)>, Diagnostics> {
+    match (pattern, ty) {
+        (Pattern::Tuple(patterns), Type::Tuple(types)) => {
+            let mut result = Vec::new();
+            for (i, (pattern, ty)) in patterns.iter().zip(types).enumerate() {
+                result.extend(binding_values(pattern, ty, &format!("({value}).f_{i}"))?);
+            }
+            Ok(result)
+        }
+        (Pattern::Name(name), _) if name == "_" => Ok(vec![]),
+        (Pattern::Name(name), _) => Ok(vec![(name, ty, value.into())]),
+        _ => unsupported("this binding pattern"),
     }
 }
 
@@ -2114,18 +2140,10 @@ impl Emitter<'_> {
         ty: &Type,
         value: &str,
     ) -> Result<(), Diagnostics> {
-        match (pattern, ty) {
-            (Pattern::Tuple(patterns), Type::Tuple(types)) => {
-                for (i, (pattern, ty)) in patterns.iter().zip(types).enumerate() {
-                    self.declare_pattern(pattern, ty, &format!("({value}).f_{i}"))?;
-                }
-            }
-            (Pattern::Name(n), _) => {
-                let ct = self.c_type(ty)?;
-                let name = self.bind(n);
-                self.line(format!("{ct} {name} = {value};"));
-            }
-            _ => return unsupported("this binding pattern"),
+        for (binding, ty, value) in binding_values(pattern, ty, value)? {
+            let ct = self.c_type(ty)?;
+            let name = self.bind(binding);
+            self.line(format!("{ct} {name} = {value};"));
         }
         Ok(())
     }

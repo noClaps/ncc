@@ -152,14 +152,12 @@ fn optimize_module(checked: CheckedModule) -> Result<Module, Diagnostics> {
                 } else {
                     None
                 };
-                if let Pattern::Name(n) = &v.pattern {
+                for n in v.binding_names() {
                     env.remove(n);
                     functions.remove(n);
                 }
-                if let Pattern::Name(n) = &v.pattern
-                    && let Some(value) = constant
-                {
-                    env.insert(n.clone(), value);
+                if let Some(value) = constant {
+                    let _ = bind_declaration(&v.pattern, value, &mut env, &mut Vec::new());
                 }
             }
             Item::Statement(Stmt::Expr(e)) => {
@@ -908,6 +906,27 @@ enum Flow {
     Break,
     Continue,
 }
+fn bind_declaration(
+    pattern: &Pattern,
+    value: Value,
+    env: &mut HashMap<String, Value>,
+    previous: &mut Vec<(String, Option<Value>)>,
+) -> Option<()> {
+    match (pattern, value) {
+        (Pattern::Name(name), value) => {
+            if name != "_" {
+                previous.push((name.clone(), env.insert(name.clone(), value)));
+            }
+        }
+        (Pattern::Tuple(patterns), Value::Tuple(values)) if patterns.len() == values.len() => {
+            for (pattern, value) in patterns.iter().zip(values) {
+                bind_declaration(pattern, value, env, previous)?;
+            }
+        }
+        _ => return None,
+    }
+    Some(())
+}
 impl Evaluator<'_> {
     fn pattern(
         &mut self,
@@ -1011,13 +1030,9 @@ impl Evaluator<'_> {
                     if v.mutex {
                         return None;
                     }
-                    let Pattern::Name(n) = &v.pattern else {
-                        return None;
-                    };
                     let value = self.evaluate(&v.value, env)?;
                     let value = self.coerce(value, &v.ty)?;
-                    let previous = env.insert(n.clone(), value);
-                    declared.push((n.clone(), previous));
+                    bind_declaration(&v.pattern, value, env, &mut declared)?;
                     Flow::Next
                 }
                 Stmt::Assign { target, value } => {

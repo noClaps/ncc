@@ -127,6 +127,9 @@ impl Checker {
         Ok(())
     }
     fn future_variable(&self, v: &VarDecl) -> Result<(), Diagnostics> {
+        if v.mutex && !matches!(v.pattern, Pattern::Name(_)) {
+            return self.fail("mutex declarations require a single binding; lock the tuple before destructuring it");
+        }
         if matches!(v.ty, Type::Future(_)) {
             if v.mutable || v.mutex {
                 return self.fail("futures cannot be mutable or mutex protected");

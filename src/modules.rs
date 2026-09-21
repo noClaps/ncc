@@ -57,7 +57,7 @@ impl Loader<'_> {
         let mut names = Names::new();
         let mut exports = Names::new();
         for item in &module.items {
-            if let Some((name, public)) = symbol(item) {
+            for (name, public) in symbols(item) {
                 let qualified = format!("{prefix}{name}");
                 names.insert(name.into(), qualified.clone());
                 if public {
@@ -164,20 +164,18 @@ pub fn read_source(path: &Path, sources: &HashMap<PathBuf, String>) -> std::io::
         .cloned()
         .map_or_else(|| std::fs::read_to_string(path), Ok)
 }
-fn symbol(item: &Item) -> Option<(&str, bool)> {
+fn symbols(item: &Item) -> Vec<(&str, bool)> {
     match item {
-        Item::Function(f) => Some((&f.name, f.public)),
-        Item::Struct(s) => Some((&s.name, s.public)),
-        Item::Enum(e) => Some((&e.name, e.public)),
-        Item::TypeAlias { name, public, .. } => Some((name, *public)),
-        Item::Global(v) => {
-            if let Pattern::Name(name) = &v.pattern {
-                Some((name, v.public))
-            } else {
-                None
-            }
-        }
-        _ => None,
+        Item::Function(f) => vec![(&f.name, f.public)],
+        Item::Struct(s) => vec![(&s.name, s.public)],
+        Item::Enum(e) => vec![(&e.name, e.public)],
+        Item::TypeAlias { name, public, .. } => vec![(name, *public)],
+        Item::Global(v) => v
+            .binding_names()
+            .into_iter()
+            .map(|name| (name, v.public))
+            .collect(),
+        _ => vec![],
     }
 }
 fn qualify_type(ty: &mut Type, names: &Names) {
@@ -232,11 +230,7 @@ fn qualify_item(
         Item::Global(v) => {
             qualify_type(&mut v.ty, names);
             expr(&mut v.value, names, aliases)?;
-            if let Pattern::Name(n) = &mut v.pattern
-                && let Some(name) = names.get(n)
-            {
-                *n = name.clone();
-            }
+            qualify_binding(&mut v.pattern, names);
         }
         Item::Statement(s) => {
             statement(s, &mut names.clone(), aliases)?;
@@ -279,6 +273,21 @@ fn qualify_item(
         _ => {}
     }
     Ok(())
+}
+fn qualify_binding(pattern: &mut Pattern, names: &Names) {
+    match pattern {
+        Pattern::Name(name) => {
+            if let Some(qualified) = names.get(name) {
+                *name = qualified.clone();
+            }
+        }
+        Pattern::Tuple(patterns) => {
+            for pattern in patterns {
+                qualify_binding(pattern, names);
+            }
+        }
+        _ => {}
+    }
 }
 fn hide(pattern: &Pattern, names: &mut Names) {
     match pattern {

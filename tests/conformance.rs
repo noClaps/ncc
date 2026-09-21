@@ -7,6 +7,20 @@ use std::{
 static ID: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
+fn top_level_tuple_bindings_are_visible_to_functions() {
+    success(
+        r#"
+int one, str two = (1, "two")
+mut int three, int four = (3, 4)
+fn sum() int { return one + three + four }
+three = three + 1
+test "globals" { assert sum() == 9 assert two == "two" }
+"#,
+        "",
+    );
+}
+
+#[test]
 fn recursive_struct_layouts_and_value_operations() {
     success(
         r#"
@@ -491,7 +505,9 @@ fn modules_exports_and_external_functions() {
     let dir = ncc::temp::Directory::new().unwrap();
     fs::write(
         dir.path().join("one.nc"),
-        "pub int value = 7 pub fn square(int n) int { return n * n } int hidden = 9",
+        "pub int value = 7 pub fn square(int n) int { return n * n } int hidden = 9\n\
+         pub int first, str second = (3, \"four\")\n\
+         int private_first, int private_second = (5, 6)",
     )
     .unwrap();
     fs::write(dir.path().join("two.nc"), "pub int value = 2").unwrap();
@@ -507,6 +523,8 @@ fn modules_exports_and_external_functions() {
 import { "one" as one "two" as two }
 extern "native.c" as native { fn add(int a, int b) int = "native_add" }
 @println(native.add(one.square(one.value), two.value))
+@println(one.first)
+@println(one.second)
 "#,
     )
     .unwrap();
@@ -520,7 +538,18 @@ extern "native.c" as native { fn add(int a, int b) int = "native_add" }
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(output.stdout, b"51\n");
+    assert_eq!(output.stdout, b"51\n3\nfour\n");
+    for name in ["private_first", "private_second"] {
+        assert!(
+            ncc::check_source(
+                &format!("import {{ \"one\" as one }} @println(one.{name})"),
+                &main
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("does not export")
+        );
+    }
     assert!(
         ncc::check_source("import { \"one\" as one } @println(one.hidden)", &main)
             .unwrap_err()

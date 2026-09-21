@@ -92,6 +92,24 @@ pub struct VarDecl {
     pub ty: Type,
     pub value: Expr,
 }
+impl VarDecl {
+    pub fn binding_names(&self) -> Vec<&str> {
+        fn collect<'a>(pattern: &'a Pattern, names: &mut Vec<&'a str>) {
+            match pattern {
+                Pattern::Name(name) if name != "_" => names.push(name),
+                Pattern::Tuple(patterns) => {
+                    for pattern in patterns {
+                        collect(pattern, names);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut names = Vec::new();
+        collect(&self.pattern, &mut names);
+        names
+    }
+}
 #[derive(Clone, Debug)]
 pub struct Block {
     pub statements: Vec<Stmt>,

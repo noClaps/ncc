@@ -123,6 +123,24 @@ int? global = 5
 }
 
 #[test]
+fn tuple_bindings_shadow_and_discard_without_stale_constants() {
+    folded(
+        r#"
+int first = 99
+int first, str second = (2, "three")
+fn sum((int, int) pair) int { int a, int b = pair return a + b }
+int _, int last = (3, 4)
+@println(first)
+@println(second)
+@println(last)
+@println(sum((5,6)))
+"#,
+        &["sum"],
+        "2\nthree\n4\n11\n",
+    );
+}
+
+#[test]
 fn fibonacci_uses_each_numeric_types_range() {
     folded(
         r#"
