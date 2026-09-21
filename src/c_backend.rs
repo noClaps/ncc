@@ -241,7 +241,7 @@ struct Emitter<'a> {
     out: String,
     scopes: Vec<HashMap<String, String>>,
     next: usize,
-    loops: Vec<(Option<String>, String, String)>,
+    loops: Vec<(Option<String>, Option<String>, String, bool)>,
     array_types: Vec<(Type, String, String)>,
     index_context: Vec<String>,
     record_types: Vec<RecordType>,
@@ -468,6 +468,17 @@ impl Emitter<'_> {
     }
     fn statement(&mut self, statement: &Stmt) -> Result<(), Diagnostics> {
         match statement {
+            Stmt::LabeledIf { label, value } => {
+                let end = self.fresh();
+                self.loops
+                    .push((Some(label.clone()), None, end.clone(), false));
+                let Expr::If { subject, arms } = value else {
+                    return unsupported("labelled non-conditional");
+                };
+                self.conditional(subject.as_deref(), arms, false)?;
+                self.loops.pop();
+                self.line(format!("{end}:;"));
+            }
             Stmt::Block(block) => {
                 self.line("{");
                 self.block(block)?;
@@ -567,7 +578,8 @@ impl Emitter<'_> {
             } => {
                 let start = self.fresh();
                 let end = self.fresh();
-                self.loops.push((label.clone(), start.clone(), end.clone()));
+                self.loops
+                    .push((label.clone(), Some(start.clone()), end.clone(), true));
                 self.line(format!("{start}:; {{"));
                 let condition = self.expr(condition)?;
                 self.line(format!("if (!({condition})) goto {end};"));
@@ -584,11 +596,11 @@ impl Emitter<'_> {
                     self.line(format!("{result} = {value}; goto {end};"));
                     return Ok(());
                 }
-                let (_, _, end) = self.loop_target(label)?;
+                let end = self.loop_target(label, false)?;
                 self.line(format!("goto {end};"));
             }
             Stmt::Continue(label) => {
-                let (_, start, _) = self.loop_target(label)?;
+                let start = self.loop_target(label, true)?;
                 self.line(format!("goto {start};"));
             }
             Stmt::For {
@@ -617,7 +629,8 @@ impl Emitter<'_> {
                 let start = self.fresh();
                 let end = self.fresh();
                 let next = self.fresh();
-                self.loops.push((label.clone(), next.clone(), end.clone()));
+                self.loops
+                    .push((label.clone(), Some(next.clone()), end.clone(), true));
                 self.line(format!(
                     "uint64_t {index} = 0;\n{start}:; {{\nif ({index} >= {length}) goto {end};"
                 ));
@@ -640,7 +653,7 @@ impl Emitter<'_> {
                 self.line(format!("{{ pthread_mutex_lock(&({mutex})->lock); nc_lock_guard {guard} __attribute__((cleanup(nc_unlock))) = {{ &({mutex})->lock }};"));
                 self.scopes
                     .push(HashMap::from([(name.clone(), format!("({mutex})->value"))]));
-                self.loops.push((label.clone(), end.clone(), end.clone()));
+                self.loops.push((label.clone(), None, end.clone(), true));
                 self.block(body)?;
                 self.loops.pop();
                 self.scopes.pop();
@@ -649,15 +662,22 @@ impl Emitter<'_> {
         }
         Ok(())
     }
-    fn loop_target(
-        &self,
-        label: &Option<String>,
-    ) -> Result<(Option<String>, String, String), Diagnostics> {
+    fn loop_target(&self, label: &Option<String>, continuing: bool) -> Result<String, Diagnostics> {
         self.loops
             .iter()
             .rev()
-            .find(|(name, _, _)| label.is_none() || name == label)
-            .cloned()
+            .find(|(name, start, _, can_break)| {
+                (label.is_none() || name == label)
+                    && (!continuing || start.is_some())
+                    && (label.is_some() || continuing || *can_break)
+            })
+            .map(|(_, start, end, _)| {
+                if continuing {
+                    start.as_ref().unwrap().clone()
+                } else {
+                    end.clone()
+                }
+            })
             .ok_or_else(|| Diagnostics::one("invalid loop target", 0..0))
     }
     fn conditional(
@@ -999,6 +1019,24 @@ impl Emitter<'_> {
             Expr::Cast { ty, value } => {
                 let from = self.ty(value)?;
                 let value = self.expr(value)?;
+                if matches!(ty,Type::Array(element,None) if **element == Type::Named("byte".into(),vec![]))
+                    && matches!(&from,Type::Named(n,_) if matches!(n.as_str(),"int"|"uint"|"float"))
+                {
+                    self.allocation_support();
+                    self.headers.insert("stdint.h");
+                    let bits = self.fresh();
+                    if from == Type::Named("float".into(), vec![]) {
+                        self.headers.insert("string.h");
+                        self.line(format!("_Static_assert(sizeof(double)==8,\"NC requires 64-bit double\"); uint64_t {bits}; memcpy(&{bits},&{value},8);"));
+                    } else {
+                        self.line(format!("uint64_t {bits} = (uint64_t){value};"));
+                    }
+                    let ct = self.c_type(ty)?;
+                    let result = self.fresh();
+                    let i = self.fresh();
+                    self.line(format!("{ct} {result} = {{8,8,nc_alloc(8,1)}}; for (uint64_t {i}=0; {i}<8; ++{i}) {result}.vals[{i}]=(uint8_t)({bits} >> (8*{i}));"));
+                    return Ok(result);
+                }
                 if let Type::Array(element, None) = ty
                     && matches!(&from,Type::Named(n,_) if n == "str" || n == "char")
                 {

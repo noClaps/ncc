@@ -96,6 +96,10 @@ pub struct Block {
 }
 #[derive(Clone, Debug)]
 pub enum Stmt {
+    LabeledIf {
+        label: String,
+        value: Expr,
+    },
     Block(Block),
     Var(VarDecl),
     Assign {

@@ -33,7 +33,8 @@ struct Checker {
     in_test: bool,
     generics: HashSet<String>,
     expression_types: HashMap<usize, Type>,
-    loops: Vec<Option<String>>,
+    // Label, accepts continue, accepts an unlabelled break.
+    loops: Vec<(Option<String>, bool, bool)>,
     indexing: usize,
     value_targets: Vec<Type>,
     capture_frames: Vec<(usize, HashMap<String, Binding>)>,
@@ -290,6 +291,11 @@ impl Checker {
     }
     fn stmt(&mut self, s: &Stmt) -> Result<(), Diagnostics> {
         match s {
+            Stmt::LabeledIf { label, value } => {
+                self.loops.push((Some(label.clone()), false, false));
+                self.expr(value)?;
+                self.loops.pop();
+            }
             Stmt::Block(b) => self.block(b)?,
             Stmt::Var(x) => {
                 self.future_variable(x)?;
@@ -367,7 +373,7 @@ impl Checker {
                 };
                 self.push();
                 self.bind(name, key, false)?;
-                self.loops.push(label.clone());
+                self.loops.push((label.clone(), true, true));
                 self.block(body)?;
                 self.loops.pop();
                 self.pop()
@@ -379,7 +385,7 @@ impl Checker {
             } => {
                 let actual = self.expr(condition)?;
                 self.assignable(&named("bool"), &actual)?;
-                self.loops.push(label.clone());
+                self.loops.push((label.clone(), true, true));
                 self.block(body)?;
                 self.loops.pop();
             }
@@ -406,7 +412,7 @@ impl Checker {
                 }
                 self.push();
                 self.bind(name, b.ty, true)?;
-                self.loops.push(label.clone());
+                self.loops.push((label.clone(), false, true));
                 self.block(body)?;
                 self.loops.pop();
                 self.pop()
@@ -416,13 +422,20 @@ impl Checker {
                 self.expected(value, &expected)?;
             }
             Stmt::Break(_, label) | Stmt::Continue(label) => {
-                if self.loops.is_empty() {
-                    return self.fail("loop control used outside a loop");
-                }
-                if let Some(label) = label
-                    && !self.loops.iter().any(|x| x.as_ref() == Some(label))
+                let continuing = matches!(s, Stmt::Continue(_));
+                if !self
+                    .loops
+                    .iter()
+                    .rev()
+                    .any(|(name, can_continue, can_break)| {
+                        label
+                            .as_ref()
+                            .is_none_or(|label| name.as_ref() == Some(label))
+                            && (!continuing || *can_continue)
+                            && (label.is_some() || continuing || *can_break)
+                    })
                 {
-                    return self.fail(format!("unknown loop label `{label}`"));
+                    return self.fail("no valid target for break or continue");
                 }
             }
         }
@@ -479,6 +492,8 @@ impl Checker {
             return Ok(());
         }
         if matches!(e, Expr::If { .. }) {
+            self.expression_types
+                .insert(e as *const Expr as usize, ty.clone());
             self.value_targets.push(ty.clone());
             let result = self.expr(e);
             self.value_targets.pop();
@@ -649,6 +664,8 @@ impl Checker {
                     && *ty != named("str")
                     && !string_array
                     && !bool_integer
+                    && !(matches!(ty,Type::Array(t,None) if **t == named("byte"))
+                        && matches!(&from,Type::Named(n,_) if matches!(n.as_str(),"int"|"uint"|"float")))
                 {
                     return self.fail("this cast is not implemented");
                 }
@@ -937,7 +954,11 @@ impl Checker {
                 let mut wildcard = false;
                 let mut booleans = HashSet::new();
                 let mut variants = HashSet::new();
-                let target = self.value_targets.last().cloned();
+                let target = self
+                    .expression_types
+                    .get(&(e as *const Expr as usize))
+                    .filter(|ty| **ty != Type::void())
+                    .cloned();
                 for (patterns, body) in arms {
                     self.push();
                     for pattern in patterns {
@@ -1186,9 +1207,11 @@ fn returns(block: &Block) -> bool {
     block.statements.iter().any(|statement| match statement {
         Stmt::Return(_) | Stmt::Throw(_) => true,
         Stmt::Block(block) | Stmt::Lock { body: block, .. } => returns(block),
-        Stmt::Expr(Expr::If { arms, .. }) => {
-            !arms.is_empty() && arms.iter().all(|(_, block)| returns(block))
-        }
+        Stmt::Expr(Expr::If { arms, .. })
+        | Stmt::LabeledIf {
+            value: Expr::If { arms, .. },
+            ..
+        } => !arms.is_empty() && arms.iter().all(|(_, block)| returns(block)),
         _ => false,
     })
 }

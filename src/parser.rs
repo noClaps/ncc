@@ -572,8 +572,14 @@ impl Parser {
                 body: self.block()?,
             });
         }
-        if label.is_some() {
-            return self.error("labels may only be applied to for, while, or lock blocks");
+        if let Some(label) = label {
+            if self.at(&TokenKind::Keyword(Keyword::If)) {
+                return Ok(Stmt::LabeledIf {
+                    label,
+                    value: self.expr(0)?,
+                });
+            }
+            return self.error("labels may only be applied to if, for, while, or lock blocks");
         }
         let saved = self.pos;
         let saved_tokens = self.tokens.clone();

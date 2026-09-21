@@ -346,7 +346,9 @@ impl Pass {
                 self.variable(v, b)?;
             }
             Stmt::Block(body) | Stmt::Lock { body, .. } => self.block(body, b)?,
-            Stmt::Expr(e) | Stmt::Assert(e) | Stmt::Throw(e) => self.expr(e, b)?,
+            Stmt::Expr(e) | Stmt::Assert(e) | Stmt::Throw(e) | Stmt::LabeledIf { value: e, .. } => {
+                self.expr(e, b)?
+            }
             Stmt::Return(Some(e)) => {
                 if let Some(t) = &self.return_type {
                     self.hint(e, t);

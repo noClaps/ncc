@@ -288,7 +288,9 @@ fn statement(
             hide(&v.pattern, names);
         }
         Stmt::Block(b) => block(b, names, aliases)?,
-        Stmt::Expr(e) | Stmt::Assert(e) | Stmt::Throw(e) => expr(e, names, aliases)?,
+        Stmt::Expr(e) | Stmt::Assert(e) | Stmt::Throw(e) | Stmt::LabeledIf { value: e, .. } => {
+            expr(e, names, aliases)?
+        }
         Stmt::Return(e) | Stmt::Break(e, _) => {
             if let Some(e) = e {
                 expr(e, names, aliases)?;

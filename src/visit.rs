@@ -23,7 +23,9 @@ fn stmt(s: &Stmt, f: &mut impl FnMut(&Expr)) {
             expr(target, f);
             expr(value, f);
         }
-        Stmt::Expr(e) | Stmt::Throw(e) | Stmt::Assert(e) => expr(e, f),
+        Stmt::Expr(e) | Stmt::Throw(e) | Stmt::Assert(e) | Stmt::LabeledIf { value: e, .. } => {
+            expr(e, f)
+        }
         Stmt::Return(e) | Stmt::Break(e, _) => {
             if let Some(e) = e {
                 expr(e, f);

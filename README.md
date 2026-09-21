@@ -25,6 +25,8 @@ Release builds perform bounded, memoized constant evaluation of pure scalar
 functions and loops, remove unreachable functions, and use the C compiler's
 `-O3`. Debug builds preserve runtime evaluation and use `-O0 -g`. Integer
 overflow remains an error, including when detected during constant evaluation.
+Numeric casts to `byte[]` produce eight little-endian bytes; floats use their
+64-bit IEEE-754 representation.
 
 ## Dependencies and self-hosting
 

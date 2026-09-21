@@ -7,6 +7,50 @@ use std::{
 static ID: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
+fn labelled_conditionals_and_value_breaks() {
+    success(
+        r#"
+test "labels" {
+    mut int index = 5
+    char letter = if index {
+        1 -> { break 'A' }
+        _ -> {
+            while index < 26 {
+                lbl: if index {
+                    5 -> { break 'E' }
+                    6 -> { break :lbl }
+                    7 -> { break }
+                    _ -> {}
+                }
+                index = index + 1
+            }
+            break 'Z'
+        }
+    }
+    assert letter == 'E'
+    index = 6
+    while index < 10 {
+        lbl: if index { 6 -> { break :lbl } _ -> { break } }
+        index = index + 1
+    }
+    assert index == 7
+    mutex int value = 0
+    mut int i = 0
+    while i < 2 {
+        lock value { value = value + 1 i = i + 1 continue }
+    }
+    assert value == 2
+}
+"#,
+        "",
+    );
+    rejects(
+        "lbl: if true { true -> { continue :lbl } false -> {} }",
+        "no valid target",
+    );
+}
+
+#[test]
 fn unicode_string_length_indexing_and_iteration() {
     success(
         r#"
@@ -249,6 +293,13 @@ test "nominal" {
     int[] dynamic = @as(int[],fixed)
     assert dynamic == fixed
     assert @as(int,3.5) == 3
+    byte[] bytes = @as(byte[],258)
+    assert @as(int,bytes[0]) == 2
+    assert @as(int,bytes[1]) == 1
+    assert @as(byte[],-1) == [@as(byte,255),@as(byte,255),@as(byte,255),@as(byte,255),@as(byte,255),@as(byte,255),@as(byte,255),@as(byte,255)]
+    byte[] one = @as(byte[],1.0)
+    assert @as(int,one[6]) == 240
+    assert @as(int,one[7]) == 63
 }"#,
         "",
     );
