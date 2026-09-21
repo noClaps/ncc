@@ -7,6 +7,37 @@ use std::{
 static ID: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
+fn partial_tuple_destructuring_evaluates_once_and_copies() {
+    success(
+        r#"
+mut int calls = 0
+fn values() (int, int[], int) { calls = calls + 1 return (1, [2], 3) }
+int a, (int[], int) b = values()
+test "partial tuple" {
+    assert calls == 1
+    assert a == 1
+    mut int[] data = [4]
+    (int, int[], int) source = (3, data, 5)
+    mut int first, (int[], int) rest = source
+    data[0] = 9
+    assert rest[0][0] == 4
+    assert rest[1] == 5
+    assert first == 3
+    rest[0][0] = 8
+    assert source[1][0] == 4
+    int plain, (int, int) nested = (1, (2, 3))
+    assert nested == (2, 3)
+}
+"#,
+        "",
+    );
+    rejects(
+        "int a, (int, int) b = (1, 2, 3, 4)",
+        "expects 2 grouped or 3 flat elements, found 4",
+    );
+}
+
+#[test]
 fn top_level_tuple_bindings_are_visible_to_functions() {
     success(
         r#"
@@ -507,6 +538,7 @@ fn modules_exports_and_external_functions() {
         dir.path().join("one.nc"),
         "pub int value = 7 pub fn square(int n) int { return n * n } int hidden = 9\n\
          pub int first, str second = (3, \"four\")\n\
+         pub int head, (int, int) tail = (5, 6, 7)\n\
          int private_first, int private_second = (5, 6)",
     )
     .unwrap();
@@ -525,6 +557,7 @@ extern "native.c" as native { fn add(int a, int b) int = "native_add" }
 @println(native.add(one.square(one.value), two.value))
 @println(one.first)
 @println(one.second)
+@println(one.tail)
 "#,
     )
     .unwrap();
@@ -538,7 +571,7 @@ extern "native.c" as native { fn add(int a, int b) int = "native_add" }
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(output.stdout, b"51\n3\nfour\n");
+    assert_eq!(output.stdout, b"51\n3\nfour\n(6, 7)\n");
     for name in ["private_first", "private_second"] {
         assert!(
             ncc::check_source(

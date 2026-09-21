@@ -148,7 +148,7 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
     for item in &checked.module.items {
         match item {
             Item::Global(v) => {
-                let value = e.expr_as(&v.value, &v.ty)?;
+                let value = e.declaration_value(v)?;
                 let value = e.copy(&v.ty, &value)?;
                 let slots = &global_slots[&(v as *const VarDecl as usize)];
                 for ((binding, ty, value), name) in binding_values(&v.pattern, &v.ty, &value)?
@@ -627,7 +627,7 @@ impl Emitter<'_> {
                     self.mutexes.insert(name);
                     return Ok(());
                 }
-                let value = self.expr_as(&v.value, &v.ty)?;
+                let value = self.declaration_value(v)?;
                 let value = self.copy(&v.ty, &value)?;
                 self.declare_pattern(&v.pattern, &v.ty, &value)?;
             }
@@ -2021,6 +2021,39 @@ impl Emitter<'_> {
             }
         }
         Ok(())
+    }
+    fn declaration_value(&mut self, v: &VarDecl) -> Result<String, Diagnostics> {
+        if let (Pattern::Tuple(_), Type::Tuple(expected), Type::Tuple(actual)) =
+            (&v.pattern, &v.ty, self.ty(&v.value)?)
+            && expected.len() != actual.len()
+        {
+            let value = self.expr(&v.value)?;
+            // Materialize once: regrouping must not repeat initializer side effects.
+            let source_type = self.c_type(&Type::Tuple(actual))?;
+            let source = self.fresh();
+            self.line(format!("{source_type} {source} = {value};"));
+            return self.regroup_tuple(&v.ty, &source, &mut 0);
+        }
+        self.expr_as(&v.value, &v.ty)
+    }
+    fn regroup_tuple(
+        &mut self,
+        ty: &Type,
+        source: &str,
+        index: &mut usize,
+    ) -> Result<String, Diagnostics> {
+        if let Type::Tuple(types) = ty {
+            let ct = self.c_type(ty)?;
+            let fields = types
+                .iter()
+                .map(|ty| self.regroup_tuple(ty, source, index))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(format!("({ct}){{{}}}", fields.join(", ")))
+        } else {
+            let value = format!("{source}.f_{index}");
+            *index += 1;
+            Ok(value)
+        }
     }
     fn expr_as(&mut self, e: &Expr, expected: &Type) -> Result<String, Diagnostics> {
         let value = self.expr(e)?;

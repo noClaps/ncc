@@ -123,6 +123,31 @@ int? global = 5
 }
 
 #[test]
+fn partial_tuple_destructuring_preserves_context_and_values() {
+    folded(
+        r#"
+int first, (uint, byte) rest = (1, 2, 3)
+int _, (int?, uint[]) optional = (0, none, [])
+fn sum((int, int, int) values) int {
+    int a, (int, int) b = values
+    return a + b[0] + b[1]
+}
+fn nested() int {
+    (int, (int, int)) a, int b = (1, 2, 3, 4)
+    return a[0] + a[1][0] + a[1][1] + b
+}
+@println(first)
+@println(rest)
+@println(sum((4, 5, 6)))
+@println(nested())
+@println(optional)
+"#,
+        &["sum", "nested"],
+        "1\n(2, 3)\n15\n10\n(none, [])\n",
+    );
+}
+
+#[test]
 fn tuple_bindings_shadow_and_discard_without_stale_constants() {
     folded(
         r#"

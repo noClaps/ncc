@@ -156,7 +156,9 @@ fn optimize_module(checked: CheckedModule) -> Result<Module, Diagnostics> {
                     env.remove(n);
                     functions.remove(n);
                 }
-                if let Some(value) = constant {
+                if let Some(value) = constant
+                    && let Some(value) = declaration_value(v, value)
+                {
                     let _ = bind_declaration(&v.pattern, value, &mut env, &mut Vec::new());
                 }
             }
@@ -906,6 +908,31 @@ enum Flow {
     Break,
     Continue,
 }
+fn declaration_value(v: &VarDecl, value: Value) -> Option<Value> {
+    if let (Pattern::Tuple(_), Type::Tuple(types), Value::Tuple(values)) =
+        (&v.pattern, &v.ty, &value)
+        && types.len() != values.len()
+    {
+        fn regroup(ty: &Type, values: &mut impl Iterator<Item = Value>) -> Option<Value> {
+            match ty {
+                Type::Tuple(types) => Some(Value::Tuple(
+                    types
+                        .iter()
+                        .map(|ty| regroup(ty, values))
+                        .collect::<Option<_>>()?,
+                )),
+                _ => values.next(),
+            }
+        }
+        let Value::Tuple(values) = value else {
+            unreachable!()
+        };
+        let mut values = values.into_iter();
+        let result = regroup(&v.ty, &mut values)?;
+        return values.next().is_none().then_some(result);
+    }
+    Some(value)
+}
 fn bind_declaration(
     pattern: &Pattern,
     value: Value,
@@ -1031,7 +1058,7 @@ impl Evaluator<'_> {
                         return None;
                     }
                     let value = self.evaluate(&v.value, env)?;
-                    let value = self.coerce(value, &v.ty)?;
+                    let value = self.coerce(declaration_value(v, value)?, &v.ty)?;
                     bind_declaration(&v.pattern, value, env, &mut declared)?;
                     Flow::Next
                 }

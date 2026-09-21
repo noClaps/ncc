@@ -254,7 +254,7 @@ impl Checker {
             Item::Global(x) => {
                 self.future_variable(x)?;
                 self.validate_type(&x.ty)?;
-                self.expected(&x.value, &x.ty)?;
+                self.declaration_value(x)?;
                 self.bind_pattern(&x.pattern, x.ty.clone(), x.mutable)?;
                 self.mark_mutex(x);
             }
@@ -378,7 +378,7 @@ impl Checker {
             Stmt::Var(x) => {
                 self.future_variable(x)?;
                 self.validate_type(&x.ty)?;
-                self.expected(&x.value, &x.ty)?;
+                self.declaration_value(x)?;
                 self.bind_pattern(&x.pattern, x.ty.clone(), x.mutable)?;
                 self.mark_mutex(x);
             }
@@ -550,6 +550,39 @@ impl Checker {
         self.expression_types
             .insert(e as *const Expr as usize, ty.clone());
         Ok(ty)
+    }
+    fn declaration_value(&mut self, v: &VarDecl) -> Result<(), Diagnostics> {
+        if let (Pattern::Tuple(_), Type::Tuple(types)) = (&v.pattern, &v.ty)
+            && types.iter().any(|ty| matches!(ty, Type::Tuple(_)))
+        {
+            let count = match &v.value {
+                Expr::Tuple(values) => Some(values.len()),
+                _ => match self.expr(&v.value)? {
+                    Type::Tuple(fields) => Some(fields.len()),
+                    _ => None,
+                },
+            };
+            if count.is_some_and(|count| count != types.len()) {
+                fn flatten(ty: &Type, fields: &mut Vec<Type>) {
+                    match ty {
+                        Type::Tuple(types) => types.iter().for_each(|ty| flatten(ty, fields)),
+                        ty => fields.push(ty.clone()),
+                    }
+                }
+                let mut fields = Vec::new();
+                flatten(&v.ty, &mut fields);
+                if count != Some(fields.len()) {
+                    return self.fail(format!(
+                        "tuple destructuring expects {} grouped or {} flat elements, found {}",
+                        types.len(),
+                        fields.len(),
+                        count.unwrap()
+                    ));
+                }
+                return self.expected(&v.value, &Type::Tuple(fields));
+            }
+        }
+        self.expected(&v.value, &v.ty)
     }
     fn expected(&mut self, e: &Expr, ty: &Type) -> Result<(), Diagnostics> {
         if let Type::Named(n, _) = ty

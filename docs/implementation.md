@@ -10,6 +10,8 @@ must stay explicit about features still under construction.
   short-circuit evaluation, shadowing, labelled loops, and return-path checks.
 - Arrays, maps, tuples/destructuring, structs, recursive enums, pattern bindings,
   optional values, error unions, catch/try/throw, and composite formatting.
+- Top-level and exported tuple bindings, discarded bindings, and partial tuple
+  destructuring into grouped values; initializers are evaluated once and copied.
 - Recursive structs through arrays, including mutual recursion; infinite inline
   layouts and cyclic aliases are rejected. Composite copy/equality/format helpers
   are generated once per type and operation.
