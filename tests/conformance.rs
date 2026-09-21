@@ -7,6 +7,60 @@ use std::{
 static ID: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
+fn alternative_pattern_bindings_are_consistent() {
+    success(
+        r#"
+enum Either { Left(int) Right(int) }
+fn value(Either e) int {
+    if e { Either.Left(n), Either.Right(n) -> { return n } }
+}
+test "alternatives" { assert value(Either.Left(3)) == 3 assert value(Either.Right(4)) == 4 }
+"#,
+        "",
+    );
+    rejects(
+        "enum E { A(int) B(int) } fn f(E e) int { if e { E.A(a), E.B(b) -> { return a } } }",
+        "alternative patterns must bind",
+    );
+    rejects(
+        "enum E { A(int) B(str) } fn f(E e) int { if e { E.A(a), E.B(a) -> { return 0 } } }",
+        "alternative patterns must bind",
+    );
+    rejects(
+        "enum E { A(int) B } fn f(E e) int { if e { E.A(a), E.B -> { return a } } }",
+        "alternative patterns must bind",
+    );
+}
+
+#[test]
+fn futures_cannot_escape_through_nominal_types_or_captures() {
+    rejects(
+        "type Hidden = fut int fn escape() Hidden { throw \"no\" }",
+        "futures cannot be returned",
+    );
+    rejects(
+        "struct Hidden { fut int value } fn escape() Hidden { throw \"no\" }",
+        "futures cannot be returned",
+    );
+    rejects(
+        "enum Hidden { Value(fut int) } fn escape() Hidden { throw \"no\" }",
+        "futures cannot be returned",
+    );
+    rejects(
+        "fn one() int { return 1 } fut int value = async one() fn later = fn() int { return await value }",
+        "cannot capture futures",
+    );
+    rejects(
+        "fn one() int { return 1 } fut int value = async one() fut int[] values = [value]",
+        "future must be initialized",
+    );
+    rejects(
+        "fn one() int { return 1 } fut int value = async one() struct Hidden { fut int value } Hidden hidden = Hidden{.value = value}",
+        "not stored in composite",
+    );
+}
+
+#[test]
 fn partial_tuple_destructuring_evaluates_once_and_copies() {
     success(
         r#"

@@ -43,7 +43,7 @@ must stay explicit about features still under construction.
 - Complete generic inference in nested contextual expressions.
 - Complete pattern/label coverage and restrictions on escaping futures.
 - Audit value-copy and evaluation-order behavior across all composite operations.
-- Finish standard modules, external ABI coverage, and source-aware diagnostics
+- Finish external C ABI coverage and source-aware diagnostics
   for all semantic errors (many still report the start of the file).
 - Extend compile-time evaluation to remaining operations and broaden optimisation
   within function bodies. The evaluation fuel/depth limits intentionally retain
@@ -54,6 +54,9 @@ must stay explicit about features still under construction.
 
 The Unicode crate is now a test oracle only. The compiler core can be built with
 zero production dependencies by disabling the optional LSP feature.
+Standard-library modules are intentionally out of scope: the language author
+will implement them separately. External implementations target C only; an Etch
+backend is not part of this toolchain.
 
 ## Self-hosting handoff
 

@@ -20,7 +20,7 @@ pub enum TypeInfo {
     Enum(EnumDecl),
     Function(Function),
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Binding {
     ty: Type,
     mutable: bool,
@@ -65,6 +65,40 @@ pub fn check(module: Module, _path: &Path) -> Result<CheckedModule, Diagnostics>
     })
 }
 impl Checker {
+    fn contains_future(&self, ty: &Type) -> bool {
+        fn visit(checker: &Checker, ty: &Type, seen: &mut HashSet<String>) -> bool {
+            match ty {
+                Type::Future(_) => true,
+                Type::Named(name, args) => {
+                    if args.iter().any(|ty| visit(checker, ty, seen)) {
+                        return true;
+                    }
+                    if !seen.insert(name.clone()) {
+                        return false;
+                    }
+                    match checker.types.get(name) {
+                        Some(TypeInfo::Alias(ty)) => visit(checker, ty, seen),
+                        Some(TypeInfo::Struct(s)) => {
+                            s.fields.iter().any(|f| visit(checker, &f.ty, seen))
+                        }
+                        Some(TypeInfo::Enum(e)) => e
+                            .variants
+                            .iter()
+                            .any(|v| v.values.iter().any(|ty| visit(checker, ty, seen))),
+                        _ => false,
+                    }
+                }
+                Type::Array(ty, _) | Type::Optional(ty) | Type::ErrorUnion(ty) => {
+                    visit(checker, ty, seen)
+                }
+                Type::Map(key, value) => visit(checker, key, seen) || visit(checker, value, seen),
+                Type::Tuple(types) => types.iter().any(|ty| visit(checker, ty, seen)),
+                // A callable is not a future. Captures and its return type are checked separately.
+                Type::Function(_, _) => false,
+            }
+        }
+        visit(self, ty, &mut HashSet::new())
+    }
     fn validate_layouts(&self) -> Result<(), Diagnostics> {
         fn visit(
             checker: &Checker,
@@ -137,6 +171,8 @@ impl Checker {
             if !matches!(v.value, Expr::Async(_)) {
                 return self.fail("a future must be initialized by an async function call");
             }
+        } else if self.contains_future(&v.ty) {
+            return self.fail("futures must be declared directly from async calls, not stored in composite or nominal values");
         }
         Ok(())
     }
@@ -227,7 +263,7 @@ impl Checker {
                 }
             }
             Item::Function(x) => self.with_generics(&x.generics, |this| {
-                if contains_future(&x.return_type) {
+                if this.contains_future(&x.return_type) {
                     return this.fail("futures cannot be returned from functions");
                 }
                 this.validate_type(&x.return_type)?;
@@ -719,7 +755,7 @@ impl Checker {
     fn expr_inner(&mut self, e: &Expr) -> Result<Type, Diagnostics> {
         match e {
             Expr::Lambda(f) => {
-                if contains_future(&f.return_type) {
+                if self.contains_future(&f.return_type) {
                     return self.fail("futures cannot be returned from functions");
                 }
                 self.validate_type(&f.return_type)?;
@@ -763,6 +799,11 @@ impl Checker {
                     .map(|(n, b)| (n, b.ty, b.mutex))
                     .collect();
                 captures.sort_by(|a, b| a.0.cmp(&b.0));
+                if captures.iter().any(|(_, ty, _)| self.contains_future(ty)) {
+                    return self.fail(
+                        "functions cannot capture futures; await the value before capturing it",
+                    );
+                }
                 self.captures.insert(e as *const Expr as usize, captures);
                 Ok(Type::Function(
                     f.params.iter().map(|p| p.ty.clone()).collect(),
@@ -1092,8 +1133,20 @@ impl Checker {
                     .cloned();
                 for (patterns, body) in arms {
                     self.push();
+                    let mut bindings = None;
                     for pattern in patterns {
+                        self.scopes.last_mut().unwrap().clear();
                         let total = self.check_pattern(pattern, &subject_type)?;
+                        let current = self.scopes.last().unwrap();
+                        if bindings
+                            .as_ref()
+                            .is_some_and(|bindings| bindings != current)
+                        {
+                            return self.fail(
+                                "alternative patterns must bind the same names with the same types",
+                            );
+                        }
+                        bindings = Some(current.clone());
                         match pattern {
                             Pattern::Wildcard => wildcard = true,
                             Pattern::Literal(value) => {
@@ -1305,15 +1358,6 @@ impl Checker {
 }
 fn named(x: &str) -> Type {
     Type::Named(x.into(), vec![])
-}
-fn contains_future(ty: &Type) -> bool {
-    match ty {
-        Type::Future(_) => true,
-        Type::Array(t, _) | Type::Optional(t) | Type::ErrorUnion(t) => contains_future(t),
-        Type::Tuple(ts) | Type::Named(_, ts) => ts.iter().any(contains_future),
-        Type::Map(k, v) => contains_future(k) || contains_future(v),
-        _ => false,
-    }
 }
 fn numeric(t: &Type) -> bool {
     matches!(t,Type::Named(n,_)if matches!(n.as_str(),"byte"|"int"|"uint"|"float"))
