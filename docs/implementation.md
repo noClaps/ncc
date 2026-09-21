@@ -31,6 +31,8 @@ must stay explicit about features still under construction.
 - Incremental UTF-16 LSP edits, local definitions, documentation hover,
   completions and open-document symbols. Unsaved imported buffers participate in
   checking, and changes/closure trigger fresh diagnostics in open importers.
+  Imported exports support definition/hover lookup. Parser errors and semantic
+  errors in variable/function declarations retain their original file locations.
 
 ## Known remaining work
 
@@ -45,7 +47,7 @@ must stay explicit about features still under construction.
   within function bodies. The evaluation fuel/depth limits intentionally retain
   runtime code for work that cannot safely be completed at compile time.
 - Improve multiline strings, embedded-NUL handling, canonical formatting, and
-  editor indexing of imported members and pattern bindings.
+  editor indexing of struct members and pattern bindings.
 - Increase negative, differential, concurrency, and full-specification tests.
 
 The Unicode crate is now a test oracle only. The compiler core can be built with

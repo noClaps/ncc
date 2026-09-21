@@ -157,6 +157,7 @@ fn execute(o: Options) -> Result<ExitCode, String> {
                 let message = Diagnostics(vec![Diagnostic {
                     message: format!("[{}] {}", w.code, w.message),
                     span: w.span,
+                    path: Some(w.path.clone()),
                 }])
                 .render(&text, &w.path)
                 .replacen(": error:", ": warning:", 1);

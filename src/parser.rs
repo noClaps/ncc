@@ -487,6 +487,8 @@ impl Parser {
             );
         }
         Ok(VarDecl {
+            source_path: self.path.clone(),
+            span: start..self.tokens[self.pos - 1].span.end,
             public: false,
             mutable,
             mutex,
@@ -519,6 +521,8 @@ impl Parser {
                     Box::new(function.return_type.clone()),
                 );
                 return Ok(Stmt::Var(VarDecl {
+                    source_path: self.path.clone(),
+                    span: function.span.clone(),
                     public: false,
                     mutable: false,
                     mutex: false,
@@ -541,6 +545,8 @@ impl Parser {
                 Box::new(f.return_type.clone()),
             );
             return Ok(Stmt::Var(VarDecl {
+                source_path: self.path.clone(),
+                span: start..self.tokens[self.pos - 1].span.end,
                 public: false,
                 mutable: false,
                 mutex: false,

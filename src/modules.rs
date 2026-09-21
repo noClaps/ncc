@@ -88,11 +88,10 @@ impl Loader<'_> {
                             0..0,
                         )
                     })?;
-                    let exports = self.visit(
-                        parser::parse_at(lexer::lex(&source)?, &imported_path)?,
-                        &imported_path,
-                        false,
-                    )?;
+                    let imported_module = lexer::lex(&source)
+                        .and_then(|tokens| parser::parse_at(tokens, &imported_path))
+                        .map_err(|error| error.at_source(&imported_path, 0..0))?;
+                    let exports = self.visit(imported_module, &imported_path, false)?;
                     aliases.insert(alias.clone(), exports);
                 }
                 Item::Extern {

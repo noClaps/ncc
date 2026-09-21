@@ -1,6 +1,6 @@
 //! Editor source index. Reuses parser declarations, never the lowered C names.
 use crate::{
-    lexer::{self, Token, TokenKind},
+    lexer::{self, Keyword, Token, TokenKind},
     parser::{self, SourceSymbol},
 };
 use serde_json::{Value, json};
@@ -12,6 +12,65 @@ pub(super) struct Index<'a> {
 }
 
 impl<'a> Index<'a> {
+    fn imported_path(&self, alias: &str) -> Option<String> {
+        let mut importing = false;
+        for (index, token) in self.tokens.iter().enumerate() {
+            match &token.kind {
+                TokenKind::Keyword(Keyword::Import) => importing = true,
+                TokenKind::RBrace => importing = false,
+                TokenKind::String(path)
+                    if importing
+                        && matches!(
+                            self.tokens.get(index + 1).map(|token| &token.kind),
+                            Some(TokenKind::Keyword(Keyword::As))
+                        )
+                        && matches!(self.tokens.get(index + 2).map(|token| &token.kind), Some(TokenKind::Ident(name)) if name == alias) =>
+                {
+                    return Some(path.clone());
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Recognize an unshadowed import namespace, not arbitrary member spelling.
+    pub fn imported_member(&self, at: usize) -> Option<(String, String)> {
+        let index = self
+            .tokens
+            .iter()
+            .position(|token| token.span.contains(&at))
+            .or_else(|| {
+                self.tokens.iter().position(|token| {
+                    token.span.end == at && matches!(token.kind, TokenKind::Ident(_))
+                })
+            })?;
+        if index < 2 || self.tokens[index - 1].kind != TokenKind::Dot {
+            return None;
+        }
+        let (TokenKind::Ident(alias), TokenKind::Ident(name)) =
+            (&self.tokens[index - 2].kind, &self.tokens[index].kind)
+        else {
+            return None;
+        };
+        if self.resolve(alias, at).is_some() {
+            return None;
+        }
+        Some((self.imported_path(alias)?, name.clone()))
+    }
+
+    pub fn exported_position(&self, name: &str) -> Option<usize> {
+        self.symbols
+            .iter()
+            .find(|symbol| {
+                symbol.name == name
+                    && symbol.scope.is_none()
+                    && self.text[..symbol.declaration.start]
+                        .trim_end()
+                        .ends_with("pub")
+            })
+            .map(|symbol| symbol.selection.start)
+    }
     pub fn new(text: &'a str) -> Self {
         let tokens = lexer::lex(text).unwrap_or_default();
         let symbols = parser::source_symbols(tokens.clone());

@@ -186,6 +186,13 @@ impl Checker {
         }
     }
     fn item(&mut self, item: &Item) -> Result<(), Diagnostics> {
+        self.item_inner(item).map_err(|error| match item {
+            Item::Function(f) => error.at_source(&f.source_path, f.span.clone()),
+            Item::Global(v) => error.at_source(&v.source_path, v.span.clone()),
+            _ => error,
+        })
+    }
+    fn item_inner(&mut self, item: &Item) -> Result<(), Diagnostics> {
         match item {
             Item::Struct(x) => self.with_generics(&x.generics, |this| {
                 for f in &x.fields {
@@ -352,6 +359,12 @@ impl Checker {
         Ok(())
     }
     fn stmt(&mut self, s: &Stmt) -> Result<(), Diagnostics> {
+        self.stmt_inner(s).map_err(|error| match s {
+            Stmt::Var(v) => error.at_source(&v.source_path, v.span.clone()),
+            _ => error,
+        })
+    }
+    fn stmt_inner(&mut self, s: &Stmt) -> Result<(), Diagnostics> {
         match s {
             Stmt::LabeledIf { label, value } => {
                 self.loops.push((Some(label.clone()), false, false));

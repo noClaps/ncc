@@ -135,7 +135,9 @@ fn lsp_rechecks_importers_against_unsaved_buffers() {
     let dependency = format!("file://{}/dependency.nc", directory.path().display());
     let messages = [
         json!({"method":"textDocument/didOpen","params":{"textDocument":{"uri":root,"version":1,"text":"import { \"dependency\" as dep } int n = dep.value()"}}}),
-        json!({"method":"textDocument/didOpen","params":{"textDocument":{"uri":dependency,"version":1,"text":"pub fn value() int { return 42 }"}}}),
+        json!({"method":"textDocument/didOpen","params":{"textDocument":{"uri":dependency,"version":1,"text":"/// Unsaved documentation.\npub fn value() int { return 42 }"}}}),
+        json!({"id":2,"method":"textDocument/definition","params":{"textDocument":{"uri":root},"position":{"line":0,"character":44}}}),
+        json!({"id":3,"method":"textDocument/hover","params":{"textDocument":{"uri":root},"position":{"line":0,"character":44}}}),
         json!({"method":"textDocument/didChange","params":{"textDocument":{"uri":dependency,"version":2},"contentChanges":[{"text":"pub fn value() bool { return true }"}]}}),
         json!({"method":"textDocument/didClose","params":{"textDocument":{"uri":dependency}}}),
         json!({"id":1,"method":"shutdown"}),
@@ -167,6 +169,25 @@ fn lsp_rechecks_importers_against_unsaved_buffers() {
         })
         .collect();
     assert_eq!(root_errors, [true, false, true, true]);
+    let definition = notifications
+        .iter()
+        .find(|message| message["id"] == 2)
+        .unwrap();
+    assert_eq!(definition["result"]["uri"], dependency);
+    assert_eq!(
+        definition["result"]["range"]["start"],
+        json!({"line":1,"character":7})
+    );
+    let hover = notifications
+        .iter()
+        .find(|message| message["id"] == 3)
+        .unwrap();
+    assert!(
+        hover["result"]["contents"]["value"]
+            .as_str()
+            .unwrap()
+            .contains("Unsaved documentation.")
+    );
     assert_eq!(
         std::fs::read_to_string(directory.path().join("dependency.nc")).unwrap(),
         "pub fn value() str { return \"disk\" }"
@@ -188,4 +209,32 @@ fn checks_can_import_new_unsaved_files() {
     )
     .unwrap();
     assert!(!directory.path().join("new.nc").exists());
+}
+
+#[test]
+fn imported_errors_retain_source_paths_and_declaration_locations() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let root = directory.path().join("main.nc");
+    let imported = directory.path().join("library.nc");
+    std::fs::write(
+        &imported,
+        "// header\n\npub fn broken() int {\n  int n = false\n  return n\n}\n",
+    )
+    .unwrap();
+    let source = "import { \"library\" as lib }";
+    let error = ncc::check_source(source, &root).unwrap_err();
+    assert_eq!(error.0[0].path.as_deref(), Some(imported.as_path()));
+    let rendered = error.render(source, &root);
+    assert!(
+        rendered.contains(&format!("{}:4:3:", imported.display())),
+        "{rendered}"
+    );
+    assert!(rendered.contains("int n = false"));
+    std::fs::write(&imported, "pub fn broken( { }").unwrap();
+    assert_eq!(
+        ncc::check_source(source, &root).unwrap_err().0[0]
+            .path
+            .as_deref(),
+        Some(imported.as_path())
+    );
 }

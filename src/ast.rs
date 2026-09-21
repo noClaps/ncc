@@ -83,6 +83,8 @@ pub struct Param {
 }
 #[derive(Clone, Debug)]
 pub struct VarDecl {
+    pub source_path: std::path::PathBuf,
+    pub span: Span,
     pub public: bool,
     pub mutable: bool,
     pub mutex: bool,

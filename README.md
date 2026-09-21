@@ -43,8 +43,9 @@ optimiser.
 `ncc lsp` provides versioned incremental synchronization, diagnostics, formatting,
 local definition navigation, documentation hover, completion, and symbols from
 open documents. Imports are checked against unsaved buffers, and dependents are
-rechecked when those buffers change or close. Navigation is parser-backed but does not yet resolve imported
-members or every pattern binding.
+rechecked when those buffers change or close. Definition and documentation lookup
+also resolve exported import members, including unsaved files. Arbitrary struct
+members and every pattern binding are not yet indexed.
 
 The [Tree-sitter grammar](tree-sitter-nc/README.md) includes generated C and a
 syntax corpus. The [Zed extension](editors/zed/README.md) adds highlighting,

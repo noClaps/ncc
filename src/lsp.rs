@@ -139,11 +139,17 @@ pub fn serve(mut input: impl BufRead, mut output: impl Write) -> io::Result<()> 
                     if method.ends_with("documentSymbol") {
                         json!(index.symbols(uri, ""))
                     } else if let Some(at) = offset(&document.text, &p["position"]) {
-                        match method {
+                        let imported =
+                            if matches!(method, "textDocument/definition" | "textDocument/hover") {
+                                imported_navigation(&index, at, uri, method, &documents)
+                            } else {
+                                None
+                            };
+                        imported.unwrap_or_else(|| match method {
                             "textDocument/definition" => index.definition(uri, at),
                             "textDocument/hover" => index.hover(at),
                             _ => index.completion(at),
-                        }
+                        })
                     } else {
                         Value::Null
                     }
@@ -174,6 +180,34 @@ struct Document {
     text: String,
     version: i64,
 }
+fn imported_navigation(
+    index: &index::Index<'_>,
+    at: usize,
+    uri: &str,
+    method: &str,
+    documents: &HashMap<String, Document>,
+) -> Option<Value> {
+    let (imported, name) = index.imported_member(at)?;
+    let root = document_path(uri);
+    let path = root.parent()?.join(imported).with_extension("nc");
+    let key = crate::modules::source_key(&path);
+    let open = documents
+        .iter()
+        .find(|(uri, _)| crate::modules::source_key(&document_path(uri)) == key);
+    let source = open
+        .map(|(_, document)| document.text.clone())
+        .or_else(|| std::fs::read_to_string(&path).ok())?;
+    let imported = index::Index::new(&source);
+    let position = imported.exported_position(&name)?;
+    Some(if method == "textDocument/definition" {
+        imported.definition(
+            &open.map_or_else(|| file_uri(&path), |(uri, _)| uri.clone()),
+            position,
+        )
+    } else {
+        imported.hover(position)
+    })
+}
 fn publish_diagnostics(
     documents: &HashMap<String, Document>,
     output: &mut impl Write,
@@ -194,7 +228,15 @@ fn publish_diagnostics(
         let path = document_path(uri);
         let diagnostics = match crate::lint::check_with_sources(text, &path, &sources) {
             Ok(warnings) => warnings.iter().filter(|w| crate::modules::source_key(&w.path) == crate::modules::source_key(&path)).map(|w| json!({"range":{"start":position(text,w.span.start),"end":position(text,w.span.end)},"severity":2,"source":"ncc","code":w.code,"message":w.message})).collect(),
-            Err(errors) => errors.0.iter().map(|e| json!({"range":{"start":position(text, e.span.start),"end":position(text,e.span.end)},"severity":1,"source":"ncc","message":e.message})).collect::<Vec<_>>()
+            Err(errors) => errors.0.iter().map(|error| {
+                let actual_path = error.path.as_deref().unwrap_or(&path);
+                if crate::modules::source_key(actual_path) != crate::modules::source_key(&path) {
+                    let imported = crate::modules::read_source(actual_path, &sources).unwrap_or_default();
+                    json!({"range":{"start":position(text,0),"end":position(text,0)},"severity":1,"source":"ncc","message":format!("{}: {}",actual_path.display(),error.message),"relatedInformation":[{"location":{"uri":file_uri(actual_path),"range":{"start":position(&imported,error.span.start),"end":position(&imported,error.span.end)}},"message":error.message}]})
+                } else {
+                    json!({"range":{"start":position(text, error.span.start),"end":position(text,error.span.end)},"severity":1,"source":"ncc","message":error.message})
+                }
+            }).collect::<Vec<_>>()
         };
         send(
             output,
@@ -276,6 +318,19 @@ fn document_path(uri: &str) -> PathBuf {
         i += 1;
     }
     PathBuf::from(String::from_utf8_lossy(&bytes).into_owned())
+}
+fn file_uri(path: &std::path::Path) -> String {
+    let path = crate::modules::source_key(path);
+    let mut uri = String::from("file://");
+    for byte in path.to_string_lossy().bytes() {
+        if byte.is_ascii_alphanumeric() || b"/-_.~:".contains(&byte) {
+            uri.push(byte as char);
+        } else {
+            use std::fmt::Write;
+            let _ = write!(uri, "%{byte:02X}");
+        }
+    }
+    uri
 }
 fn send(output: &mut impl Write, message: Value) -> io::Result<()> {
     let body = serde_json::to_vec(&message)?;
