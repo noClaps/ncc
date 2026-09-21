@@ -12,6 +12,7 @@ pub fn parse_at(tokens: Vec<Token>, path: &std::path::Path) -> Result<Module, Di
         tokens,
         pos: 0,
         path: path.to_path_buf(),
+        symbols: None,
     }
     .module()
 }
@@ -19,8 +20,61 @@ struct Parser {
     tokens: Vec<Token>,
     pos: usize,
     path: std::path::PathBuf,
+    symbols: Option<Vec<SourceSymbol>>,
+}
+
+/// Source-level declarations retained for editor navigation, before lowering.
+#[derive(Clone, Debug)]
+pub struct SourceSymbol {
+    pub name: String,
+    pub selection: Span,
+    pub declaration: Span,
+    pub scope: Option<Span>,
+    pub visible_from: usize,
+    pub kind: u32,
+}
+
+/// Keep declarations preceding a syntax error useful while editing incomplete code.
+pub fn source_symbols(tokens: Vec<Token>) -> Vec<SourceSymbol> {
+    if tokens.is_empty() {
+        return Vec::new();
+    }
+    let mut parser = Parser {
+        tokens,
+        pos: 0,
+        path: "<editor>".into(),
+        symbols: Some(Vec::new()),
+    };
+    let _ = parser.module();
+    parser.symbols.unwrap()
 }
 impl Parser {
+    fn symbol(&mut self, token: Token, start: usize, kind: u32, visible_from: usize) {
+        if let Some(symbols) = &mut self.symbols
+            && let TokenKind::Ident(name) = token.kind
+        {
+            symbols.push(SourceSymbol {
+                name,
+                selection: token.span,
+                declaration: start..self.tokens[self.pos.saturating_sub(1)].span.end,
+                scope: None,
+                visible_from,
+                kind,
+            });
+        }
+    }
+    fn symbol_count(&self) -> usize {
+        self.symbols.as_ref().map_or(0, Vec::len)
+    }
+    fn scope_symbols(&mut self, from: usize, start: usize) {
+        if let Some(symbols) = &mut self.symbols {
+            for symbol in &mut symbols[from..] {
+                if symbol.scope.is_none() {
+                    symbol.scope = Some(start..self.tokens[self.pos.saturating_sub(1)].span.end);
+                }
+            }
+        }
+    }
     fn current(&self) -> &Token {
         &self.tokens[self.pos]
     }
@@ -88,6 +142,8 @@ impl Parser {
     }
     fn item(&mut self) -> Result<Item, Diagnostics> {
         if self.keyword(Keyword::Extern) {
+            let symbol_start = self.symbol_count();
+            let start = self.tokens[self.pos - 1].span.start;
             let path = match self.bump().kind {
                 TokenKind::String(path) => path,
                 _ => return self.error("expected external implementation path"),
@@ -129,6 +185,7 @@ impl Parser {
                 });
             }
             self.bump();
+            self.scope_symbols(symbol_start, start);
             return Ok(Item::Extern {
                 path,
                 alias,
@@ -143,13 +200,13 @@ impl Parser {
             return self.enum_item(public).map(Item::Enum);
         }
         if self.keyword(Keyword::Type) {
+            let token = self.current().clone();
+            let start = self.tokens[self.pos - 1].span.start;
             let name = self.ident()?;
             self.expect(TokenKind::Assign)?;
-            return Ok(Item::TypeAlias {
-                public,
-                name,
-                ty: self.ty()?,
-            });
+            let ty = self.ty()?;
+            self.symbol(token, start, 26, 0);
+            return Ok(Item::TypeAlias { public, name, ty });
         }
         if self.at(&TokenKind::Keyword(Keyword::Fn))
             && !matches!(
@@ -201,6 +258,8 @@ impl Parser {
         Ok(result)
     }
     fn struct_item(&mut self, public: bool) -> Result<StructDecl, Diagnostics> {
+        let token = self.current().clone();
+        let start = self.tokens[self.pos - 1].span.start;
         let name = self.ident()?;
         let generics = self.generics()?;
         self.expect(TokenKind::LBrace)?;
@@ -211,6 +270,7 @@ impl Parser {
             fields.push(Field { name, ty });
         }
         self.bump();
+        self.symbol(token, start, 23, 0);
         Ok(StructDecl {
             public,
             name,
@@ -219,6 +279,8 @@ impl Parser {
         })
     }
     fn enum_item(&mut self, public: bool) -> Result<EnumDecl, Diagnostics> {
+        let token = self.current().clone();
+        let start = self.tokens[self.pos - 1].span.start;
         let name = self.ident()?;
         let generics = self.generics()?;
         self.expect(TokenKind::LBrace)?;
@@ -239,6 +301,7 @@ impl Parser {
             variants.push(Variant { name, values });
         }
         self.bump();
+        self.symbol(token, start, 10, 0);
         Ok(EnumDecl {
             public,
             name,
@@ -248,6 +311,9 @@ impl Parser {
     }
     fn function(&mut self, public: bool) -> Result<Function, Diagnostics> {
         let start = self.current().span.start;
+        let declaration_start = self.tokens[self.pos - 1].span.start;
+        let token = self.current().clone();
+        let symbol_start = self.symbol_count();
         let name = self.ident()?;
         let generics = self.generics()?;
         let params = self.params()?;
@@ -266,6 +332,8 @@ impl Parser {
             false
         };
         let body = self.block()?;
+        self.scope_symbols(symbol_start, start);
+        self.symbol(token, declaration_start, 12, 0);
         Ok(Function {
             source_path: self.path.clone(),
             span: start..self.tokens[self.pos - 1].span.end,
@@ -282,8 +350,11 @@ impl Parser {
         self.expect(TokenKind::LParen)?;
         let mut out = vec![];
         while !self.at(&TokenKind::RParen) {
+            let start = self.current().span.start;
             let ty = self.ty()?;
+            let token = self.current().clone();
             let name = self.ident()?;
+            self.symbol(token, start, 13, 0);
             out.push(Param { name, ty });
             if !self.at(&TokenKind::RParen) {
                 self.expect(TokenKind::Comma)?
@@ -387,9 +458,11 @@ impl Parser {
         Ok(x)
     }
     fn var_decl(&mut self) -> Result<VarDecl, Diagnostics> {
+        let start = self.current().span.start;
         let mutex = self.keyword(Keyword::Mutex);
         let mutable = self.keyword(Keyword::Mut);
         let mut ty = self.ty()?;
+        let mut names = vec![self.current().clone()];
         let mut pattern = Pattern::Name(self.ident()?);
         if self.at(&TokenKind::Comma) {
             let mut types = vec![ty];
@@ -397,6 +470,7 @@ impl Parser {
             while self.at(&TokenKind::Comma) {
                 self.bump();
                 types.push(self.ty()?);
+                names.push(self.current().clone());
                 patterns.push(Pattern::Name(self.ident()?));
             }
             ty = Type::Tuple(types);
@@ -404,6 +478,14 @@ impl Parser {
         }
         self.expect(TokenKind::Assign)?;
         let value = self.expr(0)?;
+        for token in names {
+            self.symbol(
+                token,
+                start,
+                if mutable { 13 } else { 14 },
+                self.tokens[self.pos - 1].span.end,
+            );
+        }
         Ok(VarDecl {
             public: false,
             mutable,
@@ -414,12 +496,15 @@ impl Parser {
         })
     }
     fn block(&mut self) -> Result<Block, Diagnostics> {
+        let start = self.current().span.start;
+        let symbol_start = self.symbol_count();
         self.expect(TokenKind::LBrace)?;
         let mut statements = vec![];
         while !self.at(&TokenKind::RBrace) {
             statements.push(self.stmt()?)
         }
         self.bump();
+        self.scope_symbols(symbol_start, start);
         Ok(Block { statements })
     }
     fn stmt(&mut self) -> Result<Stmt, Diagnostics> {
@@ -442,9 +527,12 @@ impl Parser {
                     value: Expr::Lambda(Box::new(function)),
                 }));
             }
+            let token = self.current().clone();
+            let start = self.tokens[self.pos - 1].span.start;
             let name = self.ident()?;
             self.expect(TokenKind::Assign)?;
             let value = self.expr(0)?;
+            self.symbol(token, start, 12, self.tokens[self.pos - 1].span.end);
             let Expr::Lambda(f) = &value else {
                 return self.error("inferred `fn` declarations require an anonymous function");
             };
@@ -527,16 +615,22 @@ impl Parser {
             return Ok(Stmt::Assert(self.expr(0)?));
         }
         if self.keyword(Keyword::For) {
+            let token = self.current().clone();
             let name = self.ident()?;
             if !self.keyword(Keyword::In) {
                 return self.error("expected `in`");
             };
             let iterable = self.expr(0)?;
+            let start = self.current().span.start;
+            let body = self.block()?;
+            let symbols = self.symbol_count();
+            self.symbol(token, start, 13, start);
+            self.scope_symbols(symbols, start);
             return Ok(Stmt::For {
                 label,
                 name,
                 iterable,
-                body: self.block()?,
+                body,
             });
         }
         if self.keyword(Keyword::While) {
@@ -739,6 +833,7 @@ impl Parser {
     fn prefix(&mut self) -> Result<Expr, Diagnostics> {
         let start = self.current().span.start;
         if self.keyword(Keyword::Fn) {
+            let symbol_start = self.symbol_count();
             let params = self.params()?;
             let return_type = if self.at(&TokenKind::LBrace) {
                 Type::void()
@@ -746,6 +841,7 @@ impl Parser {
                 self.ty()?
             };
             let body = self.block()?;
+            self.scope_symbols(symbol_start, start);
             return Ok(Expr::Lambda(Box::new(Function {
                 source_path: self.path.clone(),
                 span: start..self.tokens[self.pos - 1].span.end,
@@ -921,6 +1017,7 @@ impl Parser {
                 path: self.path.clone(),
                 tokens: crate::lexer::lex(&text[start..end])?,
                 pos: 0,
+                symbols: None,
             };
             let value = parser.expr(0)?;
             parser.expect(TokenKind::Eof)?;

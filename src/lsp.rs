@@ -1,5 +1,7 @@
 //! Stdio LSP transport, versioned incremental document sync and diagnostics.
 use serde_json::{Value, json};
+#[path = "lsp_index.rs"]
+mod index;
 use std::{
     collections::HashMap,
     io::{self, BufRead, Write},
@@ -52,7 +54,7 @@ pub fn serve(mut input: impl BufRead, mut output: impl Write) -> io::Result<()> 
         }
         let result = match method {
             "initialize" => Some(
-                json!({"capabilities":{"positionEncoding":"utf-16","textDocumentSync":{"openClose":true,"change":2},"documentFormattingProvider":true},"serverInfo":{"name":"ncc","version":env!("CARGO_PKG_VERSION")}}),
+                json!({"capabilities":{"positionEncoding":"utf-16","textDocumentSync":{"openClose":true,"change":2},"documentFormattingProvider":true,"documentSymbolProvider":true,"workspaceSymbolProvider":true,"definitionProvider":true,"hoverProvider":true,"completionProvider":{}},"serverInfo":{"name":"ncc","version":env!("CARGO_PKG_VERSION")}}),
             ),
             "shutdown" => {
                 shutdown = true;
@@ -121,6 +123,36 @@ pub fn serve(mut input: impl BufRead, mut output: impl Write) -> io::Result<()> 
                     }
                 } else {
                     json!([])
+                })
+            }
+            "workspace/symbol" => {
+                let query = p["query"].as_str().unwrap_or("");
+                let mut symbols = Vec::new();
+                for (uri, document) in &documents {
+                    symbols.extend(index::Index::new(&document.text).symbols(uri, query));
+                }
+                Some(json!(symbols))
+            }
+            "textDocument/documentSymbol"
+            | "textDocument/definition"
+            | "textDocument/hover"
+            | "textDocument/completion" => {
+                let uri = p["textDocument"]["uri"].as_str().unwrap_or("");
+                Some(if let Some(document) = documents.get(uri) {
+                    let index = index::Index::new(&document.text);
+                    if method.ends_with("documentSymbol") {
+                        json!(index.symbols(uri, ""))
+                    } else if let Some(at) = offset(&document.text, &p["position"]) {
+                        match method {
+                            "textDocument/definition" => index.definition(uri, at),
+                            "textDocument/hover" => index.hover(at),
+                            _ => index.completion(at),
+                        }
+                    } else {
+                        Value::Null
+                    }
+                } else {
+                    Value::Null
                 })
             }
             _ => {
