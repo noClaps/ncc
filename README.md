@@ -4,6 +4,9 @@ Rust front end, portable C output, and system-C-compiler executable builds.
 The language specification is in [docs/design.md](docs/design.md). Implementation
 is ongoing; see [the implementation ledger](docs/implementation.md).
 
+[examples/bootstrap/compiler.nc](examples/bootstrap/compiler.nc) is a working
+NC-written subset compiler and a starting point for the self-hosted compiler.
+
 ```sh
 cargo build --release
 target/release/ncc run example.nc

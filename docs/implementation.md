@@ -25,7 +25,8 @@ must stay explicit about features still under construction.
 
 ## Known remaining work
 
-- Complete all specified casts and operators; settle numeric byte-array encoding.
+- Complete remaining specified casts and operators. Numeric byte-array casts
+  now use fixed little-endian encoding (IEEE-754 bits for floats).
 - Complete generic inference in nested contextual expressions. Validate recursive
   type layouts without backend recursion failures.
 - Complete pattern/label coverage and restrictions on escaping futures.
@@ -41,6 +42,14 @@ must stay explicit about features still under construction.
 
 The Unicode crate is now a test oracle only. The compiler core can be built with
 zero production dependencies by disabling the optional LSP feature.
+
+## Self-hosting handoff
+
+`examples/bootstrap/compiler.nc` implements a real subset compiler in NC:
+stdin input, recursive enum AST, precedence parsing, symbol-table maps, shadowing,
+diagnostics, and C output. Its integration test compiles the compiler in both
+debug and release modes, feeds it source, compiles the resulting C, and runs it.
+This is the verified handoff baseline, not a claim of full language completeness.
 
 ## Initial audit findings
 

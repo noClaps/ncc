@@ -87,23 +87,6 @@ impl Parser {
         Ok(Module { items })
     }
     fn item(&mut self) -> Result<Item, Diagnostics> {
-        if self.keyword(Keyword::Import) {
-            self.expect(TokenKind::LBrace)?;
-            let mut path = "".into();
-            let mut alias = "".into();
-            while !self.at(&TokenKind::RBrace) {
-                match self.bump().kind {
-                    TokenKind::String(s) => path = s,
-                    _ => return self.error("expected import path"),
-                };
-                if !self.keyword(Keyword::As) {
-                    return self.error("expected `as` in import");
-                };
-                alias = self.ident()?;
-            }
-            self.expect(TokenKind::RBrace)?;
-            return Ok(Item::Import { path, alias });
-        }
         if self.keyword(Keyword::Extern) {
             let path = match self.bump().kind {
                 TokenKind::String(path) => path,

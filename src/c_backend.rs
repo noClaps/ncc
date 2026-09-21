@@ -139,6 +139,7 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
     e.scopes[0].clear();
     e.return_type = Type::void();
     e.line("int main(void) {");
+    let main_body_start = e.out.len();
     for item in &checked.module.items {
         match item {
             Item::Global(v) => {
@@ -201,22 +202,17 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
         output.push_str(function);
         output.push('\n');
     }
+    output.push_str(&e.out[..main_body_start]);
     if e.helpers
         .iter()
         .any(|helper| helper.contains("nc_allocations"))
     {
-        output.push_str(&e.out.replacen(
-            "int main(void) {",
-            if e.helpers.contains("/* async runtime */") {
-                "int main(void) {\natexit(nc_cleanup);\natexit(nc_async_cleanup);"
-            } else {
-                "int main(void) {\natexit(nc_cleanup);"
-            },
-            1,
-        ));
-    } else {
-        output.push_str(&e.out);
+        output.push_str("atexit(nc_cleanup);\n");
     }
+    if e.helpers.contains("/* async runtime */") {
+        output.push_str("atexit(nc_async_cleanup);\n");
+    }
+    output.push_str(&e.out[main_body_start..]);
     Ok(output)
 }
 fn unsupported<T>(feature: &str) -> Result<T, Diagnostics> {
@@ -1055,7 +1051,10 @@ impl Emitter<'_> {
                         self.line(format!("memcpy({result}.vals,{value},{result}.len);"));
                     } else {
                         let i = self.fresh();
-                        self.line(format!("for (uint64_t {i}=0; {i}<{result}.len; ++{i}) {result}.vals[{i}]=nc_str_index({value},{i});"));
+                        let cursor = self.fresh();
+                        let next = self.fresh();
+                        let ch = self.fresh();
+                        self.line(format!("const char *{cursor} = {value}; for (uint64_t {i}=0; {i}<{result}.len; ++{i}) {{ const char *{next} = nc_grapheme_next({cursor}); size_t length=(size_t)({next}-{cursor}); char *{ch}=nc_alloc(length+1,1); memcpy({ch},{cursor},length); {result}.vals[{i}]={ch}; {cursor}={next}; }}"));
                     }
                     return Ok(result);
                 }
@@ -1241,18 +1240,19 @@ impl Emitter<'_> {
                     for arg in args {
                         let value = self.expr(arg)?;
                         let ty = self.ty(arg)?;
-                        if matches!(ty, Type::Map(_, _) | Type::Tuple(_) | Type::Optional(_))
-                            || self.fields(&ty).is_some()
+                        if matches!(
+                            ty,
+                            Type::Array(_, _)
+                                | Type::Map(_, _)
+                                | Type::Tuple(_)
+                                | Type::Optional(_)
+                        ) || self.fields(&ty).is_some()
                             || self.enum_decl(&ty).is_some()
                             || matches!(&ty,Type::Named(n,_) if matches!(self.checked.types.get(n),Some(TypeInfo::Alias(_))))
                             || matches!(&ty, Type::Named(n, _) if n == "float")
                         {
                             let string = self.string_value(&value, &ty)?;
                             self.line(format!("fprintf({stream}, \"%s\", {string});"));
-                            continue;
-                        }
-                        if matches!(ty, Type::Array(_, _)) {
-                            self.print_array(stream, &value, &ty)?;
                             continue;
                         }
                         let (fmt, value) = match ty {
@@ -1985,33 +1985,6 @@ impl Emitter<'_> {
             }
             _ => return unsupported("this binding pattern"),
         }
-        Ok(())
-    }
-    fn print_array(&mut self, stream: &str, value: &str, ty: &Type) -> Result<(), Diagnostics> {
-        let Type::Array(element, _) = ty else {
-            unreachable!()
-        };
-        self.headers.insert("stdio.h");
-        let i = self.fresh();
-        self.line(format!("fputc('[', {stream});\nfor (uint64_t {i} = 0; {i} < ({value}).len; ++{i}) {{\nif ({i}) fputs(\", \", {stream});"));
-        let item = format!("({value}).vals[{i}]");
-        if matches!(&**element, Type::Array(_, _)) {
-            self.print_array(stream, &item, element)?;
-        } else {
-            let (fmt, item) = match &**element {
-                Type::Named(n, _) if n == "str" || n == "char" => ("%s", item),
-                Type::Named(n, _) if n == "float" => ("%.17g", item),
-                Type::Named(n, _) if n == "bool" => {
-                    ("%s", format!("{item} ? \"true\" : \"false\""))
-                }
-                Type::Named(n, _) if n == "uint" || n == "byte" => {
-                    ("%llu", format!("(unsigned long long){item}"))
-                }
-                _ => ("%lld", format!("(long long){item}")),
-            };
-            self.line(format!("fprintf({stream}, \"{fmt}\", {item});"));
-        }
-        self.line(format!("}} fputc(']', {stream});"));
         Ok(())
     }
 }
