@@ -29,6 +29,7 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
         type_definitions: vec![],
         mutexes: HashSet::new(),
         mutex_types: vec![],
+        value_helpers: HashMap::new(),
     };
     let mut declarations = String::new();
     let mut global_slots = HashMap::new();
@@ -178,9 +179,27 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
     for (_, name, _) in &e.record_types {
         output.push_str(&format!("typedef struct {name} {name};\n"));
     }
-    for definition in &e.type_definitions {
-        output.push_str(definition);
-        output.push('\n');
+    let mut emitted = HashSet::new();
+    while emitted.len() < e.type_definitions.len() {
+        let previous = emitted.len();
+        for definition in &e.type_definitions {
+            if !emitted.contains(&definition.name)
+                && definition.dependencies.iter().all(|name| {
+                    emitted.contains(name)
+                        || !e
+                            .type_definitions
+                            .iter()
+                            .any(|definition| &definition.name == name)
+                })
+            {
+                output.push_str(&definition.code);
+                output.push('\n');
+                emitted.insert(definition.name.clone());
+            }
+        }
+        if previous == emitted.len() {
+            return Err(Diagnostics::one("cyclic C type layout", 0..0));
+        }
     }
     if e.headers.contains("pthread.h") {
         output.push_str("static pthread_mutex_t nc_allocation_lock = PTHREAD_MUTEX_INITIALIZER;\n");
@@ -230,6 +249,17 @@ fn pattern_name(pattern: &Pattern) -> Result<&str, Diagnostics> {
 }
 
 type RecordType = (Type, String, Vec<(String, String)>);
+struct TypeDefinition {
+    name: String,
+    dependencies: Vec<String>,
+    code: String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum ValueOperation {
+    Copy,
+    Equal,
+    String,
+}
 struct Emitter<'a> {
     checked: &'a CheckedModule,
     headers: BTreeSet<&'static str>,
@@ -248,11 +278,64 @@ struct Emitter<'a> {
     runtime_prototypes: Vec<String>,
     runtime_functions: Vec<String>,
     function_types: Vec<(Type, String)>,
-    type_definitions: Vec<String>,
+    type_definitions: Vec<TypeDefinition>,
     mutexes: HashSet<String>,
     mutex_types: Vec<(Type, String)>,
+    value_helpers: HashMap<(ValueOperation, Type), String>,
 }
 impl Emitter<'_> {
+    /// Generate one recursive runtime helper per operation/type, rather than
+    /// recursively expanding type structure in the compiler itself.
+    fn value_helper(
+        &mut self,
+        operation: ValueOperation,
+        ty: &Type,
+        arguments: &[&str],
+    ) -> Result<String, Diagnostics> {
+        let key = (operation, ty.clone());
+        if let Some(name) = self.value_helpers.get(&key) {
+            return Ok(format!("{name}({})", arguments.join(", ")));
+        }
+        let name = format!("nc_value_{}", self.value_helpers.len());
+        self.value_helpers.insert(key, name.clone());
+        let ct = self.c_type(ty)?;
+        let (ret, params) = match operation {
+            ValueOperation::Copy => (ct.clone(), format!("{ct} value")),
+            ValueOperation::Equal => ("int".into(), format!("{ct} left, {ct} right")),
+            ValueOperation::String => ("const char *".into(), format!("{ct} value")),
+        };
+        let signature = format!("static {ret} {name}({params})");
+        self.runtime_prototypes.push(format!("{signature};"));
+        let saved = std::mem::take(&mut self.out);
+        self.line(format!("{signature} {{"));
+        let result = match operation {
+            ValueOperation::Copy => self.copy_body(ty, "value"),
+            ValueOperation::Equal => self.equality_body("left", "right", ty),
+            ValueOperation::String => self.string_body("value", ty),
+        }?;
+        self.line(format!("return {result}; }}"));
+        let function = std::mem::replace(&mut self.out, saved);
+        self.runtime_functions.push(function);
+        Ok(format!("{name}({})", arguments.join(", ")))
+    }
+    fn define_type(&mut self, name: &str, dependencies: Vec<String>, code: String) {
+        self.type_definitions.push(TypeDefinition {
+            name: name.into(),
+            dependencies,
+            code,
+        });
+    }
+    fn incomplete_dependencies(&self, types: Vec<String>) -> Vec<String> {
+        types
+            .into_iter()
+            .filter(|name| {
+                !self
+                    .record_types
+                    .iter()
+                    .any(|(_, record, _)| record == name)
+            })
+            .collect()
+    }
     fn line(&mut self, text: impl AsRef<str>) {
         self.out.push_str(text.as_ref());
         self.out.push('\n');
@@ -304,21 +387,25 @@ impl Emitter<'_> {
             if let Some((_, name)) = self.function_types.iter().find(|(t, _)| t == ty) {
                 return Ok(name.clone());
             }
+            let name = format!("nc_callable_{}", self.function_types.len());
+            self.function_types.push((ty.clone(), name.clone()));
             let ret = self.c_type(ret)?;
             let params = params
                 .iter()
                 .map(|t| self.c_type(t))
                 .collect::<Result<Vec<_>, _>>()?;
-            let name = format!("nc_callable_{}", self.function_types.len());
             let suffix = if params.is_empty() {
                 String::new()
             } else {
                 format!(", {}", params.join(", "))
             };
-            self.type_definitions.push(format!(
-                "typedef struct {{ {ret} (*call)(void *{suffix}); void *env; }} {name};"
-            ));
-            self.function_types.push((ty.clone(), name.clone()));
+            let dependencies =
+                self.incomplete_dependencies(params.iter().cloned().chain([ret.clone()]).collect());
+            self.define_type(
+                &name,
+                dependencies,
+                format!("typedef struct {{ {ret} (*call)(void *{suffix}); void *env; }} {name};"),
+            );
             return Ok(name);
         }
         if let Some((_, name, _)) = self.record_types.iter().find(|(t, _, _)| t == ty) {
@@ -328,8 +415,11 @@ impl Emitter<'_> {
             && matches!(self.checked.types.get(n), Some(TypeInfo::Enum(_)))
         {
             let name = format!("nc_enum_{n}");
-            self.type_definitions
-                .push(format!("struct {name} {{ int tag; void *payload; }};"));
+            self.define_type(
+                &name,
+                vec![],
+                format!("struct {name} {{ int tag; void *payload; }};"),
+            );
             self.record_types.push((
                 ty.clone(),
                 name.clone(),
@@ -341,20 +431,26 @@ impl Emitter<'_> {
             return Ok(name);
         }
         if let Some(fields) = self.fields(ty) {
+            let slot = self.record_types.len();
+            let name = format!("nc_record_{slot}");
+            self.record_types.push((ty.clone(), name.clone(), vec![]));
             let mut c_fields = vec![];
             for (field, ty) in fields {
                 c_fields.push((field, self.c_type(&ty)?));
             }
-            let name = format!("nc_record_{}", self.record_types.len());
-            self.type_definitions.push(format!(
-                "struct {name} {{ {} }};",
-                c_fields
-                    .iter()
-                    .map(|(field, ct)| format!("{ct} {field};"))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            ));
-            self.record_types.push((ty.clone(), name.clone(), c_fields));
+            self.define_type(
+                &name,
+                c_fields.iter().map(|(_, ct)| ct.clone()).collect(),
+                format!(
+                    "struct {name} {{ {} }};",
+                    c_fields
+                        .iter()
+                        .map(|(field, ct)| format!("{ct} {field};"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ),
+            );
+            self.record_types[slot].2 = c_fields;
             return Ok(name);
         }
         if let Type::Array(element, _) = ty {
@@ -362,13 +458,17 @@ impl Emitter<'_> {
             if let Some((_, name, _)) = self.array_types.iter().find(|(t, _, _)| *t == key) {
                 return Ok(name.clone());
             }
+            let slot = self.array_types.len();
+            let name = format!("nc_arr_{slot}");
+            self.array_types.push((key, name.clone(), String::new()));
             let element_type = self.c_type(element)?;
             self.headers.insert("stdint.h");
-            let name = format!("nc_arr_{}", self.array_types.len());
-            self.type_definitions.push(format!(
-                "typedef struct {{ uint64_t len, cap; {element_type} *vals; }} {name};"
-            ));
-            self.array_types.push((key, name.clone(), element_type));
+            self.define_type(
+                &name,
+                self.incomplete_dependencies(vec![element_type.clone()]),
+                format!("typedef struct {{ uint64_t len, cap; {element_type} *vals; }} {name};"),
+            );
+            self.array_types[slot].2 = element_type;
             return Ok(name);
         }
         Ok(match ty {
@@ -427,6 +527,16 @@ impl Emitter<'_> {
         if let Type::Map(key, inner) = ty {
             return self.copy(&map_array(key, inner), value);
         }
+        if self.fields(ty).is_some() || matches!(ty, Type::Array(_, _)) {
+            let call = self.value_helper(ValueOperation::Copy, ty, &[value])?;
+            let ct = self.c_type(ty)?;
+            let result = self.fresh();
+            self.line(format!("{ct} {result} = {call};"));
+            return Ok(result);
+        }
+        Ok(value.into())
+    }
+    fn copy_body(&mut self, ty: &Type, value: &str) -> Result<String, Diagnostics> {
         if let Some(fields) = self.fields(ty) {
             let ct = self.c_type(ty)?;
             let copy = self.fresh();
@@ -710,6 +820,12 @@ impl Emitter<'_> {
         Ok(())
     }
     fn equality(&mut self, left: &str, right: &str, ty: &Type) -> Result<String, Diagnostics> {
+        if self.fields(ty).is_some() || matches!(ty, Type::Array(_, _) | Type::Map(_, _)) {
+            return self.value_helper(ValueOperation::Equal, ty, &[left, right]);
+        }
+        self.equality_body(left, right, ty)
+    }
+    fn equality_body(&mut self, left: &str, right: &str, ty: &Type) -> Result<String, Diagnostics> {
         if let Type::Named(n, _) = ty
             && let Some(TypeInfo::Alias(base)) = self.checked.types.get(n)
         {
@@ -1317,9 +1433,11 @@ impl Emitter<'_> {
         self.helpers.insert("typedef struct { pthread_mutex_t *lock; } nc_lock_guard; static void nc_unlock(nc_lock_guard *guard) { pthread_mutex_unlock(guard->lock); }".into());
         let ct = self.c_type(ty)?;
         let name = self.fresh();
-        self.type_definitions.push(format!(
-            "typedef struct {{ pthread_mutex_t lock; {ct} value; }} {name};"
-        ));
+        self.define_type(
+            &name,
+            vec![ct.clone()],
+            format!("typedef struct {{ pthread_mutex_t lock; {ct} value; }} {name};"),
+        );
         self.mutex_types.push((ty.clone(), name.clone()));
         Ok(name)
     }
@@ -1362,7 +1480,7 @@ impl Emitter<'_> {
             self.c_type(ret)?
         };
         let job_type = self.fresh();
-        self.type_definitions.push(format!("typedef struct {{ nc_future future; {payload_type} args; {result_type} result; }} {job_type};"));
+        self.define_type(&job_type, vec![payload_type.clone(), result_type.clone()], format!("typedef struct {{ nc_future future; {payload_type} args; {result_type} result; }} {job_type};"));
         let worker = self.fresh();
         let call_args = (0..params.len())
             .map(|i| format!(", job->args.f_{}", i + 1))
@@ -1412,16 +1530,21 @@ impl Emitter<'_> {
         } else {
             let name = self.fresh();
             let mut fields = vec![];
+            let mut dependencies = vec![];
             for (i, (_, ty, mutex)) in captures.iter().enumerate() {
                 let ct = if *mutex {
                     format!("{} *", self.mutex_type(ty)?)
                 } else {
                     self.c_type(ty)?
                 };
+                dependencies.push(ct.trim_end_matches(" *").into());
                 fields.push(format!("{ct} f_{i};"));
             }
-            self.type_definitions
-                .push(format!("typedef struct {{ {} }} {name};", fields.join(" ")));
+            self.define_type(
+                &name,
+                dependencies,
+                format!("typedef struct {{ {} }} {name};", fields.join(" ")),
+            );
             Some(name)
         };
         let ct = self.c_type(&self.ty(e)?)?;
@@ -1623,6 +1746,12 @@ impl Emitter<'_> {
         Ok(())
     }
     fn string_value(&mut self, value: &str, ty: &Type) -> Result<String, Diagnostics> {
+        if self.fields(ty).is_some() || matches!(ty, Type::Array(_, _) | Type::Map(_, _)) {
+            return self.value_helper(ValueOperation::String, ty, &[value]);
+        }
+        self.string_body(value, ty)
+    }
+    fn string_body(&mut self, value: &str, ty: &Type) -> Result<String, Diagnostics> {
         if let Type::Named(n, _) = ty
             && let Some(TypeInfo::Alias(base)) = self.checked.types.get(n)
         {

@@ -46,6 +46,7 @@ pub fn check(module: Module, _path: &Path) -> Result<CheckedModule, Diagnostics>
     for item in &module.items {
         c.declare(item)?;
     }
+    c.validate_layouts()?;
     for item in &module.items {
         if !matches!(item, Item::Function(_)) {
             c.item(item)?;
@@ -64,6 +65,67 @@ pub fn check(module: Module, _path: &Path) -> Result<CheckedModule, Diagnostics>
     })
 }
 impl Checker {
+    fn validate_layouts(&self) -> Result<(), Diagnostics> {
+        fn visit(
+            checker: &Checker,
+            ty: &Type,
+            active: &mut HashSet<String>,
+            aliases_only: bool,
+        ) -> Result<(), Diagnostics> {
+            match ty {
+                Type::Named(name, _) => {
+                    let children = match checker.types.get(name) {
+                        Some(TypeInfo::Alias(base)) => vec![base],
+                        Some(TypeInfo::Struct(declaration)) if !aliases_only => {
+                            declaration.fields.iter().map(|field| &field.ty).collect()
+                        }
+                        _ => return Ok(()),
+                    };
+                    if !active.insert(name.clone()) {
+                        return checker.fail(if aliases_only {
+                            format!("cyclic nominal type definition involving `{name}`")
+                        } else {
+                            format!("recursive type `{name}` has infinite size; use an array or enum payload to break the cycle")
+                        });
+                    }
+                    for child in children {
+                        visit(checker, child, active, aliases_only)?;
+                    }
+                    active.remove(name);
+                }
+                Type::Tuple(types) => {
+                    for ty in types {
+                        visit(checker, ty, active, aliases_only)?;
+                    }
+                }
+                Type::Optional(ty) | Type::ErrorUnion(ty) => {
+                    visit(checker, ty, active, aliases_only)?
+                }
+                Type::Array(ty, _) | Type::Future(ty) if aliases_only => {
+                    visit(checker, ty, active, true)?
+                }
+                Type::Map(key, value) if aliases_only => {
+                    visit(checker, key, active, true)?;
+                    visit(checker, value, active, true)?;
+                }
+                Type::Function(params, ret) if aliases_only => {
+                    for ty in params {
+                        visit(checker, ty, active, true)?;
+                    }
+                    visit(checker, ret, active, true)?;
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+        let mut names = self.types.keys().collect::<Vec<_>>();
+        names.sort();
+        for name in names {
+            visit(self, &named(name), &mut HashSet::new(), true)?;
+            visit(self, &named(name), &mut HashSet::new(), false)?;
+        }
+        Ok(())
+    }
     fn future_variable(&self, v: &VarDecl) -> Result<(), Diagnostics> {
         if matches!(v.ty, Type::Future(_)) {
             if v.mutable || v.mutex {

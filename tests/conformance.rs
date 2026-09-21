@@ -7,6 +7,39 @@ use std::{
 static ID: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
+fn recursive_struct_layouts_and_value_operations() {
+    success(
+        r#"
+struct Node { int value Node[] children }
+struct Parent { Child[] children }
+struct Child { Parent parent }
+test "recursive values" {
+    Node leaf = Node{.value = 2, .children = []}
+    Node root = Node{.value = 1, .children = [leaf]}
+    mut Node copy = root
+    copy.children[0].value = 3
+    assert root.children[0].value == 2
+    assert copy != root
+    assert root == Node{.value = 1, .children = [leaf]}
+    str text = @as(str, root)
+    assert "children" in text
+    Parent empty = Parent{.children = []}
+    Parent parent = Parent{.children = [Child{.parent = empty}]}
+    assert parent.children[0].parent == empty
+}
+"#,
+        "",
+    );
+    rejects("struct Loop { Loop value }", "infinite size");
+    rejects(
+        "struct A { B value } struct B { A? value }",
+        "infinite size",
+    );
+    rejects("type Cycle = Cycle[]", "cyclic nominal");
+    rejects("type A = [str]B type B = A?", "cyclic nominal");
+}
+
+#[test]
 fn labelled_conditionals_and_value_breaks() {
     success(
         r#"
