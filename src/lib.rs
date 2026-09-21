@@ -35,7 +35,7 @@ pub fn compile_source_with_options(
     let module = modules::load(parser::parse_at(tokens, path)?, path)?;
     let checked = sema::check(generics::specialize(module)?, path)?;
     if release {
-        let checked = sema::check(optimizer::optimize(checked.module)?, path)?;
+        let checked = sema::check(optimizer::optimize(checked)?, path)?;
         return codegen::emit(&checked);
     }
     codegen::emit(&checked)

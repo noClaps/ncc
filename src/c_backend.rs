@@ -933,8 +933,8 @@ impl Emitter<'_> {
                 let result = self.fresh();
                 self.line(format!("{ct} {result} = {{0}};"));
                 for (k, v) in entries {
-                    let k = self.expr(k)?;
-                    let v = self.expr(v)?;
+                    let k = self.expr_as(k, &key)?;
+                    let v = self.expr_as(v, &value)?;
                     self.map_set(&result, &k, &v, &key, &value)?;
                 }
                 return Ok(result);
@@ -1011,22 +1011,35 @@ impl Emitter<'_> {
             }
             Expr::Tuple(values) => {
                 let ty = self.ty(e)?;
+                let Type::Tuple(types) = &ty else {
+                    return unsupported("non-tuple literal type");
+                };
                 let ct = self.c_type(&ty)?;
                 let result = self.fresh();
                 self.line(format!("{ct} {result};"));
                 for (i, value) in values.iter().enumerate() {
-                    let v = self.expr(value)?;
+                    let v = self.expr_as(value, &types[i])?;
+                    let v = self.copy(&types[i], &v)?;
                     self.line(format!("{result}.f_{i} = {v};"));
                 }
                 return Ok(result);
             }
             Expr::StructInit { fields, .. } => {
                 let ty = self.ty(e)?;
+                let types = self
+                    .fields(&ty)
+                    .ok_or_else(|| Diagnostics::one("missing struct layout", 0..0))?;
                 let ct = self.c_type(&ty)?;
                 let result = self.fresh();
                 self.line(format!("{ct} {result};"));
                 for (field, value) in fields {
-                    let v = self.expr(value)?;
+                    let field_type = &types
+                        .iter()
+                        .find(|(name, _)| *name == format!("f_{field}"))
+                        .unwrap()
+                        .1;
+                    let v = self.expr_as(value, field_type)?;
+                    let v = self.copy(field_type, &v)?;
                     self.line(format!("{result}.f_{field} = {v};"));
                 }
                 return Ok(result);
@@ -1051,7 +1064,7 @@ impl Emitter<'_> {
                     values.len()
                 ));
                 for (index, value) in values.iter().enumerate() {
-                    let v = self.expr(value)?;
+                    let v = self.expr_as(value, element)?;
                     let v = self.copy(element, &v)?;
                     self.line(format!("{name}.vals[{index}] = {v};"));
                 }

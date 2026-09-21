@@ -563,7 +563,17 @@ impl Checker {
             return Ok(());
         }
         if let Type::ErrorUnion(inner) = ty {
-            if matches!(e, Expr::Name(_) | Expr::Call { .. }) {
+            if matches!(
+                e,
+                Expr::Name(_)
+                    | Expr::Call { .. }
+                    | Expr::Member { .. }
+                    | Expr::Index { .. }
+                    | Expr::Else { .. }
+                    | Expr::Catch { .. }
+                    | Expr::Try(_)
+                    | Expr::Await(_)
+            ) {
                 let actual = self.expr(e)?;
                 if &actual == ty {
                     return Ok(());
@@ -577,7 +587,17 @@ impl Checker {
                     .insert(e as *const Expr as usize, ty.clone());
                 return Ok(());
             }
-            if matches!(e, Expr::Name(_) | Expr::Call { .. }) {
+            if matches!(
+                e,
+                Expr::Name(_)
+                    | Expr::Call { .. }
+                    | Expr::Member { .. }
+                    | Expr::Index { .. }
+                    | Expr::Else { .. }
+                    | Expr::Catch { .. }
+                    | Expr::Try(_)
+                    | Expr::Await(_)
+            ) {
                 let actual = self.expr(e)?;
                 if &actual == ty {
                     return Ok(());

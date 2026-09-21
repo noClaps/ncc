@@ -24,12 +24,31 @@ takes precedence over the output filename's extension.
 surrounding values. Suppress it for a file with
 `// @ncc lint disable capture`. Imported files are also checked.
 
-Release builds perform bounded, memoized constant evaluation of pure scalar
+Release builds perform bounded, memoized, type-aware constant evaluation of pure
 functions and loops, remove unreachable functions, and use the C compiler's
 `-O3`. Debug builds preserve runtime evaluation and use `-O0 -g`. Integer
 overflow remains an error, including when detected during constant evaluation.
 Numeric casts to `byte[]` produce eight little-endian bytes; floats use their
 64-bit IEEE-754 representation.
+
+Constant evaluation supports signed/unsigned integers, bytes, floats, booleans,
+characters, strings, arrays, tuples, maps, structs, enums, optionals, successful
+error unions, nominal types, and named function callbacks. Arithmetic uses each
+type's range. Effects, unsupported operations, and exhausted evaluation budgets
+remain runtime code; futures and external calls are never executed by the
+optimiser.
+
+## Editor tooling
+
+`ncc lsp` provides versioned incremental synchronization, diagnostics, formatting,
+local definition navigation, documentation hover, completion, and symbols from
+open documents. Navigation is parser-backed but does not yet resolve imported
+members or every pattern binding.
+
+The [Tree-sitter grammar](tree-sitter-nc/README.md) includes generated C and a
+syntax corpus. The [Zed extension](editors/zed/README.md) adds highlighting,
+indentation, brackets, outline navigation, and LSP integration. Its local
+packaging helper uses this repository's committed grammar without publishing.
 
 ## Dependencies and self-hosting
 
