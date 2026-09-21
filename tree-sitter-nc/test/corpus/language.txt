@@ -1,0 +1,377 @@
+==================
+Declarations and nominal types
+==================
+import { "other.nc" as other }
+extern "native.c" as native { fn read() str = "native_read" }
+pub type Count = uint
+pub struct Box<type T> { T value }
+enum Tree { Leaf(int) Branch(Tree[]) }
+fn apply<type T>(T value, (fn(T) T) operation) T { return operation(value) }
+mut [str]int table = ["one": 1, "two": 2,]
+int a, str b = (1, "two")
+Box<int> box = Box<int>{.value = a}
+---
+
+(source_file
+  (import_declaration
+    (string
+      (string_content))
+    (identifier))
+  (extern_declaration
+    (string
+      (string_content))
+    (identifier)
+    (function_signature
+      (identifier)
+      (parameters)
+      (named_type
+        (identifier))
+      (string
+        (string_content))))
+  (type_declaration
+    (identifier)
+    (named_type
+      (identifier)))
+  (struct_declaration
+    (identifier)
+    (type_parameters
+      (identifier))
+    (field_declaration
+      (named_type
+        (identifier))
+      (identifier)))
+  (enum_declaration
+    (identifier)
+    (enum_variant
+      (identifier)
+      (named_type
+        (identifier)))
+    (enum_variant
+      (identifier)
+      (array_type
+        (named_type
+          (identifier)))))
+  (function_declaration
+    (identifier)
+    (type_parameters
+      (identifier))
+    (parameters
+      (parameter
+        (named_type
+          (identifier))
+        (identifier))
+      (parameter
+        (function_type
+          (named_type
+            (identifier))
+          (named_type
+            (identifier)))
+        (identifier)))
+    (named_type
+      (identifier))
+    (block
+      (return_statement
+        (call_expression
+          (identifier)
+          (arguments
+            (identifier))))))
+  (variable_declaration
+    (parameter
+      (map_type
+        (named_type
+          (identifier))
+        (named_type
+          (identifier)))
+      (identifier))
+    (map_expression
+      (map_entry
+        (string
+          (string_content))
+        (number))
+      (map_entry
+        (string
+          (string_content))
+        (number))))
+  (variable_declaration
+    (parameter
+      (named_type
+        (identifier))
+      (identifier))
+    (parameter
+      (named_type
+        (identifier))
+      (identifier))
+    (tuple_expression
+      (number)
+      (string
+        (string_content))))
+  (variable_declaration
+    (parameter
+      (named_type
+        (identifier)
+        (type_arguments
+          (named_type
+            (identifier))))
+      (identifier))
+    (struct_expression
+      (named_type
+        (identifier)
+        (type_arguments
+          (named_type
+            (identifier))))
+      (field_initializer
+        (identifier)
+        (identifier)))))
+
+==================
+Matching, labels, and concurrency
+==================
+test "control" {
+  mutex int count = 0
+  fn work = fn() { lock count { count = count + 1 } }
+  fut void result = async work()
+  await result
+  outer: for i in [1, 2] {
+    while i > 0 {
+      if i {
+        0, 1 -> { continue :outer }
+        _ -> { break }
+      }
+    }
+  }
+  int value = if Tree.Leaf(1) {
+    Tree.Leaf(n) -> { break n }
+    Tree.Branch(_) -> { break 0 }
+  }
+  int value = try fetch() catch err { throw err }
+  int value = maybe else { break 42 }
+}
+---
+
+(source_file
+  (test_declaration
+    (string
+      (string_content))
+    (block
+      (variable_declaration
+        (parameter
+          (named_type
+            (identifier))
+          (identifier))
+        (number))
+      (variable_declaration
+        (identifier)
+        (lambda_expression
+          (parameters)
+          (block
+            (lock_statement
+              (identifier)
+              (block
+                (assignment_statement
+                  (identifier)
+                  (binary_expression
+                    (identifier)
+                    (number))))))))
+      (variable_declaration
+        (parameter
+          (future_type
+            (named_type
+              (identifier)))
+          (identifier))
+        (unary_expression
+          (call_expression
+            (identifier)
+            (arguments))))
+      (expression_statement
+        (unary_expression
+          (identifier)))
+      (labeled_statement
+        (identifier)
+        (for_statement
+          (identifier)
+          (array_expression
+            (number)
+            (number))
+          (block
+            (while_statement
+              (binary_expression
+                (identifier)
+                (number))
+              (block
+                (expression_statement
+                  (if_expression
+                    (identifier)
+                    (match_arm
+                      (number)
+                      (number)
+                      (block
+                        (continue_statement
+                          (identifier))))
+                    (match_arm
+                      (identifier)
+                      (block
+                        (break_statement))))))))))
+      (variable_declaration
+        (parameter
+          (named_type
+            (identifier))
+          (identifier))
+        (if_expression
+          (call_expression
+            (member_expression
+              (identifier)
+              (identifier))
+            (arguments
+              (number)))
+          (match_arm
+            (call_expression
+              (member_expression
+                (identifier)
+                (identifier))
+              (arguments
+                (identifier)))
+            (block
+              (break_statement
+                (identifier))))
+          (match_arm
+            (call_expression
+              (member_expression
+                (identifier)
+                (identifier))
+              (arguments
+                (identifier)))
+            (block
+              (break_statement
+                (number))))))
+      (variable_declaration
+        (parameter
+          (named_type
+            (identifier))
+          (identifier))
+        (catch_expression
+          (unary_expression
+            (call_expression
+              (identifier)
+              (arguments)))
+          (identifier)
+          (block
+            (throw_statement
+              (identifier)))))
+      (variable_declaration
+        (parameter
+          (named_type
+            (identifier))
+          (identifier))
+        (else_expression
+          (identifier)
+          (block
+            (break_statement
+              (number))))))))
+
+==================
+Strings, casts, and operator precedence
+==================
+str value = "Hello {name}: {1 + 2 * 3} \{literal}"
+str multi = """
+  text "quoted" {call("nested")}
+  """
+char emoji = '👩‍👩‍👧‍👦'
+byte[] bytes = @as(byte[], value)
+bool okay = not false and 2 ** 3 == 8 or 1 < 2
+int last = values[$ - 1]
+_ = apply<Box<int>>(box)
+---
+
+(source_file
+  (variable_declaration
+    (parameter
+      (named_type
+        (identifier))
+      (identifier))
+    (string
+      (string_content)
+      (interpolation
+        (identifier))
+      (string_content)
+      (interpolation
+        (binary_expression
+          (number)
+          (binary_expression
+            (number)
+            (number))))
+      (string_content)
+      (escape_sequence)
+      (string_content)))
+  (variable_declaration
+    (parameter
+      (named_type
+        (identifier))
+      (identifier))
+    (multiline_string
+      (multiline_content)
+      (multiline_content)
+      (multiline_content)
+      (multiline_content)
+      (interpolation
+        (call_expression
+          (identifier)
+          (arguments
+            (string
+              (string_content)))))
+      (multiline_content)))
+  (variable_declaration
+    (parameter
+      (named_type
+        (identifier))
+      (identifier))
+    (character))
+  (variable_declaration
+    (parameter
+      (array_type
+        (named_type
+          (identifier)))
+      (identifier))
+    (cast_expression
+      (array_type
+        (named_type
+          (identifier)))
+      (identifier)))
+  (variable_declaration
+    (parameter
+      (named_type
+        (identifier))
+      (identifier))
+    (binary_expression
+      (binary_expression
+        (unary_expression
+          (boolean))
+        (binary_expression
+          (binary_expression
+            (number)
+            (number))
+          (number)))
+      (binary_expression
+        (number)
+        (number))))
+  (variable_declaration
+    (parameter
+      (named_type
+        (identifier))
+      (identifier))
+    (index_expression
+      (identifier)
+      (binary_expression
+        (last_index)
+        (number))))
+  (assignment_statement
+    (identifier)
+    (call_expression
+      (identifier)
+      (type_arguments
+        (named_type
+          (identifier)
+          (type_arguments
+            (named_type
+              (identifier)))))
+      (arguments
+        (identifier)))))

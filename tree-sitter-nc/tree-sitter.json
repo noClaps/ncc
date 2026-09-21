@@ -1,0 +1,5 @@
+{
+  "grammars": [{"name":"nc", "camelcase":"NC", "scope":"source.nc", "path":".", "file-types":["nc"], "highlights":"queries/highlights.scm"}],
+  "metadata": {"version":"0.1.0", "description":"NC language grammar"},
+  "bindings": {"c":true}
+}
