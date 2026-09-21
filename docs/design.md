@@ -2263,6 +2263,53 @@ struct Data {
 @println(data) // output: (Nathan, 24)
 ```
 
+### `@args`
+
+This is a builtin function that returns the command line arguments passed to the program as an array of strings. The first argument is the executable name.
+
+```nc
+str[] args = @args()
+
+@println(args)
+```
+
+For example:
+
+```
+> ./program 1 2 3 --help --force true
+["./program", "1", "2", "3", "--help", "--force", "true"]
+```
+
+### `@env`
+
+This is a builtin function to get the environment variables as a `[str]str` map.
+
+```nc
+test "environment variables {
+  [str]str env = @env()
+  assert "HOME" in env && env["HOME"] == "/usr/bin/cc"
+}
+```
+
+### `@target`
+
+This will return the current target as a tuple of the OS name and CPU architecture.
+
+```nc
+test "target" {
+  str os, str arch = @target()
+  // on macOS arm64
+  assert os == "macos"
+  assert arch = "arm64"
+}
+```
+
+The currently supported list of compiler targets is:
+
+| OS    | Arch  | `--target` Name |
+| ----- | ----- | --------------- |
+| macOS | arm64 | `macos-arm64`   |
+
 ## Compiler
 
 The compiler is implemented to type-check an optimise the NC code and output C, and then compile that to the executable using the system's C compiler.
@@ -2297,7 +2344,7 @@ This massively cuts down on binary size and improves runtime performance, at the
 ### CLI
 
 ```
-Usage: ncc [command]
+Usage: ncc [command | --targets]
 
 Commands:
   build       Build the given file to the desired target.
@@ -2307,27 +2354,32 @@ Commands:
   run         Build and execute the given file.
 
 Options:
+  --targets   Show the list of supported compilation targets.
   -h, --help  Show this help and exit.
 ```
 
 #### Build
 
 ```
-Usage: ncc build <file>
+Usage: ncc build <file> [-r | -d] [-o <file>] [-f <format>] [--target <target>]
 
 Build the given file to the desired target.
 
 Arguments:
-  <file>         The file to build. Other files imported by this file are resolved automatically.
+  <file>                 The file to build. Other files imported by this file are resolved
+                         automatically.
 
 Options:
-  -r, --release  Do a release build with more aggressive optimisations.
-  -d, --debug    Do a debug build [default].
-  -o, --output   The file to output to. The extension of this file will determine what the output
-                 format is: `.c` for C files, `.o` for object files and anything else or nothing
-                 for the executable.
-  -f, --format   Set the output format. The valid options are 'C', 'obj', and 'exe'.
-  -h, --help     Show this help and exit.
+  -r, --release          Do a release build with more aggressive optimisations.
+  -d, --debug            Do a debug build [default].
+  -o, --output <file>    The file to output to. The extension of this file will determine what the
+                         output format is: `.c` for C files, `.o` for object files and anything
+                         else or nothing for the executable.
+  -f, --format <format>  Set the output format. The valid options are 'C', 'obj', and 'exe'.
+  --target <target>      The target to compile the program to. Can also be set with the NC_TARGET
+                         environment variable. The list of supported targets can be seen with the
+                         `ncc --targets` command.
+  -h, --help             Show this help and exit.
 ```
 
 #### Check
@@ -2375,7 +2427,7 @@ Options:
 #### Run
 
 ```
-Usage: ncc run <file>
+Usage: ncc run <file> [-r | -d]
 
 Build and execute the given file.
 
