@@ -7,6 +7,39 @@ use std::{
 static ID: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
+fn generic_constructors_receive_nested_type_context() {
+    success(
+        r#"
+enum Choice<type T> { Value(T) Empty }
+struct Box<type T> { T value }
+struct Holder { Choice<int> choice }
+fn read(Choice<int> choice) int {
+    if choice { Choice.Value(n) -> { return n } Choice.Empty -> { return 0 } }
+}
+fn identity<type T>(T value) T { return value }
+fn make() Choice<int> { return Choice.Value(7) }
+test "nested contexts" {
+    Choice<int>? optional = Choice.Value(1)
+    Choice<int> choice = optional else { Choice.Empty }
+    assert read(choice) == 1
+    assert read(Choice.Value(2)) == 2
+    assert read(identity<Choice<int>>(Choice.Value(3))) == 3
+    [str]Choice<int> map = ["one": Choice.Value(4)]
+    assert read(map["one"]) == 4
+    Holder holder = Holder{.choice = Choice.Value(5)}
+    assert read(holder.choice) == 5
+    Box<Choice<int>> box = Box<Choice<int>>{.value = Choice.Value(6)}
+    assert read(box.value) == 6
+    Choice<int> conditional = if true { true -> { Choice.Value(8) } false -> { Choice.Empty } }
+    assert read(conditional) == 8
+    if make() { Choice.Value(n) -> { assert n == 7 } Choice.Empty -> { assert false } }
+}
+"#,
+        "",
+    );
+}
+
+#[test]
 fn alternative_pattern_bindings_are_consistent() {
     success(
         r#"

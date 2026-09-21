@@ -34,6 +34,7 @@ pub fn specialize(mut module: Module) -> Result<Module, Diagnostics> {
         type_instances: HashMap::new(),
         generated_types: vec![],
         values: HashMap::new(),
+        declarations: HashMap::new(),
         return_type: None,
     };
     module
@@ -45,6 +46,39 @@ pub fn specialize(mut module: Module) -> Result<Module, Diagnostics> {
     });
     for item in &mut module.items {
         pass.item_types(item, &HashMap::new())?;
+    }
+    for item in &module.items {
+        match item {
+            Item::Function(f) => {
+                pass.values.insert(
+                    f.name.clone(),
+                    Type::Function(
+                        f.params.iter().map(|p| p.ty.clone()).collect(),
+                        Box::new(f.return_type.clone()),
+                    ),
+                );
+            }
+            Item::Extern { functions, .. } => {
+                for f in functions {
+                    pass.values.insert(
+                        f.name.clone(),
+                        Type::Function(
+                            f.params.iter().map(|p| p.ty.clone()).collect(),
+                            Box::new(f.return_type.clone()),
+                        ),
+                    );
+                }
+            }
+            Item::Struct(s) => {
+                pass.declarations.insert(s.name.clone(), item.clone());
+            }
+            Item::Enum(e) => {
+                pass.declarations.insert(e.name.clone(), item.clone());
+            }
+            _ => {}
+        }
+    }
+    for item in &mut module.items {
         match item {
             Item::Function(f) => pass.function_body(f, &HashMap::new())?,
             Item::Global(v) => pass.variable(v, &HashMap::new())?,
@@ -67,6 +101,7 @@ struct Pass {
     type_instances: HashMap<(String, Vec<Type>), String>,
     generated_types: Vec<Item>,
     values: HashMap<String, Type>,
+    declarations: HashMap<String, Item>,
     return_type: Option<Type>,
 }
 fn substitute(ty: &mut Type, bindings: &HashMap<String, Type>) {
@@ -101,8 +136,114 @@ fn substitute(ty: &mut Type, bindings: &HashMap<String, Type>) {
     }
 }
 impl Pass {
+    fn declaration(&self, name: &str) -> Option<&Item> {
+        self.declarations.get(name).or_else(|| {
+            self.generated_types.iter().find(|item| match item {
+                Item::Struct(s) => s.name == name,
+                Item::Enum(e) => e.name == name,
+                _ => false,
+            })
+        })
+    }
+    fn expression_type(&self, e: &Expr) -> Option<Type> {
+        match e {
+            Expr::Name(n) => self.values.get(n).cloned().or_else(|| {
+                self.generated.iter().find(|f| f.name == *n).map(|f| {
+                    Type::Function(
+                        f.params.iter().map(|p| p.ty.clone()).collect(),
+                        Box::new(f.return_type.clone()),
+                    )
+                })
+            }),
+            Expr::Cast { ty, .. } => Some(ty.clone()),
+            Expr::Call { callee, .. } => match self.expression_type(callee)? {
+                Type::Function(_, ret) => Some(*ret),
+                _ => None,
+            },
+            Expr::Member { object, name } => {
+                let Type::Named(owner, _) = self.expression_type(object)? else {
+                    return None;
+                };
+                let Item::Struct(s) = self.declaration(&owner)? else {
+                    return None;
+                };
+                s.fields
+                    .iter()
+                    .find(|f| f.name == *name)
+                    .map(|f| f.ty.clone())
+            }
+            Expr::Index { object, index } => match self.expression_type(object)? {
+                Type::Array(ty, _) | Type::Map(_, ty) => Some(*ty),
+                Type::Tuple(types) => {
+                    if let Expr::Int(n) = &**index {
+                        types.get(crate::sema::integer(n).ok()? as usize).cloned()
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            },
+            Expr::Await(value) => match self.expression_type(value)? {
+                Type::Future(ty) => Some(*ty),
+                _ => None,
+            },
+            Expr::Try(value) | Expr::Catch { value, .. } => match self.expression_type(value)? {
+                Type::ErrorUnion(ty) => Some(*ty),
+                _ => None,
+            },
+            Expr::Else { value, .. } => match self.expression_type(value)? {
+                Type::Optional(ty) => Some(*ty),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+    fn hint_block(&self, body: &mut Block, ty: &Type) {
+        for statement in &mut body.statements {
+            if let Stmt::Break(Some(value), None) = statement {
+                self.hint(value, ty);
+            }
+        }
+        if let Some(Stmt::Expr(value)) = body.statements.last_mut() {
+            self.hint(value, ty);
+        }
+    }
     fn hint(&self, e: &mut Expr, ty: &Type) {
+        if let Type::Optional(inner) | Type::ErrorUnion(inner) = ty {
+            self.hint(e, inner);
+            return;
+        }
         match (e, ty) {
+            (Expr::If { arms, .. }, ty) => {
+                for (_, body) in arms {
+                    self.hint_block(body, ty);
+                }
+            }
+            (Expr::Else { fallback, .. }, ty) | (Expr::Catch { body: fallback, .. }, ty) => {
+                self.hint_block(fallback, ty)
+            }
+            (Expr::Map(entries), Type::Map(key, value)) => {
+                for (k, v) in entries {
+                    self.hint(k, key);
+                    self.hint(v, value);
+                }
+            }
+            (Expr::StructInit { name, fields }, Type::Named(instance, _)) => {
+                if self
+                    .type_instances
+                    .iter()
+                    .any(|((base, _), n)| base == name && n == instance)
+                {
+                    *name = instance.clone();
+                }
+                if let Some(Item::Struct(decl)) = self.declaration(name) {
+                    for (name, value) in fields {
+                        if let Some(field) = decl.fields.iter().find(|f| f.name == *name) {
+                            self.hint(value, &field.ty);
+                        }
+                    }
+                }
+            }
             (Expr::Call { callee, args, .. }, Type::Named(instance, _)) => {
                 if let Expr::Member { object, name } = &mut **callee
                     && let Expr::Name(owner) = &mut **object
@@ -115,10 +256,7 @@ impl Pass {
                         *owner = instance.clone();
                     }
                     if owner == instance
-                        && let Some(Item::Enum(decl)) = self
-                            .generated_types
-                            .iter()
-                            .find(|i| matches!(i, Item::Enum(d) if d.name == *instance))
+                        && let Some(Item::Enum(decl)) = self.declaration(instance)
                         && let Some(variant) = decl.variants.iter().find(|v| v.name == *name)
                     {
                         for (arg, t) in args.iter_mut().zip(&variant.values) {
@@ -324,6 +462,13 @@ impl Pass {
             self.ty(&mut p.ty, &bindings)?;
         }
         self.ty(&mut f.return_type, &bindings)?;
+        self.values.insert(
+            instance.clone(),
+            Type::Function(
+                f.params.iter().map(|p| p.ty.clone()).collect(),
+                Box::new(f.return_type.clone()),
+            ),
+        );
         self.function_body(&mut f, &bindings)?;
         self.generated.push(f);
         Ok(instance)
@@ -357,10 +502,8 @@ impl Pass {
             }
             Stmt::Break(Some(e), _) => self.expr(e, b)?,
             Stmt::Assign { target, value } => {
-                if let Expr::Name(name) = target
-                    && let Some(t) = self.values.get(name)
-                {
-                    self.hint(value, t);
+                if let Some(t) = self.expression_type(target) {
+                    self.hint(value, &t);
                 }
                 self.expr(target, b)?;
                 self.expr(value, b)?;
@@ -393,9 +536,6 @@ impl Pass {
                 args,
                 generics,
             } => {
-                for a in args {
-                    self.expr(a, b)?;
-                }
                 for t in generics.iter_mut() {
                     self.ty(t, b)?;
                 }
@@ -416,6 +556,15 @@ impl Pass {
                         format!("generic function `{name}` requires explicit type arguments"),
                         0..0,
                     ));
+                }
+                if let Some(Type::Function(params, _)) = self.expression_type(callee) {
+                    for (arg, ty) in args.iter_mut().zip(params) {
+                        self.hint(arg, &ty);
+                    }
+                }
+                self.expr(callee, b)?;
+                for arg in args {
+                    self.expr(arg, b)?;
                 }
             }
             Expr::Cast { ty, value } => {
@@ -458,19 +607,20 @@ impl Pass {
                     self.expr(v, b)?;
                 }
             }
-            Expr::StructInit { fields, .. } => {
+            Expr::StructInit { name, fields } => {
+                if let Some(Item::Struct(decl)) = self.declaration(name) {
+                    for (name, value) in fields.iter_mut() {
+                        if let Some(field) = decl.fields.iter().find(|f| f.name == *name) {
+                            self.hint(value, &field.ty);
+                        }
+                    }
+                }
                 for (_, v) in fields {
                     self.expr(v, b)?;
                 }
             }
             Expr::If { subject, arms } => {
-                let subject_type = subject.as_ref().and_then(|s| {
-                    if let Expr::Name(n) = &**s {
-                        self.values.get(n).cloned()
-                    } else {
-                        None
-                    }
-                });
+                let subject_type = subject.as_ref().and_then(|s| self.expression_type(s));
                 if let Some(s) = subject {
                     self.expr(s, b)?;
                 }
