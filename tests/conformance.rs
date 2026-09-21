@@ -7,6 +7,72 @@ use std::{
 static ID: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
+fn external_c_composite_signatures_have_stable_aliases() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    fs::write(
+        directory.path().join("native.c"),
+        r#"
+nc_abi_nc_sum_result nc_sum(nc_abi_nc_sum_arg0 bytes) {
+    nc_abi_nc_sum_result result = {0};
+    if (!bytes.len) { result.failed = 1; result.error = "empty"; return result; }
+    for (uint64_t i = 0; i < bytes.len; ++i) result.value += bytes.vals[i];
+    bytes.vals[0] = 99;
+    return result;
+}
+"#,
+    )
+    .unwrap();
+    let input = directory.path().join("main.nc");
+    fs::write(
+        &input,
+        r#"
+extern "native.c" as native { fn sum(byte[] bytes) int! = "nc_sum" }
+byte[] bytes = [1, 2, 3]
+@println(try native.sum(bytes))
+@println(bytes[0])
+int fallback = native.sum([]) catch err { 42 }
+@println(fallback)
+"#,
+    )
+    .unwrap();
+    for release in [false, true] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ncc"));
+        command.arg("run");
+        if release {
+            command.arg("--release");
+        }
+        let output = command.arg(&input).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"6\n1\n42\n");
+    }
+    let rejects_external = |source: &str, expected: &str| {
+        let error = ncc::check_source(source, &input).unwrap_err().to_string();
+        assert!(error.contains(expected), "{error}");
+    };
+    fs::write(directory.path().join("native.etch"), "").unwrap();
+    rejects_external(
+        "extern \"native.c\" as native { fn sum(Missing value) int = \"sum\" }",
+        "unknown type",
+    );
+    rejects_external(
+        "extern \"native.etch\" as native { fn sum() int = \"sum\" }",
+        "must be C source",
+    );
+    rejects_external(
+        "extern \"native.c\" as native { fn sum() int = \"not-valid\" }",
+        "C identifier",
+    );
+    rejects(
+        "struct S { int n } bool b = S{.n = 1} < S{.n = 2}",
+        "ordered comparisons require numeric",
+    );
+}
+
+#[test]
 fn generic_constructors_receive_nested_type_context() {
     success(
         r#"

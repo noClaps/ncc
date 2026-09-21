@@ -76,25 +76,18 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
             Item::Extern {
                 path, functions, ..
             } => {
-                if !path.ends_with(".c") {
-                    return unsupported("non-C external implementations");
-                }
                 for f in functions {
-                    if !f.symbol.chars().enumerate().all(|(i, c)| {
-                        c == '_' || c.is_ascii_alphabetic() || (i > 0 && c.is_ascii_digit())
-                    }) || f.symbol.is_empty()
-                    {
-                        return Err(Diagnostics::one(
-                            "external symbol must be a C identifier",
-                            0..0,
-                        ));
-                    }
                     let ret = e.c_type(&f.return_type)?;
                     let params = f
                         .params
                         .iter()
                         .map(|p| e.c_type(&p.ty))
                         .collect::<Result<Vec<_>, _>>()?;
+                    declarations.push_str(&format!("typedef {ret} nc_abi_{}_result;\n", f.symbol));
+                    for (index, ty) in params.iter().enumerate() {
+                        declarations
+                            .push_str(&format!("typedef {ty} nc_abi_{}_arg{index};\n", f.symbol));
+                    }
                     declarations.push_str(&format!(
                         "extern {ret} {}({});\n",
                         f.symbol,

@@ -233,6 +233,29 @@ impl Checker {
     }
     fn item_inner(&mut self, item: &Item) -> Result<(), Diagnostics> {
         match item {
+            Item::Extern {
+                path, functions, ..
+            } => {
+                if !path.ends_with(".c") {
+                    return self.fail("external implementations must be C source files (.c)");
+                }
+                for function in functions {
+                    if function.symbol.is_empty()
+                        || !function.symbol.chars().enumerate().all(|(i, c)| {
+                            c == '_' || c.is_ascii_alphabetic() || (i > 0 && c.is_ascii_digit())
+                        })
+                    {
+                        return self.fail("external symbol must be a C identifier");
+                    }
+                    self.validate_type(&function.return_type)?;
+                    if self.contains_future(&function.return_type) {
+                        return self.fail("futures cannot be returned from external functions");
+                    }
+                    for param in &function.params {
+                        self.validate_type(&param.ty)?;
+                    }
+                }
+            }
             Item::Struct(x) => self.with_generics(&x.generics, |this| {
                 for f in &x.fields {
                     this.validate_type(&f.ty)?
@@ -994,6 +1017,9 @@ impl Checker {
                 self.assignable(&l, &r)?;
                 match op {
                     BinaryOp::And | BinaryOp::Or => self.assignable(&named("bool"), &l)?,
+                    BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge if !numeric(&l) => {
+                        return self.fail("ordered comparisons require numeric operands");
+                    }
                     BinaryOp::Add
                     | BinaryOp::Sub
                     | BinaryOp::Mul
