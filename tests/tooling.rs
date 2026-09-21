@@ -46,7 +46,7 @@ fn lsp_lifecycle_diagnostics_and_formatting() {
         .collect();
     assert_eq!(
         messages[0]["result"]["capabilities"]["textDocumentSync"]["change"],
-        1
+        2
     );
     assert_eq!(
         messages[1]["params"]["diagnostics"]
