@@ -2,8 +2,6 @@
 name = "ncc"
 version = "0.1.0"
 edition = "2024"
-description = "Compiler for the NC programming language"
-license = "MIT"
 
 [dependencies]
 serde_json = { version = "=1.0.150", optional = true }
