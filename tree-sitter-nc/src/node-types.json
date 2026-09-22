@@ -1053,21 +1053,6 @@
     }
   },
   {
-    "type": "builtin",
-    "named": true,
-    "fields": {},
-    "children": {
-      "multiple": false,
-      "required": true,
-      "types": [
-        {
-          "type": "identifier",
-          "named": true
-        }
-      ]
-    }
-  },
-  {
     "type": "call_expression",
     "named": true,
     "fields": {
@@ -4839,7 +4824,7 @@
     "named": false
   },
   {
-    "type": "@",
+    "type": "@as",
     "named": false
   },
   {
@@ -4877,6 +4862,10 @@
   {
     "type": "break",
     "named": false
+  },
+  {
+    "type": "builtin",
+    "named": true
   },
   {
     "type": "catch",

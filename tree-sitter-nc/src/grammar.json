@@ -1789,28 +1789,27 @@
       ]
     },
     "builtin": {
-      "type": "SEQ",
-      "members": [
-        {
-          "type": "STRING",
-          "value": "@"
-        },
-        {
-          "type": "SYMBOL",
-          "name": "identifier"
-        }
-      ]
+      "type": "TOKEN",
+      "content": {
+        "type": "SEQ",
+        "members": [
+          {
+            "type": "STRING",
+            "value": "@"
+          },
+          {
+            "type": "PATTERN",
+            "value": "[a-zA-Z_][a-zA-Z0-9_]*"
+          }
+        ]
+      }
     },
     "cast_expression": {
       "type": "SEQ",
       "members": [
         {
           "type": "STRING",
-          "value": "@"
-        },
-        {
-          "type": "STRING",
-          "value": "as"
+          "value": "@as"
         },
         {
           "type": "STRING",

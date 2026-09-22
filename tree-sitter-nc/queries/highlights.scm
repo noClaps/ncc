@@ -15,6 +15,7 @@
 (call_expression function: (identifier) @function.call)
 (call_expression function: (member_expression member: (identifier) @function.call))
 (builtin) @function.builtin
+"@as" @function.builtin
 (struct_declaration name: (identifier) @type)
 (enum_declaration name: (identifier) @type)
 (type_declaration name: (identifier) @type)

@@ -1,0 +1,26 @@
+==================
+Builtin names are single tokens
+==================
+@println("hello")
+@print(@as(str, 42))
+@eprintln(@args(), @env(), @target())
+
+---
+
+(source_file
+  (expression_statement
+    (call_expression
+      (builtin)
+      (arguments (string (string_content)))))
+  (expression_statement
+    (call_expression
+      (builtin)
+      (arguments
+        (cast_expression (named_type (identifier)) (number)))))
+  (expression_statement
+    (call_expression
+      (builtin)
+      (arguments
+        (call_expression (builtin) (arguments))
+        (call_expression (builtin) (arguments))
+        (call_expression (builtin) (arguments))))))
