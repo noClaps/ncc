@@ -144,25 +144,6 @@ pub fn lex(source: &str) -> Result<Vec<Token>, Diagnostics> {
             i = source[i..].find('\n').map_or(bytes.len(), |n| i + n);
             continue;
         }
-        if source[i..].starts_with("\"\"\"") {
-            i += 3;
-            let body_start = i;
-            let Some(end) = source[i..].find("\"\"\"") else {
-                return Err(Diagnostics::one(
-                    "unterminated multiline string",
-                    start..bytes.len(),
-                ));
-            };
-            i += end;
-            let raw = &source[body_start..i];
-            i += 3;
-            out.push(Token {
-                newline_before: false,
-                kind: TokenKind::String(dedent(raw)),
-                span: start..i,
-            });
-            continue;
-        }
         if c == '"' {
             let (value, end) = quoted(source, i, '"')?;
             i = end;
@@ -298,13 +279,26 @@ pub fn lex(source: &str) -> Result<Vec<Token>, Diagnostics> {
 }
 
 fn quoted(source: &str, start: usize, quote: char) -> Result<(String, usize), Diagnostics> {
+    let multiline = quote == '"' && source[start..].starts_with("\"\"\"");
     let mut braces = 0usize;
     let mut nested_quote = None;
     let mut nested_escape = false;
-    let mut i = start + quote.len_utf8();
+    let mut i = start + if multiline { 3 } else { quote.len_utf8() };
     let mut value = String::new();
     let bytes = source.as_bytes();
     while i < bytes.len() {
+        if multiline && braces == 0 && source[i..].starts_with("\"\"\"") {
+            let closing_line = source[..i].rsplit('\n').next().unwrap();
+            let indent = if closing_line
+                .bytes()
+                .all(|b| b == b' ' || b == b'\t' || b == b'\r')
+            {
+                closing_line.len()
+            } else {
+                0
+            };
+            return Ok((dedent(&value, indent), i + 3));
+        }
         let c = source[i..].chars().next().unwrap();
         i += c.len_utf8();
         if braces > 0 {
@@ -334,7 +328,7 @@ fn quoted(source: &str, start: usize, quote: char) -> Result<(String, usize), Di
             value.push(c);
             continue;
         }
-        if c == quote {
+        if c == quote && !multiline {
             return Ok((value, i));
         }
         if c == '\\' {
@@ -371,19 +365,25 @@ fn quoted(source: &str, start: usize, quote: char) -> Result<(String, usize), Di
     ))
 }
 
-fn dedent(raw: &str) -> String {
-    let raw = raw.strip_prefix('\n').unwrap_or(raw);
-    let indent = raw
-        .lines()
-        .last()
-        .map(|s| s.len() - s.trim_start().len())
-        .unwrap_or(0);
-    raw.lines()
-        .map(|line| line.get(indent.min(line.len())..).unwrap_or(""))
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim_end_matches('\n')
-        .to_string()
+fn dedent(raw: &str, indent: usize) -> String {
+    let raw = raw
+        .strip_prefix("\r\n")
+        .or_else(|| raw.strip_prefix('\n'))
+        .unwrap_or(raw);
+    let mut result = String::new();
+    for line in raw.split_inclusive('\n') {
+        let remove = line
+            .bytes()
+            .take(indent)
+            .take_while(|b| *b == b' ' || *b == b'\t')
+            .count();
+        result.push_str(&line[remove..]);
+    }
+    // Drop the closing delimiter's indentation, but preserve content newlines.
+    if result.ends_with('\r') {
+        result.pop();
+    }
+    result
 }
 
 #[cfg(test)]

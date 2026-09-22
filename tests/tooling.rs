@@ -2,6 +2,30 @@
 use serde_json::{Value, json};
 
 #[test]
+fn multiline_strings_preserve_content_and_handle_escapes() {
+    use ncc::lexer::{TokenKind, lex};
+    for (source, expected) in [
+        (
+            "\"\"\"\n  Hello\n    indented\n  \"\"\"",
+            "Hello\n  indented\n",
+        ),
+        ("\"\"\"\n界\n  \"\"\"", "界\n"),
+        (
+            "\"\"\"inline \"quotes\" and \\t tab\"\"\"",
+            "inline \"quotes\" and \t tab",
+        ),
+        ("\"\"\"\n  \\{literal}\n  \"\"\"", "\\{literal}\n"),
+        ("\"\"\"\n{\"quoted\"}\n\"\"\"", "{\"quoted\"}\n"),
+        ("\"\"\"\r\n  hello\r\n  \"\"\"", "hello\r\n"),
+    ] {
+        assert_eq!(
+            lex(source).unwrap()[0].kind,
+            TokenKind::String(expected.into())
+        );
+    }
+}
+
+#[test]
 fn formatter_preserves_comments_literals_and_is_idempotent() {
     let source = "test \"format\" {\n     // keep this\n   str s = \"{literal}\"\n if true {\ntrue -> { @print(s) }\nfalse -> {}\n}\n}\n";
     let formatted = ncc::formatter::format(source).unwrap();
