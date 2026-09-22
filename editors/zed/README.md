@@ -9,9 +9,7 @@ back. The Zed SDK is an editor-only dependency; it is not linked into ncc.
 From the ncc repository root:
 
 ```sh
-cargo build --release
-rustc --edition=2024 scripts/prepare-zed.rs -o target/prepare-zed
-target/prepare-zed
+make zed
 ```
 
 In Zed, run **zed: install dev extension** and select `target/zed-extension`.

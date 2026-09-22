@@ -8,7 +8,7 @@ is ongoing; see [the implementation ledger](docs/implementation.md).
 NC-written subset compiler and a starting point for the self-hosted compiler.
 
 ```sh
-cargo build --release
+make build
 target/release/ncc run example.nc
 target/release/ncc build example.nc --release -o example.c
 target/release/ncc check example.nc
@@ -73,6 +73,5 @@ and a small runtime, without ICU or another external Unicode library.
 optional regeneration tool, not part of building or running the compiler.
 
 ```sh
-cargo test --offline
-cargo clippy --offline --all-targets -- -D warnings
+make test
 ```
