@@ -1,3 +1,13 @@
+The mostly vibe-coded compiler for the [NC programming language](https://nc.klado.dev). This version of the compiler was made primarily by GPT-6 Astra, which is the reason why it's not on Codeberg where I put all my other projects. The purpose of this version of the compiler is to give me a working implementation of NC, at least enough that I can later rewrite the compiler in NC itself and archive this repo.
+
+There may be some differences between the specification on the NC website linked above and the implementation in this repo. In such cases, you can look at [`docs/design.md`](./docs/design.md) as it is the reference design for this compiler.
+
+This code is unlicensed for now as I don't really know the legal implications of using LLMs to write code. I don't want to end up using the wrong license. The bootstrapped compiler will be properly licensed, but for now you'll just have to deal with this not being properly open source. For all intents and purposes though, it is open source and you can fork and use it however you wish, and I grant you explicit permission to do so.
+
+Everything below the line is the original LLM-written README. I cannot guarantee that the information below is up to date or correct. If something isn't working and you need help, let me know and I'll try to sort it out for you. Chances are, a lot of things are broken, and I haven't tested the vast majority of them yet.
+
+---
+
 # NC compiler
 
 Rust front end, portable C output, and system-C-compiler executable builds.
