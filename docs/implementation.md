@@ -24,6 +24,10 @@ must stay explicit about features still under construction.
 - UTF-8 grapheme literals, interpolation, Unicode-aware string length/indexing,
   replacement and iteration, and string-to-character/byte-array conversion.
 - Source imports, exports, cycle diagnostics, and external C functions.
+- Validated external C signatures with stable argument/result aliases, including
+  composite arguments and error-union results; see `docs/c-abi.md`.
+- Runtime argument/environment builtins and compile-time target introspection;
+  explicit target selection and `NC_TARGET` support for `macos-arm64`.
 - CLI artifact isolation, explicit formats, argument validation, capture lint
   (including imported files and suppression), stdio LSP diagnostics/formatting,
   and bounded memoized type-aware constant evaluation in release builds, covering

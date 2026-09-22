@@ -13,6 +13,7 @@ pub mod modules;
 pub mod optimizer;
 pub mod parser;
 pub mod sema;
+pub mod target;
 pub mod temp;
 pub mod unicode;
 mod unicode_data;

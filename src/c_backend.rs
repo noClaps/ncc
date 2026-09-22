@@ -136,7 +136,7 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
     }
     e.scopes[0].clear();
     e.return_type = Type::void();
-    e.line("int main(void) {");
+    e.line("int main(int nc_argc_input, char **nc_argv_input) {");
     let main_body_start = e.out.len();
     for item in &checked.module.items {
         match item {
@@ -214,6 +214,9 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
         output.push('\n');
     }
     output.push_str(&declarations);
+    if e.helpers.contains("/* arguments */") {
+        output.push_str("static int nc_argc; static char **nc_argv;\n");
+    }
     for prototype in &e.runtime_prototypes {
         output.push_str(prototype);
         output.push('\n');
@@ -223,6 +226,9 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
         output.push('\n');
     }
     output.push_str(&e.out[..main_body_start]);
+    if e.helpers.contains("/* arguments */") {
+        output.push_str("nc_argc = nc_argc_input; nc_argv = nc_argv_input;\n");
+    }
     if e.helpers
         .iter()
         .any(|helper| helper.contains("nc_allocations"))
@@ -1352,6 +1358,41 @@ impl Emitter<'_> {
                 }
             }
             Expr::Call { callee, args, .. } => {
+                if let Expr::Name(name) = &**callee {
+                    match name.as_str() {
+                        "@target" => {
+                            let ct = self.c_type(&self.ty(e)?)?;
+                            return self.temp(
+                                e,
+                                format!(
+                                    "({ct}){{{}, {}}}",
+                                    c_string(crate::target::OS),
+                                    c_string(crate::target::ARCH)
+                                ),
+                            );
+                        }
+                        "@args" => {
+                            self.allocation_support();
+                            self.helpers.insert("/* arguments */".into());
+                            let ct = self.c_type(&self.ty(e)?)?;
+                            let result = self.fresh();
+                            self.line(format!("{ct} {result} = {{nc_argc, nc_argc, nc_alloc(nc_argc, sizeof(const char *))}}; for (int i=0; i<nc_argc; ++i) {result}.vals[i] = nc_argv[i];"));
+                            return Ok(result);
+                        }
+                        "@env" => {
+                            self.allocation_support();
+                            self.headers.insert("string.h");
+                            let ct = self.c_type(&self.ty(e)?)?;
+                            let result = self.fresh();
+                            self.line(format!("{ct} {result} = {{0}}; extern char **environ; for (char **entry = environ; entry && *entry; ++entry) {{ const char *separator = strchr(*entry, '='); if (!separator) continue; size_t length = (size_t)(separator - *entry); char *key = nc_alloc(length + 1, 1); memcpy(key, *entry, length);"));
+                            let string = Type::Named("str".into(), vec![]);
+                            self.map_set(&result, "key", "separator + 1", &string, &string)?;
+                            self.line("}");
+                            return Ok(result);
+                        }
+                        _ => {}
+                    }
+                }
                 if let Expr::Member { object, name } = &**callee {
                     let ty = self.ty(object)?;
                     if let Some(declaration) = self.enum_decl(&ty) {
@@ -1856,7 +1897,14 @@ impl Emitter<'_> {
             match ty {
                 Type::Array(element, _) => {
                     let s = self.string_value(&format!("({value}).vals[{i}]"), element)?;
+                    let quoted = matches!(&**element, Type::Named(n, _) if n == "str");
+                    if quoted {
+                        self.append_string(&result, "\"\\\"\"")?;
+                    }
                     self.append_string(&result, &s)?;
+                    if quoted {
+                        self.append_string(&result, "\"\\\"\"")?;
+                    }
                 }
                 Type::Map(key, val) => {
                     let k = self.string_value(&format!("({value}).vals[{i}].f_0"), key)?;

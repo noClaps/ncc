@@ -168,6 +168,18 @@ impl<'a> Index<'a> {
 
     pub fn completion(&self, at: usize) -> Value {
         let mut items = std::collections::BTreeMap::new();
+        for builtin in [
+            "@print",
+            "@println",
+            "@eprint",
+            "@eprintln",
+            "@as",
+            "@args",
+            "@env",
+            "@target",
+        ] {
+            items.insert(builtin.into(), json!({"label":builtin,"kind":3}));
+        }
         for symbol in &self.symbols {
             if let Some(resolved) = self.resolve(&symbol.name, at) {
                 items.insert(symbol.name.clone(), json!({"label":symbol.name,"kind":match resolved.kind { 12 => 3, 23 => 22, 10 => 13, 14 => 21, 26 => 25, _ => 6 }, "detail":self.detail(resolved),"documentation":{"kind":"markdown","value":self.documentation(resolved)}}));

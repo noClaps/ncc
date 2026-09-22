@@ -39,6 +39,15 @@ fn folded(source: &str, names: &[&str], expected: &str) {
 }
 
 #[test]
+fn target_is_a_compile_time_value() {
+    folded(
+        "fn platform() (str, str) { return @target() } @println(platform())",
+        &["platform"],
+        "(macos, arm64)\n",
+    );
+}
+
+#[test]
 fn loops_labels_and_local_places_are_evaluated() {
     folded(
         r#"

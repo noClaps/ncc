@@ -1058,6 +1058,20 @@ impl Checker {
                 }
             }
             Expr::Call { callee, args, .. } => {
+                if let Expr::Name(name) = &**callee {
+                    let ty = match name.as_str() {
+                        "@args" => Some(Type::Array(Box::new(named("str")), None)),
+                        "@env" => Some(Type::Map(Box::new(named("str")), Box::new(named("str")))),
+                        "@target" => Some(Type::Tuple(vec![named("str"), named("str")])),
+                        _ => None,
+                    };
+                    if let Some(ty) = ty {
+                        if !args.is_empty() {
+                            return self.fail(format!("{name} expects no arguments"));
+                        }
+                        return Ok(ty);
+                    }
+                }
                 if let Expr::Name(name) = &**callee
                     && matches!(
                         name.as_str(),

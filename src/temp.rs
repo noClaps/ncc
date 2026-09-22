@@ -9,12 +9,15 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 pub struct Directory(PathBuf);
 impl Directory {
     pub fn new() -> io::Result<Self> {
+        Self::new_in(&std::env::temp_dir())
+    }
+    pub fn new_in(parent: &Path) -> io::Result<Self> {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
         for _ in 0..100 {
-            let path = std::env::temp_dir().join(format!(
+            let path = parent.join(format!(
                 "ncc-{}-{nonce:x}-{}",
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)

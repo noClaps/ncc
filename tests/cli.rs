@@ -7,6 +7,96 @@ fn cli(args: &[&str]) -> std::process::Output {
 }
 
 #[test]
+fn runtime_process_builtins_and_target_selection() {
+    let dir = ncc::temp::Directory::new().unwrap();
+    let file = dir.path().join("process.nc");
+    let binary = dir.path().join("process");
+    fs::write(
+        &file,
+        r#"
+str[] args = @args()
+[str]str environment = @env()
+str os, str arch = @target()
+@println(args.len)
+@println(args[1])
+@println(args[2])
+@println(environment["NC_TEST_PROCESS_VALUE"])
+@println(os)
+@println(arch)
+"#,
+    )
+    .unwrap();
+    assert_eq!(cli(&["--targets"]).stdout, b"macos-arm64\n");
+    for release in [false, true] {
+        let output = Command::new(env!("CARGO_BIN_EXE_ncc"))
+            .args([
+                "build",
+                file.to_str().unwrap(),
+                "-o",
+                binary.to_str().unwrap(),
+                if release { "-r" } else { "-d" },
+            ])
+            .env("NC_TARGET", "invalid-default")
+            .args(["--target", "macos-arm64"])
+            .env("NC_TEST_PROCESS_VALUE", "compile-time")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = Command::new(&binary)
+            .args(["one two", "--help"])
+            .env("NC_TEST_PROCESS_VALUE", "runtime=✓")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            "3\none two\n--help\nruntime=✓\nmacos\narm64\n"
+        );
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_ncc"))
+        .args(["run", file.to_str().unwrap(), "--", "first", "second"])
+        .env("NC_TEST_PROCESS_VALUE", "forwarded")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        output.stdout,
+        b"3\nfirst\nsecond\nforwarded\nmacos\narm64\n"
+    );
+    for target in ["macos-arm64", "invalid"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_ncc"))
+            .args([
+                "build",
+                file.to_str().unwrap(),
+                "-f",
+                "C",
+                "-o",
+                dir.path().join("process.c").to_str().unwrap(),
+            ])
+            .env("NC_TARGET", target)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.success(), target == "macos-arm64");
+    }
+    for name in ["args", "env", "target"] {
+        let error = ncc::check_source(&format!("_ = @{name}(1)"), &file).unwrap_err();
+        assert!(error.to_string().contains("expects no arguments"));
+    }
+}
+
+#[test]
 fn help_and_invalid_options() {
     for command in ["build", "run", "check", "fmt", "lsp"] {
         let out = cli(&[command, "--help"]);
@@ -16,6 +106,9 @@ fn help_and_invalid_options() {
     for args in [
         vec!["build", "-o"],
         vec!["build", "-f"],
+        vec!["build", "--target"],
+        vec!["build", "file.nc", "--target=invalid"],
+        vec!["--targets", "unexpected"],
         vec!["run", "file.nc", "-f", "C"],
         vec!["check", "file.nc", "--release"],
         vec!["fmt", "one", "two"],

@@ -885,6 +885,12 @@ impl Evaluator<'_> {
                 }
             }
             Expr::Call { callee, args, .. } => {
+                if matches!(&**callee, Expr::Name(name) if name == "@target") {
+                    return Some(Value::Tuple(vec![
+                        Value::String(crate::target::OS.into()),
+                        Value::String(crate::target::ARCH.into()),
+                    ]));
+                }
                 if let Expr::Member { object, name } = &**callee
                     && let Expr::Name(owner) = &**object
                     && let Some(TypeInfo::Enum(_)) = self.checked.types.get(owner)

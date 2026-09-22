@@ -19,6 +19,13 @@ target/release/ncc build --help
 exit. `build` leaves only the requested output. Explicit `--format C|obj|exe`
 takes precedence over the output filename's extension.
 
+`ncc --targets` lists supported targets (currently `macos-arm64`). Select one
+with `ncc build --target macos-arm64` or `NC_TARGET`; an explicit option takes
+precedence. Native builds require the macOS C toolchain. `@target()` is a
+compile-time `(OS, architecture)` tuple. `@args()` and `@env()` read the running
+program's arguments and environment, never the compiler's. Pass arguments with
+`ncc run program.nc -- one two --help`.
+
 `check` performs mandatory checks and emits non-fatal lint warnings, including
 `capture`, which recommends passing function parameters instead of capturing
 surrounding values. Suppress it for a file with
