@@ -135,6 +135,23 @@ The definition of a 'character' in Unicode isn't quite aligned with what a chara
 
 Internally, NC will use UTF-8 encoding, as it is the most widely used everywhere else, making it a good default. If you'd like to use a different encoding, you can implement that yourself by converting your string into a `byte` array and parsing the raw bytes manually, or using a library that does that for you.
 
+The following escapes are defined for characters and strings:
+
+| Character    | Escape for             | Note           |
+| ------------ | ---------------------- | -------------- |
+| `\n`         | newline (line feed)    |                |
+| `\r`         | carriage return        |                |
+| `\t`         | tab                    |                |
+| `\u{XXXXXX}` | Unicode hex code       |                |
+| `\e`         | ANSI escape (`\u{1B}`) |                |
+| `\\`         | Backslash              |                |
+| `\'`         | Apostrophe             | Only in `char` |
+| `\"`         | Quote                  | Only in `str`  |
+| `\{`         | Open curly brace (`{`) | Only in `str`  |
+
+> [!NOTE]
+> For the Unicode hex code escape, not all 6 positions need to be used, e.g. `'\u{1B}' == '\u{00001B}'`. Any value that is not a valid Unicode character will result in a compilation error.
+
 ### Numeric
 
 There are 4 numeric types in NC: `byte`, `int`, `uint`, and `float`.
