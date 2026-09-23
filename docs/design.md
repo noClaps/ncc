@@ -2310,6 +2310,28 @@ The currently supported list of compiler targets is:
 | ----- | ----- | --------------- |
 | macOS | arm64 | `macos-arm64`   |
 
+### `@embed`
+
+This is a builtin function to embed a file into the program at compile time. The function takes either an absolute path or a path relative to the file it's called in and returns the bytes of that file. Symlinks will not be resolved, you should provide the path to the actual file. If the file cannot be read, `@embed` will throw a compilation error.
+
+```nc
+fn @embed(str path) byte[]
+```
+
+At compile time, the call site will be replaced with the actual bytes of the file.
+
+```
+// file.txt
+Hello world
+```
+
+```nc
+byte[] hello = @embed("./file.txt")
+
+// after compilation
+byte[] hello = [0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x20, 0x77, 0x6f, 0x72, 0x6c, 0x64]
+```
+
 ## Compiler
 
 The compiler is implemented to type-check an optimise the NC code and output C, and then compile that to the executable using the system's C compiler.
