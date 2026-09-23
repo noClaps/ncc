@@ -2263,7 +2263,7 @@ struct Data {
 @println(data) // output: (Nathan, 24)
 ```
 
-### `@args`
+#### `@args`
 
 This is a builtin function that returns the command line arguments passed to the program as an array of strings. The first argument is the executable name.
 
@@ -2280,7 +2280,7 @@ For example:
 ["./program", "1", "2", "3", "--help", "--force", "true"]
 ```
 
-### `@env`
+#### `@env`
 
 This is a builtin function to get the environment variables as a `[str]str` map.
 
@@ -2291,7 +2291,7 @@ test "environment variables {
 }
 ```
 
-### `@target`
+#### `@target`
 
 This will return the current target as a tuple of the OS name and CPU architecture.
 
@@ -2310,7 +2310,7 @@ The currently supported list of compiler targets is:
 | ----- | ----- | --------------- |
 | macOS | arm64 | `macos-arm64`   |
 
-### `@embed`
+#### `@embed`
 
 This is a builtin function to embed a file into the program at compile time. The function takes either an absolute path or a path relative to the file it's called in and returns the bytes of that file. Symlinks will not be resolved, you should provide the path to the actual file. If the file cannot be read, `@embed` will throw a compilation error.
 
