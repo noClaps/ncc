@@ -1,0 +1,609 @@
+==================
+Unicode escapes and interpolation
+==================
+str s = "\u{0}\u{1F36A}\n\r\t\e\\\"\{literal} {1 + 2}"
+char c = '\u{1F36A}'
+char quote = '\''
+str multiline = """
+  \u{7b}literal} {"nested"}
+  """
+
+---
+
+(source_file
+  (variable_declaration
+    (parameter
+      (named_type
+        (identifier))
+      (identifier))
+    (string
+      (escape_sequence)
+      (escape_sequence)
+      (escape_sequence)
+      (escape_sequence)
+      (escape_sequence)
+      (escape_sequence)
+      (escape_sequence)
+      (escape_sequence)
+      (escape_sequence)
+      (string_content)
+      (interpolation
+        (binary_expression
+          (number)
+          (number)))))
+  (variable_declaration
+    (parameter
+      (named_type
+        (identifier))
+      (identifier))
+    (character))
+  (variable_declaration
+    (parameter
+      (named_type
+        (identifier))
+      (identifier))
+    (character))
+  (variable_declaration
+    (parameter
+      (named_type
+        (identifier))
+      (identifier))
+    (multiline_string
+      (multiline_content)
+      (escape_sequence)
+      (multiline_content)
+      (interpolation
+        (string
+          (string_content)))
+      (multiline_content))))
+
+==================
+Generics and function types
+==================
+pub struct Box<type T> { T value }
+enum Result<type T> { Ok(T), Empty }
+type Count = uint
+fn identity<type T>(T value) T { return value }
+(fn(int) int) callback = fn(int x) int { return x + 1 }
+Box<Result<int[]>> value = Box<Result<int[]>> { .value = Result.Ok([1, 2]) }
+int n = identity<int>(callback(1))
+
+---
+
+(source_file
+  (struct_declaration
+    (identifier)
+    (type_parameters
+      (identifier))
+    (field_declaration
+      (named_type
+        (identifier))
+      (identifier)))
+  (enum_declaration
+    (identifier)
+    (type_parameters
+      (identifier))
+    (enum_variant
+      (identifier)
+      (named_type
+        (identifier)))
+    (enum_variant
+      (identifier)))
+  (type_declaration
+    (identifier)
+    (named_type
+      (identifier)))
+  (function_declaration
+    (identifier)
+    (type_parameters
+      (identifier))
+    (parameters
+      (parameter
+        (named_type
+          (identifier))
+        (identifier)))
+    (named_type
+      (identifier))
+    (block
+      (return_statement
+        (identifier))))
+  (variable_declaration
+    (parameter
+      (function_type
+        (named_type
+          (identifier))
+        (named_type
+          (identifier)))
+      (identifier))
+    (lambda_expression
+      (parameters
+        (parameter
+          (named_type
+            (identifier))
+          (identifier)))
+      (named_type
+        (identifier))
+      (block
+        (return_statement
+          (binary_expression
+            (identifier)
+            (number))))))
+  (variable_declaration
+    (parameter
+      (named_type
+        (identifier)
+        (type_arguments
+          (named_type
+            (identifier)
+            (type_arguments
+              (array_type
+                (named_type
+                  (identifier)))))))
+      (identifier))
+    (struct_expression
+      (named_type
+        (identifier)
+        (type_arguments
+          (named_type
+            (identifier)
+            (type_arguments
+              (array_type
+                (named_type
+                  (identifier)))))))
+      (field_initializer
+        (identifier)
+        (call_expression
+          (member_expression
+            (identifier)
+            (identifier))
+          (arguments
+            (array_expression
+              (number)
+              (number)))))))
+  (variable_declaration
+    (parameter
+      (named_type
+        (identifier))
+      (identifier))
+    (call_expression
+      (identifier)
+      (type_arguments
+        (named_type
+          (identifier)))
+      (arguments
+        (call_expression
+          (identifier)
+          (arguments
+            (number)))))))
+
+==================
+Patterns and value branches
+==================
+int result = if (1, [2, 3]) {
+  (a, [b, c]) -> { break a + b + c }
+  _ -> { break 0 }
+}
+if value {
+  Result.Ok(x), Result.Empty -> { @println(x) }
+  Point { .x = a, .y = b } -> { @println(a, b) }
+  _ -> {}
+}
+int a, (int, int) rest = (1, 2, 3)
+
+---
+
+(source_file
+  (variable_declaration
+    (parameter
+      (named_type
+        (identifier))
+      (identifier))
+    (if_expression
+      (tuple_expression
+        (number)
+        (array_expression
+          (number)
+          (number)))
+      (match_arm
+        (tuple_expression
+          (identifier)
+          (array_expression
+            (identifier)
+            (identifier)))
+        (block
+          (break_statement
+            (binary_expression
+              (binary_expression
+                (identifier)
+                (identifier))
+              (identifier)))))
+      (match_arm
+        (identifier)
+        (block
+          (break_statement
+            (number))))))
+  (expression_statement
+    (if_expression
+      (identifier)
+      (match_arm
+        (call_expression
+          (member_expression
+            (identifier)
+            (identifier))
+          (arguments
+            (identifier)))
+        (member_expression
+          (identifier)
+          (identifier))
+        (block
+          (expression_statement
+            (call_expression
+              (builtin)
+              (arguments
+                (identifier))))))
+      (match_arm
+        (struct_expression
+          (named_type
+            (identifier))
+          (field_initializer
+            (identifier)
+            (identifier))
+          (field_initializer
+            (identifier)
+            (identifier)))
+        (block
+          (expression_statement
+            (call_expression
+              (builtin)
+              (arguments
+                (identifier)
+                (identifier))))))
+      (match_arm
+        (identifier)
+        (block))))
+  (variable_declaration
+    (parameter
+      (named_type
+        (identifier))
+      (identifier))
+    (parameter
+      (tuple_type
+        (named_type
+          (identifier))
+        (named_type
+          (identifier)))
+      (identifier))
+    (tuple_expression
+      (number)
+      (number)
+      (number))))
+
+==================
+Concurrency and labelled control flow
+==================
+mut mutex int count = 0
+fn worker() int {
+  lock count { count = count + 1 }
+  return 1
+}
+fut int job = async worker()
+outer: for i in [1, 2] {
+  while true {
+    if i { 1 -> { continue :outer } _ -> { break :outer } }
+  }
+}
+@println(await job)
+
+---
+
+(source_file
+  (variable_declaration
+    (parameter
+      (named_type
+        (identifier))
+      (identifier))
+    (number))
+  (function_declaration
+    (identifier)
+    (parameters)
+    (named_type
+      (identifier))
+    (block
+      (lock_statement
+        (identifier)
+        (block
+          (assignment_statement
+            (identifier)
+            (binary_expression
+              (identifier)
+              (number)))))
+      (return_statement
+        (number))))
+  (variable_declaration
+    (parameter
+      (future_type
+        (named_type
+          (identifier)))
+      (identifier))
+    (unary_expression
+      (call_expression
+        (identifier)
+        (arguments))))
+  (labeled_statement
+    (identifier)
+    (for_statement
+      (identifier)
+      (array_expression
+        (number)
+        (number))
+      (block
+        (while_statement
+          (boolean)
+          (block
+            (expression_statement
+              (if_expression
+                (identifier)
+                (match_arm
+                  (number)
+                  (block
+                    (continue_statement
+                      (identifier))))
+                (match_arm
+                  (identifier)
+                  (block
+                    (break_statement
+                      (identifier)))))))))))
+  (expression_statement
+    (call_expression
+      (builtin)
+      (arguments
+        (unary_expression
+          (identifier))))))
+
+==================
+Errors optionals imports and externs
+==================
+import { "other" as other }
+extern "bridge.c" as c { fn read(str path) int! = "read_value" }
+fn read() int! { return try c.read("file") }
+int? maybe = none
+int value = maybe else 42
+int result = read() catch message { @eprintln(message) break 0 }
+byte[] bytes = @embed("data.bin")
+test "imports" { assert other.answer() == value }
+
+---
+
+(source_file
+  (import_declaration
+    (string
+      (string_content))
+    (identifier))
+  (extern_declaration
+    (string
+      (string_content))
+    (identifier)
+    (function_signature
+      (identifier)
+      (parameters
+        (parameter
+          (named_type
+            (identifier))
+          (identifier)))
+      (error_type
+        (named_type
+          (identifier)))
+      (string
+        (string_content))))
+  (function_declaration
+    (identifier)
+    (parameters)
+    (error_type
+      (named_type
+        (identifier)))
+    (block
+      (return_statement
+        (unary_expression
+          (call_expression
+            (member_expression
+              (identifier)
+              (identifier))
+            (arguments
+              (string
+                (string_content))))))))
+  (variable_declaration
+    (parameter
+      (optional_type
+        (named_type
+          (identifier)))
+      (identifier))
+    (none))
+  (variable_declaration
+    (parameter
+      (named_type
+        (identifier))
+      (identifier))
+    (else_expression
+      (identifier)
+      (number)))
+  (variable_declaration
+    (parameter
+      (named_type
+        (identifier))
+      (identifier))
+    (catch_expression
+      (call_expression
+        (identifier)
+        (arguments))
+      (identifier)
+      (block
+        (expression_statement
+          (call_expression
+            (builtin)
+            (arguments
+              (identifier))))
+        (break_statement
+          (number)))))
+  (variable_declaration
+    (parameter
+      (array_type
+        (named_type
+          (identifier)))
+      (identifier))
+    (call_expression
+      (builtin)
+      (arguments
+        (string
+          (string_content)))))
+  (test_declaration
+    (string
+      (string_content))
+    (block
+      (assert_statement
+        (binary_expression
+          (call_expression
+            (member_expression
+              (identifier)
+              (identifier))
+            (arguments))
+          (identifier))))))
+
+==================
+Operators containers and literals
+==================
+mut [str]int map = ["a": 1, "b": 2]
+map["c"] = 3
+mut int[3] numbers = [0x1, 0b10, 0o3]
+numbers[$] = -2 ** 3 + 4 * 5 / 2 % 3
+uint bits = ((1u << 2u) | 3u) ^ (7u & !1u) >> 1u
+bool condition = not false and true or 1 <= 2 and 3 >= 2 and 1 != 2
+str text = "hello" <> '!' <> @as(str, map)
+assert "a" in map
+assert numbers[0] < numbers[1]
+assert 2 > 1
+
+---
+
+(source_file
+  (variable_declaration
+    (parameter
+      (map_type
+        (named_type
+          (identifier))
+        (named_type
+          (identifier)))
+      (identifier))
+    (map_expression
+      (map_entry
+        (string
+          (string_content))
+        (number))
+      (map_entry
+        (string
+          (string_content))
+        (number))))
+  (assignment_statement
+    (index_expression
+      (identifier)
+      (string
+        (string_content)))
+    (number))
+  (variable_declaration
+    (parameter
+      (array_type
+        (named_type
+          (identifier))
+        (number))
+      (identifier))
+    (array_expression
+      (number)
+      (number)
+      (number)))
+  (assignment_statement
+    (index_expression
+      (identifier)
+      (last_index))
+    (binary_expression
+      (unary_expression
+        (binary_expression
+          (number)
+          (number)))
+      (binary_expression
+        (binary_expression
+          (binary_expression
+            (number)
+            (number))
+          (number))
+        (number))))
+  (variable_declaration
+    (parameter
+      (named_type
+        (identifier))
+      (identifier))
+    (binary_expression
+      (parenthesized_expression
+        (binary_expression
+          (parenthesized_expression
+            (binary_expression
+              (number)
+              (number)))
+          (number)))
+      (binary_expression
+        (parenthesized_expression
+          (binary_expression
+            (number)
+            (unary_expression
+              (number))))
+        (number))))
+  (variable_declaration
+    (parameter
+      (named_type
+        (identifier))
+      (identifier))
+    (binary_expression
+      (binary_expression
+        (unary_expression
+          (boolean))
+        (boolean))
+      (binary_expression
+        (binary_expression
+          (binary_expression
+            (number)
+            (number))
+          (binary_expression
+            (number)
+            (number)))
+        (binary_expression
+          (number)
+          (number)))))
+  (variable_declaration
+    (parameter
+      (named_type
+        (identifier))
+      (identifier))
+    (binary_expression
+      (binary_expression
+        (string
+          (string_content))
+        (character))
+      (cast_expression
+        (named_type
+          (identifier))
+        (identifier))))
+  (assert_statement
+    (binary_expression
+      (string
+        (string_content))
+      (identifier)))
+  (assert_statement
+    (binary_expression
+      (index_expression
+        (identifier)
+        (number))
+      (index_expression
+        (identifier)
+        (number))))
+  (assert_statement
+    (binary_expression
+      (number)
+      (number))))

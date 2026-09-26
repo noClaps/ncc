@@ -11,16 +11,27 @@ Builtin names are single tokens
   (expression_statement
     (call_expression
       (builtin)
-      (arguments (string (string_content)))))
+      (arguments
+        (string
+          (string_content)))))
   (expression_statement
     (call_expression
       (builtin)
       (arguments
-        (cast_expression (named_type (identifier)) (number)))))
+        (cast_expression
+          (named_type
+            (identifier))
+          (number)))))
   (expression_statement
     (call_expression
       (builtin)
       (arguments
-        (call_expression (builtin) (arguments))
-        (call_expression (builtin) (arguments))
-        (call_expression (builtin) (arguments))))))
+        (call_expression
+          (builtin)
+          (arguments))
+        (call_expression
+          (builtin)
+          (arguments))
+        (call_expression
+          (builtin)
+          (arguments))))))

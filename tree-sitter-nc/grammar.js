@@ -1,6 +1,9 @@
 // NC concrete syntax. Semantic restrictions are enforced by ncc, not the editor.
 const commaSep1 = rule => seq(rule, repeat(seq(',', rule)), optional(','));
 const commaSep = rule => optional(commaSep1(rule));
+const identifier = /[A-Za-z_][A-Za-z_0-9]*/;
+const unicodeEscape = /\\u\{[0-9a-fA-F]{1,6}\}/;
+const typedName = $ => seq(field('type', $._type), field('name', $.identifier));
 
 module.exports = grammar({
   name: 'nc',
@@ -16,7 +19,7 @@ module.exports = grammar({
   rules: {
     source_file: $ => repeat($._item),
     comment: _ => token(seq('//', /[^\r\n]*/)),
-    identifier: _ => /[A-Za-z_][A-Za-z_0-9]*/,
+    identifier: _ => identifier,
     _item: $ => choice($.import_declaration, $.extern_declaration,
       $.function_declaration, $.struct_declaration, $.enum_declaration,
       $.type_declaration, $.test_declaration, $._statement),
@@ -26,12 +29,12 @@ module.exports = grammar({
     function_declaration: $ => seq(optional('pub'), 'fn', field('name', $.identifier), optional($.type_parameters), $.parameters, optional($._return_type), field('body', $.block)),
     lambda_expression: $ => seq('fn', $.parameters, optional($._return_type), field('body', $.block)),
     parameters: $ => seq('(', commaSep($.parameter), ')'),
-    parameter: $ => seq(field('type', $._type), field('name', $.identifier)),
+    parameter: typedName,
     _return_type: $ => choice($._type, '!'),
     type_parameters: $ => seq('<', commaSep1(seq(optional('type'), $.identifier)), '>'),
     type_arguments: $ => seq('<', commaSep1($._type), '>'),
     struct_declaration: $ => seq(optional('pub'), 'struct', field('name', $.identifier), optional($.type_parameters), '{', repeat(seq($.field_declaration, optional(','))), '}'),
-    field_declaration: $ => seq(field('type', $._type), field('name', $.identifier)),
+    field_declaration: typedName,
     enum_declaration: $ => seq(optional('pub'), 'enum', field('name', $.identifier), optional($.type_parameters), '{', repeat(seq($.enum_variant, optional(','))), '}'),
     enum_variant: $ => seq(field('name', $.identifier), optional(seq('(', commaSep($._type), ')'))),
     type_declaration: $ => seq(optional('pub'), 'type', field('name', $.identifier), '=', field('type', $._type)),
@@ -69,7 +72,7 @@ module.exports = grammar({
       $.tuple_expression, $.parenthesized_expression, $.struct_expression,
       $.call_expression, $.index_expression, $.member_expression, $.unary_expression,
       $.binary_expression, $.if_expression, $.lambda_expression, $.else_expression, $.catch_expression, $.cast_expression),
-    builtin: $ => token(seq('@', /[a-zA-Z_][a-zA-Z0-9_]*/)),
+    builtin: _ => token(seq('@', identifier)),
     cast_expression: $ => seq('@as', '(', $._type, ',', $._expression, ')'),
     number: _ => token(choice(/0[xX][0-9a-fA-F_]+u?/, /0[bB][01_]+u?/, /0[oO][0-7_]+u?/, /[0-9][0-9_]*(\.[0-9][0-9_]*)?u?/)),
     boolean: _ => choice('true', 'false'),
@@ -77,11 +80,11 @@ module.exports = grammar({
     last_index: _ => '$',
     string: $ => seq('"', repeat(choice($.string_content, $.escape_sequence, $.interpolation)), '"'),
     string_content: _ => token.immediate(/[^"\\{\r\n]+/),
-    escape_sequence: _ => token.immediate(/\\[^\r\n]/),
+    escape_sequence: _ => token.immediate(choice(unicodeEscape, /\\[nrte\\"{]/)),
     interpolation: $ => seq('{', $._expression, '}'),
     multiline_string: $ => seq('"""', repeat(choice($.multiline_content, $.escape_sequence, $.interpolation)), '"""'),
     multiline_content: _ => token.immediate(choice(/[^"\\{]+/, /"[^"\\{]/, /""[^"\\{]/)),
-    character: _ => token(seq("'", repeat1(choice(/[^'\\\r\n]/, /\\[^\r\n]/)), "'")),
+    character: _ => token(seq("'", repeat1(choice(/[^'\\\r\n]/, unicodeEscape, /\\[nrte\\']/)), "'")),
     array_expression: $ => seq('[', commaSep($._expression), ']'),
     map_expression: $ => seq('[', commaSep1($.map_entry), ']'),
     map_entry: $ => seq(field('key', $._expression), ':', field('value', $._expression)),
