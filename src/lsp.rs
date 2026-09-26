@@ -54,7 +54,7 @@ pub fn serve(mut input: impl BufRead, mut output: impl Write) -> io::Result<()> 
         }
         let result = match method {
             "initialize" => Some(
-                json!({"capabilities":{"positionEncoding":"utf-16","textDocumentSync":{"openClose":true,"change":2},"documentFormattingProvider":true,"documentSymbolProvider":true,"workspaceSymbolProvider":true,"definitionProvider":true,"hoverProvider":true,"completionProvider":{}},"serverInfo":{"name":"ncc","version":env!("CARGO_PKG_VERSION")}}),
+                json!({"capabilities":{"positionEncoding":"utf-16","textDocumentSync":{"openClose":true,"change":2,"save":true},"documentFormattingProvider":true,"documentSymbolProvider":true,"workspaceSymbolProvider":true,"definitionProvider":true,"typeDefinitionProvider":true,"referencesProvider":true,"renameProvider":{"prepareProvider":true},"signatureHelpProvider":{"triggerCharacters":["(",","]},"foldingRangeProvider":true,"hoverProvider":true,"completionProvider":{"triggerCharacters":[".","@"]}},"serverInfo":{"name":"ncc","version":env!("CARGO_PKG_VERSION")}}),
             ),
             "shutdown" => {
                 shutdown = true;
@@ -131,6 +131,12 @@ pub fn serve(mut input: impl BufRead, mut output: impl Write) -> io::Result<()> 
             }
             "textDocument/documentSymbol"
             | "textDocument/definition"
+            | "textDocument/typeDefinition"
+            | "textDocument/references"
+            | "textDocument/prepareRename"
+            | "textDocument/rename"
+            | "textDocument/signatureHelp"
+            | "textDocument/foldingRange"
             | "textDocument/hover"
             | "textDocument/completion" => {
                 let uri = p["textDocument"]["uri"].as_str().unwrap_or("");
@@ -138,6 +144,8 @@ pub fn serve(mut input: impl BufRead, mut output: impl Write) -> io::Result<()> 
                     let index = index::Index::new(&document.text);
                     if method.ends_with("documentSymbol") {
                         json!(index.symbols(uri, ""))
+                    } else if method.ends_with("foldingRange") {
+                        index.folding_ranges()
                     } else if let Some(at) = offset(&document.text, &p["position"]) {
                         let imported =
                             if matches!(method, "textDocument/definition" | "textDocument/hover") {
@@ -147,6 +155,19 @@ pub fn serve(mut input: impl BufRead, mut output: impl Write) -> io::Result<()> 
                             };
                         imported.unwrap_or_else(|| match method {
                             "textDocument/definition" => index.definition(uri, at),
+                            "textDocument/typeDefinition" => index.type_definition(uri, at),
+                            "textDocument/references" => index.references(
+                                uri,
+                                at,
+                                p["context"]["includeDeclaration"]
+                                    .as_bool()
+                                    .unwrap_or(false),
+                            ),
+                            "textDocument/prepareRename" => index.prepare_rename(at),
+                            "textDocument/rename" => {
+                                index.rename(uri, at, p["newName"].as_str().unwrap_or(""))
+                            }
+                            "textDocument/signatureHelp" => index.signature_help(at),
                             "textDocument/hover" => index.hover(at),
                             _ => index.completion(at),
                         })

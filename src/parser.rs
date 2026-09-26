@@ -32,6 +32,7 @@ pub struct SourceSymbol {
     pub scope: Option<Span>,
     pub visible_from: usize,
     pub kind: u32,
+    pub owner: Option<String>,
 }
 
 /// Keep declarations preceding a syntax error useful while editing incomplete code.
@@ -60,6 +61,7 @@ impl Parser {
                 scope: None,
                 visible_from,
                 kind,
+                owner: None,
             });
         }
     }
@@ -72,6 +74,14 @@ impl Parser {
                 if symbol.scope.is_none() {
                     symbol.scope = Some(start..self.tokens[self.pos.saturating_sub(1)].span.end);
                 }
+            }
+        }
+    }
+    fn member_symbols(&mut self, from: usize, owner: &str, start: usize) {
+        self.scope_symbols(from, start);
+        if let Some(symbols) = &mut self.symbols {
+            for symbol in &mut symbols[from..] {
+                symbol.owner = Some(owner.into());
             }
         }
     }
@@ -264,12 +274,17 @@ impl Parser {
         let generics = self.generics()?;
         self.expect(TokenKind::LBrace)?;
         let mut fields = vec![];
+        let symbol_start = self.symbol_count();
         while !self.at(&TokenKind::RBrace) {
+            let field_start = self.current().span.start;
             let ty = self.ty()?;
+            let field_token = self.current().clone();
             let name = self.ident()?;
+            self.symbol(field_token, field_start, 8, 0);
             fields.push(Field { name, ty });
         }
         self.bump();
+        self.member_symbols(symbol_start, &name, start);
         self.symbol(token, start, 23, 0);
         Ok(StructDecl {
             public,
@@ -748,8 +763,13 @@ impl Parser {
                 continue;
             }
             if min == 0 && self.keyword(Keyword::Catch) {
+                let symbols = self.symbol_count();
+                let token = self.current().clone();
+                let start = token.span.start;
                 let name = self.ident()?;
+                self.symbol(token, start, 13, start);
                 let body = self.block()?;
+                self.scope_symbols(symbols, start);
                 left = Expr::Catch {
                     value: Box::new(left),
                     name,
@@ -980,6 +1000,7 @@ impl Parser {
         self.expect(TokenKind::LBrace)?;
         let mut arms = vec![];
         while !self.at(&TokenKind::RBrace) {
+            let pattern_start = self.pos;
             let mut patterns = vec![self.pattern()?];
             while self.at(&TokenKind::Comma) {
                 self.bump();
@@ -989,7 +1010,53 @@ impl Parser {
                 return self.error("expected `->` after conditional pattern(s)");
             }
             self.bump();
-            arms.push((patterns, self.block()?));
+            let symbol_start = self.symbol_count();
+            let start = self.tokens[pattern_start].span.start;
+            if self.symbols.is_some() {
+                fn names(pattern: &Pattern, out: &mut Vec<String>) {
+                    match pattern {
+                        Pattern::Name(n) => out.push(n.clone()),
+                        Pattern::Tuple(ps)
+                        | Pattern::Array(ps)
+                        | Pattern::Variant { values: ps, .. } => {
+                            for p in ps {
+                                names(p, out);
+                            }
+                        }
+                        Pattern::Struct { fields, .. } => {
+                            for (_, p) in fields {
+                                names(p, out);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                let mut bindings = Vec::new();
+                for pattern in &patterns {
+                    names(pattern, &mut bindings);
+                }
+                bindings.sort();
+                bindings.dedup();
+                for binding in bindings {
+                    let existing = self.symbols.as_ref().unwrap().iter().any(|s| {
+                        s.name == binding
+                            && s.owner.is_none()
+                            && s.visible_from <= start
+                            && s.scope.as_ref().is_none_or(|scope| scope.contains(&start))
+                    });
+                    if !existing
+                        && let Some(token) = self.tokens[pattern_start..self.pos]
+                            .iter()
+                            .find(|t| matches!(&t.kind, TokenKind::Ident(n) if *n == binding))
+                            .cloned()
+                    {
+                        self.symbol(token, start, 13, start);
+                    }
+                }
+            }
+            let body = self.block()?;
+            self.scope_symbols(symbol_start, start);
+            arms.push((patterns, body));
         }
         self.bump();
         Ok(Expr::If { subject, arms })

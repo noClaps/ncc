@@ -2,6 +2,69 @@
 use serde_json::{Value, json};
 
 #[test]
+#[cfg(feature = "lsp")]
+fn lsp_refactoring_and_signature_protocol() {
+    let uri = "file:///refactor.nc";
+    let source = "fn sum(int x, int y) int {\n return x + y\n}\n@println(sum(1, 2))\n";
+    let mut messages = vec![
+        json!({"id":0,"method":"initialize","params":{}}),
+        json!({"method":"textDocument/didOpen","params":{"textDocument":{"uri":uri,"version":1,"text":source}}}),
+    ];
+    for (id, method, extra) in [
+        (
+            1,
+            "references",
+            json!({"position":{"line":1,"character":8},"context":{"includeDeclaration":true}}),
+        ),
+        (
+            2,
+            "prepareRename",
+            json!({"position":{"line":1,"character":8}}),
+        ),
+        (
+            3,
+            "rename",
+            json!({"position":{"line":1,"character":8},"newName":"left"}),
+        ),
+        (
+            4,
+            "signatureHelp",
+            json!({"position":{"line":3,"character":16}}),
+        ),
+        (5, "foldingRange", json!({})),
+    ] {
+        let mut params = extra;
+        params["textDocument"] = json!({"uri":uri});
+        messages.push(json!({"id":id,"method":format!("textDocument/{method}"),"params":params}));
+    }
+    let input = messages
+        .iter()
+        .map(|m| {
+            let body = m.to_string();
+            format!("Content-Length: {}\r\n\r\n{body}", body.len())
+        })
+        .collect::<String>();
+    let mut output = Vec::new();
+    ncc::lsp::serve(std::io::Cursor::new(input), &mut output).unwrap();
+    let output = String::from_utf8(output).unwrap();
+    let replies = output
+        .split("Content-Length: ")
+        .filter_map(|s| s.split_once("\r\n\r\n"))
+        .map(|(_, body)| serde_json::from_str::<Value>(body).unwrap())
+        .collect::<Vec<_>>();
+    let result = |id| &replies.iter().find(|r| r["id"] == id).unwrap()["result"];
+    assert_eq!(
+        result(0)["capabilities"]["renameProvider"]["prepareProvider"],
+        true
+    );
+    assert_eq!(result(1).as_array().unwrap().len(), 2);
+    assert_eq!(result(2)["placeholder"], "x");
+    assert_eq!(result(3)["changes"][uri].as_array().unwrap().len(), 2);
+    assert_eq!(result(4)["activeParameter"], 1);
+    assert_eq!(result(5).as_array().unwrap().len(), 1);
+}
+
+#[test]
 fn unicode_escape_validation_is_strict() {
     for source in [
         r#""\u{}""#,
