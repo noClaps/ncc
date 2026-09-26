@@ -340,10 +340,43 @@ fn quoted(source: &str, start: usize, quote: char) -> Result<(String, usize), Di
                 'n' => '\n',
                 'r' => '\r',
                 't' => '\t',
+                'e' => '\u{1b}',
+                'u' => {
+                    let escape_start = i - 2;
+                    if !source[i..].starts_with('{') {
+                        return Err(Diagnostics::one(
+                            "Unicode escapes require `\\u{hex}`",
+                            escape_start..i,
+                        ));
+                    }
+                    i += 1;
+                    let digits = i;
+                    while i < bytes.len() && bytes[i].is_ascii_hexdigit() {
+                        i += 1;
+                    }
+                    if i == digits || i - digits > 6 || bytes.get(i) != Some(&b'}') {
+                        return Err(Diagnostics::one(
+                            "Unicode escape requires 1 to 6 hex digits and a closing `}`",
+                            escape_start..i,
+                        ));
+                    }
+                    let scalar = u32::from_str_radix(&source[digits..i], 16).unwrap();
+                    i += 1;
+                    let Some(character) = char::from_u32(scalar) else {
+                        return Err(Diagnostics::one(
+                            "Unicode escape is not a valid Unicode scalar value",
+                            escape_start..i,
+                        ));
+                    };
+                    if character == '{' && quote == '"' {
+                        value.push('\\');
+                    }
+                    character
+                }
                 '\\' => '\\',
-                '\'' => '\'',
-                '"' => '"',
-                '{' => {
+                '\'' if quote == '\'' => '\'',
+                '"' if quote == '"' => '"',
+                '{' if quote == '"' => {
                     value.push('\\');
                     '{'
                 }

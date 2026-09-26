@@ -875,7 +875,31 @@ impl Parser {
                     self.expect(TokenKind::RParen)?;
                     Ok(Expr::Cast { ty, value })
                 } else {
-                    Ok(Expr::Name(format!("@{}", self.ident()?)))
+                    let start = self.tokens[self.pos - 1].span.start;
+                    let name = self.ident()?;
+                    if name == "embed" {
+                        self.expect(TokenKind::LParen)?;
+                        let path = match self.bump().kind {
+                            TokenKind::String(path) => match self.string_expression(&path)? {
+                                Expr::String(path) => path,
+                                _ => return self.error(
+                                    "@embed path must be a string literal without interpolation",
+                                ),
+                            },
+                            _ => {
+                                return self
+                                    .error("@embed requires a compile-time string literal path");
+                            }
+                        };
+                        self.expect(TokenKind::RParen)?;
+                        Ok(Expr::Embed {
+                            path,
+                            source_path: self.path.clone(),
+                            span: start..self.tokens[self.pos - 1].span.end,
+                        })
+                    } else {
+                        Ok(Expr::Name(format!("@{name}")))
+                    }
                 }
             }
             TokenKind::Int(x) => Ok(Expr::Int(x)),

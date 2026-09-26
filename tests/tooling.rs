@@ -2,6 +2,33 @@
 use serde_json::{Value, json};
 
 #[test]
+fn unicode_escape_validation_is_strict() {
+    for source in [
+        r#""\u{}""#,
+        r#""\u{D800}""#,
+        r#""\u{110000}""#,
+        r#""\u{0000000}""#,
+        r#""\u{xyz}""#,
+        r#""\u1234""#,
+        r#""\u{41""#,
+        r#""\'""#,
+        r#"'\"'"#,
+        r#"'\{'"#,
+    ] {
+        assert!(ncc::lexer::lex(source).is_err(), "{source}");
+    }
+    for source in [
+        r#"'\u{0}'"#,
+        r#"'\u{10FFFF}'"#,
+        r#"'\u{1f36a}'"#,
+        r#"'o\u{308}'"#,
+        r#""\e\n\r\t\\\"\{""#,
+    ] {
+        assert!(ncc::lexer::lex(source).is_ok(), "{source}");
+    }
+}
+
+#[test]
 fn multiline_strings_preserve_content_and_handle_escapes() {
     use ncc::lexer::{TokenKind, lex};
     for (source, expected) in [

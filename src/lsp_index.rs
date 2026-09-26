@@ -177,6 +177,7 @@ impl<'a> Index<'a> {
             "@args",
             "@env",
             "@target",
+            "@embed",
         ] {
             items.insert(builtin.into(), json!({"label":builtin,"kind":3}));
         }

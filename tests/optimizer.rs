@@ -39,6 +39,31 @@ fn folded(source: &str, names: &[&str], expected: &str) {
 }
 
 #[test]
+fn embedded_nuls_and_unicode_escapes_agree_at_runtime() {
+    folded(
+        r#"
+fn text() str {
+    mut str value = "a\u{0}🍪"
+    value[0] = '\u{0}'
+    return value <> "\u{0}z"
+}
+fn octet(byte n) char { return @as(char, n) }
+@println(text())
+@println(text().len)
+@println(@as(byte[], text()))
+@println("\u{0}" in text())
+@println("a\u{0}b" == "a\u{0}c")
+@println(octet(0))
+@println(octet(255))
+@println("\u{7b}literal}")
+@println('\e' == '\u{00001B}')
+"#,
+        &["text", "octet"],
+        "\0\0🍪\0z\n5\n[0, 0, 240, 159, 141, 170, 0, 122]\ntrue\nfalse\n\0\nÿ\n{literal}\ntrue\n",
+    );
+}
+
+#[test]
 fn target_is_a_compile_time_value() {
     folded(
         "fn platform() (str, str) { return @target() } @println(platform())",

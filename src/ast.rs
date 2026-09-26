@@ -151,6 +151,12 @@ pub enum Stmt {
 }
 #[derive(Clone, Debug)]
 pub enum Expr {
+    Bytes(Vec<u8>),
+    Embed {
+        path: String,
+        source_path: std::path::PathBuf,
+        span: Span,
+    },
     Lambda(Box<Function>),
     Cast {
         ty: Type,

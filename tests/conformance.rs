@@ -14,7 +14,7 @@ fn external_c_composite_signatures_have_stable_aliases() {
         r#"
 nc_abi_nc_sum_result nc_sum(nc_abi_nc_sum_arg0 bytes) {
     nc_abi_nc_sum_result result = {0};
-    if (!bytes.len) { result.failed = 1; result.error = "empty"; return result; }
+    if (!bytes.len) { result.failed = 1; result.error = NC_STRING("empty"); return result; }
     for (uint64_t i = 0; i < bytes.len; ++i) result.value += bytes.vals[i];
     bytes.vals[0] = 99;
     return result;

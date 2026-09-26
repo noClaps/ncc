@@ -170,6 +170,9 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
     for header in &e.headers {
         output.push_str(&format!("#include <{header}>\n"));
     }
+    if e.helpers.contains("/* string type */") {
+        output.push_str("typedef struct { size_t bytes; const char *data; } nc_string;\n#define NC_STRING(s) ((nc_string){sizeof(s)-1, s})\n");
+    }
     if e.helpers.contains("/* async runtime */") {
         output.push_str(include_str!("runtime_async.h"));
     }
@@ -327,7 +330,10 @@ impl Emitter<'_> {
         let (ret, params) = match operation {
             ValueOperation::Copy => (ct.clone(), format!("{ct} value")),
             ValueOperation::Equal => ("int".into(), format!("{ct} left, {ct} right")),
-            ValueOperation::String => ("const char *".into(), format!("{ct} value")),
+            ValueOperation::String => (
+                self.c_type(&Type::Named("str".into(), vec![]))?,
+                format!("{ct} value"),
+            ),
         };
         let signature = format!("static {ret} {name}({params})");
         self.runtime_prototypes.push(format!("{signature};"));
@@ -500,7 +506,11 @@ impl Emitter<'_> {
             Type::Named(n, _) => match n.as_str() {
                 "void" => "void",
                 "float" => "double",
-                "str" | "char" | "error" => "const char *",
+                "str" | "char" | "error" => {
+                    self.headers.insert("stddef.h");
+                    self.helpers.insert("/* string type */".into());
+                    "nc_string"
+                }
                 "bool" => {
                     self.headers.insert("stdbool.h");
                     "bool"
@@ -943,7 +953,9 @@ impl Emitter<'_> {
         }
         if matches!(ty, Type::Named(n, _) if n == "str" || n == "char") {
             self.headers.insert("string.h");
-            Ok(format!("strcmp({left}, {right}) == 0"))
+            Ok(format!(
+                "({left}).bytes == ({right}).bytes && (!({left}).bytes || memcmp(({left}).data, ({right}).data, ({left}).bytes) == 0)"
+            ))
         } else {
             Ok(format!("{left} == {right}"))
         }
@@ -991,7 +1003,7 @@ impl Emitter<'_> {
                 self.line("} else {");
                 self.scopes.push(HashMap::new());
                 let error = self.bind(name);
-                self.line(format!("const char *{error} = {value}.error;"));
+                self.line(format!("nc_string {error} = {value}.error;"));
                 self.value_targets.push((result.clone(), end.clone(), ty));
                 if void {
                     self.block(body)?;
@@ -1118,6 +1130,24 @@ impl Emitter<'_> {
                     if self.fields(&ty).is_some() { "f_" } else { "" }
                 )
             }
+            Expr::Bytes(bytes) => {
+                self.allocation_support();
+                self.headers.insert("string.h");
+                let ct = self.c_type(&self.ty(e)?)?;
+                let value = self.fresh();
+                self.line(format!(
+                    "{ct} {value} = {{{0}, {0}, nc_alloc({0}, 1)}};",
+                    bytes.len()
+                ));
+                if !bytes.is_empty() {
+                    self.line(format!(
+                        "memcpy({value}.vals, {}, {});",
+                        c_string_bytes(bytes),
+                        bytes.len()
+                    ));
+                }
+                return Ok(value);
+            }
             Expr::Int(n) => {
                 let n = integer(n)?;
                 if matches!(self.ty(e)?, Type::Named(n, _) if n == "uint") {
@@ -1127,7 +1157,7 @@ impl Emitter<'_> {
                 }
             }
             Expr::Float(n) => n.clone(),
-            Expr::String(s) | Expr::Char(s) => c_string(s),
+            Expr::String(s) | Expr::Char(s) => nc_string(s),
             Expr::Bool(b) => {
                 self.headers.insert("stdbool.h");
                 b.to_string()
@@ -1169,6 +1199,17 @@ impl Emitter<'_> {
             Expr::Cast { ty, value } => {
                 let from = self.ty(value)?;
                 let value = self.expr(value)?;
+                if *ty == from {
+                    return Ok(value);
+                }
+                if *ty == Type::Named("char".into(), vec![])
+                    && from == Type::Named("byte".into(), vec![])
+                {
+                    self.allocation_support();
+                    let text = self.fresh();
+                    self.line(format!("char *{text} = nc_alloc(3,1); if ({value}<128) {text}[0]=(char){value}; else {{ {text}[0]=(char)(0xc0|({value}>>6)); {text}[1]=(char)(0x80|({value}&63)); }}"));
+                    return self.temp(e, format!("(nc_string){{{value}<128 ? 1 : 2, {text}}}"));
+                }
                 if matches!(ty,Type::Array(element,None) if **element == Type::Named("byte".into(),vec![]))
                     && matches!(&from,Type::Named(n,_) if matches!(n.as_str(),"int"|"uint"|"float"))
                 {
@@ -1195,20 +1236,22 @@ impl Emitter<'_> {
                     let elem = self.c_type(element)?;
                     let bytes = **element == Type::Named("byte".into(), vec![]);
                     let length = if bytes {
-                        format!("strlen({value})")
+                        format!("{value}.bytes")
                     } else {
                         format!("nc_str_len({value})")
                     };
                     let result = self.fresh();
                     self.line(format!("{ct} {result} = {{ {length}, {length}, nc_alloc({length},sizeof({elem})) }};"));
                     if bytes {
-                        self.line(format!("memcpy({result}.vals,{value},{result}.len);"));
+                        self.line(format!(
+                            "if ({result}.len) memcpy({result}.vals,{value}.data,{result}.len);"
+                        ));
                     } else {
                         let i = self.fresh();
                         let cursor = self.fresh();
                         let next = self.fresh();
                         let ch = self.fresh();
-                        self.line(format!("const char *{cursor} = {value}; for (uint64_t {i}=0; {i}<{result}.len; ++{i}) {{ const char *{next} = nc_grapheme_next({cursor}); size_t length=(size_t)({next}-{cursor}); char *{ch}=nc_alloc(length+1,1); memcpy({ch},{cursor},length); {result}.vals[{i}]={ch}; {cursor}={next}; }}"));
+                        self.line(format!("const char *{cursor} = {value}.data; for (uint64_t {i}=0; {i}<{result}.len; ++{i}) {{ const char *{next} = nc_grapheme_next({cursor}, {value}.data + {value}.bytes); size_t length=(size_t)({next}-{cursor}); char *{ch}=nc_alloc(length+1,1); memcpy({ch},{cursor},length); {result}.vals[{i}]=(nc_string){{length,{ch}}}; {cursor}={next}; }}"));
                     }
                     return Ok(result);
                 }
@@ -1334,8 +1377,8 @@ impl Emitter<'_> {
                         let result = self.fresh();
                         let a = self.fresh();
                         let b = self.fresh();
-                        self.line(format!("size_t {a} = strlen({l}), {b} = strlen({r});\nif ({a} > (size_t)-1 - {b} - 1) nc_panic(\"string length overflow\");\nchar *{result} = nc_alloc({a} + {b} + 1, 1);\nmemcpy({result}, {l}, {a}); memcpy({result} + {a}, {r}, {b} + 1);"));
-                        return Ok(result);
+                        self.line(format!("size_t {a} = {l}.bytes, {b} = {r}.bytes;\nif ({a} > (size_t)-1 - {b} - 1) nc_panic(\"string length overflow\");\nchar *{result} = nc_alloc({a} + {b} + 1, 1);\nif ({a}) memcpy({result}, {l}.data, {a}); if ({b}) memcpy({result} + {a}, {r}.data, {b});"));
+                        return self.temp(e, format!("(nc_string){{{a}+{b}, {result}}}"));
                     }
                     BinaryOp::In => {
                         if let Type::Map(key, _) = self.ty(right)? {
@@ -1352,7 +1395,9 @@ impl Emitter<'_> {
                             return Ok(result);
                         }
                         self.headers.insert("string.h");
-                        format!("strstr({r}, {l}) != 0")
+                        let found = self.fresh();
+                        self.line(format!("int {found} = 0; if ({l}.bytes <= {r}.bytes) for (size_t i=0; i <= {r}.bytes - {l}.bytes; ++i) {{ if (!{l}.bytes || memcmp({r}.data+i,{l}.data,{l}.bytes)==0) {{ {found}=1; break; }} }}"));
+                        found
                     }
                     _ => format!("({l} {} {r})", operator(*op)),
                 }
@@ -1366,17 +1411,18 @@ impl Emitter<'_> {
                                 e,
                                 format!(
                                     "({ct}){{{}, {}}}",
-                                    c_string(crate::target::OS),
-                                    c_string(crate::target::ARCH)
+                                    nc_string(crate::target::OS),
+                                    nc_string(crate::target::ARCH)
                                 ),
                             );
                         }
                         "@args" => {
                             self.allocation_support();
+                            self.headers.insert("string.h");
                             self.helpers.insert("/* arguments */".into());
                             let ct = self.c_type(&self.ty(e)?)?;
                             let result = self.fresh();
-                            self.line(format!("{ct} {result} = {{nc_argc, nc_argc, nc_alloc(nc_argc, sizeof(const char *))}}; for (int i=0; i<nc_argc; ++i) {result}.vals[i] = nc_argv[i];"));
+                            self.line(format!("{ct} {result} = {{nc_argc, nc_argc, nc_alloc(nc_argc, sizeof(nc_string))}}; for (int i=0; i<nc_argc; ++i) {result}.vals[i] = (nc_string){{strlen(nc_argv[i]), nc_argv[i]}};"));
                             return Ok(result);
                         }
                         "@env" => {
@@ -1386,7 +1432,13 @@ impl Emitter<'_> {
                             let result = self.fresh();
                             self.line(format!("{ct} {result} = {{0}}; extern char **environ; for (char **entry = environ; entry && *entry; ++entry) {{ const char *separator = strchr(*entry, '='); if (!separator) continue; size_t length = (size_t)(separator - *entry); char *key = nc_alloc(length + 1, 1); memcpy(key, *entry, length);"));
                             let string = Type::Named("str".into(), vec![]);
-                            self.map_set(&result, "key", "separator + 1", &string, &string)?;
+                            self.map_set(
+                                &result,
+                                "((nc_string){length,key})",
+                                "((nc_string){strlen(separator+1),separator+1})",
+                                &string,
+                                &string,
+                            )?;
                             self.line("}");
                             return Ok(result);
                         }
@@ -1441,12 +1493,17 @@ impl Emitter<'_> {
                             || matches!(&ty, Type::Named(n, _) if n == "float")
                         {
                             let string = self.string_value(&value, &ty)?;
-                            self.line(format!("fprintf({stream}, \"%s\", {string});"));
+                            let result = self.fresh();
+                            self.line(format!("nc_string {result} = {string}; if ({result}.bytes) fwrite({result}.data, 1, {result}.bytes, {stream});"));
+                            continue;
+                        }
+                        if matches!(&ty, Type::Named(n, _) if matches!(n.as_str(), "str" | "char" | "error"))
+                        {
+                            self.line(format!("if ({value}.bytes) fwrite({value}.data, 1, {value}.bytes, {stream});"));
                             continue;
                         }
                         let (fmt, value) = match ty {
                             Type::Named(n, _) => match n.as_str() {
-                                "str" | "char" | "error" => ("%s", value),
                                 "bool" => ("%s", format!("{value} ? \"true\" : \"false\"")),
                                 "float" => ("%.17g", value),
                                 "uint" | "byte" => ("%llu", format!("(unsigned long long){value}")),
@@ -1819,6 +1876,7 @@ impl Emitter<'_> {
         Ok(())
     }
     fn string_value(&mut self, value: &str, ty: &Type) -> Result<String, Diagnostics> {
+        self.c_type(&Type::Named("str".into(), vec![]))?;
         if self.fields(ty).is_some() || matches!(ty, Type::Array(_, _) | Type::Map(_, _)) {
             return self.value_helper(ValueOperation::String, ty, &[value]);
         }
@@ -1838,18 +1896,18 @@ impl Emitter<'_> {
                 return Ok(call);
             }
             self.runtime_prototypes
-                .push(format!("static const char *{helper}({ct} value);"));
+                .push(format!("static nc_string {helper}({ct} value);"));
             let saved = std::mem::take(&mut self.out);
-            self.line(format!("static const char *{helper}({ct} value) {{"));
+            self.line(format!("static nc_string {helper}({ct} value) {{"));
             let value = "value";
             let result = self.fresh();
             self.line(format!(
-                "const char *{result} = \"\"; switch (({value}).tag) {{"
+                "nc_string {result} = NC_STRING(\"\"); switch (({value}).tag) {{"
             ));
             for (tag, variant) in declaration.variants.iter().enumerate() {
                 self.line(format!(
                     "case {tag}: {{ {result} = {};",
-                    c_string(&format!("{}.{}", declaration.name, variant.name))
+                    nc_string(&format!("{}.{}", declaration.name, variant.name))
                 ));
                 if !variant.values.is_empty() {
                     let ct = self.c_type(&Type::Tuple(variant.values.clone()))?;
@@ -1882,7 +1940,7 @@ impl Emitter<'_> {
         if let Type::Optional(inner) = ty {
             let result = self.fresh();
             self.line(format!(
-                "const char *{result} = \"none\"; if ({value}.present) {{"
+                "nc_string {result} = NC_STRING(\"none\"); if ({value}.present) {{"
             ));
             let s = self.string_value(&format!("{value}.value"), inner)?;
             self.line(format!("{result} = {s}; }}"));
@@ -1891,7 +1949,7 @@ impl Emitter<'_> {
         if matches!(ty, Type::Array(_, _) | Type::Map(_, _)) {
             let result = self.fresh();
             let i = self.fresh();
-            self.line(format!("const char *{result} = \"[\"; for (uint64_t {i} = 0; {i} < ({value}).len; ++{i}) {{\nif ({i}) {{"));
+            self.line(format!("nc_string {result} = NC_STRING(\"[\"); for (uint64_t {i} = 0; {i} < ({value}).len; ++{i}) {{\nif ({i}) {{"));
             self.append_string(&result, "\", \"")?;
             self.line("}");
             match ty {
@@ -1926,7 +1984,7 @@ impl Emitter<'_> {
                 ("(".into(), ")")
             };
             let result = self.fresh();
-            self.line(format!("const char *{result} = {};", c_string(&open)));
+            self.line(format!("nc_string {result} = {};", nc_string(&open)));
             for (i, (field, ty_field)) in fields.iter().enumerate() {
                 if i > 0 {
                     self.append_string(&result, "\", \"")?;
@@ -1950,7 +2008,9 @@ impl Emitter<'_> {
             return Ok(value.into());
         }
         if name == "bool" {
-            return Ok(format!("({value} ? \"true\" : \"false\")"));
+            return Ok(format!(
+                "({value} ? NC_STRING(\"true\") : NC_STRING(\"false\"))"
+            ));
         }
         self.allocation_support();
         self.headers.insert("stdio.h");
@@ -1970,7 +2030,8 @@ impl Emitter<'_> {
                 "if (!strpbrk({result}, \".eE\")) strcat({result}, \".0\");"
             ));
         }
-        Ok(result)
+        self.headers.insert("string.h");
+        Ok(format!("((nc_string){{strlen({result}), {result}}})"))
     }
     fn append_string(&mut self, result: &str, suffix: &str) -> Result<(), Diagnostics> {
         self.allocation_support();
@@ -1978,7 +2039,13 @@ impl Emitter<'_> {
         let a = self.fresh();
         let b = self.fresh();
         let text = self.fresh();
-        self.line(format!("size_t {a} = strlen({result}), {b} = strlen({suffix}); if ({a} > (size_t)-1 - {b} - 1) nc_panic(\"string length overflow\");\nchar *{text} = nc_alloc({a} + {b} + 1, 1); memcpy({text},{result},{a}); memcpy({text}+{a},{suffix},{b}+1); {result} = {text};"));
+        let suffix = if suffix.starts_with('"') {
+            format!("NC_STRING({suffix})")
+        } else {
+            suffix.into()
+        };
+        let value = self.fresh();
+        self.line(format!("nc_string {value} = {suffix}; size_t {a} = {result}.bytes, {b} = {value}.bytes; if ({a} > (size_t)-1 - {b} - 1) nc_panic(\"string length overflow\");\nchar *{text} = nc_alloc({a} + {b} + 1, 1); if ({a}) memcpy({text},{result}.data,{a}); if ({b}) memcpy({text}+{a},{value}.data,{b}); {result} = (nc_string){{{a}+{b},{text}}};"));
         Ok(())
     }
     fn enum_decl(&self, ty: &Type) -> Option<EnumDecl> {
@@ -2119,7 +2186,7 @@ impl Emitter<'_> {
             self.line(format!("return ({ct}){{.failed = 1, .error = {message}}};"));
         } else {
             self.headers.extend(["stdio.h", "stdlib.h"]);
-            self.line(format!("fprintf(stderr, \"%s\\n\", {message}); exit(1);"));
+            self.line(format!("if (({message}).bytes) fwrite(({message}).data, 1, ({message}).bytes, stderr); fputc('\\n', stderr); exit(1);"));
         }
         Ok(())
     }
@@ -2247,9 +2314,15 @@ fn map_array(key: &Type, value: &Type) -> Type {
         None,
     )
 }
+fn nc_string(value: &str) -> String {
+    format!("((nc_string){{{}, {}}})", value.len(), c_string(value))
+}
 fn c_string(value: &str) -> String {
+    c_string_bytes(value.as_bytes())
+}
+fn c_string_bytes(value: &[u8]) -> String {
     let mut s = String::from("\"");
-    for b in value.bytes() {
+    for &b in value {
         match b {
             b'"' => s.push_str("\\\""),
             b'\\' => s.push_str("\\\\"),

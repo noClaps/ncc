@@ -777,6 +777,8 @@ impl Checker {
     }
     fn expr_inner(&mut self, e: &Expr) -> Result<Type, Diagnostics> {
         match e {
+            Expr::Bytes(_) => Ok(Type::Array(Box::new(named("byte")), None)),
+            Expr::Embed { .. } => self.fail("internal error: unresolved @embed"),
             Expr::Lambda(f) => {
                 if self.contains_future(&f.return_type) {
                     return self.fail("futures cannot be returned from functions");
@@ -859,6 +861,7 @@ impl Checker {
                     && *ty != named("str")
                     && !string_array
                     && !bool_integer
+                    && !(from == named("byte") && *ty == named("char"))
                     && !(matches!(ty,Type::Array(t,None) if **t == named("byte"))
                         && matches!(&from,Type::Named(n,_) if matches!(n.as_str(),"int"|"uint"|"float")))
                 {

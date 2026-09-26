@@ -497,6 +497,12 @@ impl Evaluator<'_> {
                 _ => None,
             },
             "char" if matches!(value, Value::Char(_)) => Some(value),
+            "char" if matches!(value, Value::Byte(_)) => {
+                let Value::Byte(value) = value else {
+                    unreachable!()
+                };
+                Some(Value::Char(char::from(value).to_string()))
+            }
             "bool" if matches!(value, Value::Bool(_)) => Some(value),
             _ => None,
         };
@@ -644,6 +650,9 @@ impl Evaluator<'_> {
                 value.is_finite().then(|| Value::Float(value.to_bits()))
             }
             Expr::Bool(b) => Some(Value::Bool(*b)),
+            Expr::Bytes(bytes) => Some(Value::Array(
+                bytes.iter().copied().map(Value::Byte).collect(),
+            )),
             Expr::String(s) => Some(Value::String(s.clone())),
             Expr::Char(s) => Some(Value::Char(s.clone())),
             Expr::Array(values) => {

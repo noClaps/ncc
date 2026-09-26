@@ -11,6 +11,13 @@ containing the key and value. Optionals have `present` and `value`; error unions
 have `failed`, `error`, and `value`. A zero-initialized error union means success.
 An error union with a void result uses an unused byte for `value`.
 
+Strings, characters, and error messages use `nc_string`, with a `bytes` byte
+length and `data` pointer to UTF-8 storage. Embedded zero bytes are supported;
+do not use `strlen` to measure NC strings. `NC_STRING("literal")` constructs a
+string from a C literal, including embedded zeros. A returned C buffer can be
+wrapped as `(nc_string){length, buffer}`. This is also the representation used
+by the stable external argument/result aliases.
+
 NC copies value arguments before calling an external function. External code
 must not free arguments or retain pointers to mutable argument storage. Returned
 storage must remain valid for the duration of the program. External code is
