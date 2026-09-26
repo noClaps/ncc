@@ -8,10 +8,10 @@ Generate with Tree-sitter 0.27 (ABI 14 for editor compatibility):
 cd tree-sitter-nc
 tree-sitter generate --js-runtime native --abi 14
 tree-sitter test
-tree-sitter parse ../examples/bootstrap/compiler.nc
+tree-sitter parse ../nc-tests/hello-world.nc
 ```
 
-`queries/highlights.scm` is shared with the Zed extension. The corpus covers
+`queries/highlights.scm` is used by the [Neovim setup](../editors/neovim/README.md). The corpus covers
 declarations, type syntax, control flow, concurrency, interpolation and operators.
 The grammar recognizes syntax, not types or exhaustiveness; use `ncc check` or
 the language server for semantic validation.

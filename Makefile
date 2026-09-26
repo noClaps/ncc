@@ -4,9 +4,12 @@ build:
 install: build
 	@install target/release/ncc $(HOME)/.local/bin/ncc
 
-zed: build
-	@rustc --edition=2024 scripts/prepare-zed.rs -o target/prepare-zed
-	@target/prepare-zed
+grammar:
+	@mkdir -p target
+	@cc -O2 -shared -fPIC -I tree-sitter-nc/src tree-sitter-nc/src/parser.c -o target/nc.so
+
+grammar-test:
+	@cd tree-sitter-nc && tree-sitter test
 
 test: build
 	@cargo test

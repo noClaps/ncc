@@ -14,9 +14,6 @@ Rust front end, portable C output, and system-C-compiler executable builds.
 The language specification is in [docs/design.md](docs/design.md). Implementation
 is ongoing; see [the implementation ledger](docs/implementation.md).
 
-[examples/bootstrap/compiler.nc](examples/bootstrap/compiler.nc) is a working
-NC-written subset compiler and a starting point for the self-hosted compiler.
-
 ```sh
 make build
 target/release/ncc run example.nc
@@ -65,9 +62,8 @@ also resolve exported import members, including unsaved files. Arbitrary struct
 members and every pattern binding are not yet indexed.
 
 The [Tree-sitter grammar](tree-sitter-nc/README.md) includes generated C and a
-syntax corpus. The [Zed extension](editors/zed/README.md) adds highlighting,
-indentation, brackets, outline navigation, and LSP integration. Its local
-packaging helper uses this repository's committed grammar without publishing.
+syntax corpus. See [Neovim setup](editors/neovim/README.md) for built-in LSP and
+Tree-sitter integration without editor plugins. The Zed extension was removed.
 
 ## Dependencies and self-hosting
 
