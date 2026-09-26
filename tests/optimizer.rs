@@ -39,6 +39,37 @@ fn folded(source: &str, names: &[&str], expected: &str) {
 }
 
 #[test]
+fn nominal_composite_casts_preserve_representation_and_value_copies() {
+    folded(
+        r#"
+type Text = str
+type List = int[]
+type Pair = (str, int)
+type Table = [str]int
+struct Record { int[] values }
+type Wrapped = Record
+type Maybe = int?
+fn text() str { return @as(str, @as(Text, "a\u{0}b")) }
+fn list() int[] { return @as(int[], @as(List, [1, 2])) }
+fn pair() (str, int) { return @as((str, int), @as(Pair, ("x", 3))) }
+fn table() [str]int { return @as([str]int, @as(Table, ["x": 4])) }
+fn record() Record { return @as(Record, @as(Wrapped, Record{.values = [5]})) }
+@println(text(), list(), pair(), table(), record())
+mut int[] copy = list()
+copy[0] = 99
+@println(list())
+Text original = @as(Text, "same")
+@println(@as(Text, original))
+@println(@as(int?, @as(Maybe, none)) else 9)
+@println(@as(int?, @as(Maybe, 7)) else 9)
+@println(@as(int[], @as(List, [])))
+"#,
+        &["text", "list", "pair", "table", "record"],
+        "a\0b[1, 2](x, 3)[x: 4]Record{.values = [5]}\n[1, 2]\nsame\n9\n7\n[]\n",
+    );
+}
+
+#[test]
 fn embedded_nuls_and_unicode_escapes_agree_at_runtime() {
     folded(
         r#"

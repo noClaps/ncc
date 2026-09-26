@@ -837,12 +837,33 @@ impl Checker {
             }
             Expr::Cast { ty, value } => {
                 self.validate_type(ty)?;
-                let from = self.expr(value)?;
                 if let Type::Named(n, _) = ty
-                    && matches!(self.types.get(n),Some(TypeInfo::Alias(base)) if *base == from)
+                    && let Some(TypeInfo::Alias(base)) = self.types.get(n).cloned()
                 {
+                    // Give literals the base type's context (empty containers, unsigned
+                    // values and optional promotions need it before they can be checked).
+                    if matches!(
+                        &**value,
+                        Expr::Int(_)
+                            | Expr::Float(_)
+                            | Expr::String(_)
+                            | Expr::Char(_)
+                            | Expr::Bool(_)
+                            | Expr::Array(_)
+                            | Expr::Tuple(_)
+                            | Expr::Map(_)
+                            | Expr::None
+                    ) {
+                        self.expected(value, &base)?;
+                    } else {
+                        let from = self.expr(value)?;
+                        if from != *ty {
+                            self.assignable(&base, &from)?;
+                        }
+                    }
                     return Ok(ty.clone());
                 }
+                let from = self.expr(value)?;
                 if let Type::Named(n, _) = &from
                     && matches!(self.types.get(n),Some(TypeInfo::Alias(base)) if base == ty)
                 {

@@ -1198,8 +1198,19 @@ impl Emitter<'_> {
             }
             Expr::Cast { ty, value } => {
                 let from = self.ty(value)?;
+                if let Type::Named(n, _) = ty
+                    && let Some(TypeInfo::Alias(base)) = self.checked.types.get(n)
+                    && from != *ty
+                {
+                    return self.expr_as(value, &base.clone());
+                }
                 let value = self.expr(value)?;
-                if *ty == from {
+                // Nominal types share their base representation, including C structs.
+                // A C scalar cast is invalid for strings, arrays and other aggregates.
+                if *ty == from
+                    || matches!(&from, Type::Named(n, _)
+                    if matches!(self.checked.types.get(n), Some(TypeInfo::Alias(base)) if base == ty))
+                {
                     return Ok(value);
                 }
                 if *ty == Type::Named("char".into(), vec![])

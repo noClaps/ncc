@@ -748,8 +748,13 @@ impl Evaluator<'_> {
                 }
             }
             Expr::Cast { ty, value } => {
+                let from = self.expr_type(value)?.clone();
                 let value = self.evaluate(value, env)?;
-                self.cast(ty, value)
+                if self.base_type(ty) == self.base_type(&from) {
+                    self.coerce(value, ty)
+                } else {
+                    self.cast(ty, value)
+                }
             }
             Expr::Name(n) if n == "$" => self
                 .indices
