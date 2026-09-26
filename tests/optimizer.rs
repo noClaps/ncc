@@ -39,6 +39,46 @@ fn folded(source: &str, names: &[&str], expected: &str) {
 }
 
 #[test]
+fn async_builtins_evaluate_arguments_once_and_keep_runtime_process_state() {
+    folded(
+        r#"
+mut int calls = 0
+fn next() int { calls = calls + 1 return calls }
+fut void printed = async @println(next(), next())
+await printed
+@println(calls)
+mut int[] values = [1, 2]
+fut void snapshot = async @println(values)
+values[0] = 99
+await snapshot
+fut (str, str) platform = async @target()
+@println(await platform)
+fut str[] arguments = async @args()
+str[] args = await arguments
+@println(args.len > 0)
+fut [str]str environment = async @env()
+[str]str env = await environment
+@println(env == @env())
+"#,
+        &[],
+        "12\n2\n[1, 2]\n(macos, arm64)\ntrue\ntrue\n",
+    );
+}
+
+#[test]
+fn builtin_arguments_follow_function_call_evaluation_order() {
+    folded(
+        r#"
+mut int[] values = [1]
+fn update() str { values[0] = 2 @print("effect:") return "done" }
+@println(values, update(), values)
+"#,
+        &[],
+        "effect:[1]done[2]\n",
+    );
+}
+
+#[test]
 fn nominal_composite_casts_preserve_representation_and_value_copies() {
     folded(
         r#"

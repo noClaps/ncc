@@ -30,6 +30,7 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
         mutexes: HashSet::new(),
         mutex_types: vec![],
         value_helpers: HashMap::new(),
+        expression_values: HashMap::new(),
     };
     let mut declarations = String::new();
     let mut global_slots = HashMap::new();
@@ -289,6 +290,8 @@ enum ValueOperation {
     String,
 }
 struct Emitter<'a> {
+    // Pre-evaluated async arguments used when emitting a builtin worker body.
+    expression_values: HashMap<usize, String>,
     checked: &'a CheckedModule,
     headers: BTreeSet<&'static str>,
     helpers: BTreeSet<String>,
@@ -961,6 +964,9 @@ impl Emitter<'_> {
         }
     }
     fn expr(&mut self, e: &Expr) -> Result<String, Diagnostics> {
+        if let Some(value) = self.expression_values.get(&(e as *const Expr as usize)) {
+            return Ok(value.clone());
+        }
         let value = match e {
             Expr::Map(entries) => {
                 let Type::Map(key, value) = self.ty(e)? else {
@@ -1489,9 +1495,14 @@ impl Emitter<'_> {
                     } else {
                         "stdout"
                     };
+                    let mut values = Vec::with_capacity(args.len());
                     for arg in args {
                         let value = self.expr(arg)?;
                         let ty = self.ty(arg)?;
+                        let value = self.copy(&ty, &value)?;
+                        values.push((value, ty));
+                    }
+                    for (value, ty) in values {
                         if matches!(
                             ty,
                             Type::Array(_, _)
@@ -1516,7 +1527,6 @@ impl Emitter<'_> {
                         let (fmt, value) = match ty {
                             Type::Named(n, _) => match n.as_str() {
                                 "bool" => ("%s", format!("{value} ? \"true\" : \"false\"")),
-                                "float" => ("%.17g", value),
                                 "uint" | "byte" => ("%llu", format!("(unsigned long long){value}")),
                                 _ => ("%lld", format!("(long long){value}")),
                             },
@@ -1602,17 +1612,35 @@ impl Emitter<'_> {
         let Expr::Call { callee, args, .. } = call else {
             return unsupported("async non-call");
         };
-        let callee_type = self.ty(callee)?;
-        let Type::Function(params, ret) = &callee_type else {
-            return unsupported("async builtin call");
+        let builtin = matches!(&**callee, Expr::Name(name) if name.starts_with('@'));
+        let callee_type = if builtin {
+            Type::Function(
+                args.iter()
+                    .map(|arg| self.ty(arg))
+                    .collect::<Result<_, _>>()?,
+                Box::new(self.ty(call)?),
+            )
+        } else {
+            self.ty(callee)?
         };
-        let callee_value = self.expr(callee)?;
+        let Type::Function(params, ret) = &callee_type else {
+            return unsupported("async non-function call");
+        };
+        let callee_value = if builtin {
+            "0".into()
+        } else {
+            self.expr(callee)?
+        };
         let mut values = vec![callee_value];
         for (arg, ty) in args.iter().zip(params) {
             let value = self.expr_as(arg, ty)?;
             values.push(self.copy(ty, &value)?);
         }
-        let mut fields = vec![callee_type.clone()];
+        let mut fields = vec![if builtin {
+            Type::Named("byte".into(), vec![])
+        } else {
+            callee_type.clone()
+        }];
         fields.extend(params.clone());
         let payload_type = self.c_type(&Type::Tuple(fields))?;
         let result_type = if **ret == Type::void() {
@@ -1628,7 +1656,36 @@ impl Emitter<'_> {
             .collect::<String>();
         self.runtime_prototypes
             .push(format!("static void *{worker}(void *raw);"));
-        self.runtime_functions.push(format!("static void *{worker}(void *raw) {{ {job_type} *job = raw; {}job->args.f_0.call(job->args.f_0.env{call_args}); return 0; }}", if **ret == Type::void() { "" } else { "job->result = " }));
+        let body = if builtin {
+            let saved = std::mem::take(&mut self.out);
+            for (i, arg) in args.iter().enumerate() {
+                self.expression_values.insert(
+                    arg as *const Expr as usize,
+                    format!("job->args.f_{}", i + 1),
+                );
+            }
+            let value = self.expr(call)?;
+            for arg in args {
+                self.expression_values
+                    .remove(&(arg as *const Expr as usize));
+            }
+            if **ret != Type::void() {
+                self.line(format!("job->result = {value};"));
+            }
+            std::mem::replace(&mut self.out, saved)
+        } else {
+            format!(
+                "{}job->args.f_0.call(job->args.f_0.env{call_args});",
+                if **ret == Type::void() {
+                    ""
+                } else {
+                    "job->result = "
+                }
+            )
+        };
+        self.runtime_functions.push(format!(
+            "static void *{worker}(void *raw) {{ {job_type} *job = raw; {body} return 0; }}"
+        ));
         let job = self.fresh();
         self.line(format!(
             "{job_type} *{job} = nc_alloc(1,sizeof({job_type}));"
