@@ -43,8 +43,26 @@ struct Checker {
 
 pub fn check(module: Module, _path: &Path) -> Result<CheckedModule, Diagnostics> {
     let mut c = Checker::new();
+    let mut external_symbols = HashMap::new();
     for item in &module.items {
         c.declare(item)?;
+        if let Item::Extern { functions, .. } = item {
+            for f in functions {
+                let signature = (
+                    f.params.iter().map(|p| p.ty.clone()).collect::<Vec<_>>(),
+                    f.return_type.clone(),
+                );
+                if external_symbols
+                    .insert(&f.symbol, signature.clone())
+                    .is_some_and(|previous| previous != signature)
+                {
+                    return c.fail(format!(
+                        "conflicting declarations for external C symbol `{}`",
+                        f.symbol
+                    ));
+                }
+            }
+        }
     }
     c.validate_layouts()?;
     for item in &module.items {

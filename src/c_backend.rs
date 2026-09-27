@@ -33,6 +33,7 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
         expression_values: HashMap::new(),
     };
     let mut declarations = String::new();
+    let mut external_files = BTreeSet::new();
     let mut global_slots = HashMap::new();
     for item in &checked.module.items {
         match item {
@@ -99,12 +100,16 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
                         }
                     ));
                 }
-                declarations.push_str(&format!("#include {}\n", c_string(path)));
+                external_files.insert(path);
             }
             Item::Struct(_) | Item::Enum(_) => {}
             Item::TypeAlias { .. } => {}
             _ => {}
         }
+    }
+    // Expose all ABI aliases before including shared C implementations once.
+    for path in external_files {
+        declarations.push_str(&format!("#include {}\n", c_string(path)));
     }
     for item in &checked.module.items {
         if let Item::Function(f) = item {
