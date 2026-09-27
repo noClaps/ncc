@@ -23,6 +23,7 @@ enum Value {
     Enum(String, String, Vec<Value>),
     Optional(Type, Option<Box<Value>>),
     Success(Type, Box<Value>),
+    Failure(Type, String),
     Function(String),
     Closure(usize, Vec<(String, Value)>),
 }
@@ -125,6 +126,10 @@ impl Value {
                 constant_thunk(value.expr(), inner)
             }
             Self::Function(name) => Expr::Name(name),
+            Self::Failure(inner, message) => constant_statement(
+                Stmt::Throw(Expr::String(message)),
+                Type::ErrorUnion(Box::new(inner)),
+            ),
             Self::Closure(..) => unreachable!("closure constants retain their original source"),
         }
     }
@@ -277,6 +282,9 @@ fn materialize(value: Value, original: &Expr, checked: &CheckedModule) -> Expr {
     expr
 }
 fn constant_thunk(expr: Expr, ty: Type) -> Expr {
+    constant_statement(Stmt::Return(Some(expr)), ty)
+}
+fn constant_statement(statement: Stmt, ty: Type) -> Expr {
     Expr::Call {
         callee: Box::new(Expr::Lambda(Box::new(Function {
             source_path: "<constant>".into(),
@@ -288,7 +296,7 @@ fn constant_thunk(expr: Expr, ty: Type) -> Expr {
             return_type: ty,
             throws: false,
             body: Block {
-                statements: vec![Stmt::Return(Some(expr))],
+                statements: vec![statement],
             },
         }))),
         args: vec![],
@@ -318,6 +326,7 @@ fn evaluate(
         memo: HashMap::new(),
         depth: 0,
         arithmetic_failure: false,
+        flow: None,
         indices: vec![],
     };
     let value = evaluator.evaluate(e, &mut env.clone());
@@ -338,6 +347,8 @@ struct Evaluator<'a> {
     memo: HashMap<(Value, Vec<Value>), Value>,
     depth: usize,
     arithmetic_failure: bool,
+    // A return/throw inside a value expression exits its enclosing function.
+    flow: Option<Flow>,
     indices: Vec<u64>,
 }
 impl Evaluator<'_> {
@@ -382,6 +393,9 @@ impl Evaluator<'_> {
     }
     fn coerce(&self, value: Value, ty: &Type) -> Option<Value> {
         match (value, self.base_type(ty)) {
+            (value @ Value::Failure(_, _), Type::ErrorUnion(inner)) if matches!(&value, Value::Failure(actual, _) if actual == &**inner) => {
+                Some(value)
+            }
             (value @ Value::Optional(_, _), Type::Optional(inner)) if matches!(&value, Value::Optional(actual, _) if actual == &**inner) => {
                 Some(value)
             }
@@ -980,33 +994,70 @@ impl Evaluator<'_> {
                 if let Some(value) = self.memo.get(&key) {
                     return Some(value.clone());
                 }
-                match self.block(&f.body, &mut scope)? {
+                match self
+                    .block(&f.body, &mut scope)
+                    .or_else(|| self.flow.take())?
+                {
                     Flow::Return(v) => {
                         let v = self.coerce(v, &f.return_type)?;
                         self.memo.insert(key, v.clone());
                         Some(v)
                     }
+                    Flow::Throw(message) => {
+                        let Type::ErrorUnion(inner) = &f.return_type else {
+                            return None;
+                        };
+                        let value = Value::Failure((**inner).clone(), message);
+                        self.memo.insert(key, value.clone());
+                        Some(value)
+                    }
                     _ => None,
                 }
             }
             Expr::If { subject, arms } => {
-                match self.conditional(subject.as_deref(), arms, env, true)? {
-                    Flow::Value(value) => Some(value),
-                    _ => None,
-                }
+                let flow = self.conditional(subject.as_deref(), arms, env, true)?;
+                self.flow_value(flow)
             }
             Expr::Else { value, fallback } => match self.evaluate(value, env)? {
                 Value::Optional(_, Some(value)) => Some(*value),
-                Value::Optional(_, None) => match self.value_block(fallback, env, true)? {
-                    Flow::Value(value) => Some(value),
-                    _ => None,
-                },
+                Value::Optional(_, None) => {
+                    let flow = self.value_block(fallback, env, true)?;
+                    self.flow_value(flow)
+                }
                 _ => None,
             },
-            Expr::Try(value) | Expr::Catch { value, .. } => match self.evaluate(value, env)? {
+            Expr::Try(value) => match self.evaluate(value, env)? {
                 Value::Success(_, value) => Some(*value),
+                Value::Failure(_, message) => {
+                    self.flow = Some(Flow::Throw(message));
+                    None
+                }
                 _ => None,
             },
+            Expr::Catch { value, name, body } => match self.evaluate(value, env)? {
+                Value::Success(_, value) => Some(*value),
+                Value::Failure(_, message) => {
+                    let previous = env.insert(name.clone(), Value::String(message));
+                    let flow = self.value_block(body, env, true);
+                    if let Some(previous) = previous {
+                        env.insert(name.clone(), previous);
+                    } else {
+                        env.remove(name);
+                    }
+                    self.flow_value(flow?)
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+    fn flow_value(&mut self, flow: Flow) -> Option<Value> {
+        match flow {
+            Flow::Value(value) => Some(value),
+            Flow::Return(_) | Flow::Throw(_) => {
+                self.flow = Some(flow);
+                None
+            }
             _ => None,
         }
     }
@@ -1014,6 +1065,7 @@ impl Evaluator<'_> {
 enum Flow {
     Next,
     Return(Value),
+    Throw(String),
     Value(Value),
     Break(Option<String>),
     Continue(Option<String>),
@@ -1238,6 +1290,10 @@ impl Evaluator<'_> {
                     Flow::Next
                 }
                 Stmt::Return(Some(e)) => Flow::Return(self.evaluate(e, env)?),
+                Stmt::Throw(e) => match self.evaluate(e, env)? {
+                    Value::String(message) => Flow::Throw(message),
+                    _ => return None,
+                },
                 Stmt::Expr(Expr::If { subject, arms }) => self.conditional(
                     subject.as_deref(),
                     arms,

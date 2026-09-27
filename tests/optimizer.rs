@@ -39,6 +39,42 @@ fn folded(source: &str, names: &[&str], expected: &str) {
 }
 
 #[test]
+fn thrown_errors_catch_try_and_early_returns_fold() {
+    folded(
+        r#"
+fn checked(int n) int! { if n { 0 -> { throw "zero" } _ -> { return n } } }
+fn forwarded(int n) int! { return try checked(n) }
+fn recovered(int n) int {
+    mut int changes = 0
+    int value = forwarded(n) catch message { changes = 10 break @as(int, @as(str, message).len) }
+    return value + changes
+}
+fn early() int { int n = checked(0) catch _ { return 42 } return n }
+fn optional() int { int? n = none return n else { return 7 } }
+fn conditional() int { int n = if true { true -> { return 8 } false -> { break 0 } } return n }
+@println(recovered(0), recovered(3), early(), optional())
+@println(conditional())
+int! stored = checked(0)
+@println(stored catch _ { 9 })
+"#,
+        &[
+            "checked",
+            "forwarded",
+            "recovered",
+            "early",
+            "optional",
+            "conditional",
+        ],
+        "143427\n8\n9\n",
+    );
+    folded(
+        "fn effect() int! { @print(\"effect:\") throw \"bad\" } @println(effect() catch _ { 5 })",
+        &[],
+        "effect:5\n",
+    );
+}
+
+#[test]
 fn value_branches_preserve_mutations_of_surrounding_locals() {
     folded(
         r#"
