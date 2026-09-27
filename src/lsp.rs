@@ -147,12 +147,16 @@ pub fn serve(mut input: impl BufRead, mut output: impl Write) -> io::Result<()> 
                     } else if method.ends_with("foldingRange") {
                         index.folding_ranges()
                     } else if let Some(at) = offset(&document.text, &p["position"]) {
-                        let imported =
-                            if matches!(method, "textDocument/definition" | "textDocument/hover") {
-                                imported_navigation(&index, at, uri, method, &documents)
-                            } else {
-                                None
-                            };
+                        let imported = if matches!(
+                            method,
+                            "textDocument/definition"
+                                | "textDocument/hover"
+                                | "textDocument/completion"
+                        ) {
+                            imported_navigation(&index, at, uri, method, &documents)
+                        } else {
+                            None
+                        };
                         imported.unwrap_or_else(|| match method {
                             "textDocument/definition" => index.definition(uri, at),
                             "textDocument/typeDefinition" => index.type_definition(uri, at),
@@ -208,7 +212,11 @@ fn imported_navigation(
     method: &str,
     documents: &HashMap<String, Document>,
 ) -> Option<Value> {
-    let (imported, name) = index.imported_member(at)?;
+    let (imported, name) = if method == "textDocument/completion" {
+        (index.imported_completion(at)?, String::new())
+    } else {
+        index.imported_member(at)?
+    };
     let root = document_path(uri);
     let path = root.parent()?.join(imported).with_extension("nc");
     let key = crate::modules::source_key(&path);
@@ -219,6 +227,9 @@ fn imported_navigation(
         .map(|(_, document)| document.text.clone())
         .or_else(|| std::fs::read_to_string(&path).ok())?;
     let imported = index::Index::new(&source);
+    if method == "textDocument/completion" {
+        return Some(imported.exported_completions());
+    }
     let position = imported.exported_position(&name)?;
     Some(if method == "textDocument/definition" {
         imported.definition(

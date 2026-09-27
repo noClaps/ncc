@@ -5,6 +5,54 @@ use crate::{
 };
 use serde_json::{Value, json};
 
+const BUILTINS: &[(&str, &str, &str)] = &[
+    (
+        "@print",
+        "fn @print(...values)",
+        "Write values to standard output without a newline.",
+    ),
+    (
+        "@println",
+        "fn @println(...values)",
+        "Write values to standard output followed by a newline.",
+    ),
+    (
+        "@eprint",
+        "fn @eprint(...values)",
+        "Write values to standard error without a newline.",
+    ),
+    (
+        "@eprintln",
+        "fn @eprintln(...values)",
+        "Write values to standard error followed by a newline.",
+    ),
+    (
+        "@as",
+        "fn @as(type T, value) T",
+        "Convert a value to the requested type. Numeric conversions check the target range.",
+    ),
+    (
+        "@args",
+        "fn @args() str[]",
+        "Read process arguments at runtime. The first entry is the executable name.",
+    ),
+    (
+        "@env",
+        "fn @env() [str]str",
+        "Read the process environment at runtime.",
+    ),
+    (
+        "@target",
+        "fn @target() (str, str)",
+        "Return the target operating system and architecture at compile time.",
+    ),
+    (
+        "@embed",
+        "fn @embed(str path) byte[]",
+        "Embed file bytes at compile time. Relative paths are resolved beside this source file; symbolic links are rejected.",
+    ),
+];
+
 pub(super) struct Index<'a> {
     text: &'a str,
     tokens: Vec<Token>,
@@ -12,6 +60,23 @@ pub(super) struct Index<'a> {
 }
 
 impl<'a> Index<'a> {
+    fn builtin(&self, at: usize) -> Option<&'static (&'static str, &'static str, &'static str)> {
+        self.tokens.windows(2).find_map(|pair| {
+            if pair[0].kind != TokenKind::At
+                || !(pair[0].span.start..=pair[1].span.end).contains(&at)
+            {
+                return None;
+            }
+            let name = match &pair[1].kind {
+                TokenKind::Ident(name) => name.as_str(),
+                TokenKind::Keyword(Keyword::As) => "as",
+                _ => return None,
+            };
+            BUILTINS
+                .iter()
+                .find(|(builtin, _, _)| &builtin[1..] == name)
+        })
+    }
     fn imported_path(&self, alias: &str) -> Option<String> {
         let mut importing = false;
         for (index, token) in self.tokens.iter().enumerate() {
@@ -70,6 +135,35 @@ impl<'a> Index<'a> {
                         .ends_with("pub")
             })
             .map(|symbol| symbol.selection.start)
+    }
+    pub fn imported_completion(&self, at: usize) -> Option<String> {
+        let (i, token) = self
+            .tokens
+            .iter()
+            .enumerate()
+            .rfind(|(_, t)| t.span.start < at && t.kind != TokenKind::Eof)?;
+        let dot = if token.kind == TokenKind::Dot {
+            i
+        } else if matches!(token.kind, TokenKind::Ident(_)) {
+            i.checked_sub(1)?
+        } else {
+            return None;
+        };
+        if self.tokens[dot].kind != TokenKind::Dot {
+            return None;
+        }
+        let TokenKind::Ident(alias) = &self.tokens[dot.checked_sub(1)?].kind else {
+            return None;
+        };
+        if self.resolve(alias, at).is_some() {
+            return None;
+        }
+        self.imported_path(alias)
+    }
+    pub fn exported_completions(&self) -> Value {
+        let items = self.symbols.iter().filter(|s| self.exported_position(&s.name) == Some(s.selection.start))
+            .map(|s| json!({"label":s.name,"kind":match s.kind {12 => 3, 23 | 10 | 26 => 7, _ => 6},"detail":self.detail(s),"documentation":{"kind":"markdown","value":self.documentation(s)}})).collect::<Vec<_>>();
+        json!({"isIncomplete":false,"items":items})
     }
     pub fn new(text: &'a str) -> Self {
         let tokens = lexer::lex(text).unwrap_or_else(|error| {
@@ -281,6 +375,23 @@ impl<'a> Index<'a> {
             if i == 0 || self.tokens[i].kind != TokenKind::LParen {
                 continue;
             }
+            if let Some((_, signature, documentation)) = self.builtin(self.tokens[i - 1].span.start)
+            {
+                let parameters = signature
+                    .split_once('(')
+                    .unwrap()
+                    .1
+                    .split_once(')')
+                    .unwrap()
+                    .0;
+                let params = parameters
+                    .split(',')
+                    .filter(|p| !p.is_empty())
+                    .map(|p| json!({"label":p.trim()}))
+                    .collect::<Vec<_>>();
+                let active = active.min(params.len().saturating_sub(1));
+                return json!({"signatures":[{"label":signature,"documentation":documentation,"parameters":params}],"activeSignature":0,"activeParameter":active});
+            }
             let Some(symbol) = self
                 .selected(self.tokens[i - 1].span.start)
                 .filter(|s| s.kind == 12)
@@ -336,6 +447,9 @@ impl<'a> Index<'a> {
     }
 
     pub fn hover(&self, at: usize) -> Value {
+        if let Some((_, signature, documentation)) = self.builtin(at) {
+            return json!({"contents":{"kind":"markdown","value":format!("```nc\n{signature}\n```\n\n{documentation}")}});
+        }
         self.selected(at).map_or(Value::Null, |symbol| {
             let documentation = self.documentation(symbol);
             json!({"contents":{"kind":"markdown","value":format!("```nc\n{}\n```\n\n{}", self.detail(symbol), documentation)}})
@@ -380,18 +494,22 @@ impl<'a> Index<'a> {
             return json!({"isIncomplete":false,"items":items});
         }
         let mut items = std::collections::BTreeMap::new();
-        for builtin in [
-            "@print",
-            "@println",
-            "@eprint",
-            "@eprintln",
-            "@as",
-            "@args",
-            "@env",
-            "@target",
-            "@embed",
-        ] {
-            items.insert(builtin.into(), json!({"label":builtin,"kind":3}));
+        let mut start = at;
+        while start > 0
+            && (self.text.as_bytes()[start - 1].is_ascii_alphanumeric()
+                || self.text.as_bytes()[start - 1] == b'_')
+        {
+            start -= 1;
+        }
+        let builtin_prefix = start > 0 && self.text.as_bytes()[start - 1] == b'@';
+        if builtin_prefix {
+            start -= 1;
+        }
+        for (builtin, signature, documentation) in BUILTINS {
+            items.insert((*builtin).into(), json!({"label":builtin,"kind":3,"detail":signature,"documentation":{"kind":"markdown","value":documentation},"textEdit":{"range":range(self.text,&(start..at)),"newText":builtin}}));
+        }
+        if builtin_prefix {
+            return json!({"isIncomplete":false,"items":items.into_values().collect::<Vec<_>>()});
         }
         for symbol in &self.symbols {
             if let Some(resolved) = self.resolve(&symbol.name, at) {
@@ -621,5 +739,33 @@ mod tests {
                 .resolve("f", unfinished_string.len())
                 .is_some()
         );
+    }
+
+    #[test]
+    fn builtin_completion_replaces_the_sigil_and_provides_documentation() {
+        for source in ["@", "@pri", "fn f() { @pri"] {
+            let index = Index::new(source);
+            let completion = index.completion(source.len());
+            let item = completion["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["label"] == "@println")
+                .unwrap();
+            assert_eq!(
+                item["textEdit"]["range"]["start"],
+                super::super::position(source, source.find('@').unwrap())
+            );
+            assert!(item["detail"].as_str().unwrap().starts_with("fn @println"));
+        }
+        let source = "@as(int, 2.5)";
+        let index = Index::new(source);
+        assert!(
+            index.hover(0)["contents"]["value"]
+                .as_str()
+                .unwrap()
+                .contains("Convert a value")
+        );
+        assert_eq!(index.signature_help(9)["activeParameter"], 1);
     }
 }
