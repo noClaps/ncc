@@ -37,7 +37,7 @@ pub(super) fn actions(params: &Value, documents: &HashMap<String, Document>) -> 
             continue;
         }
         if let TokenKind::Int(literal) = &token.kind
-            && let Ok(value) = crate::sema::integer(literal)
+            && let Ok(value) = crate::lexer::integer(literal)
         {
             let suffix = if literal.ends_with('u') { "u" } else { "" };
             for (base, value) in [
@@ -168,8 +168,8 @@ mod tests {
                 let edited = apply(&text, action);
                 let replacement = edited.split("_ = -").nth(1).unwrap().trim();
                 assert_eq!(
-                    crate::sema::integer(literal).unwrap(),
-                    crate::sema::integer(replacement)
+                    crate::lexer::integer(literal).unwrap(),
+                    crate::lexer::integer(replacement)
                         .unwrap_or_else(|_| panic!("{literal} -> {replacement}: {action}"))
                 );
                 assert_eq!(literal.ends_with('u'), replacement.ends_with('u'));

@@ -1059,6 +1059,35 @@ test "control" {
 }
 
 #[test]
+fn fixed_array_lengths_use_integer_literal_syntax() {
+    success(
+        r#"
+fn identity(int[0x2] values) int[0b10u] { return values }
+test "array lengths" {
+    int[0o2] values = identity([3, 4])
+    int[2u] decimal = values
+    int[0x0] empty = []
+    int[0b10][0o1] nested = [[3, 4]]
+    assert decimal == [3, 4]
+    assert empty.len == 0
+    assert nested[0] == values
+}
+"#,
+        "",
+    );
+    for literal in ["0x", "0b2", "0o8", "18446744073709551616", "1.5"] {
+        let source = format!("fn f(int[{literal}] values) {{}}");
+        for release in [false, true] {
+            let errors = ncc::compile_source_with_options(&source, Path::new("size.nc"), release)
+                .unwrap_err();
+            assert!(errors.to_string().contains("array size"), "{errors}");
+            assert_eq!(errors.0[0].span, 9..9 + literal.len());
+        }
+    }
+    rejects("int[0x2] values = [1]", "array");
+}
+
+#[test]
 fn arrays_indexing_iteration_and_value_copies() {
     success(
         r#"

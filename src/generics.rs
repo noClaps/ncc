@@ -176,7 +176,7 @@ impl Pass {
                 Type::Array(ty, _) | Type::Map(_, ty) => Some(*ty),
                 Type::Tuple(types) => {
                     if let Expr::Int(n) = &**index {
-                        types.get(crate::sema::integer(n).ok()? as usize).cloned()
+                        types.get(crate::lexer::integer(n).ok()? as usize).cloned()
                     } else {
                         None
                     }

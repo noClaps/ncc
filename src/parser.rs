@@ -487,11 +487,25 @@ impl Parser {
                 let n = if self.at(&TokenKind::RBracket) {
                     None
                 } else {
-                    match self.bump().kind {
-                        TokenKind::Int(x) => Some(x.parse().map_err(|_| {
-                            Diagnostics::one("invalid array size", self.current().span.clone())
-                        })?),
-                        _ => return self.error("expected array size"),
+                    let token = self.bump();
+                    match token.kind {
+                        TokenKind::Int(x) => Some(
+                            crate::lexer::integer(&x)
+                                .ok()
+                                .and_then(|n| usize::try_from(n).ok())
+                                .ok_or_else(|| {
+                                    Diagnostics::one(
+                                        "invalid or overflowing array size",
+                                        token.span,
+                                    )
+                                })?,
+                        ),
+                        _ => {
+                            return Err(Diagnostics::one(
+                                "expected integer array size",
+                                token.span,
+                            ));
+                        }
                     }
                 };
                 self.expect(TokenKind::RBracket)?;

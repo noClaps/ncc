@@ -867,13 +867,13 @@ impl Evaluator<'_> {
             value,
         } = e
             && let Expr::Int(n) = &**value
-            && crate::sema::integer(n).ok()? == 1u64 << 63
+            && crate::lexer::integer(n).ok()? == 1u64 << 63
         {
             return Some(Value::Int(i64::MIN));
         }
         match e {
             Expr::Int(s) => {
-                let n = crate::sema::integer(s).ok()?;
+                let n = crate::lexer::integer(s).ok()?;
                 match self.expr_type(e) {
                     Some(Type::Named(name, _)) if name == "uint" => Some(Value::Uint(n)),
                     Some(Type::Named(name, _)) if name == "byte" => {

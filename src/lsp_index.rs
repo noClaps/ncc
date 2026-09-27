@@ -331,7 +331,7 @@ impl<'a> Index<'a> {
                             return None;
                         };
                         types
-                            .get(crate::sema::integer(index).ok()? as usize)
+                            .get(crate::lexer::integer(index).ok()? as usize)
                             .cloned()
                     }
                     Type::Named(name, _) if name == "str" => {

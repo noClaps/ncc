@@ -3,7 +3,8 @@
 use crate::{
     ast::*,
     diagnostic::Diagnostics,
-    sema::{CheckedModule, TypeInfo, integer},
+    lexer::integer,
+    sema::{CheckedModule, TypeInfo},
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
 

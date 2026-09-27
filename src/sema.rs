@@ -1,4 +1,4 @@
-use crate::{ast::*, diagnostic::Diagnostics};
+use crate::{ast::*, diagnostic::Diagnostics, lexer::integer};
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
@@ -1506,21 +1506,6 @@ fn named(x: &str) -> Type {
 }
 fn numeric(t: &Type) -> bool {
     matches!(t,Type::Named(n,_)if matches!(n.as_str(),"byte"|"int"|"uint"|"float"))
-}
-
-pub fn integer(text: &str) -> Result<u64, Diagnostics> {
-    let text = text.strip_suffix('u').unwrap_or(text);
-    let (digits, base) = if let Some(x) = text.strip_prefix("0x") {
-        (x, 16)
-    } else if let Some(x) = text.strip_prefix("0b") {
-        (x, 2)
-    } else if let Some(x) = text.strip_prefix("0o") {
-        (x, 8)
-    } else {
-        (text, 10)
-    };
-    u64::from_str_radix(digits, base)
-        .map_err(|_| Diagnostics::one("invalid or overflowing integer literal", 0..0))
 }
 
 fn returns(block: &Block) -> bool {
