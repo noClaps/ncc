@@ -77,7 +77,7 @@ module.exports = grammar({
       $.binary_expression, $.if_expression, $.lambda_expression, $.else_expression, $.catch_expression, $.cast_expression),
     builtin: _ => token(seq('@', identifier)),
     cast_expression: $ => seq('@as', openParen($), $._type, ',', $._expression, ')'),
-    number: _ => token(choice(/0[xX][0-9a-fA-F_]+u?/, /0[bB][01_]+u?/, /0[oO][0-7_]+u?/, /[0-9][0-9_]*(\.[0-9][0-9_]*)?u?/)),
+    number: _ => token(choice(/0x[0-9a-fA-F]+u?/, /0b[01]+u?/, /0o[0-7]+u?/, /[0-9]+u?/, /[0-9]+\.[0-9]+/)),
     boolean: _ => choice('true', 'false'),
     none: _ => 'none',
     last_index: _ => '$',

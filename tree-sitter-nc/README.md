@@ -13,6 +13,8 @@ tree-sitter parse ../nc-tests/hello-world.nc
 
 `queries/highlights.scm` provides highlighting for editor integrations. The corpus covers
 declarations, type syntax, control flow, concurrency, interpolation and operators.
+Recovery cases cover missing call delimiters, initializers, field values and
+conditional arrows, checking that subsequent declarations remain recognizable.
 The grammar recognizes syntax, not types or exhaustiveness; use `ncc check` or
 the language server for semantic validation.
 

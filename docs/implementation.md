@@ -95,7 +95,10 @@ must stay explicit about features still under construction.
 - More inferred member types, code actions, workspace indexing performance and
   resilient indexing through every invalid edit.
   LSP usability has improved, but parity with Gleam's LSP is not yet achieved.
-- Further Tree-sitter error-recovery and malformed-input cases.
+- Further Tree-sitter error-recovery and malformed-input cases. Missing call
+  delimiters, block-local initializers, field values and conditional arrows have
+  recovery fixtures; an unfinished top-level initializer can still consume the
+  following function declaration during recovery.
 - Increase negative, differential, concurrency, and full-specification tests.
 
 The Unicode crate is now a test oracle only. The compiler core can be built with
