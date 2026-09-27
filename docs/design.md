@@ -2387,9 +2387,6 @@ Usage: ncc [command | --targets]
 
 Commands:
   build       Build the given file to the desired target.
-  check       Lint the given file.
-  fmt         Format the given file.
-  lsp         Start the NC LSP.
   run         Build and execute the given file.
 
 Options:
@@ -2419,48 +2416,6 @@ Options:
                          environment variable. The list of supported targets can be seen with the
                          `ncc --targets` command.
   -h, --help             Show this help and exit.
-```
-
-#### Check
-
-> [!NOTE]
-> Specific lints can be turned off using `// @ncc lint disable [lint]` comments. This is not recommended unless you're sure you know what you're doing.
-
-```
-Usage: ncc check <file>
-
-Lint the given file.
-
-Arguments:
-  <file>      The file to lint. Other files imported by this file are also checked.
-
-Options:
-  -h, --help  Show this help and exit.
-```
-
-#### Format
-
-```
-Usage: ncc fmt <file>
-
-Format the given file.
-
-Arguments:
-  <file>      The file to type-check. Other files imported by this file are also type-checked.
-
-Options:
-  -h, --help  Show this help and exit.
-```
-
-#### LSP
-
-```
-Usage: ncc lsp
-
-Start the NC LSP.
-
-Options:
-  -h, --help  Show this help and exit.
 ```
 
 #### Run
