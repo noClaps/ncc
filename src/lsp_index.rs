@@ -72,7 +72,15 @@ impl<'a> Index<'a> {
             .map(|symbol| symbol.selection.start)
     }
     pub fn new(text: &'a str) -> Self {
-        let tokens = lexer::lex(text).unwrap_or_default();
+        let tokens = lexer::lex(text).unwrap_or_else(|error| {
+            let end = error.0.first().map_or(0, |d| d.span.start.min(text.len()));
+            lexer::lex(&text[..end])
+                .or_else(|_| {
+                    let line = text[..end].rfind('\n').unwrap_or(0);
+                    lexer::lex(&text[..line])
+                })
+                .unwrap_or_default()
+        });
         let symbols = parser::source_symbols(tokens.clone());
         Self {
             text,
@@ -535,6 +543,83 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|item| item["label"] == "n")
+        );
+    }
+
+    #[test]
+    fn incomplete_statements_do_not_disable_navigation_or_leak_locals() {
+        let source = "fn incomplete(int n) int {\n int broken = +\n int valid = n\n @println(\n return valid\n}\nfn later(int input) int { return input }\n@println(later(2))\n";
+        assert!(crate::check_source(source, std::path::Path::new("broken.nc")).is_err());
+        let index = Index::new(source);
+        assert_eq!(
+            index
+                .selected(source.find("= n").unwrap() + 2)
+                .unwrap()
+                .name,
+            "n"
+        );
+        assert_eq!(
+            index
+                .selected(source.find("return valid").unwrap() + 7)
+                .unwrap()
+                .name,
+            "valid"
+        );
+        assert_eq!(
+            index
+                .selected(source.rfind("later(").unwrap())
+                .unwrap()
+                .selection
+                .start,
+            source.find("later(").unwrap()
+        );
+        assert!(index.resolve("n", source.len()).is_none());
+        assert!(
+            index
+                .resolve("broken", source.find("return valid").unwrap())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn index_survives_typing_and_tracks_pattern_and_catch_bindings() {
+        let source = "fn value(int n) int {\n if (n, 2) {\n (a, b) -> { return a + b }\n }\n}\nfn fail() int! { throw \"oops\" }\nint result = fail() catch message { @println(message) break 0 }\n";
+        let index = Index::new(source);
+        assert_eq!(
+            index
+                .selected(source.find("a +").unwrap())
+                .unwrap()
+                .selection
+                .start,
+            source.find("a, b").unwrap()
+        );
+        assert_eq!(
+            index
+                .selected(source.find("println(message").unwrap() + 8)
+                .unwrap()
+                .selection
+                .start,
+            source.find("message {").unwrap()
+        );
+        assert!(index.resolve("a", source.len()).is_none());
+        assert!(index.resolve("message", source.len()).is_none());
+        for (end, _) in source.char_indices() {
+            let partial = Index::new(&source[..end]);
+            partial.completion(end);
+            partial.signature_help(end);
+            partial.folding_ranges();
+        }
+        let incomplete = "fn f(int parameter) int {\n @println(";
+        assert!(
+            Index::new(incomplete)
+                .resolve("parameter", incomplete.len())
+                .is_some()
+        );
+        let unfinished_string = "fn f(int n) int { return n }\nstr s = \"unfinished";
+        assert!(
+            Index::new(unfinished_string)
+                .resolve("f", unfinished_string.len())
+                .is_some()
         );
     }
 }

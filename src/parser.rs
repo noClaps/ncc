@@ -69,10 +69,17 @@ impl Parser {
         self.symbols.as_ref().map_or(0, Vec::len)
     }
     fn scope_symbols(&mut self, from: usize, start: usize) {
+        let end = if self.at(&TokenKind::Eof)
+            && self.tokens[self.pos.saturating_sub(1)].kind != TokenKind::RBrace
+        {
+            self.current().span.end + 1
+        } else {
+            self.tokens[self.pos.saturating_sub(1)].span.end
+        };
         if let Some(symbols) = &mut self.symbols {
             for symbol in &mut symbols[from..] {
                 if symbol.scope.is_none() {
-                    symbol.scope = Some(start..self.tokens[self.pos.saturating_sub(1)].span.end);
+                    symbol.scope = Some(start..end);
                 }
             }
         }
@@ -146,7 +153,18 @@ impl Parser {
                 self.bump();
                 continue;
             }
-            items.push(self.item()?)
+            let start = self.pos;
+            let symbols = self.symbol_count();
+            match self.item() {
+                Ok(item) => items.push(item),
+                Err(error) if self.symbols.is_none() => return Err(error),
+                Err(_) => {
+                    self.recover_editor_statement(start, symbols);
+                    if self.at(&TokenKind::RBrace) {
+                        self.bump();
+                    }
+                }
+            }
         }
         Ok(Module { items })
     }
@@ -518,11 +536,43 @@ impl Parser {
         self.expect(TokenKind::LBrace)?;
         let mut statements = vec![];
         while !self.at(&TokenKind::RBrace) {
-            statements.push(self.stmt()?)
+            if self.at(&TokenKind::Eof) && self.symbols.is_some() {
+                break;
+            }
+            let start = self.pos;
+            let symbols = self.symbol_count();
+            match self.stmt() {
+                Ok(statement) => statements.push(statement),
+                Err(error) if self.symbols.is_none() => return Err(error),
+                Err(_) => self.recover_editor_statement(start, symbols),
+            }
         }
-        self.bump();
+        if self.at(&TokenKind::RBrace) {
+            self.bump();
+        }
         self.scope_symbols(symbol_start, start);
         Ok(Block { statements })
+    }
+    /// Recovery is only enabled for the editor index, never compilation.
+    /// Re-scan from the failed statement so partially consumed tokens cannot
+    /// swallow the next line or leak unfinished declarations into another scope.
+    fn recover_editor_statement(&mut self, start: usize, symbols: usize) {
+        self.symbols.as_mut().unwrap().truncate(symbols);
+        self.pos = start;
+        let mut braces = 0usize;
+        while !self.at(&TokenKind::Eof) {
+            if braces == 0
+                && (self.at(&TokenKind::RBrace)
+                    || (self.pos > start && self.current().newline_before))
+            {
+                break;
+            }
+            match self.bump().kind {
+                TokenKind::LBrace => braces += 1,
+                TokenKind::RBrace => braces = braces.saturating_sub(1),
+                _ => {}
+            }
+        }
     }
     fn stmt(&mut self) -> Result<Stmt, Diagnostics> {
         if self.keyword(Keyword::Fn) {
