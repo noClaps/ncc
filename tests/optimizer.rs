@@ -39,6 +39,59 @@ fn folded(source: &str, names: &[&str], expected: &str) {
 }
 
 #[test]
+fn value_branches_preserve_mutations_of_surrounding_locals() {
+    folded(
+        r#"
+fn branch() int {
+    mut int n = 0
+    int value = if true { true -> { n = 5 break 1 } false -> { break 0 } }
+    return n + value
+}
+fn fallback() int {
+    mut int n = 0
+    int? absent = none
+    int value = absent else { n = 7 break 2 }
+    return n + value
+}
+@println(branch())
+@println(fallback())
+"#,
+        &["branch", "fallback"],
+        "6\n9\n",
+    );
+}
+
+#[test]
+fn pure_by_value_closures_fold_without_conflating_captured_environments() {
+    folded(
+        r#"
+fn make(int n) (fn(int) int) { return fn(int x) int { return n + x } }
+fn apply((fn(int) int) f, int n) int { return f(n) }
+fn compute() int {
+    mut int n = 4
+    fn captured(int x) int { return n * x }
+    n = 99
+    return captured(3) + apply(make(10), 2) + apply(make(20), 2)
+}
+fn collection() int {
+    int[] values = [1, 2, 3]
+    fn sum() int { mut int total = 0 for i in values { total = total + values[i] } return total }
+    return sum()
+}
+@println(compute())
+@println(collection())
+"#,
+        &["compute", "collection", "make", "apply"],
+        "46\n6\n",
+    );
+    folded(
+        "fn make(int n) (fn(int) int) { return fn(int x) int { @print(\"effect:\") return n + x } }\n(fn(int) int) closure = make(4)\n@println(closure(2))",
+        &[],
+        "effect:6\n",
+    );
+}
+
+#[test]
 fn optional_and_error_equality_compares_only_active_payloads() {
     folded(
         r#"

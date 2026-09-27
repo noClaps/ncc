@@ -1,10 +1,4 @@
-use std::{
-    fs,
-    path::Path,
-    process::Command,
-    sync::atomic::{AtomicUsize, Ordering},
-};
-static ID: AtomicUsize = AtomicUsize::new(0);
+use std::{fs, path::Path, process::Command};
 
 #[test]
 fn external_c_composite_signatures_have_stable_aliases() {
@@ -909,30 +903,33 @@ test "records" {
 }
 
 fn run(source: &str) -> std::process::Output {
-    let dir = std::env::temp_dir().join(format!(
-        "nc-conformance-{}-{}",
-        std::process::id(),
-        ID.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir(&dir).unwrap();
-    let file = dir.join("test.nc");
+    run_mode(source, false)
+}
+fn run_mode(source: &str, release: bool) -> std::process::Output {
+    let dir = ncc::temp::Directory::new().unwrap();
+    let file = dir.path().join("test.nc");
     fs::write(&file, source).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_ncc"))
-        .arg("run")
-        .arg(&file)
-        .output()
-        .unwrap();
-    fs::remove_dir_all(&dir).unwrap();
-    output
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ncc"));
+    command.arg("run");
+    if release {
+        command.arg("-r");
+    }
+    command.arg(&file).output().unwrap()
 }
 fn success(source: &str, stdout: &str) {
-    let output = run(source);
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(String::from_utf8(output.stdout).unwrap(), stdout);
+    for release in [false, true] {
+        let output = run_mode(source, release);
+        assert!(
+            output.status.success(),
+            "release={release}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            stdout,
+            "release={release}"
+        );
+    }
 }
 fn rejects(source: &str, message: &str) {
     let error = ncc::check_source(source, Path::new("test.nc")).unwrap_err();

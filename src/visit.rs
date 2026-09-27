@@ -1,7 +1,7 @@
 //! Shared read-only expression traversal for linting and reachability.
 use crate::ast::*;
 
-pub fn item(item: &Item, f: &mut impl FnMut(&Expr)) {
+pub fn item<'a>(item: &'a Item, f: &mut impl FnMut(&'a Expr)) {
     match item {
         Item::Function(fun) => block(&fun.body, f),
         Item::Global(v) => expr(&v.value, f),
@@ -10,12 +10,12 @@ pub fn item(item: &Item, f: &mut impl FnMut(&Expr)) {
         _ => {}
     }
 }
-fn block(b: &Block, f: &mut impl FnMut(&Expr)) {
+fn block<'a>(b: &'a Block, f: &mut impl FnMut(&'a Expr)) {
     for s in &b.statements {
         stmt(s, f);
     }
 }
-fn stmt(s: &Stmt, f: &mut impl FnMut(&Expr)) {
+fn stmt<'a>(s: &'a Stmt, f: &mut impl FnMut(&'a Expr)) {
     match s {
         Stmt::Block(b) | Stmt::Lock { body: b, .. } => block(b, f),
         Stmt::Var(v) => expr(&v.value, f),
@@ -44,7 +44,7 @@ fn stmt(s: &Stmt, f: &mut impl FnMut(&Expr)) {
         Stmt::Continue(_) => {}
     }
 }
-fn pattern(p: &Pattern, f: &mut impl FnMut(&Expr)) {
+fn pattern<'a>(p: &'a Pattern, f: &mut impl FnMut(&'a Expr)) {
     match p {
         Pattern::Literal(e) => expr(e, f),
         Pattern::Array(ps) | Pattern::Tuple(ps) | Pattern::Variant { values: ps, .. } => {
@@ -60,7 +60,7 @@ fn pattern(p: &Pattern, f: &mut impl FnMut(&Expr)) {
         _ => {}
     }
 }
-fn expr(e: &Expr, f: &mut impl FnMut(&Expr)) {
+fn expr<'a>(e: &'a Expr, f: &mut impl FnMut(&'a Expr)) {
     f(e);
     match e {
         Expr::Lambda(fun) => block(&fun.body, f),

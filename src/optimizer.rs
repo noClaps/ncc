@@ -24,8 +24,23 @@ enum Value {
     Optional(Type, Option<Box<Value>>),
     Success(Type, Box<Value>),
     Function(String),
+    Closure(usize, Vec<(String, Value)>),
 }
 impl Value {
+    fn materializable(&self) -> bool {
+        match self {
+            Self::Closure(..) => false,
+            Self::Array(values) | Self::Tuple(values) | Self::Enum(_, _, values) => {
+                values.iter().all(Self::materializable)
+            }
+            Self::Map(values) => values
+                .iter()
+                .all(|(k, v)| k.materializable() && v.materializable()),
+            Self::Struct(_, fields) => fields.iter().all(|(_, v)| v.materializable()),
+            Self::Optional(_, Some(v)) | Self::Success(_, v) => v.materializable(),
+            _ => true,
+        }
+    }
     fn equals(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Float(a), Self::Float(b)) => f64::from_bits(*a) == f64::from_bits(*b),
@@ -110,6 +125,7 @@ impl Value {
                 constant_thunk(value.expr(), inner)
             }
             Self::Function(name) => Expr::Name(name),
+            Self::Closure(..) => unreachable!("closure constants retain their original source"),
         }
     }
 }
@@ -217,7 +233,9 @@ fn fold(
 ) -> Result<Option<Expr>, Diagnostics> {
     // Only fold whole pure evaluations. Do not rewrite expressions inside a
     // short-circuited or potentially effectful expression independently.
-    if let Some(v) = evaluate(e, env, functions, checked, &mut 100_000)? {
+    if let Some(v) =
+        evaluate(e, env, functions, checked, &mut 100_000)?.filter(Value::materializable)
+    {
         return Ok(Some(materialize(v, e, checked)));
     } else if let Expr::Call {
         callee,
@@ -230,7 +248,9 @@ fn fold(
             .iter()
             .map(|arg| {
                 evaluate(arg, env, functions, checked, &mut 100_000).map(|value| {
-                    value.map_or_else(|| arg.clone(), |value| materialize(value, arg, checked))
+                    value
+                        .filter(Value::materializable)
+                        .map_or_else(|| arg.clone(), |value| materialize(value, arg, checked))
                 })
             })
             .collect::<Result<_, _>>()?;
@@ -282,8 +302,17 @@ fn evaluate(
     checked: &CheckedModule,
     fuel: &mut usize,
 ) -> Result<Option<Value>, Diagnostics> {
+    let mut lambdas = HashMap::new();
+    for item in &checked.module.items {
+        crate::visit::item(item, &mut |e| {
+            if let Expr::Lambda(f) = e {
+                lambdas.insert(e as *const Expr as usize, &**f);
+            }
+        });
+    }
     let mut evaluator = Evaluator {
         functions,
+        lambdas,
         checked,
         fuel,
         memo: HashMap::new(),
@@ -291,7 +320,7 @@ fn evaluate(
         arithmetic_failure: false,
         indices: vec![],
     };
-    let value = evaluator.evaluate(e, env);
+    let value = evaluator.evaluate(e, &mut env.clone());
     if evaluator.arithmetic_failure {
         Err(Diagnostics::one(
             "constant evaluation failed: integer overflow, division by zero, invalid shift/exponent, or non-finite float",
@@ -305,7 +334,8 @@ struct Evaluator<'a> {
     functions: &'a HashMap<String, &'a Function>,
     checked: &'a CheckedModule,
     fuel: &'a mut usize,
-    memo: HashMap<(String, Vec<Value>), Value>,
+    lambdas: HashMap<usize, &'a Function>,
+    memo: HashMap<(Value, Vec<Value>), Value>,
     depth: usize,
     arithmetic_failure: bool,
     indices: Vec<u64>,
@@ -315,7 +345,7 @@ impl Evaluator<'_> {
         &mut self,
         index: &Expr,
         object: &Value,
-        env: &HashMap<String, Value>,
+        env: &mut HashMap<String, Value>,
     ) -> Option<Value> {
         let length = match object {
             Value::Array(values) | Value::Tuple(values) => values.len(),
@@ -331,7 +361,7 @@ impl Evaluator<'_> {
     fn place(
         &mut self,
         e: &Expr,
-        env: &HashMap<String, Value>,
+        env: &mut HashMap<String, Value>,
         path: &mut Vec<Access>,
     ) -> Option<String> {
         match e {
@@ -607,7 +637,7 @@ impl Evaluator<'_> {
             .get(&(e as *const Expr as usize))
             .map(|ty| self.base_type(ty))
     }
-    fn evaluate(&mut self, e: &Expr, env: &HashMap<String, Value>) -> Option<Value> {
+    fn evaluate(&mut self, e: &Expr, env: &mut HashMap<String, Value>) -> Option<Value> {
         if self.depth >= 512 {
             return None;
         }
@@ -622,7 +652,7 @@ impl Evaluator<'_> {
         self.depth -= 1;
         result
     }
-    fn expression(&mut self, e: &Expr, env: &HashMap<String, Value>) -> Option<Value> {
+    fn expression(&mut self, e: &Expr, env: &mut HashMap<String, Value>) -> Option<Value> {
         let fuel = &mut *self.fuel;
         *fuel = fuel.checked_sub(1)?;
         if let Expr::Unary {
@@ -650,6 +680,20 @@ impl Evaluator<'_> {
                 value.is_finite().then(|| Value::Float(value.to_bits()))
             }
             Expr::Bool(b) => Some(Value::Bool(*b)),
+            Expr::Lambda(_) => {
+                let key = e as *const Expr as usize;
+                let captures = self.checked.captures.get(&key)?;
+                let values = captures
+                    .iter()
+                    .map(|(name, _, mutex)| {
+                        if *mutex {
+                            return None;
+                        }
+                        Some((name.clone(), env.get(name)?.clone()))
+                    })
+                    .collect::<Option<_>>()?;
+                Some(Value::Closure(key, values))
+            }
             Expr::Bytes(bytes) => Some(Value::Array(
                 bytes.iter().copied().map(Value::Byte).collect(),
             )),
@@ -917,11 +961,14 @@ impl Evaluator<'_> {
                             .collect::<Option<_>>()?,
                     ));
                 }
-                let Value::Function(n) = self.evaluate(callee, env)? else {
-                    return None;
+                let callable = self.evaluate(callee, env)?;
+                let (f, mut scope) = match &callable {
+                    Value::Function(n) => (*self.functions.get(n)?, HashMap::new()),
+                    Value::Closure(key, captures) => {
+                        (*self.lambdas.get(key)?, captures.iter().cloned().collect())
+                    }
+                    _ => return None,
                 };
-                let f = *self.functions.get(&n)?;
-                let mut scope = HashMap::new();
                 let mut values = vec![];
                 for (p, arg) in f.params.iter().zip(args) {
                     let value = self.evaluate(arg, env)?;
@@ -929,7 +976,7 @@ impl Evaluator<'_> {
                     values.push(value.clone());
                     scope.insert(p.name.clone(), value);
                 }
-                let key = (n.clone(), values);
+                let key = (callable, values);
                 if let Some(value) = self.memo.get(&key) {
                     return Some(value.clone());
                 }
@@ -943,20 +990,17 @@ impl Evaluator<'_> {
                 }
             }
             Expr::If { subject, arms } => {
-                let mut local = env.clone();
-                match self.conditional(subject.as_deref(), arms, &mut local, true)? {
+                match self.conditional(subject.as_deref(), arms, env, true)? {
                     Flow::Value(value) => Some(value),
                     _ => None,
                 }
             }
             Expr::Else { value, fallback } => match self.evaluate(value, env)? {
                 Value::Optional(_, Some(value)) => Some(*value),
-                Value::Optional(_, None) => {
-                    match self.value_block(fallback, &mut env.clone(), true)? {
-                        Flow::Value(value) => Some(value),
-                        _ => None,
-                    }
-                }
+                Value::Optional(_, None) => match self.value_block(fallback, env, true)? {
+                    Flow::Value(value) => Some(value),
+                    _ => None,
+                },
                 _ => None,
             },
             Expr::Try(value) | Expr::Catch { value, .. } => match self.evaluate(value, env)? {

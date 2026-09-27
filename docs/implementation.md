@@ -8,6 +8,9 @@ must stay explicit about features still under construction.
 
 - Checked scalar arithmetic, exponentiation, contextual literals, nominal casts,
   short-circuit evaluation, shadowing, labelled loops, and return-path checks.
+- Every row of the specified cast table has a debug/release differential test.
+  Numeric byte-array casts use fixed little-endian encoding (IEEE-754 for floats).
+  Nominal composite casts preserve representation, contextual literals and copies.
 - Arrays, maps, tuples/destructuring, structs, recursive enums, pattern bindings,
   optional values, error unions, catch/try/throw, and composite formatting.
 - Top-level and exported tuple bindings, discarded bindings, and partial tuple
@@ -19,41 +22,64 @@ must stay explicit about features still under construction.
   constructors; nested generic types.
 - First-class functions, nested anonymous functions, returned closures, and
   immutable by-value captures. Mutex captures retain the shared protected value.
+- Enum payload constructors are first-class callables, including async calls.
 - Background futures, repeated awaits, mutex snapshots, and automatic lock
   release on return, throw, and labelled breaks.
+- Async runtime builtins snapshot their arguments before spawning. Printing
+  evaluates all arguments left-to-right before emitting output.
 - UTF-8 grapheme literals, interpolation, Unicode-aware string length/indexing,
   replacement and iteration, and string-to-character/byte-array conversion.
+- Counted UTF-8 strings preserve embedded NUL bytes. All documented escapes,
+  Unicode scalar validation and multiline literal preservation are covered.
+- Compile-time `@embed` with literal paths, module-relative resolution, binary
+  and empty files, unreadable-file diagnostics and symlink rejection.
 - Source imports, exports, cycle diagnostics, and external C functions.
 - Validated external C signatures with stable argument/result aliases, including
   composite arguments and error-union results; see `docs/c-abi.md`.
+- Shared external C sources are included once after all ABI declarations;
+  conflicting symbol signatures are rejected. Optional/error copies and equality
+  inspect only active payloads, including values returned by C implementations.
 - Runtime argument/environment builtins and compile-time target introspection;
   explicit target selection and `NC_TARGET` support for `macos-arm64`.
 - CLI artifact isolation, explicit formats, argument validation, capture lint
   (including imported files and suppression), stdio LSP diagnostics/formatting,
   and bounded memoized type-aware constant evaluation in release builds, covering
   numeric widths, composites, optionals, named callbacks, and nominal types.
+- Pure calls through by-value closures can be evaluated with captured environments
+  included in memoization. Effectful/escaping closures retain their source code.
+  Value-producing branches propagate assignments to surrounding local variables.
 - Tree-sitter syntax grammar, corpus tests and highlight queries; Neovim setup
   using its built-in Tree-sitter and LSP APIs. The Zed extension was removed.
 - Incremental UTF-16 LSP edits, local definitions, documentation hover,
   completions and open-document symbols. Unsaved imported buffers participate in
   checking, and changes/closure trigger fresh diagnostics in open importers.
-  Imported exports support definition/hover lookup. Parser errors and semantic
+  Imported exports support definition/hover/completion lookup. Parser errors and semantic
   errors in variable/function declarations retain their original file locations.
+- Local references and collision-checked local rename, type definitions, struct
+  member navigation/completion, pattern/catch bindings, signature help and folds.
+  Builtins have documentation/signatures and completion replaces the entire sigil.
+  Editor-only parser recovery retains useful indexing through incomplete input.
+- Formatting uses a single token pass for indentation and preserves literal
+  contents and comments; tests check token equivalence and idempotence.
 
 ## Known remaining work
 
-- Complete remaining specified casts and operators. Numeric byte-array casts
-  now use fixed little-endian encoding (IEEE-754 bits for floats).
-- Complete generic inference in nested contextual expressions.
-- Complete pattern/label coverage and restrictions on escaping futures.
+- Continue auditing nested generic contexts, pattern/label restrictions, escaping
+  futures and negative operator/type combinations beyond the current fixtures.
 - Audit value-copy and evaluation-order behavior across all composite operations.
 - Finish external C ABI coverage and source-aware diagnostics
   for all semantic errors (many still report the start of the file).
 - Extend compile-time evaluation to remaining operations and broaden optimisation
-  within function bodies. The evaluation fuel/depth limits intentionally retain
+  within function bodies, including thrown-error paths. The evaluation fuel/depth limits intentionally retain
   runtime code for work that cannot safely be completed at compile time.
-- Improve multiline strings, embedded-NUL handling, canonical formatting, and
-  editor indexing of struct members and pattern bindings.
+- Support computed compile-time paths for `@embed` if required; currently its
+  path must be a string literal without interpolation.
+- Full canonical spacing/layout formatting, rather than indentation only.
+- Workspace-wide references/rename (currently references are document-local and
+  rename is restricted to local bindings), imported signature help, more inferred
+  member types, code actions and resilient indexing through every invalid edit.
+  LSP usability has improved, but parity with Gleam's LSP is not yet achieved.
+- Tree-sitter newline-sensitive return/call parsing and further recovery cases.
 - Increase negative, differential, concurrency, and full-specification tests.
 
 The Unicode crate is now a test oracle only. The compiler core can be built with
