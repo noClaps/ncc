@@ -1133,6 +1133,10 @@ impl Emitter<'_> {
                         .position(|v| v.name == *name)
                         .unwrap();
                     let ct = self.c_type(&ty)?;
+                    let variant = &declaration.variants[tag];
+                    if !variant.values.is_empty() {
+                        return self.enum_constructor(e, &ct, tag, &variant.values);
+                    }
                     return self.temp(e, format!("({ct}){{{tag},0}}"));
                 }
                 let object = self.expr(object)?;
@@ -1702,6 +1706,28 @@ impl Emitter<'_> {
             "{job}->future.result = &{job}->result; nc_start(&{job}->future, {worker}, {job});"
         ));
         self.temp(e, format!("&{job}->future"))
+    }
+    fn enum_constructor(
+        &mut self,
+        e: &Expr,
+        result_type: &str,
+        tag: usize,
+        params: &[Type],
+    ) -> Result<String, Diagnostics> {
+        self.allocation_support();
+        let payload = self.c_type(&Type::Tuple(params.to_vec()))?;
+        let callable = self.c_type(&self.ty(e)?)?;
+        let wrapper = self.fresh();
+        let mut arguments = vec!["void *env".into()];
+        let mut fields = Vec::new();
+        for (i, ty) in params.iter().enumerate() {
+            arguments.push(format!("{} a{i}", self.c_type(ty)?));
+            fields.push(format!("a{i}"));
+        }
+        let signature = format!("static {result_type} {wrapper}({})", arguments.join(", "));
+        self.runtime_prototypes.push(format!("{signature};"));
+        self.runtime_functions.push(format!("{signature} {{ (void)env; {payload} *payload = nc_alloc(1, sizeof({payload})); *payload = ({payload}){{{}}}; return ({result_type}){{{tag}, payload}}; }}", fields.join(", ")));
+        self.temp(e, format!("({callable}){{{wrapper},0}}"))
     }
     fn function_value(&mut self, e: &Expr, name: &str) -> Result<String, Diagnostics> {
         let ty = self.ty(e)?;

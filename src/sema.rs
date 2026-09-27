@@ -952,7 +952,7 @@ impl Checker {
                                 .collect(),
                             Box::new(function.return_type.clone()),
                         )),
-                        Some(_) => Some(named(n)),
+                        Some(_) => None,
                         None => None,
                     })
                     .ok_or_else(|| Diagnostics::one(format!("unknown name `{n}`"), 0..0))
@@ -1168,7 +1168,17 @@ impl Checker {
                 }
             }
             Expr::Member { object, name } => {
-                let o = self.expr(object)?;
+                let o = if let Expr::Name(n) = &**object
+                    && self.lookup(n).is_none()
+                    && matches!(self.types.get(n), Some(TypeInfo::Enum(_)))
+                {
+                    let ty = named(n);
+                    self.expression_types
+                        .insert(&**object as *const Expr as usize, ty.clone());
+                    ty
+                } else {
+                    self.expr(object)?
+                };
                 if let Type::Named(n, _) = &o {
                     if let Some(TypeInfo::Enum(declaration)) = self.types.get(n) {
                         let Some(variant) = declaration.variants.iter().find(|v| v.name == *name)

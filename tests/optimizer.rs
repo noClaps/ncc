@@ -39,6 +39,82 @@ fn folded(source: &str, names: &[&str], expected: &str) {
 }
 
 #[test]
+fn specified_cast_table_matches_in_debug_and_release() {
+    let mut source = String::from("enum E { Value(int) } struct S { int value }\n");
+    let mut expected = String::new();
+    for (i, (from, to, value, output)) in [
+        ("int[2]", "int[]", "[1, 2]", "[1, 2]"),
+        ("int[2]", "str", "[1, 2]", "[1, 2]"),
+        ("bool", "int", "true", "1"),
+        ("bool", "uint", "false", "0"),
+        ("bool", "str", "true", "true"),
+        ("byte", "char", "233", "é"),
+        ("byte", "int", "255", "255"),
+        ("byte", "uint", "255", "255"),
+        ("byte", "str", "255", "255"),
+        ("char", "byte[]", "'é'", "[195, 169]"),
+        ("char", "str", "'🍪'", "🍪"),
+        ("E", "str", "E.Value(2)", "E.Value(2)"),
+        ("[str]int", "str", "[\"x\": 3]", "[x: 3]"),
+        ("int", "byte[]", "258", "[2, 1, 0, 0, 0, 0, 0, 0]"),
+        ("int", "uint", "7", "7"),
+        ("int", "float", "7", "7.0"),
+        ("int", "str", "-7", "-7"),
+        ("uint", "byte[]", "258", "[2, 1, 0, 0, 0, 0, 0, 0]"),
+        ("uint", "int", "7", "7"),
+        ("uint", "float", "7", "7.0"),
+        (
+            "uint",
+            "str",
+            "18446744073709551615",
+            "18446744073709551615",
+        ),
+        ("float", "byte[]", "1.0", "[0, 0, 0, 0, 0, 0, 240, 63]"),
+        ("float", "int", "-7.9", "-7"),
+        ("float", "uint", "7.9", "7"),
+        ("float", "str", "7.0", "7.0"),
+        ("str", "char[]", "\"a🍪\"", "[a, 🍪]"),
+        ("str", "byte[]", "\"é\"", "[195, 169]"),
+        ("S", "str", "S{.value = 9}", "S{.value = 9}"),
+        ("(str, int)", "str", "(\"x\", 4)", "(x, 4)"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        source.push_str(&format!("fn cast_{i}({from} value) {to} {{ return @as({to}, value) }}\n@println(cast_{i}({value}))\n"));
+        expected.push_str(output);
+        expected.push('\n');
+    }
+    folded(&source, &[], &expected);
+}
+
+#[test]
+fn enum_constructors_are_first_class_and_async_callable() {
+    folded(
+        r#"
+enum Data { Value(int[]) Empty }
+(fn(int[]) Data) construct = Data.Value
+fn apply((fn(int[]) Data) f) Data { return f([3]) }
+mut int[] values = [1, 2]
+Data stored = construct(values)
+values[0] = 99
+@println(stored, apply(construct))
+fut Data work = async construct([4])
+@println(await work)
+"#,
+        &[],
+        "Data.Value([1, 2])Data.Value([3])\nData.Value([4])\n",
+    );
+    for source in [
+        "@println(int)",
+        "struct S { int n } @println(S)",
+        "enum E { A } E e = E",
+    ] {
+        assert!(ncc::check_source(source, Path::new("types.nc")).is_err());
+    }
+}
+
+#[test]
 fn async_builtins_evaluate_arguments_once_and_keep_runtime_process_state() {
     folded(
         r#"
