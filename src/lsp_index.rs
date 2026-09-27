@@ -291,7 +291,7 @@ impl<'a> Index<'a> {
     }
     pub fn prepare_rename(&self, at: usize) -> Value {
         self.selected(at)
-            .filter(|s| s.owner.is_none() && s.scope.is_some())
+            .filter(|s| self.locally_renamable(s))
             .map_or(
                 Value::Null,
                 |s| {
@@ -301,14 +301,15 @@ impl<'a> Index<'a> {
                 },
             )
     }
+    fn locally_renamable(&self, symbol: &SourceSymbol) -> bool {
+        symbol.owner.is_none()
+            && (symbol.scope.is_some() || self.exported_position(&symbol.name).is_none())
+    }
     pub fn rename(&self, uri: &str, at: usize, name: &str) -> Value {
         if !valid_name(name) {
             return Value::Null;
         }
-        let Some(symbol) = self
-            .selected(at)
-            .filter(|s| s.owner.is_none() && s.scope.is_some())
-        else {
+        let Some(symbol) = self.selected(at).filter(|s| self.locally_renamable(s)) else {
             return Value::Null;
         };
         let references = self.references(uri, at, true);
@@ -333,6 +334,46 @@ impl<'a> Index<'a> {
             .iter()
             .map(|r| json!({"range":r["range"],"newText":name}))
             .collect::<Vec<_>>();
+        // Re-index the proposal and compare binding identities in both directions:
+        // existing uses of the new name must not become captured by this rename.
+        let changed = self
+            .tokens
+            .iter()
+            .filter(|t| {
+                matches!(&t.kind, TokenKind::Ident(n) if *n == symbol.name)
+                    && self
+                        .selected(t.span.start)
+                        .is_some_and(|s| s.selection == symbol.selection)
+            })
+            .map(|t| t.span.clone())
+            .collect::<Vec<_>>();
+        let remap = |position: usize| {
+            let delta = changed
+                .iter()
+                .filter(|span| span.end <= position)
+                .map(|span| name.len() as isize - span.len() as isize)
+                .sum::<isize>();
+            position.checked_add_signed(delta).unwrap()
+        };
+        let mut source = self.text.to_string();
+        for span in changed.iter().rev() {
+            source.replace_range(span.clone(), name);
+        }
+        let after = Index::new(&source);
+        for token in &self.tokens {
+            if !matches!(&token.kind, TokenKind::Ident(n) if *n == symbol.name || n == name) {
+                continue;
+            }
+            let before = self
+                .selected(token.span.start)
+                .map(|s| remap(s.selection.start));
+            let actual = after
+                .selected(remap(token.span.start))
+                .map(|s| s.selection.start);
+            if before != actual {
+                return Value::Null;
+            }
+        }
         json!({"changes":{uri:edits}})
     }
     pub fn can_rename_export(&self, at: usize, name: &str) -> bool {
@@ -689,7 +730,66 @@ mod tests {
         for name in ["y", "int", "a b", "_", "", "x.y"] {
             assert!(index.rename("file:///a.nc", at, name).is_null(), "{name}");
         }
-        assert!(index.prepare_rename(source.find("f(").unwrap()).is_null());
+        assert!(!index.prepare_rename(source.find("f(").unwrap()).is_null());
+    }
+
+    #[test]
+    fn private_module_declarations_rename_without_changing_bindings() {
+        for (source, name, replacement, count) in [
+            (
+                "fn f(int x) int { return x }\n@println(f(1))",
+                "f",
+                "identity",
+                2,
+            ),
+            (
+                "str greeting = \"🍪\"\n@println(greeting)",
+                "greeting",
+                "message",
+                2,
+            ),
+            (
+                "struct Point { int x }\nPoint p = Point{.x = 1}",
+                "Point",
+                "Position",
+                3,
+            ),
+            (
+                "enum State { Ready }\nState s = State.Ready",
+                "State",
+                "Status",
+                3,
+            ),
+        ] {
+            let index = Index::new(source);
+            let at = index
+                .symbols
+                .iter()
+                .find(|s| s.name == name)
+                .unwrap()
+                .selection
+                .start;
+            assert_eq!(index.prepare_rename(at)["placeholder"], name);
+            assert_eq!(
+                index.rename("file:///a.nc", at, replacement)["changes"]["file:///a.nc"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                count
+            );
+        }
+        let source = "pub fn f() int { return 1 }";
+        assert!(
+            Index::new(source)
+                .prepare_rename(source.find("f(").unwrap())
+                .is_null()
+        );
+        let source = "fn f() int { return 1 }\nfn g(int renamed) int { return f() + renamed }";
+        assert!(
+            Index::new(source)
+                .rename("file:///a.nc", source.find("f(").unwrap(), "renamed")
+                .is_null()
+        );
     }
 
     #[test]
