@@ -39,6 +39,25 @@ fn folded(source: &str, names: &[&str], expected: &str) {
 }
 
 #[test]
+fn optional_and_error_equality_compares_only_active_payloads() {
+    folded(
+        r#"
+fn result(bool fail) int[]! { if fail { true -> { throw "bad\u{0}value" } false -> { return [1, 2] } } }
+int[]! success = result(false)
+int[]! failure = result(true)
+int[]? absent = none
+int[]? present = [1, 2]
+@println(success == result(false))
+@println(failure == result(true))
+@println(success != failure)
+@println(absent == absent, absent != present, present == present)
+"#,
+        &[],
+        "true\ntrue\ntrue\ntruetruetrue\n",
+    );
+}
+
+#[test]
 fn specified_cast_table_matches_in_debug_and_release() {
     let mut source = String::from("enum E { Value(int) } struct S { int value }\n");
     let mut expected = String::new();

@@ -580,6 +580,28 @@ impl Emitter<'_> {
         Ok(value.into())
     }
     fn copy_body(&mut self, ty: &Type, value: &str) -> Result<String, Diagnostics> {
+        if let Type::Optional(inner) | Type::ErrorUnion(inner) = ty {
+            let ct = self.c_type(ty)?;
+            let copy = self.fresh();
+            let optional = matches!(ty, Type::Optional(_));
+            let flag = if optional { "present" } else { "failed" };
+            self.line(format!(
+                "{ct} {copy} = {{0}}; {copy}.{flag} = ({value}).{flag};"
+            ));
+            self.line(format!(
+                "if ({}({value}).{flag}) {{",
+                if optional { "" } else { "!" }
+            ));
+            if **inner != Type::void() {
+                let contents = self.copy(inner, &format!("({value}).value"))?;
+                self.line(format!("{copy}.value = {contents};"));
+            }
+            self.line("}");
+            if !optional {
+                self.line(format!("else {{ {copy}.error = ({value}).error; }}"));
+            }
+            return Ok(copy);
+        }
         if let Some(fields) = self.fields(ty) {
             let ct = self.c_type(ty)?;
             let copy = self.fresh();
@@ -874,6 +896,38 @@ impl Emitter<'_> {
         {
             return self.equality(left, right, &base.clone());
         }
+        if let Type::Optional(inner) | Type::ErrorUnion(inner) = ty {
+            let result = self.fresh();
+            let optional = matches!(ty, Type::Optional(_));
+            let flag = if optional { "present" } else { "failed" };
+            self.line(format!(
+                "int {result} = ({left}).{flag} == ({right}).{flag}; if ({result}) {{"
+            ));
+            self.line(format!(
+                "if ({}({left}).{flag}) {{",
+                if optional { "" } else { "!" }
+            ));
+            if **inner != Type::void() {
+                let eq = self.equality(
+                    &format!("({left}).value"),
+                    &format!("({right}).value"),
+                    inner,
+                )?;
+                self.line(format!("{result} = {eq};"));
+            }
+            self.line("}");
+            if !optional {
+                self.line("else {");
+                let eq = self.equality(
+                    &format!("({left}).error"),
+                    &format!("({right}).error"),
+                    &Type::Named("error".into(), vec![]),
+                )?;
+                self.line(format!("{result} = {eq}; }}"));
+            }
+            self.line("}");
+            return Ok(result);
+        }
         if let Some(declaration) = self.enum_decl(ty) {
             let helper = format!("nc_equal_{}", declaration.name);
             let ct = self.c_type(ty)?;
@@ -959,7 +1013,7 @@ impl Emitter<'_> {
             self.line(format!("{result} = {eq};\n}}"));
             return Ok(result);
         }
-        if matches!(ty, Type::Named(n, _) if n == "str" || n == "char") {
+        if matches!(ty, Type::Named(n, _) if n == "str" || n == "char" || n == "error") {
             self.headers.insert("string.h");
             Ok(format!(
                 "({left}).bytes == ({right}).bytes && (!({left}).bytes || memcmp(({left}).data, ({right}).data, ({left}).bytes) == 0)"
