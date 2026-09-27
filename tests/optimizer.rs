@@ -39,6 +39,32 @@ fn folded(source: &str, names: &[&str], expected: &str) {
 }
 
 #[test]
+fn pure_void_calls_fold_without_hiding_effects() {
+    folded(
+        r#"
+fn noop() {}
+fn early(bool stop) { if stop { true -> { return } _ -> {} } }
+fn checked(bool fail) void! { if fail { true -> { throw "failed" } _ -> {} } noop() }
+fn forwarded() void! { return noop() }
+fn total() int! { noop() early(false) early(true) try checked(false) try forwarded() return 42 }
+noop()
+@println(try total())
+fn recovered() { checked(true) catch message { @println(message) } }
+recovered()
+fn effect() { @print("effect:") }
+fn effect_forwarded() void! { return effect() }
+fn runtime() int! { try effect_forwarded() noop() return 7 }
+@println(try runtime())
+"#,
+        &["noop", "early", "checked", "forwarded", "total"],
+        "42\nfailed\neffect:7\n",
+    );
+    let source = "fn loop() { while true {} } loop()";
+    let c = ncc::compile_source_with_options(source, Path::new("void.nc"), true).unwrap();
+    assert!(c.contains("nc_fn_loop("));
+}
+
+#[test]
 fn pure_subexpressions_fold_inside_effectful_functions() {
     folded(
         r#"

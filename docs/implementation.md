@@ -58,6 +58,8 @@ must stay explicit about features still under construction.
 - Constant subexpressions inside function bodies fold even when surrounding
   code is effectful. Async calls and pattern syntax retain their required shape;
   failures in potentially unreachable expressions remain runtime operations.
+- Pure void calls, early returns and successful void error unions fold, including
+  calls used as statements. Effectful calls and nontermination retain runtime code.
 - Independent Tree-sitter syntax grammar, corpus tests and highlight queries.
   Editor plugins and configuration are intentionally not provided.
 - Incremental UTF-16 LSP edits, local definitions, documentation hover,

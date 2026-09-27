@@ -2322,6 +2322,9 @@ impl Emitter<'_> {
             && self.ty(e)? != *expected
         {
             let ct = self.c_type(expected)?;
+            if self.ty(e)? == Type::void() {
+                return Ok(format!("({ct}){{0}}"));
+            }
             return Ok(format!("({ct}){{.value = {value}}}"));
         }
         if let Type::Optional(inner) = expected

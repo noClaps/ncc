@@ -116,6 +116,7 @@ fn embedded_bytes(path: &str, source: &std::path::Path) -> std::io::Result<Vec<u
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 enum Value {
+    Void,
     Int(i64),
     Uint(u64),
     Byte(u8),
@@ -184,6 +185,7 @@ impl Value {
     }
     fn expr(self) -> Expr {
         match self {
+            Self::Void => constant_statement(Stmt::Return(None), Type::void()),
             Self::Int(n) if n < 0 => Expr::Unary {
                 op: UnaryOp::Neg,
                 value: Box::new(Expr::Int(n.unsigned_abs().to_string())),
@@ -229,6 +231,9 @@ impl Value {
                 }
             }
             Self::Optional(_, None) => Expr::None,
+            Self::Success(inner, _) if inner == Type::void() => {
+                constant_statement(Stmt::Return(None), Type::ErrorUnion(Box::new(inner)))
+            }
             Self::Optional(inner, Some(value)) | Self::Success(inner, value) => {
                 constant_thunk(value.expr(), inner)
             }
@@ -443,6 +448,11 @@ fn fold(
     Ok(None)
 }
 fn materialize(value: Value, original: &Expr, checked: &CheckedModule) -> Expr {
+    if matches!(value, Value::Void)
+        || matches!(value, Value::Success(_, ref v) if **v == Value::Void)
+    {
+        return value.expr();
+    }
     let expr = value.expr();
     let ty = checked
         .expression_types
@@ -1211,6 +1221,14 @@ impl Evaluator<'_> {
                     .block(&f.body, &mut scope)
                     .or_else(|| self.flow.take())?
                 {
+                    Flow::Next
+                        if f.return_type == Type::void()
+                            || f.return_type == Type::ErrorUnion(Box::new(Type::void())) =>
+                    {
+                        let v = self.coerce(Value::Void, &f.return_type)?;
+                        self.memo.insert(key, v.clone());
+                        Some(v)
+                    }
                     Flow::Return(v) => {
                         let v = self.coerce(v, &f.return_type)?;
                         self.memo.insert(key, v.clone());
@@ -1503,6 +1521,7 @@ impl Evaluator<'_> {
                     Flow::Next
                 }
                 Stmt::Return(Some(e)) => Flow::Return(self.evaluate(e, env)?),
+                Stmt::Return(None) => Flow::Return(Value::Void),
                 Stmt::Throw(e) => match self.evaluate(e, env)? {
                     Value::String(message) => Flow::Throw(message),
                     _ => return None,
@@ -1515,6 +1534,10 @@ impl Evaluator<'_> {
                 )?,
                 Stmt::Expr(e) if valued && index + 1 == b.statements.len() => {
                     Flow::Value(self.evaluate(e, env)?)
+                }
+                Stmt::Expr(e) => {
+                    self.evaluate(e, env)?;
+                    Flow::Next
                 }
                 Stmt::While {
                     condition,
