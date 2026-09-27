@@ -22,6 +22,9 @@ must stay explicit about features still under construction.
   constructors; nested generic types.
 - First-class functions, nested anonymous functions, returned closures, and
   immutable by-value captures. Mutex captures retain the shared protected value.
+- Equality, membership and map keys reject function/future values, including
+  recursively inside containers, nominal types and recursive composites.
+  Printing, interpolation and string casts reject those values during checking.
 - Enum payload constructors are first-class callables, including async calls.
 - Background futures, repeated awaits, mutex snapshots, and automatic lock
   release on return, throw, and labelled breaks.

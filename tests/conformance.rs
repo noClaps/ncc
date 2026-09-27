@@ -154,6 +154,66 @@ fn futures_cannot_escape_through_nominal_types_or_captures() {
 }
 
 #[test]
+fn functions_and_futures_reject_equality_and_string_conversion_recursively() {
+    let function = "fn value() int { return 1 }\n";
+    for (declaration, expression) in [
+        ("", "value"),
+        ("(fn() int)[] values = [value]", "values"),
+        ("[str](fn() int) values = [\"f\": value]", "values"),
+        ("((fn() int), int) values = (value, 1)", "values"),
+        (
+            "struct Holder { (fn() int) f } Holder holder = Holder{.f = value}",
+            "holder",
+        ),
+        (
+            "enum Callback { Value((fn() int)) Empty } Callback c = Callback.Empty",
+            "c",
+        ),
+        (
+            "type Callback = (fn() int) Callback c = @as(Callback, value)",
+            "c",
+        ),
+        ("(fn() int)? c = none", "c"),
+        ("fut int pending = async value()", "pending"),
+        (
+            "enum Recursive { Children(Recursive[]) Callback((fn() int)) Empty } Recursive r = Recursive.Empty",
+            "r",
+        ),
+    ] {
+        for operation in [
+            format!("_ = {expression} == {expression}"),
+            format!("_ = {expression} != {expression}"),
+            format!("@println({expression})"),
+            format!("_ = @as(str, {expression})"),
+            format!("_ = \"{{{expression}}}\""),
+        ] {
+            let source = format!("{function}{declaration}\n{operation}");
+            rejects(&source, "not defined for functions or unawaited futures");
+            for release in [false, true] {
+                let error =
+                    ncc::compile_source_with_options(&source, Path::new("test.nc"), release)
+                        .unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("not defined for functions or unawaited futures"),
+                    "{source}: {error}"
+                );
+            }
+        }
+    }
+    for operation in [
+        "_ = value in [value]",
+        "_ = [value: 1]",
+        "[(fn() int)]int table = []",
+    ] {
+        rejects(&format!("{function}{operation}"), "equality is not defined");
+    }
+    rejects("fn empty() {} @println(empty())", "not void");
+    rejects("fn empty() {} _ = empty() == empty()", "not void");
+}
+
+#[test]
 fn partial_tuple_destructuring_evaluates_once_and_copies() {
     success(
         r#"

@@ -88,38 +88,62 @@ pub fn check(module: Module, _path: &Path) -> Result<CheckedModule, Diagnostics>
 }
 impl Checker {
     fn contains_future(&self, ty: &Type) -> bool {
-        fn visit(checker: &Checker, ty: &Type, seen: &mut HashSet<String>) -> bool {
+        self.contains_type(ty, &|ty| matches!(ty, Type::Future(_)))
+    }
+    fn contains_type(&self, ty: &Type, predicate: &impl Fn(&Type) -> bool) -> bool {
+        fn visit(
+            checker: &Checker,
+            ty: &Type,
+            seen: &mut HashSet<String>,
+            predicate: &impl Fn(&Type) -> bool,
+        ) -> bool {
+            if predicate(ty) {
+                return true;
+            }
             match ty {
-                Type::Future(_) => true,
+                Type::Future(_) | Type::Function(_, _) => false,
                 Type::Named(name, args) => {
-                    if args.iter().any(|ty| visit(checker, ty, seen)) {
+                    if args.iter().any(|ty| visit(checker, ty, seen, predicate)) {
                         return true;
                     }
                     if !seen.insert(name.clone()) {
                         return false;
                     }
                     match checker.types.get(name) {
-                        Some(TypeInfo::Alias(ty)) => visit(checker, ty, seen),
-                        Some(TypeInfo::Struct(s)) => {
-                            s.fields.iter().any(|f| visit(checker, &f.ty, seen))
-                        }
-                        Some(TypeInfo::Enum(e)) => e
-                            .variants
+                        Some(TypeInfo::Alias(ty)) => visit(checker, ty, seen, predicate),
+                        Some(TypeInfo::Struct(s)) => s
+                            .fields
                             .iter()
-                            .any(|v| v.values.iter().any(|ty| visit(checker, ty, seen))),
+                            .any(|f| visit(checker, &f.ty, seen, predicate)),
+                        Some(TypeInfo::Enum(e)) => e.variants.iter().any(|v| {
+                            v.values
+                                .iter()
+                                .any(|ty| visit(checker, ty, seen, predicate))
+                        }),
                         _ => false,
                     }
                 }
                 Type::Array(ty, _) | Type::Optional(ty) | Type::ErrorUnion(ty) => {
-                    visit(checker, ty, seen)
+                    visit(checker, ty, seen, predicate)
                 }
-                Type::Map(key, value) => visit(checker, key, seen) || visit(checker, value, seen),
-                Type::Tuple(types) => types.iter().any(|ty| visit(checker, ty, seen)),
-                // A callable is not a future. Captures and its return type are checked separately.
-                Type::Function(_, _) => false,
+                Type::Map(key, value) => {
+                    visit(checker, key, seen, predicate) || visit(checker, value, seen, predicate)
+                }
+                Type::Tuple(types) => types.iter().any(|ty| visit(checker, ty, seen, predicate)),
             }
         }
-        visit(self, ty, &mut HashSet::new())
+        visit(self, ty, &mut HashSet::new(), predicate)
+    }
+    fn value_operation(&self, ty: &Type, operation: &str) -> Result<(), Diagnostics> {
+        if self.contains_type(ty, &|ty| {
+            matches!(ty, Type::Function(_, _) | Type::Future(_))
+        }) {
+            return self.fail(format!("{operation} is not defined for functions or unawaited futures, including inside composite values"));
+        }
+        if *ty == Type::void() {
+            return self.fail(format!("{operation} requires a value, not void"));
+        }
+        Ok(())
     }
     fn validate_layouts(&self) -> Result<(), Diagnostics> {
         fn visit(
@@ -367,6 +391,7 @@ impl Checker {
             }
             Type::Map(k, v) => {
                 self.validate_type(k)?;
+                self.value_operation(k, "map-key equality")?;
                 self.validate_type(v)?
             }
             Type::Tuple(xs) | Type::Function(xs, _) => {
@@ -894,6 +919,9 @@ impl Checker {
                     return Ok(ty.clone());
                 }
                 let from = self.expr(value)?;
+                if *ty == named("str") {
+                    self.value_operation(&from, "string conversion")?;
+                }
                 if let Type::Named(n, _) = &from
                     && matches!(self.types.get(n),Some(TypeInfo::Alias(base)) if base == ty)
                 {
@@ -989,6 +1017,7 @@ impl Checker {
                 };
                 let (k, v) = &xs[0];
                 let kt = self.expr(k)?;
+                self.value_operation(&kt, "map-key equality")?;
                 let vt = self.expr(v)?;
                 for (k, v) in &xs[1..] {
                     let actual_key = self.expr(k)?;
@@ -1045,6 +1074,7 @@ impl Checker {
                     self.expr(right)?
                 };
                 if *op == BinaryOp::In {
+                    self.value_operation(&l, "equality")?;
                     match &r {
                         Type::Array(element, _) => self.assignable(element, &l)?,
                         Type::Map(key, _) => self.assignable(key, &l)?,
@@ -1055,6 +1085,9 @@ impl Checker {
                         _ => return self.fail("in requires a compatible container and element"),
                     }
                     return Ok(named("bool"));
+                }
+                if matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
+                    self.value_operation(&l, "equality")?;
                 }
                 if let (Type::Array(a, n), Type::Array(b, m)) = (&l, &r) {
                     self.assignable(a, b)?;
@@ -1135,7 +1168,8 @@ impl Checker {
                     )
                 {
                     for arg in args {
-                        self.expr(arg)?;
+                        let ty = self.expr(arg)?;
+                        self.value_operation(&ty, "string conversion")?;
                     }
                     return Ok(Type::void());
                 }
