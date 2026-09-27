@@ -46,7 +46,13 @@ fn noop() {}
 fn early(bool stop) { if stop { true -> { return } _ -> {} } }
 fn checked(bool fail) void! { if fail { true -> { throw "failed" } _ -> {} } noop() }
 fn forwarded() void! { return noop() }
-fn total() int! { noop() early(false) early(true) try checked(false) try forwarded() return 42 }
+fn invoke((fn() void) callback) { callback() }
+fn total() int! {
+    noop() early(false) early(true)
+    invoke(fn() { return })
+    try checked(false) try forwarded()
+    return 42
+}
 noop()
 @println(try total())
 fn recovered() { checked(true) catch message { @println(message) } }
@@ -56,7 +62,7 @@ fn effect_forwarded() void! { return effect() }
 fn runtime() int! { try effect_forwarded() noop() return 7 }
 @println(try runtime())
 "#,
-        &["noop", "early", "checked", "forwarded", "total"],
+        &["noop", "early", "checked", "forwarded", "invoke", "total"],
         "42\nfailed\neffect:7\n",
     );
     let source = "fn loop() { while true {} } loop()";
