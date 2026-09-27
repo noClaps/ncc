@@ -55,8 +55,8 @@ must stay explicit about features still under construction.
   Value-producing branches propagate assignments to surrounding local variables.
 - Pure thrown errors, `catch`/`try` propagation and early returns from value
   branches can fold; impure error-producing calls retain their runtime effects.
-- Tree-sitter syntax grammar, corpus tests and highlight queries; Neovim setup
-  using its built-in Tree-sitter and LSP APIs. The Zed extension was removed.
+- Independent Tree-sitter syntax grammar, corpus tests and highlight queries.
+  Editor plugins and configuration are intentionally not provided.
 - Incremental UTF-16 LSP edits, local definitions, documentation hover,
   completions and open-document symbols. Unsaved imported buffers participate in
   checking, and changes/closure trigger fresh diagnostics in open importers.

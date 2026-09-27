@@ -37,6 +37,5 @@ Negative tests distinguish rejected programs from runtime range/bounds failures.
 
 The tests are a regression suite, not a proof of specification completeness.
 See [the implementation audit](implementation.md) for remaining work, including
-LSP features not yet at parity with Gleam. See [the Neovim setup](../editors/neovim/README.md)
-for an editor smoke test: open an NC file, check highlighting, and verify server
-attachment with `:checkhealth vim.lsp`.
+LSP features not yet at parity with Gleam. The standalone language server and
+Tree-sitter grammar are tested independently of editor plugins.

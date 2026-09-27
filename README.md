@@ -62,8 +62,8 @@ also resolve exported import members, including unsaved files. Arbitrary struct
 members and every pattern binding are not yet indexed.
 
 The [Tree-sitter grammar](tree-sitter-nc/README.md) includes generated C and a
-syntax corpus. See [Neovim setup](editors/neovim/README.md) for built-in LSP and
-Tree-sitter integration without editor plugins. The Zed extension was removed.
+syntax corpus and highlight queries. Editor plugins and configuration are left
+to users; the standalone language server remains available through `ncc lsp`.
 
 ## Dependencies and self-hosting
 
