@@ -318,7 +318,10 @@ impl Parser {
         let generics = self.generics()?;
         self.expect(TokenKind::LBrace)?;
         let mut variants = vec![];
+        let symbol_start = self.symbol_count();
         while !self.at(&TokenKind::RBrace) {
+            let variant_token = self.current().clone();
+            let variant_start = variant_token.span.start;
             let name = self.ident()?;
             let mut values = vec![];
             if self.at(&TokenKind::LParen) {
@@ -331,9 +334,11 @@ impl Parser {
                 }
                 let _ = self.bump();
             }
+            self.symbol(variant_token, variant_start, 22, 0);
             variants.push(Variant { name, values });
         }
         self.bump();
+        self.member_symbols(symbol_start, &name, start);
         self.symbol(token, start, 10, 0);
         Ok(EnumDecl {
             public,

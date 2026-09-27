@@ -576,6 +576,14 @@ fn release_evaluates_pure_functions_and_preserves_effects() {
 
 #[test]
 fn enum_payloads_and_binding_patterns() {
+    rejects(
+        "enum E { A B } E value = E.A E bad = value.B",
+        "through the enum type",
+    );
+    rejects(
+        "enum E { A B } fn value() E { @println(\"effect\") return E.A } E bad = value().B",
+        "through the enum type",
+    );
     success(
         r#"
 enum Node { Empty Text(str) Number(int) }

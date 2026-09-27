@@ -250,6 +250,9 @@ impl<'a> Index<'a> {
         self.resolve(name, self.tokens[index].span.start)
     }
     fn type_name(&self, symbol: &SourceSymbol) -> Option<String> {
+        if matches!(symbol.kind, 10 | 23 | 26) {
+            return Some(symbol.name.clone());
+        }
         self.tokens
             .iter()
             .filter(|t| {
@@ -407,7 +410,10 @@ impl<'a> Index<'a> {
     }
     pub fn imported_signature(&self, at: usize) -> Option<(String, String, usize)> {
         for (callee, active) in self.call_sites(at) {
-            if self.builtin(callee).is_some() || self.selected(callee).is_some_and(|s| s.kind == 12)
+            if self.builtin(callee).is_some()
+                || self
+                    .selected(callee)
+                    .is_some_and(|s| matches!(s.kind, 12 | 22))
             {
                 return None;
             }
@@ -443,9 +449,44 @@ impl<'a> Index<'a> {
         Value::Null
     }
     pub fn signature_at(&self, at: usize, active: usize) -> Value {
-        let Some(symbol) = self.selected(at).filter(|s| s.kind == 12) else {
+        let Some(symbol) = self.selected(at).filter(|s| matches!(s.kind, 12 | 22)) else {
             return Value::Null;
         };
+        if symbol.kind == 22 {
+            let mut depth = 0usize;
+            let mut start = None;
+            let mut params = Vec::new();
+            for token in self.tokens.iter().filter(|t| {
+                t.span.start >= symbol.selection.end && t.span.end <= symbol.declaration.end
+            }) {
+                match token.kind {
+                    TokenKind::LParen | TokenKind::LBracket | TokenKind::Lt => {
+                        depth += 1;
+                        if start.is_none() {
+                            start = Some(token.span.end);
+                        }
+                    }
+                    TokenKind::RParen | TokenKind::RBracket | TokenKind::Gt => {
+                        depth = depth.saturating_sub(1);
+                        if depth == 0
+                            && let Some(start) = start.take()
+                        {
+                            let label = self.text[start..token.span.start].trim();
+                            if !label.is_empty() {
+                                params.push(json!({"label":label}));
+                            }
+                        }
+                    }
+                    TokenKind::Comma if depth == 1 => {
+                        if let Some(start) = start.replace(token.span.end) {
+                            params.push(json!({"label":self.text[start..token.span.start].trim()}));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            return json!({"signatures":[{"label":format!("{}.{}",symbol.owner.as_deref().unwrap_or(""),self.detail(symbol)),"documentation":{"kind":"markdown","value":self.documentation(symbol)},"parameters":params}],"activeSignature":0,"activeParameter":active.min(params.len().saturating_sub(1))});
+        }
         let params = self
             .symbols
             .iter()
@@ -536,7 +577,7 @@ impl<'a> Index<'a> {
                 .symbols
                 .iter()
                 .filter(|s| owner.is_some() && s.owner == owner)
-                .map(|s| json!({"label":s.name,"kind":5,"detail":self.detail(s)}))
+                .map(|s| json!({"label":s.name,"kind":if s.kind == 22 {20} else {5},"detail":self.detail(s),"documentation":{"kind":"markdown","value":self.documentation(s)}}))
                 .collect::<Vec<_>>();
             return json!({"isIncomplete":false,"items":items});
         }
@@ -843,5 +884,58 @@ mod tests {
                 .contains("Convert a value")
         );
         assert_eq!(index.signature_help(9)["activeParameter"], 1);
+    }
+
+    #[test]
+    fn enum_variants_have_navigation_documentation_completion_and_signatures() {
+        let source = "enum Node {\n /// Text contents\n Text(str)\n Pair((int, int), str)\n Empty\n}\nNode node = Node.Text(\"hello\")\nif node { Node.Text(text) -> { @println(text) } _ -> {} }\n_ = Node.Pair((1, 2), \"x\")\n";
+        let index = Index::new(source);
+        let declaration = source.find("Text(str)").unwrap();
+        let use_at = source.find("Node.Text").unwrap() + 5;
+        assert_eq!(
+            index.definition("file:///a.nc", use_at)["range"]["start"],
+            super::super::position(source, declaration)
+        );
+        assert!(
+            index.hover(use_at)["contents"]["value"]
+                .as_str()
+                .unwrap()
+                .contains("Text contents")
+        );
+        assert_eq!(
+            index
+                .references("file:///a.nc", use_at, true)
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        let completion = index.completion(use_at);
+        assert_eq!(completion["items"].as_array().unwrap().len(), 3);
+        assert!(
+            completion["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|item| item["kind"] == 20)
+        );
+        let at = source.find(", \"x\"").unwrap() + 2;
+        let signature = index.signature_help(at);
+        assert_eq!(signature["activeParameter"], 1);
+        assert_eq!(
+            signature["signatures"][0]["parameters"],
+            json!([{"label":"(int, int)"},{"label":"str"}])
+        );
+        assert_eq!(
+            signature["signatures"][0]["label"],
+            "Node.Pair((int, int), str)"
+        );
+        assert!(
+            index.completion(source.len())["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|item| item["label"] != "Text")
+        );
     }
 }

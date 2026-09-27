@@ -1182,10 +1182,12 @@ impl Checker {
                 }
             }
             Expr::Member { object, name } => {
-                let o = if let Expr::Name(n) = &**object
-                    && self.lookup(n).is_none()
-                    && matches!(self.types.get(n), Some(TypeInfo::Enum(_)))
-                {
+                let namespace = matches!(&**object, Expr::Name(n)
+                    if self.lookup(n).is_none() && matches!(self.types.get(n), Some(TypeInfo::Enum(_))));
+                let o = if namespace {
+                    let Expr::Name(n) = &**object else {
+                        unreachable!()
+                    };
                     let ty = named(n);
                     self.expression_types
                         .insert(&**object as *const Expr as usize, ty.clone());
@@ -1195,6 +1197,9 @@ impl Checker {
                 };
                 if let Type::Named(n, _) = &o {
                     if let Some(TypeInfo::Enum(declaration)) = self.types.get(n) {
+                        if !namespace {
+                            return self.fail("enum variants must be accessed through the enum type, not an enum value");
+                        }
                         let Some(variant) = declaration.variants.iter().find(|v| v.name == *name)
                         else {
                             return self.fail(format!("unknown enum variant `{name}`"));
