@@ -59,7 +59,7 @@ pub fn serve(mut input: impl BufRead, mut output: impl Write) -> io::Result<()> 
             "initialize" => {
                 workspace.initialize(p);
                 Some(
-                    json!({"capabilities":{"positionEncoding":"utf-16","textDocumentSync":{"openClose":true,"change":2,"save":true},"documentFormattingProvider":true,"documentSymbolProvider":true,"workspaceSymbolProvider":true,"definitionProvider":true,"typeDefinitionProvider":true,"referencesProvider":true,"renameProvider":{"prepareProvider":true},"signatureHelpProvider":{"triggerCharacters":["(",","]},"foldingRangeProvider":true,"hoverProvider":true,"completionProvider":{"triggerCharacters":[".","@"]}},"serverInfo":{"name":"ncc","version":env!("CARGO_PKG_VERSION")}}),
+                    json!({"capabilities":{"positionEncoding":"utf-16","textDocumentSync":{"openClose":true,"change":2,"save":true},"workspace":{"workspaceFolders":{"supported":true,"changeNotifications":true}},"documentFormattingProvider":true,"documentSymbolProvider":true,"workspaceSymbolProvider":true,"definitionProvider":true,"typeDefinitionProvider":true,"referencesProvider":true,"renameProvider":{"prepareProvider":true},"signatureHelpProvider":{"triggerCharacters":["(",","]},"foldingRangeProvider":true,"hoverProvider":true,"completionProvider":{"triggerCharacters":[".","@"]}},"serverInfo":{"name":"ncc","version":env!("CARGO_PKG_VERSION")}}),
                 )
             }
             "shutdown" => {
@@ -76,6 +76,10 @@ pub fn serve(mut input: impl BufRead, mut output: impl Write) -> io::Result<()> 
                 continue;
             }
             "initialized" | "$/cancelRequest" => None,
+            "workspace/didChangeWorkspaceFolders" => {
+                workspace.change_folders(p);
+                None
+            }
             "textDocument/didOpen" | "textDocument/didChange" => {
                 if let Some(uri) = p["textDocument"]["uri"].as_str() {
                     let version = p["textDocument"]["version"].as_i64().unwrap_or(0);
@@ -187,10 +191,15 @@ pub fn serve(mut input: impl BufRead, mut output: impl Write) -> io::Result<()> 
                         imported.unwrap_or_else(|| match method {
                             "textDocument/definition" => index.definition(uri, at),
                             "textDocument/typeDefinition" => index.type_definition(uri, at),
-                            "textDocument/prepareRename" => index.prepare_rename(at),
-                            "textDocument/rename" => {
-                                index.rename(uri, at, p["newName"].as_str().unwrap_or(""))
+                            "textDocument/prepareRename" => {
+                                workspace.prepare_rename(uri, at, &documents)
                             }
+                            "textDocument/rename" => workspace.rename(
+                                uri,
+                                at,
+                                p["newName"].as_str().unwrap_or(""),
+                                &documents,
+                            ),
                             "textDocument/signatureHelp" => index.signature_help(at),
                             "textDocument/hover" => index.hover(at),
                             _ => index.completion(at),
@@ -213,6 +222,13 @@ pub fn serve(mut input: impl BufRead, mut output: impl Write) -> io::Result<()> 
             }
         };
         if let (Some(id), Some(result)) = (id, result) {
+            if method == "textDocument/rename" && result.is_null() {
+                send(
+                    &mut output,
+                    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32803,"message":"Cannot verify this rename. Choose a non-conflicting identifier and resolve errors in affected files."}}),
+                )?;
+                continue;
+            }
             send(
                 &mut output,
                 json!({"jsonrpc":"2.0","id":id,"result":result}),

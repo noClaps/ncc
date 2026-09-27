@@ -299,16 +299,7 @@ impl<'a> Index<'a> {
             )
     }
     pub fn rename(&self, uri: &str, at: usize, name: &str) -> Value {
-        let Ok(tokens) = lexer::lex(name) else {
-            return Value::Null;
-        };
-        if tokens.len() != 2
-            || !matches!(&tokens[0].kind, TokenKind::Ident(n) if n == name && n != "_")
-            || matches!(
-                name,
-                "bool" | "byte" | "int" | "uint" | "float" | "str" | "char" | "void"
-            )
-        {
+        if !valid_name(name) {
             return Value::Null;
         }
         let Some(symbol) = self
@@ -340,6 +331,27 @@ impl<'a> Index<'a> {
             .map(|r| json!({"range":r["range"],"newText":name}))
             .collect::<Vec<_>>();
         json!({"changes":{uri:edits}})
+    }
+    pub fn can_rename_export(&self, at: usize, name: &str) -> bool {
+        let Some(old) = self.exported_at(at) else {
+            return false;
+        };
+        valid_name(name)
+            && (old == name
+                || (!self
+                    .symbols
+                    .iter()
+                    .any(|s| s.owner.is_none() && s.name == name)
+                    && self.imported_path(name).is_none()))
+    }
+    pub fn rename_range(&self, at: usize, name: &str) -> Value {
+        self.tokens
+            .iter()
+            .find(|t| t.span.contains(&at) && matches!(&t.kind, TokenKind::Ident(n) if n == name))
+            .map_or(
+                Value::Null,
+                |t| json!({"range":range(self.text, &t.span),"placeholder":name}),
+            )
     }
     pub fn folding_ranges(&self) -> Value {
         let mut stack = Vec::new();
@@ -565,6 +577,16 @@ impl<'a> Index<'a> {
     }
 }
 
+pub(super) fn valid_name(name: &str) -> bool {
+    lexer::lex(name).is_ok_and(|tokens| {
+        tokens.len() == 2
+            && matches!(&tokens[0].kind, TokenKind::Ident(n) if n == name && n != "_")
+            && !matches!(
+                name,
+                "bool" | "byte" | "int" | "uint" | "float" | "str" | "char" | "void"
+            )
+    })
+}
 fn range(text: &str, span: &std::ops::Range<usize>) -> Value {
     json!({"start":super::position(text, span.start),"end":super::position(text, span.end)})
 }
