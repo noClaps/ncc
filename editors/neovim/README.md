@@ -24,7 +24,8 @@ changes; run `:lsp restart ncc` (or restart Neovim) to use the rebuilt server.
 Useful built-in LSP mappings/commands:
 
 - `K`: documentation hover.
-- `grn`: rename a local binding; `grr`: references in the current document.
+- `grn`: rename a local binding or exported declaration; `grr`: references,
+  including unopened workspace files for exports.
 - `<C-x><C-o>` in Insert mode: completion.
 - `:lua vim.lsp.buf.definition()`: jump to a definition.
 - `:lua vim.lsp.buf.type_definition()`: jump to a declared local type.
@@ -35,8 +36,10 @@ Useful built-in LSP mappings/commands:
 Only server-advertised capabilities are available. See the implementation
 ledger for remaining LSP work; NC does not yet have all Gleam refactorings.
 Completion, hover and signatures include builtins; imported exports support
-completion, hover and definition lookup against unsaved buffers. Local renaming
-refuses collisions and does not attempt partial renames of exported APIs.
+completion, hover, signatures and definition lookup against unsaved buffers.
+Local renaming refuses collisions; exported renames check the affected workspace
+files before offering edits. Local enum variants also have documentation,
+completion, references, definitions and constructor signatures.
 For completion without a separate plugin, enable Neovim's built-in completion
 in an `LspAttach` callback with
 `vim.lsp.completion.enable(true, event.data.client_id, event.buf, { autotrigger = true })`.

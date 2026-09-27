@@ -82,7 +82,7 @@ must stay explicit about features still under construction.
 - More inferred member types, code actions, workspace indexing performance and
   resilient indexing through every invalid edit.
   LSP usability has improved, but parity with Gleam's LSP is not yet achieved.
-- Tree-sitter newline-sensitive return/call parsing and further recovery cases.
+- Further Tree-sitter error-recovery and malformed-input cases.
 - Increase negative, differential, concurrency, and full-specification tests.
 
 The Unicode crate is now a test oracle only. The compiler core can be built with

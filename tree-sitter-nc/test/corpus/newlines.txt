@@ -1,0 +1,105 @@
+==================
+Bare return and break do not consume the next line
+==================
+fn f() {
+  return
+  @println("unreachable")
+}
+while true {
+  break // stop here
+  @println("unreachable")
+}
+---
+(source_file
+  (function_declaration
+    (identifier)
+    (parameters)
+    (block
+      (return_statement)
+      (expression_statement
+        (call_expression
+          (builtin)
+          (arguments (string (string_content)))))))
+  (while_statement
+    (boolean)
+    (block
+      (break_statement)
+      (comment)
+      (expression_statement
+        (call_expression
+          (builtin)
+          (arguments (string (string_content))))))))
+
+==================
+Postfix calls and indexing must start on the same line
+==================
+fn f() {
+  foo
+  (1)
+  foo
+  [1]
+  foo // comment
+  (2)
+  foo (3)
+  foo [4]
+}
+---
+(source_file
+  (function_declaration
+    (identifier)
+    (parameters)
+    (block
+      (expression_statement (identifier))
+      (expression_statement (parenthesized_expression (number)))
+      (expression_statement (identifier))
+      (expression_statement (array_expression (number)))
+      (expression_statement (identifier))
+      (comment)
+      (expression_statement (parenthesized_expression (number)))
+      (expression_statement (call_expression (identifier) (arguments (number))))
+      (expression_statement (index_expression (identifier) (number))))))
+
+==================
+Line breaks inside arguments and struct literals remain valid
+==================
+fn value() int {
+  return foo(
+    1,
+    2
+  )
+}
+fn record() S {
+  return S{ // fields
+    .x = 1
+  }
+}
+fn bare() {
+  return // no value
+  [1]
+}
+---
+(source_file
+  (function_declaration
+    (identifier)
+    (parameters)
+    (named_type (identifier))
+    (block
+      (return_statement
+        (call_expression (identifier) (arguments (number) (number))))))
+  (function_declaration
+    (identifier)
+    (parameters)
+    (named_type (identifier))
+    (block
+      (return_statement
+        (struct_expression
+          (named_type (identifier))
+          (comment)
+          (field_initializer (identifier) (number))))))
+  (function_declaration
+    (identifier)
+    (parameters)
+    (block
+      (return_statement)
+      (comment)
+      (expression_statement (array_expression (number))))))

@@ -15,3 +15,9 @@ tree-sitter parse ../nc-tests/hello-world.nc
 declarations, type syntax, control flow, concurrency, interpolation and operators.
 The grammar recognizes syntax, not types or exhaustiveness; use `ncc check` or
 the language server for semantic validation.
+
+The small, stateless C scanner preserves NC's line-sensitive `return`, `break`
+and postfix delimiters. Compile both `src/parser.c` and `src/scanner.c` when
+embedding this grammar; `make grammar` does this automatically. Calls and
+indexing start on the same line as their operand, but their contents may span
+multiple lines. Corpus tests cover both cases and intervening comments.
