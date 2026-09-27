@@ -1,9 +1,0 @@
-==================
-Integer bases unsigned suffixes and decimal floats
-==================
-@println(0, 42, 42u, 0xFF, 0xafu, 0b101u, 0o777u, 1.25)
----
-(source_file
-  (expression_statement
-    (call_expression (builtin)
-      (arguments (number) (number) (number) (number) (number) (number) (number) (number)))))

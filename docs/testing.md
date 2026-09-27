@@ -7,7 +7,6 @@ cargo test
 cargo test --no-default-features
 cargo clippy --all-targets -- -D warnings
 cargo build --release
-make grammar grammar-test
 ```
 
 Use `--offline` on Cargo commands when dependencies are already cached. The core
@@ -27,7 +26,6 @@ uses the optional JSON dependency; Unicode segmentation is a test oracle only.
 | Escapes, formatting preservation/idempotence, LSP protocol, unsaved imports | `tests/tooling.rs` |
 | Editor scope resolution, rename safety, member/builtin completion, incomplete edits | Unit tests in `src/lsp_index.rs` and `src/lsp.rs` |
 | Grapheme boundaries against an independent oracle | Unit tests in `src/unicode.rs` |
-| Concrete syntax and whole-name builtin highlighting | `tree-sitter-nc/test/corpus/` and `tree-sitter-nc/test/highlight/` |
 
 Successful conformance fixtures use debug and release execution. Optimizer tests
 compare emitted behavior in both modes and, where specified, verify that evaluated
@@ -37,5 +35,5 @@ Negative tests distinguish rejected programs from runtime range/bounds failures.
 
 The tests are a regression suite, not a proof of specification completeness.
 See [the remaining work](../TODO.md), including
-LSP features not yet at parity with Gleam. The standalone language server and
-Tree-sitter grammar are tested independently of editor plugins.
+LSP features not yet at parity with Gleam. The standalone language server is
+tested independently of editor plugins.

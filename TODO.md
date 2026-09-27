@@ -31,9 +31,3 @@
 
 - Complete member-type resolution and expand code actions toward Gleam LSP parity.
 - Improve workspace indexing performance and resilience during invalid edits.
-
-## Tree-sitter (lower priority)
-
-- Fix recovery after unfinished top-level initializers, which can consume the
-  following function declaration.
-- Expand malformed-input and error-recovery coverage.
