@@ -2,6 +2,8 @@
 use serde_json::{Value, json};
 #[path = "lsp_index.rs"]
 mod index;
+#[path = "lsp_workspace.rs"]
+mod workspace;
 use std::{
     collections::HashMap,
     io::{self, BufRead, Write},
@@ -11,6 +13,7 @@ use std::{
 pub fn serve(mut input: impl BufRead, mut output: impl Write) -> io::Result<()> {
     let mut documents = HashMap::<String, Document>::new();
     let mut shutdown = false;
+    let mut workspace = workspace::Workspace::default();
     loop {
         let mut length = None;
         loop {
@@ -53,9 +56,12 @@ pub fn serve(mut input: impl BufRead, mut output: impl Write) -> io::Result<()> 
             };
         }
         let result = match method {
-            "initialize" => Some(
-                json!({"capabilities":{"positionEncoding":"utf-16","textDocumentSync":{"openClose":true,"change":2,"save":true},"documentFormattingProvider":true,"documentSymbolProvider":true,"workspaceSymbolProvider":true,"definitionProvider":true,"typeDefinitionProvider":true,"referencesProvider":true,"renameProvider":{"prepareProvider":true},"signatureHelpProvider":{"triggerCharacters":["(",","]},"foldingRangeProvider":true,"hoverProvider":true,"completionProvider":{"triggerCharacters":[".","@"]}},"serverInfo":{"name":"ncc","version":env!("CARGO_PKG_VERSION")}}),
-            ),
+            "initialize" => {
+                workspace.initialize(p);
+                Some(
+                    json!({"capabilities":{"positionEncoding":"utf-16","textDocumentSync":{"openClose":true,"change":2,"save":true},"documentFormattingProvider":true,"documentSymbolProvider":true,"workspaceSymbolProvider":true,"definitionProvider":true,"typeDefinitionProvider":true,"referencesProvider":true,"renameProvider":{"prepareProvider":true},"signatureHelpProvider":{"triggerCharacters":["(",","]},"foldingRangeProvider":true,"hoverProvider":true,"completionProvider":{"triggerCharacters":[".","@"]}},"serverInfo":{"name":"ncc","version":env!("CARGO_PKG_VERSION")}}),
+                )
+            }
             "shutdown" => {
                 shutdown = true;
                 Some(Value::Null)
@@ -124,15 +130,35 @@ pub fn serve(mut input: impl BufRead, mut output: impl Write) -> io::Result<()> 
             "workspace/symbol" => {
                 let query = p["query"].as_str().unwrap_or("");
                 let mut symbols = Vec::new();
-                for (uri, document) in &documents {
+                for (uri, document) in &workspace.documents(&documents) {
                     symbols.extend(index::Index::new(&document.text).symbols(uri, query));
                 }
                 Some(json!(symbols))
             }
+            "textDocument/references" => {
+                let uri = p["textDocument"]["uri"].as_str().unwrap_or("");
+                Some(
+                    documents
+                        .get(uri)
+                        .and_then(|d| offset(&d.text, &p["position"]))
+                        .map_or_else(
+                            || json!([]),
+                            |at| {
+                                workspace.references(
+                                    uri,
+                                    at,
+                                    p["context"]["includeDeclaration"]
+                                        .as_bool()
+                                        .unwrap_or(false),
+                                    &documents,
+                                )
+                            },
+                        ),
+                )
+            }
             "textDocument/documentSymbol"
             | "textDocument/definition"
             | "textDocument/typeDefinition"
-            | "textDocument/references"
             | "textDocument/prepareRename"
             | "textDocument/rename"
             | "textDocument/signatureHelp"
@@ -161,13 +187,6 @@ pub fn serve(mut input: impl BufRead, mut output: impl Write) -> io::Result<()> 
                         imported.unwrap_or_else(|| match method {
                             "textDocument/definition" => index.definition(uri, at),
                             "textDocument/typeDefinition" => index.type_definition(uri, at),
-                            "textDocument/references" => index.references(
-                                uri,
-                                at,
-                                p["context"]["includeDeclaration"]
-                                    .as_bool()
-                                    .unwrap_or(false),
-                            ),
                             "textDocument/prepareRename" => index.prepare_rename(at),
                             "textDocument/rename" => {
                                 index.rename(uri, at, p["newName"].as_str().unwrap_or(""))
@@ -202,6 +221,7 @@ pub fn serve(mut input: impl BufRead, mut output: impl Write) -> io::Result<()> 
     }
 }
 
+#[derive(Clone)]
 struct Document {
     text: String,
     version: i64,

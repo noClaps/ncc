@@ -136,6 +136,21 @@ impl<'a> Index<'a> {
             })
             .map(|symbol| symbol.selection.start)
     }
+    pub fn exported_at(&self, at: usize) -> Option<String> {
+        let symbol = self.selected(at)?;
+        (self.exported_position(&symbol.name) == Some(symbol.selection.start))
+            .then(|| symbol.name.clone())
+    }
+    pub fn imported_references(&self, uri: &str, name: &str) -> Vec<(String, Value)> {
+        self.tokens
+            .iter()
+            .filter(|t| matches!(&t.kind, TokenKind::Ident(n) if n == name))
+            .filter_map(|t| {
+                let (path, _) = self.imported_member(t.span.start)?;
+                Some((path, json!({"uri":uri,"range":range(self.text,&t.span)})))
+            })
+            .collect()
+    }
     pub fn imported_completion(&self, at: usize) -> Option<String> {
         let (i, token) = self
             .tokens
