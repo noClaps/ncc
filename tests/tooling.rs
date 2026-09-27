@@ -32,6 +32,11 @@ fn lsp_refactoring_and_signature_protocol() {
             json!({"position":{"line":3,"character":16}}),
         ),
         (5, "foldingRange", json!({})),
+        (
+            6,
+            "codeAction",
+            json!({"range":{"start":{"line":3,"character":13},"end":{"line":3,"character":14}},"context":{"only":["refactor.rewrite"]}}),
+        ),
     ] {
         let mut params = extra;
         params["textDocument"] = json!({"uri":uri});
@@ -62,6 +67,17 @@ fn lsp_refactoring_and_signature_protocol() {
     assert_eq!(result(3)["changes"][uri].as_array().unwrap().len(), 2);
     assert_eq!(result(4)["activeParameter"], 1);
     assert_eq!(result(5).as_array().unwrap().len(), 1);
+    assert_eq!(
+        result(0)["capabilities"]["codeActionProvider"]["codeActionKinds"],
+        json!(["quickfix", "refactor.rewrite"])
+    );
+    assert!(
+        result(6)
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["title"] == "Convert integer to hexadecimal")
+    );
 }
 
 #[test]

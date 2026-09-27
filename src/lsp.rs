@@ -1,5 +1,7 @@
 //! Stdio LSP transport, versioned incremental document sync and diagnostics.
 use serde_json::{Value, json};
+#[path = "lsp_actions.rs"]
+mod actions;
 #[path = "lsp_index.rs"]
 mod index;
 #[path = "lsp_workspace.rs"]
@@ -59,7 +61,7 @@ pub fn serve(mut input: impl BufRead, mut output: impl Write) -> io::Result<()> 
             "initialize" => {
                 workspace.initialize(p);
                 Some(
-                    json!({"capabilities":{"positionEncoding":"utf-16","textDocumentSync":{"openClose":true,"change":2,"save":true},"workspace":{"workspaceFolders":{"supported":true,"changeNotifications":true}},"documentFormattingProvider":true,"documentSymbolProvider":true,"workspaceSymbolProvider":true,"definitionProvider":true,"typeDefinitionProvider":true,"referencesProvider":true,"renameProvider":{"prepareProvider":true},"signatureHelpProvider":{"triggerCharacters":["(",","]},"foldingRangeProvider":true,"hoverProvider":true,"completionProvider":{"triggerCharacters":[".","@"]}},"serverInfo":{"name":"ncc","version":env!("CARGO_PKG_VERSION")}}),
+                    json!({"capabilities":{"positionEncoding":"utf-16","textDocumentSync":{"openClose":true,"change":2,"save":true},"workspace":{"workspaceFolders":{"supported":true,"changeNotifications":true}},"codeActionProvider":{"codeActionKinds":["quickfix","refactor.rewrite"]},"documentFormattingProvider":true,"documentSymbolProvider":true,"workspaceSymbolProvider":true,"definitionProvider":true,"typeDefinitionProvider":true,"referencesProvider":true,"renameProvider":{"prepareProvider":true},"signatureHelpProvider":{"triggerCharacters":["(",","]},"foldingRangeProvider":true,"hoverProvider":true,"completionProvider":{"triggerCharacters":[".","@"]}},"serverInfo":{"name":"ncc","version":env!("CARGO_PKG_VERSION")}}),
                 )
             }
             "shutdown" => {
@@ -131,6 +133,7 @@ pub fn serve(mut input: impl BufRead, mut output: impl Write) -> io::Result<()> 
                     json!([])
                 })
             }
+            "textDocument/codeAction" => Some(actions::actions(p, &documents)),
             "workspace/symbol" => {
                 let query = p["query"].as_str().unwrap_or("");
                 let mut symbols = Vec::new();

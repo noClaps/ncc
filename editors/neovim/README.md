@@ -26,6 +26,8 @@ Useful built-in LSP mappings/commands:
 - `K`: documentation hover.
 - `grn`: rename a local binding or exported declaration; `grr`: references,
   including unopened workspace files for exports.
+- `gra`: code actions, including integer-base conversion, comment conversion,
+  and explicitly discarding an unused function result.
 - `<C-x><C-o>` in Insert mode: completion.
 - `:lua vim.lsp.buf.definition()`: jump to a definition.
 - `:lua vim.lsp.buf.type_definition()`: jump to a declared local type.

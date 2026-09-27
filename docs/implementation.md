@@ -65,6 +65,10 @@ must stay explicit about features still under construction.
   Editor-only parser recovery retains useful indexing through incomplete input.
 - Workspace references and validated export renaming include unopened source
   files and unsaved overlays. Imported signatures follow the active nested call.
+- Private module declarations support rename with binding-identity verification.
+  Enum variants support local navigation, documentation, completion and signatures.
+  Code actions convert integer bases and comment kinds, and offer checked fixes
+  for unused call results. Edits preserve Unicode positions and literal contents.
 - Formatting uses a single token pass for indentation and preserves literal
   contents and comments; tests check token equivalence and idempotence.
 
