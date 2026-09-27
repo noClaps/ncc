@@ -39,6 +39,43 @@ fn folded(source: &str, names: &[&str], expected: &str) {
 }
 
 #[test]
+fn pure_subexpressions_fold_inside_effectful_functions() {
+    folded(
+        r#"
+fn total(uint n) uint {
+    mut uint result = 0
+    mut uint i = 0
+    while i < n { result = result + i i = i + 1 }
+    return result
+}
+fn runtime(uint input) uint {
+    @print("effect:", input, ":")
+    uint constant = total(10)
+    return constant + input
+}
+@println(runtime(7))
+"#,
+        &["total"],
+        "effect:7:52\n",
+    );
+    folded(
+        "fn pure() int { return 42 } fn runtime() { fut int work = async pure() @println(await work) } runtime()",
+        &[],
+        "42\n",
+    );
+    folded(
+        "fn runtime(bool fail) int { @print(\"effect:\") return if fail { true -> { 1 / 0 } false -> { 9 } } } @println(runtime(false))",
+        &[],
+        "effect:9\n",
+    );
+    folded(
+        "fn runtime() int { @print(\"effect:\") mut int n = 1 int result = if true { true -> { n = 2 3 } false -> { 4 } } return n + result } @println(runtime())",
+        &[],
+        "effect:5\n",
+    );
+}
+
+#[test]
 fn thrown_errors_catch_try_and_early_returns_fold() {
     folded(
         r#"

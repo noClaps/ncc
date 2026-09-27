@@ -55,6 +55,9 @@ must stay explicit about features still under construction.
   Value-producing branches propagate assignments to surrounding local variables.
 - Pure thrown errors, `catch`/`try` propagation and early returns from value
   branches can fold; impure error-producing calls retain their runtime effects.
+- Constant subexpressions inside function bodies fold even when surrounding
+  code is effectful. Async calls and pattern syntax retain their required shape;
+  failures in potentially unreachable expressions remain runtime operations.
 - Independent Tree-sitter syntax grammar, corpus tests and highlight queries.
   Editor plugins and configuration are intentionally not provided.
 - Incremental UTF-16 LSP edits, local definitions, documentation hover,
@@ -84,8 +87,7 @@ must stay explicit about features still under construction.
 - Audit value-copy and evaluation-order behavior across all composite operations.
 - Finish external C ABI coverage and source-aware diagnostics
   for all semantic errors (many still report the start of the file).
-- Extend compile-time evaluation to remaining operations and broaden optimisation
-  within function bodies. The evaluation fuel/depth limits intentionally retain
+- Extend compile-time evaluation to remaining operations. The evaluation fuel/depth limits intentionally retain
   runtime code for work that cannot safely be completed at compile time.
 - Full canonical spacing/layout formatting, rather than indentation only.
 - More inferred member types, code actions, workspace indexing performance and

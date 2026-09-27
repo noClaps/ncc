@@ -296,7 +296,17 @@ fn optimize_module(checked: CheckedModule) -> Result<Module, Diagnostics> {
             _ => {}
         }
     }
+    let mut body_replacements = function_constants(&checked, &functions);
     let mut module = checked.module;
+    for item in &mut module.items {
+        if matches!(item, Item::Function(_)) {
+            crate::visit::rewrite(item, &mut |e| {
+                if let Some(value) = body_replacements.remove(&(e as *const Expr as usize)) {
+                    *e = value;
+                }
+            });
+        }
+    }
     for (index, replacement) in replacements {
         if let Some(replacement) = replacement {
             match &mut module.items[index] {
@@ -336,6 +346,64 @@ fn optimize_module(checked: CheckedModule) -> Result<Module, Diagnostics> {
         .items
         .retain(|item| !matches!(item, Item::Function(f) if !reachable.contains(&f.name)));
     Ok(module)
+}
+fn function_constants(
+    checked: &CheckedModule,
+    functions: &HashMap<String, &Function>,
+) -> HashMap<usize, Expr> {
+    let mut replacements = HashMap::new();
+    let mut preserved = HashSet::new();
+    for item in &checked.module.items {
+        crate::visit::item(item, &mut |e| {
+            if let Expr::Async(call) = e {
+                preserved.insert(&**call as *const Expr as usize);
+            }
+            // Pattern literals must retain their syntax for exhaustiveness
+            // checking and pattern lowering (not become constant thunks).
+            if let Expr::If { arms, .. } = e {
+                for (patterns, _) in arms {
+                    for pattern in patterns {
+                        crate::visit::pattern(pattern, &mut |value| {
+                            preserved.insert(value as *const Expr as usize);
+                        });
+                    }
+                }
+            }
+        });
+    }
+    for item in &checked.module.items {
+        if !matches!(item, Item::Function(_)) {
+            continue;
+        }
+        let mut fuel = 100_000;
+        crate::visit::item(item, &mut |e| {
+            if fuel == 0
+                || preserved.contains(&(e as *const Expr as usize))
+                || !matches!(
+                    e,
+                    Expr::Call { .. }
+                        | Expr::Cast { .. }
+                        | Expr::Unary { .. }
+                        | Expr::Binary { .. }
+                        | Expr::Index { .. }
+                        | Expr::Member { .. }
+                        | Expr::If { .. }
+                        | Expr::Else { .. }
+                        | Expr::Catch { .. }
+                        | Expr::Try(_)
+                )
+            {
+                return;
+            }
+            // Failed evaluation may be unreachable at runtime: keep it intact.
+            if let Ok(Some(value)) = evaluate(e, &HashMap::new(), functions, checked, &mut fuel)
+                && value.materializable()
+            {
+                replacements.insert(e as *const Expr as usize, materialize(value, e, checked));
+            }
+        });
+    }
+    replacements
 }
 fn fold(
     e: &Expr,

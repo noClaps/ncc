@@ -44,7 +44,7 @@ fn stmt<'a>(s: &'a Stmt, f: &mut impl FnMut(&'a Expr)) {
         Stmt::Continue(_) => {}
     }
 }
-fn pattern<'a>(p: &'a Pattern, f: &mut impl FnMut(&'a Expr)) {
+pub(crate) fn pattern<'a>(p: &'a Pattern, f: &mut impl FnMut(&'a Expr)) {
     match p {
         Pattern::Literal(e) => expr(e, f),
         Pattern::Array(ps) | Pattern::Tuple(ps) | Pattern::Variant { values: ps, .. } => {
