@@ -1399,7 +1399,7 @@ impl Checker {
         if expected == got || matches!(expected,Type::Optional(x)if **x==*got) {
             Ok(())
         } else {
-            self.fail(format!("expected `{expected:?}`, found `{got:?}`"))
+            self.fail(format!("expected `{expected}`, found `{got}`"))
         }
     }
     fn value_block(&mut self, block: &Block, expected: &Type) -> Result<(), Diagnostics> {

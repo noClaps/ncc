@@ -278,3 +278,49 @@ impl Type {
         Self::Named("void".into(), vec![])
     }
 }
+
+impl std::fmt::Display for Type {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fn list(f: &mut std::fmt::Formatter<'_>, types: &[Type]) -> std::fmt::Result {
+            for (i, ty) in types.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{ty}")?;
+            }
+            Ok(())
+        }
+        match self {
+            Self::Named(name, args) => {
+                write!(f, "{name}")?;
+                if !args.is_empty() {
+                    write!(f, "<")?;
+                    list(f, args)?;
+                    write!(f, ">")?;
+                }
+                Ok(())
+            }
+            Self::Array(inner, size) => {
+                write!(f, "{inner}[")?;
+                if let Some(size) = size {
+                    write!(f, "{size}")?;
+                }
+                write!(f, "]")
+            }
+            Self::Map(key, value) => write!(f, "[{key}]{value}"),
+            Self::Tuple(types) => {
+                write!(f, "(")?;
+                list(f, types)?;
+                write!(f, ")")
+            }
+            Self::Function(params, result) => {
+                write!(f, "(fn(")?;
+                list(f, params)?;
+                write!(f, ") {result})")
+            }
+            Self::Optional(inner) => write!(f, "{inner}?"),
+            Self::ErrorUnion(inner) => write!(f, "{inner}!"),
+            Self::Future(inner) => write!(f, "fut {inner}"),
+        }
+    }
+}

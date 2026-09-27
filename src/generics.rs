@@ -104,7 +104,7 @@ struct Pass {
     declarations: HashMap<String, Item>,
     return_type: Option<Type>,
 }
-fn substitute(ty: &mut Type, bindings: &HashMap<String, Type>) {
+pub(crate) fn substitute(ty: &mut Type, bindings: &HashMap<String, Type>) {
     match ty {
         Type::Named(n, args) => {
             if let Some(t) = bindings.get(n) {

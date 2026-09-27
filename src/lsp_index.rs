@@ -1,5 +1,6 @@
 //! Editor source index. Reuses parser declarations, never the lowered C names.
 use crate::{
+    ast::Type,
     lexer::{self, Keyword, Token, TokenKind},
     parser::{self, SourceSymbol},
 };
@@ -234,15 +235,17 @@ impl<'a> Index<'a> {
             return None;
         }
         if index >= 2 && self.tokens[index - 1].kind == TokenKind::Dot {
-            let object = self.selected(self.tokens[index - 2].span.start)?;
-            let owner = self.type_name(object)?;
+            let Type::Named(owner, _) = self.receiver_type(index - 2)? else {
+                return None;
+            };
             let TokenKind::Ident(name) = &self.tokens[index].kind else {
                 return None;
             };
-            return self
-                .symbols
-                .iter()
-                .find(|s| s.owner.as_deref() == Some(owner.as_str()) && s.name == *name);
+            return self.symbols.iter().find(|s| {
+                s.owner.as_deref() == Some(owner.as_str())
+                    && s.name == *name
+                    && (s.kind != 22 || self.enum_namespace(index - 2))
+            });
         }
         let TokenKind::Ident(name) = &self.tokens[index].kind else {
             return None;
@@ -253,15 +256,92 @@ impl<'a> Index<'a> {
         if matches!(symbol.kind, 10 | 23 | 26) {
             return Some(symbol.name.clone());
         }
-        self.tokens
-            .iter()
-            .filter(|t| {
-                t.span.start >= symbol.declaration.start && t.span.end <= symbol.selection.start
-            })
-            .find_map(|t| match &t.kind {
-                TokenKind::Ident(name) => Some(name.clone()),
-                _ => None,
-            })
+        let mut ty = symbol.ty.as_ref()?;
+        loop {
+            match ty {
+                Type::Named(name, _) => return Some(name.clone()),
+                Type::Array(inner, _)
+                | Type::Optional(inner)
+                | Type::ErrorUnion(inner)
+                | Type::Future(inner)
+                | Type::Function(_, inner) => ty = inner,
+                _ => return None,
+            }
+        }
+    }
+    fn enum_namespace(&self, at: usize) -> bool {
+        matches!(&self.tokens[at].kind, TokenKind::Ident(name)
+            if self.resolve(name, self.tokens[at].span.start).is_some_and(|s| s.kind == 10))
+    }
+    fn opening(&self, end: usize, open: TokenKind, close: TokenKind) -> Option<usize> {
+        let mut depth = 0usize;
+        for i in (0..=end).rev() {
+            if self.tokens[i].kind == close {
+                depth += 1;
+            }
+            if self.tokens[i].kind == open {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+        }
+        None
+    }
+    fn receiver_type(&self, end: usize) -> Option<Type> {
+        match &self.tokens.get(end)?.kind {
+            TokenKind::Ident(_) => {
+                let symbol = self.selected(self.tokens[end].span.start)?;
+                if matches!(symbol.kind, 10 | 23) {
+                    return Some(Type::Named(symbol.name.clone(), vec![]));
+                }
+                let mut ty = symbol.ty.clone()?;
+                if symbol.owner.is_some()
+                    && end >= 2
+                    && self.tokens[end - 1].kind == TokenKind::Dot
+                    && let Some(Type::Named(owner, args)) = self.receiver_type(end - 2)
+                    && let Some(declaration) = self
+                        .symbols
+                        .iter()
+                        .find(|s| s.owner.is_none() && s.name == owner)
+                {
+                    let bindings = declaration.generics.iter().cloned().zip(args).collect();
+                    crate::generics::substitute(&mut ty, &bindings);
+                }
+                Some(ty)
+            }
+            TokenKind::RParen => {
+                let open = self.opening(end, TokenKind::LParen, TokenKind::RParen)?;
+                if open > 0
+                    && !self.tokens[open].newline_before
+                    && let Some(Type::Function(_, result)) = self.receiver_type(open - 1)
+                {
+                    return Some(*result);
+                }
+                (end == open + 2)
+                    .then(|| self.receiver_type(open + 1))
+                    .flatten()
+            }
+            TokenKind::RBracket => {
+                let open = self.opening(end, TokenKind::LBracket, TokenKind::RBracket)?;
+                match self.receiver_type(open.checked_sub(1)?)? {
+                    Type::Array(inner, _) | Type::Map(_, inner) => Some(*inner),
+                    Type::Tuple(types) if end == open + 2 => {
+                        let TokenKind::Int(index) = &self.tokens[open + 1].kind else {
+                            return None;
+                        };
+                        types
+                            .get(crate::sema::integer(index).ok()? as usize)
+                            .cloned()
+                    }
+                    Type::Named(name, _) if name == "str" => {
+                        Some(Type::Named("char".into(), vec![]))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
     }
     pub fn type_definition(&self, uri: &str, at: usize) -> Value {
         self.selected(at)
@@ -490,7 +570,10 @@ impl<'a> Index<'a> {
         Value::Null
     }
     pub fn signature_at(&self, at: usize, active: usize) -> Value {
-        let Some(symbol) = self.selected(at).filter(|s| matches!(s.kind, 12 | 22)) else {
+        let Some(symbol) = self
+            .selected(at)
+            .filter(|s| matches!(s.kind, 12 | 22) || matches!(s.ty, Some(Type::Function(_, _))))
+        else {
             return Value::Null;
         };
         if symbol.kind == 22 {
@@ -528,7 +611,7 @@ impl<'a> Index<'a> {
             }
             return json!({"signatures":[{"label":format!("{}.{}",symbol.owner.as_deref().unwrap_or(""),self.detail(symbol)),"documentation":{"kind":"markdown","value":self.documentation(symbol)},"parameters":params}],"activeSignature":0,"activeParameter":active.min(params.len().saturating_sub(1))});
         }
-        let params = self
+        let mut params = self
             .symbols
             .iter()
             .filter(|s| {
@@ -539,6 +622,14 @@ impl<'a> Index<'a> {
             })
             .map(|s| json!({"label":self.detail(s)}))
             .collect::<Vec<_>>();
+        if params.is_empty()
+            && let Some(Type::Function(types, _)) = &symbol.ty
+        {
+            params = types
+                .iter()
+                .map(|ty| json!({"label":ty.to_string()}))
+                .collect();
+        }
         let active = active.min(params.len().saturating_sub(1));
         json!({"signatures":[{"label":self.detail(symbol),"documentation":{"kind":"markdown","value":self.documentation(symbol)},"parameters":params}],"activeSignature":0,"activeParameter":active})
     }
@@ -610,14 +701,22 @@ impl<'a> Index<'a> {
             }
         });
         if let Some(dot) = dot {
-            let owner = dot
-                .checked_sub(1)
-                .and_then(|i| self.selected(self.tokens[i].span.start))
-                .and_then(|s| self.type_name(s));
+            let ty = dot.checked_sub(1).and_then(|i| self.receiver_type(i));
+            if matches!(&ty, Some(Type::Array(_, _) | Type::Map(_, _)))
+                || matches!(&ty, Some(Type::Named(name, _)) if name == "str")
+            {
+                return json!({"isIncomplete":false,"items":[{"label":"len","kind":5,"detail":"uint len","documentation":"Number of elements (extended grapheme clusters for strings)."}]});
+            }
+            let owner = if let Some(Type::Named(name, _)) = ty {
+                Some(name)
+            } else {
+                None
+            };
             let items = self
                 .symbols
                 .iter()
-                .filter(|s| owner.is_some() && s.owner == owner)
+                .filter(|s| owner.is_some() && s.owner == owner
+                    && (s.kind != 22 || dot.checked_sub(1).is_some_and(|i| self.enum_namespace(i))))
                 .map(|s| json!({"label":s.name,"kind":if s.kind == 22 {20} else {5},"detail":self.detail(s),"documentation":{"kind":"markdown","value":self.documentation(s)}}))
                 .collect::<Vec<_>>();
             return json!({"isIncomplete":false,"items":items});
@@ -1002,6 +1101,15 @@ mod tests {
                 .unwrap()
                 .contains("Text contents")
         );
+        let source = format!("{source}_ = node.Text");
+        let index = Index::new(&source);
+        assert!(
+            index.completion(source.len())["items"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(index.definition("file:///a.nc", source.len() - 1).is_null());
         assert_eq!(
             index
                 .references("file:///a.nc", use_at, true)
@@ -1036,6 +1144,55 @@ mod tests {
                 .unwrap()
                 .iter()
                 .all(|item| item["label"] != "Text")
+        );
+    }
+
+    #[test]
+    fn members_follow_return_array_map_tuple_and_callback_types() {
+        let prefix = "struct Point { int x int y }\nstruct Box { Point point }\nstruct Generic<type T> { T value }\nfn make() Point { return Point{.x = 1, .y = 2} }\nPoint[] points = [make()]\n[str]Point table = [\"p\": make()]\n(Point, int) pair = (make(), 1)\nint n, Point p = (1, make())\nBox box = Box{.point = make()}\nGeneric<Point> wrapped = Generic<Point>{.value = make()}\nGeneric<Point[]> wrapped_points = Generic<Point[]>{.value = points}\n(fn() Point) callback = make\n";
+        for receiver in [
+            "make()",
+            "points[0]",
+            "table[\"p\"]",
+            "pair[0]",
+            "p",
+            "box.point",
+            "callback()",
+            "(p)",
+            "wrapped.value",
+            "wrapped_points.value[0]",
+        ] {
+            let source = format!("{prefix}@println({receiver}.x)\n");
+            let index = Index::new(&source);
+            let at = source.rfind(".x").unwrap() + 1;
+            assert_eq!(
+                index.definition("file:///a.nc", at)["range"]["start"],
+                super::super::position(&source, source.find("x int").unwrap()),
+                "{receiver}"
+            );
+            assert_eq!(
+                index.completion(at)["items"].as_array().unwrap().len(),
+                2,
+                "{receiver}"
+            );
+        }
+        for (declaration, receiver) in [
+            ("int[] values = []", "values"),
+            ("[str]int values = []", "values"),
+            ("str values = \"🍪\"", "values"),
+        ] {
+            let source = format!("{declaration}\n_ = {receiver}.le");
+            assert_eq!(
+                Index::new(&source).completion(source.len())["items"][0]["label"],
+                "len"
+            );
+        }
+        let source = "(fn(int, str) bool) callback = fn(int n, str s) bool { return true }\n_ = callback(1, \"x\")";
+        let signature = Index::new(source).signature_help(source.rfind("\"x\"").unwrap());
+        assert_eq!(signature["activeParameter"], 1);
+        assert_eq!(
+            signature["signatures"][0]["parameters"],
+            json!([{"label":"int"}, {"label":"str"}])
         );
     }
 }

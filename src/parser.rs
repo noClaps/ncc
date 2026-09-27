@@ -33,6 +33,8 @@ pub struct SourceSymbol {
     pub visible_from: usize,
     pub kind: u32,
     pub owner: Option<String>,
+    pub ty: Option<Type>,
+    pub generics: Vec<String>,
 }
 
 /// Keep declarations preceding a syntax error useful while editing incomplete code.
@@ -62,7 +64,27 @@ impl Parser {
                 visible_from,
                 kind,
                 owner: None,
+                ty: None,
+                generics: vec![],
             });
+        }
+    }
+    fn typed_symbol(
+        &mut self,
+        token: Token,
+        start: usize,
+        kind: u32,
+        visible_from: usize,
+        ty: &Type,
+    ) {
+        self.symbol(token, start, kind, visible_from);
+        if let Some(symbol) = self.symbols.as_mut().and_then(|symbols| symbols.last_mut()) {
+            symbol.ty = Some(ty.clone());
+        }
+    }
+    fn symbol_generics(&mut self, generics: &[String]) {
+        if let Some(symbol) = self.symbols.as_mut().and_then(|symbols| symbols.last_mut()) {
+            symbol.generics = generics.to_vec();
         }
     }
     fn symbol_count(&self) -> usize {
@@ -233,7 +255,7 @@ impl Parser {
             let name = self.ident()?;
             self.expect(TokenKind::Assign)?;
             let ty = self.ty()?;
-            self.symbol(token, start, 26, 0);
+            self.typed_symbol(token, start, 26, 0, &ty);
             return Ok(Item::TypeAlias { public, name, ty });
         }
         if self.at(&TokenKind::Keyword(Keyword::Fn))
@@ -298,12 +320,13 @@ impl Parser {
             let ty = self.ty()?;
             let field_token = self.current().clone();
             let name = self.ident()?;
-            self.symbol(field_token, field_start, 8, 0);
+            self.typed_symbol(field_token, field_start, 8, 0, &ty);
             fields.push(Field { name, ty });
         }
         self.bump();
         self.member_symbols(symbol_start, &name, start);
         self.symbol(token, start, 23, 0);
+        self.symbol_generics(&generics);
         Ok(StructDecl {
             public,
             name,
@@ -319,6 +342,7 @@ impl Parser {
         self.expect(TokenKind::LBrace)?;
         let mut variants = vec![];
         let symbol_start = self.symbol_count();
+        let owner = name.clone();
         while !self.at(&TokenKind::RBrace) {
             let variant_token = self.current().clone();
             let variant_start = variant_token.span.start;
@@ -334,12 +358,24 @@ impl Parser {
                 }
                 let _ = self.bump();
             }
-            self.symbol(variant_token, variant_start, 22, 0);
+            let enum_type = Type::Named(owner.clone(), vec![]);
+            self.typed_symbol(
+                variant_token,
+                variant_start,
+                22,
+                0,
+                &if values.is_empty() {
+                    enum_type
+                } else {
+                    Type::Function(values.clone(), Box::new(enum_type))
+                },
+            );
             variants.push(Variant { name, values });
         }
         self.bump();
         self.member_symbols(symbol_start, &name, start);
         self.symbol(token, start, 10, 0);
+        self.symbol_generics(&generics);
         Ok(EnumDecl {
             public,
             name,
@@ -371,7 +407,17 @@ impl Parser {
         };
         let body = self.block()?;
         self.scope_symbols(symbol_start, start);
-        self.symbol(token, declaration_start, 12, 0);
+        self.typed_symbol(
+            token,
+            declaration_start,
+            12,
+            0,
+            &Type::Function(
+                params.iter().map(|p| p.ty.clone()).collect(),
+                Box::new(return_type.clone()),
+            ),
+        );
+        self.symbol_generics(&generics);
         Ok(Function {
             source_path: self.path.clone(),
             span: start..self.tokens[self.pos - 1].span.end,
@@ -392,7 +438,7 @@ impl Parser {
             let ty = self.ty()?;
             let token = self.current().clone();
             let name = self.ident()?;
-            self.symbol(token, start, 13, 0);
+            self.typed_symbol(token, start, 13, 0, &ty);
             out.push(Param { name, ty });
             if !self.at(&TokenKind::RParen) {
                 self.expect(TokenKind::Comma)?
@@ -516,12 +562,21 @@ impl Parser {
         }
         self.expect(TokenKind::Assign)?;
         let value = self.expr(0)?;
-        for token in names {
-            self.symbol(
+        let types = if matches!(pattern, Pattern::Tuple(_)) {
+            let Type::Tuple(types) = &ty else {
+                unreachable!()
+            };
+            types.clone()
+        } else {
+            vec![ty.clone()]
+        };
+        for (token, binding_type) in names.into_iter().zip(types) {
+            self.typed_symbol(
                 token,
                 start,
                 if mutable { 13 } else { 14 },
                 self.tokens[self.pos - 1].span.end,
+                &binding_type,
             );
         }
         Ok(VarDecl {
@@ -606,7 +661,6 @@ impl Parser {
             let name = self.ident()?;
             self.expect(TokenKind::Assign)?;
             let value = self.expr(0)?;
-            self.symbol(token, start, 12, self.tokens[self.pos - 1].span.end);
             let Expr::Lambda(f) = &value else {
                 return self.error("inferred `fn` declarations require an anonymous function");
             };
@@ -614,6 +668,7 @@ impl Parser {
                 f.params.iter().map(|p| p.ty.clone()).collect(),
                 Box::new(f.return_type.clone()),
             );
+            self.typed_symbol(token, start, 12, self.tokens[self.pos - 1].span.end, &ty);
             return Ok(Stmt::Var(VarDecl {
                 source_path: self.path.clone(),
                 span: start..self.tokens[self.pos - 1].span.end,

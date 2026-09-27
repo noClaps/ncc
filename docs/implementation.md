@@ -70,6 +70,8 @@ must stay explicit about features still under construction.
   files and unsaved overlays. Imported signatures follow the active nested call.
 - Private module declarations support rename with binding-identity verification.
   Enum variants support local navigation, documentation, completion and signatures.
+  Parsed declaration types drive member navigation after calls, indexing,
+  destructuring and nested generic fields, plus signatures for typed callbacks.
   Code actions convert integer bases and comment kinds, and offer checked fixes
   for unused call results. Edits preserve Unicode positions and literal contents.
 - Formatting uses a single token pass for indentation and preserves literal

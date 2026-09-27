@@ -2,6 +2,25 @@
 use serde_json::{Value, json};
 
 #[test]
+fn type_errors_use_language_syntax_instead_of_rust_debug_output() {
+    for (source, expected) in [
+        ("int value = true", "expected `int`, found `bool`"),
+        ("int[] values = [true]", "expected `int`, found `bool`"),
+        (
+            "fn f(int[] values) {} f([true])",
+            "expected `int`, found `bool`",
+        ),
+        (
+            "(fn(int) int) f = fn(str s) str { return s }",
+            "expected `(fn(int) int)`, found `(fn(str) str)`",
+        ),
+    ] {
+        let error = ncc::check_source(source, std::path::Path::new("types.nc")).unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+}
+
+#[test]
 #[cfg(feature = "lsp")]
 fn lsp_refactoring_and_signature_protocol() {
     let uri = "file:///refactor.nc";
