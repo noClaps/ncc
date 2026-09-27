@@ -152,6 +152,7 @@ pub fn serve(mut input: impl BufRead, mut output: impl Write) -> io::Result<()> 
                             "textDocument/definition"
                                 | "textDocument/hover"
                                 | "textDocument/completion"
+                                | "textDocument/signatureHelp"
                         ) {
                             imported_navigation(&index, at, uri, method, &documents)
                         } else {
@@ -212,8 +213,14 @@ fn imported_navigation(
     method: &str,
     documents: &HashMap<String, Document>,
 ) -> Option<Value> {
+    let signature = (method == "textDocument/signatureHelp")
+        .then(|| index.imported_signature(at))
+        .flatten();
     let (imported, name) = if method == "textDocument/completion" {
         (index.imported_completion(at)?, String::new())
+    } else if method == "textDocument/signatureHelp" {
+        let (path, name, _) = signature.as_ref()?;
+        (path.clone(), name.clone())
     } else {
         index.imported_member(at)?
     };
@@ -231,6 +238,9 @@ fn imported_navigation(
         return Some(imported.exported_completions());
     }
     let position = imported.exported_position(&name)?;
+    if let Some((_, _, active)) = signature {
+        return Some(imported.signature_at(position, active));
+    }
     Some(if method == "textDocument/definition" {
         imported.definition(
             &open.map_or_else(|| file_uri(&path), |(uri, _)| uri.clone()),

@@ -350,7 +350,7 @@ impl<'a> Index<'a> {
         }
         json!(ranges)
     }
-    pub fn signature_help(&self, at: usize) -> Value {
+    fn call_sites(&self, at: usize) -> Vec<(usize, usize)> {
         let mut stack: Vec<(usize, usize)> = Vec::new();
         for (i, token) in self
             .tokens
@@ -371,12 +371,28 @@ impl<'a> Index<'a> {
                 _ => {}
             }
         }
-        for (i, active) in stack.into_iter().rev() {
-            if i == 0 || self.tokens[i].kind != TokenKind::LParen {
-                continue;
-            }
-            if let Some((_, signature, documentation)) = self.builtin(self.tokens[i - 1].span.start)
+        stack
+            .into_iter()
+            .rev()
+            .filter(|(i, _)| *i > 0 && self.tokens[*i].kind == TokenKind::LParen)
+            .map(|(i, active)| (self.tokens[i - 1].span.start, active))
+            .collect()
+    }
+    pub fn imported_signature(&self, at: usize) -> Option<(String, String, usize)> {
+        for (callee, active) in self.call_sites(at) {
+            if self.builtin(callee).is_some() || self.selected(callee).is_some_and(|s| s.kind == 12)
             {
+                return None;
+            }
+            if let Some((path, name)) = self.imported_member(callee) {
+                return Some((path, name, active));
+            }
+        }
+        None
+    }
+    pub fn signature_help(&self, at: usize) -> Value {
+        for (callee, active) in self.call_sites(at) {
+            if let Some((_, signature, documentation)) = self.builtin(callee) {
                 let parameters = signature
                     .split_once('(')
                     .unwrap()
@@ -392,26 +408,30 @@ impl<'a> Index<'a> {
                 let active = active.min(params.len().saturating_sub(1));
                 return json!({"signatures":[{"label":signature,"documentation":documentation,"parameters":params}],"activeSignature":0,"activeParameter":active});
             }
-            let Some(symbol) = self
-                .selected(self.tokens[i - 1].span.start)
-                .filter(|s| s.kind == 12)
-            else {
-                continue;
-            };
-            let params = self
-                .symbols
-                .iter()
-                .filter(|s| {
-                    s.kind == 13
-                        && s.scope
-                            .as_ref()
-                            .is_some_and(|scope| scope.start == symbol.selection.start)
-                })
-                .map(|s| json!({"label":self.detail(s)}))
-                .collect::<Vec<_>>();
-            return json!({"signatures":[{"label":self.detail(symbol),"documentation":{"kind":"markdown","value":self.documentation(symbol)},"parameters":params}],"activeSignature":0,"activeParameter":active});
+            let signature = self.signature_at(callee, active);
+            if !signature.is_null() {
+                return signature;
+            }
         }
         Value::Null
+    }
+    pub fn signature_at(&self, at: usize, active: usize) -> Value {
+        let Some(symbol) = self.selected(at).filter(|s| s.kind == 12) else {
+            return Value::Null;
+        };
+        let params = self
+            .symbols
+            .iter()
+            .filter(|s| {
+                s.kind == 13
+                    && s.scope
+                        .as_ref()
+                        .is_some_and(|scope| scope.start == symbol.selection.start)
+            })
+            .map(|s| json!({"label":self.detail(s)}))
+            .collect::<Vec<_>>();
+        let active = active.min(params.len().saturating_sub(1));
+        json!({"signatures":[{"label":self.detail(symbol),"documentation":{"kind":"markdown","value":self.documentation(symbol)},"parameters":params}],"activeSignature":0,"activeParameter":active})
     }
 
     pub fn definition(&self, uri: &str, at: usize) -> Value {
@@ -537,6 +557,25 @@ fn range(text: &str, span: &std::ops::Range<usize>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn imported_signatures_follow_the_innermost_call_and_ignore_nested_commas() {
+        let source = "import { \"dep\" as dep }\nfn local(int n) int { return n }\n@println(dep.apply([1, 2], local(3), ";
+        let index = Index::new(source);
+        assert_eq!(
+            index.imported_signature(source.len()),
+            Some(("dep".into(), "apply".into(), 2))
+        );
+        assert!(
+            index
+                .imported_signature(source.find("local(3)").unwrap() + 7)
+                .is_none()
+        );
+        assert_eq!(
+            index.signature_help(source.find("local(3)").unwrap() + 7)["signatures"][0]["label"],
+            "fn local(int n) int"
+        );
+    }
 
     #[test]
     fn references_and_rename_preserve_shadowing_and_reject_collisions() {

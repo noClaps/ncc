@@ -278,6 +278,7 @@ fn lsp_rechecks_importers_against_unsaved_buffers() {
         json!({"id":2,"method":"textDocument/definition","params":{"textDocument":{"uri":root},"position":{"line":0,"character":44}}}),
         json!({"id":3,"method":"textDocument/hover","params":{"textDocument":{"uri":root},"position":{"line":0,"character":44}}}),
         json!({"id":4,"method":"textDocument/completion","params":{"textDocument":{"uri":root},"position":{"line":0,"character":44}}}),
+        json!({"id":5,"method":"textDocument/signatureHelp","params":{"textDocument":{"uri":root},"position":{"line":0,"character":49}}}),
         json!({"method":"textDocument/didChange","params":{"textDocument":{"uri":dependency,"version":2},"contentChanges":[{"text":"pub fn value() bool { return true }"}]}}),
         json!({"method":"textDocument/didClose","params":{"textDocument":{"uri":dependency}}}),
         json!({"id":1,"method":"shutdown"}),
@@ -309,6 +310,17 @@ fn lsp_rechecks_importers_against_unsaved_buffers() {
         })
         .collect();
     assert_eq!(root_errors, [true, false, true, true]);
+    let signature = &notifications
+        .iter()
+        .find(|message| message["id"] == 5)
+        .unwrap()["result"];
+    assert_eq!(signature["signatures"][0]["label"], "fn value() int");
+    assert!(
+        signature["signatures"][0]["documentation"]["value"]
+            .as_str()
+            .unwrap()
+            .contains("Unsaved documentation.")
+    );
     let completion = &notifications
         .iter()
         .find(|message| message["id"] == 4)
