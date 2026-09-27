@@ -10,6 +10,7 @@ pub struct CheckedModule {
     pub types: HashMap<String, TypeInfo>,
     pub expression_types: HashMap<usize, Type>,
     pub captures: HashMap<usize, Vec<(String, Type, bool)>>,
+    pub constant_sources: HashMap<usize, Option<usize>>,
 }
 #[derive(Clone, Debug)]
 pub enum TypeInfo {
@@ -25,6 +26,7 @@ struct Binding {
     ty: Type,
     mutable: bool,
     mutex: bool,
+    initializer: Option<usize>,
 }
 struct Checker {
     types: HashMap<String, TypeInfo>,
@@ -39,6 +41,7 @@ struct Checker {
     value_targets: Vec<Type>,
     capture_frames: Vec<(usize, HashMap<String, Binding>)>,
     captures: HashMap<usize, Vec<(String, Type, bool)>>,
+    constant_sources: HashMap<usize, Option<usize>>,
 }
 
 pub fn check(module: Module, _path: &Path) -> Result<CheckedModule, Diagnostics> {
@@ -80,6 +83,7 @@ pub fn check(module: Module, _path: &Path) -> Result<CheckedModule, Diagnostics>
         types: c.types,
         expression_types: c.expression_types,
         captures: c.captures,
+        constant_sources: c.constant_sources,
     })
 }
 impl Checker {
@@ -213,6 +217,7 @@ impl Checker {
             value_targets: vec![],
             capture_frames: vec![],
             captures: HashMap::new(),
+            constant_sources: HashMap::new(),
         }
     }
     fn fail<T>(&self, s: impl Into<String>) -> Result<T, Diagnostics> {
@@ -402,6 +407,7 @@ impl Checker {
                 ty,
                 mutable,
                 mutex: false,
+                initializer: None,
             },
         );
         Ok(())
@@ -428,6 +434,9 @@ impl Checker {
             && let Some(binding) = self.scopes.last_mut().unwrap().get_mut(name)
         {
             binding.mutex = v.mutex;
+            if !v.mutable && !v.mutex {
+                binding.initializer = Some(&v.value as *const Expr as usize);
+            }
         }
     }
     fn block(&mut self, b: &Block) -> Result<(), Diagnostics> {
@@ -796,7 +805,10 @@ impl Checker {
     fn expr_inner(&mut self, e: &Expr) -> Result<Type, Diagnostics> {
         match e {
             Expr::Bytes(_) => Ok(Type::Array(Box::new(named("byte")), None)),
-            Expr::Embed { .. } => self.fail("internal error: unresolved @embed"),
+            Expr::Embed { path, .. } => {
+                self.expected(path, &named("str"))?;
+                Ok(Type::Array(Box::new(named("byte")), None))
+            }
             Expr::Lambda(f) => {
                 if self.contains_future(&f.return_type) {
                     return self.fail("futures cannot be returned from functions");
@@ -931,6 +943,8 @@ impl Checker {
                     .rev()
                     .find_map(|(i, s)| s.get(n).map(|v| (i, v.clone())))
                 {
+                    self.constant_sources
+                        .insert(e as *const Expr as usize, binding.initializer);
                     for (depth, captures) in &mut self.capture_frames {
                         if i < *depth {
                             captures.insert(n.clone(), binding.clone());

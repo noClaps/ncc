@@ -31,8 +31,10 @@ must stay explicit about features still under construction.
   replacement and iteration, and string-to-character/byte-array conversion.
 - Counted UTF-8 strings preserve embedded NUL bytes. All documented escapes,
   Unicode scalar validation and multiline literal preservation are covered.
-- Compile-time `@embed` with literal paths, module-relative resolution, binary
+- Compile-time `@embed` with computed paths, module-relative resolution, binary
   and empty files, unreadable-file diagnostics and symlink rejection.
+  Paths can use lexical immutable constants, interpolation, pure functions and
+  nested embeddings; runtime-dependent paths fail at their original call site.
 - Source imports, exports, cycle diagnostics, and external C functions.
 - Validated external C signatures with stable argument/result aliases, including
   composite arguments and error-union results; see `docs/c-abi.md`.
@@ -61,6 +63,8 @@ must stay explicit about features still under construction.
   member navigation/completion, pattern/catch bindings, signature help and folds.
   Builtins have documentation/signatures and completion replaces the entire sigil.
   Editor-only parser recovery retains useful indexing through incomplete input.
+- Workspace references and validated export renaming include unopened source
+  files and unsaved overlays. Imported signatures follow the active nested call.
 - Formatting uses a single token pass for indentation and preserves literal
   contents and comments; tests check token equivalence and idempotence.
 
@@ -74,12 +78,9 @@ must stay explicit about features still under construction.
 - Extend compile-time evaluation to remaining operations and broaden optimisation
   within function bodies. The evaluation fuel/depth limits intentionally retain
   runtime code for work that cannot safely be completed at compile time.
-- Support computed compile-time paths for `@embed` if required; currently its
-  path must be a string literal without interpolation.
 - Full canonical spacing/layout formatting, rather than indentation only.
-- Workspace-wide references/rename (currently references are document-local and
-  rename is restricted to local bindings), imported signature help, more inferred
-  member types, code actions and resilient indexing through every invalid edit.
+- More inferred member types, code actions, workspace indexing performance and
+  resilient indexing through every invalid edit.
   LSP usability has improved, but parity with Gleam's LSP is not yet achieved.
 - Tree-sitter newline-sensitive return/call parsing and further recovery cases.
 - Increase negative, differential, concurrency, and full-specification tests.

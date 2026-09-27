@@ -153,7 +153,7 @@ pub enum Stmt {
 pub enum Expr {
     Bytes(Vec<u8>),
     Embed {
-        path: String,
+        path: Box<Expr>,
         source_path: std::path::PathBuf,
         span: Span,
     },

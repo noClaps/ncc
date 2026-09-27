@@ -949,18 +949,7 @@ impl Parser {
                     let name = self.ident()?;
                     if name == "embed" {
                         self.expect(TokenKind::LParen)?;
-                        let path = match self.bump().kind {
-                            TokenKind::String(path) => match self.string_expression(&path)? {
-                                Expr::String(path) => path,
-                                _ => return self.error(
-                                    "@embed path must be a string literal without interpolation",
-                                ),
-                            },
-                            _ => {
-                                return self
-                                    .error("@embed requires a compile-time string literal path");
-                            }
-                        };
+                        let path = Box::new(self.expr(0)?);
                         self.expect(TokenKind::RParen)?;
                         Ok(Expr::Embed {
                             path,

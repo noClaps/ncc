@@ -371,39 +371,7 @@ fn statement(
 }
 fn expr(e: &mut Expr, names: &Names, aliases: &HashMap<String, Names>) -> Result<(), Diagnostics> {
     match e {
-        Expr::Embed {
-            path,
-            source_path,
-            span,
-        } => {
-            let file = source_path.parent().unwrap_or(Path::new(".")).join(&*path);
-            let bytes = (|| {
-                // Reject symlinks in every path component, without canonicalizing them.
-                let mut component_path = PathBuf::new();
-                for component in file.components() {
-                    component_path.push(component);
-                    if std::fs::symlink_metadata(&component_path)?
-                        .file_type()
-                        .is_symlink()
-                    {
-                        return Err(std::io::Error::other("@embed does not follow symlinks"));
-                    }
-                }
-                let metadata = std::fs::metadata(&file)?;
-                if !metadata.is_file() {
-                    return Err(std::io::Error::other("@embed requires a regular file"));
-                }
-                std::fs::read(&file)
-            })()
-            .map_err(|error| {
-                Diagnostics::one(
-                    format!("cannot embed {}: {error}", file.display()),
-                    span.clone(),
-                )
-                .at_source(source_path, span.clone())
-            })?;
-            *e = Expr::Bytes(bytes);
-        }
+        Expr::Embed { path, .. } => expr(path, names, aliases)?,
         Expr::Lambda(f) => {
             let mut local = names.clone();
             for p in &mut f.params {

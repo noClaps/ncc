@@ -64,7 +64,8 @@ fn expr<'a>(e: &'a Expr, f: &mut impl FnMut(&'a Expr)) {
     f(e);
     match e {
         Expr::Lambda(fun) => block(&fun.body, f),
-        Expr::Cast { value, .. }
+        Expr::Embed { path: value, .. }
+        | Expr::Cast { value, .. }
         | Expr::Unary { value, .. }
         | Expr::Async(value)
         | Expr::Await(value)
@@ -121,4 +122,128 @@ fn expr<'a>(e: &'a Expr, f: &mut impl FnMut(&'a Expr)) {
         }
         _ => {}
     }
+}
+
+/// Rewrite expressions bottom-up. A replacement is not visited again.
+pub fn rewrite(item: &mut Item, f: &mut impl FnMut(&mut Expr)) {
+    match item {
+        Item::Function(fun) => rewrite_block(&mut fun.body, f),
+        Item::Global(v) => rewrite_expr(&mut v.value, f),
+        Item::Statement(s) => rewrite_stmt(s, f),
+        Item::Test { body, .. } => rewrite_block(body, f),
+        _ => {}
+    }
+}
+fn rewrite_block(b: &mut Block, f: &mut impl FnMut(&mut Expr)) {
+    for s in &mut b.statements {
+        rewrite_stmt(s, f);
+    }
+}
+fn rewrite_stmt(s: &mut Stmt, f: &mut impl FnMut(&mut Expr)) {
+    match s {
+        Stmt::Block(b) | Stmt::Lock { body: b, .. } => rewrite_block(b, f),
+        Stmt::Var(v) => rewrite_expr(&mut v.value, f),
+        Stmt::Assign { target, value } => {
+            rewrite_expr(target, f);
+            rewrite_expr(value, f);
+        }
+        Stmt::Expr(e) | Stmt::Throw(e) | Stmt::Assert(e) | Stmt::LabeledIf { value: e, .. } => {
+            rewrite_expr(e, f)
+        }
+        Stmt::Return(e) | Stmt::Break(e, _) => {
+            if let Some(e) = e {
+                rewrite_expr(e, f);
+            }
+        }
+        Stmt::For { iterable, body, .. } => {
+            rewrite_expr(iterable, f);
+            rewrite_block(body, f);
+        }
+        Stmt::While {
+            condition, body, ..
+        } => {
+            rewrite_expr(condition, f);
+            rewrite_block(body, f);
+        }
+        Stmt::Continue(_) => {}
+    }
+}
+fn rewrite_pattern(p: &mut Pattern, f: &mut impl FnMut(&mut Expr)) {
+    match p {
+        Pattern::Literal(e) => rewrite_expr(e, f),
+        Pattern::Array(ps) | Pattern::Tuple(ps) | Pattern::Variant { values: ps, .. } => {
+            for p in ps {
+                rewrite_pattern(p, f);
+            }
+        }
+        Pattern::Struct { fields, .. } => {
+            for (_, p) in fields {
+                rewrite_pattern(p, f);
+            }
+        }
+        _ => {}
+    }
+}
+fn rewrite_expr(e: &mut Expr, f: &mut impl FnMut(&mut Expr)) {
+    match e {
+        Expr::Lambda(fun) => rewrite_block(&mut fun.body, f),
+        Expr::Embed { path: value, .. }
+        | Expr::Cast { value, .. }
+        | Expr::Unary { value, .. }
+        | Expr::Async(value)
+        | Expr::Await(value)
+        | Expr::Try(value) => rewrite_expr(value, f),
+        Expr::Binary { left, right, .. } => {
+            rewrite_expr(left, f);
+            rewrite_expr(right, f);
+        }
+        Expr::Call { callee, args, .. } => {
+            rewrite_expr(callee, f);
+            for arg in args {
+                rewrite_expr(arg, f);
+            }
+        }
+        Expr::Index { object, index } => {
+            rewrite_expr(object, f);
+            rewrite_expr(index, f);
+        }
+        Expr::Member { object, .. } => rewrite_expr(object, f),
+        Expr::Array(xs) | Expr::Tuple(xs) => {
+            for x in xs {
+                rewrite_expr(x, f);
+            }
+        }
+        Expr::Map(xs) => {
+            for (k, v) in xs {
+                rewrite_expr(k, f);
+                rewrite_expr(v, f);
+            }
+        }
+        Expr::StructInit { fields, .. } => {
+            for (_, v) in fields {
+                rewrite_expr(v, f);
+            }
+        }
+        Expr::If { subject, arms } => {
+            if let Some(s) = subject {
+                rewrite_expr(s, f);
+            }
+            for (patterns, b) in arms {
+                for p in patterns {
+                    rewrite_pattern(p, f);
+                }
+                rewrite_block(b, f);
+            }
+        }
+        Expr::Else { value, fallback } => {
+            rewrite_expr(value, f);
+            rewrite_block(fallback, f);
+        }
+        Expr::Catch { value, body, .. } => {
+            rewrite_expr(value, f);
+            rewrite_block(body, f);
+        }
+        _ => {}
+    }
+    f(e);
 }

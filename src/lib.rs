@@ -35,6 +35,7 @@ pub fn compile_source_with_options(
     let tokens = lexer::lex(source)?;
     let module = modules::load(parser::parse_at(tokens, path)?, path)?;
     let checked = sema::check(generics::specialize(module)?, path)?;
+    let checked = optimizer::resolve_embeds(checked, path)?;
     if release {
         let checked = sema::check(optimizer::optimize(checked)?, path)?;
         return codegen::emit(&checked);
@@ -46,5 +47,5 @@ pub fn compile_source_with_options(
 pub fn check_source(source: &str, path: &Path) -> Result<(), Diagnostics> {
     let tokens = lexer::lex(source)?;
     let module = modules::load(parser::parse_at(tokens, path)?, path)?;
-    sema::check(generics::specialize(module)?, path).map(|_| ())
+    optimizer::resolve_embeds(sema::check(generics::specialize(module)?, path)?, path).map(|_| ())
 }

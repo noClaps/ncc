@@ -583,7 +583,8 @@ impl Pass {
                     *e = *value.clone();
                 }
             }
-            Expr::Unary { value, .. }
+            Expr::Embed { path: value, .. }
+            | Expr::Unary { value, .. }
             | Expr::Async(value)
             | Expr::Await(value)
             | Expr::Try(value) => self.expr(value, b)?,

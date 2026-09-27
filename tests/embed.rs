@@ -91,3 +91,78 @@ fn rejects_symlink_files_and_parent_directories() {
         );
     }
 }
+
+#[test]
+fn computed_paths_follow_lexical_constants_in_debug_release_and_check() {
+    let temp = ncc::temp::Directory::new().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    fs::write(root.join("data1.bin"), [0, 42, 255]).unwrap();
+    fs::write(root.join("name"), b"data1.bin").unwrap();
+    fs::write(root.join("paths.nc"), "pub str filename = \"data1.bin\"").unwrap();
+    let input = root.join("main.nc");
+    let source = r#"
+import { "paths" as paths }
+str stem = "data"
+fn filename(uint n) str { return "{stem}{n}.bin" }
+fn bytes() byte[] {
+    str local = filename(1)
+    return @embed(local)
+}
+byte[] a = @embed(stem <> "1.bin")
+byte[] b = @embed("{stem}1.bin")
+byte[] c = @embed(filename(1))
+byte[] d = @embed(paths.filename)
+fn choose = fn() str { return "data1.bin" }
+byte[] e = @embed(choose())
+byte[] nested = @embed(if @embed("name").len {
+    9 -> { "data1.bin" }
+    _ -> { "missing" }
+})
+test "computed paths" {
+    assert a == b and b == c and c == d and d == bytes()
+    assert e == a and nested == a
+    byte[] expected = [0, 42, 255]
+    assert a == expected
+}
+@println(a)
+"#;
+    fs::write(&input, source).unwrap();
+    ncc::check_source(source, &input).unwrap();
+    ncc::lint::check(source, &input).unwrap();
+    for mode in ["-d", "-r"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_ncc"))
+            .args(["run", input.to_str().unwrap(), mode])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"[0, 42, 255]\n");
+    }
+}
+
+#[test]
+fn runtime_dependent_paths_fail_without_executing_effects() {
+    let temp = ncc::temp::Directory::new().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    fs::write(root.join("data"), [42]).unwrap();
+    let input = root.join("main.nc");
+    for source in [
+        "mut str path = \"data\"\nbyte[] b = @embed(path)",
+        "str path = \"data\"\nfn f(str path) byte[] { return @embed(path) }",
+        "fn path() str { @println(\"effect\")\n return \"data\" }\nbyte[] b = @embed(path())",
+        "fn f(str path) byte[] { str copy = path\n return @embed(copy) }",
+        "fn loop() str { return loop() }\nbyte[] b = @embed(loop())",
+        "fn path() str { return \"data\" }\nfn f((fn() str) path) byte[] { return @embed(path()) }",
+    ] {
+        let error = ncc::check_source(source, &input).unwrap_err();
+        assert!(
+            error.to_string().contains("compile-time string"),
+            "{source}: {error}"
+        );
+        assert_eq!(error.0[0].path.as_ref(), Some(&input));
+        assert!(source[error.0[0].span.clone()].starts_with("@embed("));
+    }
+}

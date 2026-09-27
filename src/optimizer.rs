@@ -7,6 +7,113 @@ use crate::{
 };
 use std::collections::{HashMap, HashSet};
 
+/// Embedding is mandatory compile-time evaluation, including in debug builds.
+pub fn resolve_embeds(
+    checked: CheckedModule,
+    source: &std::path::Path,
+) -> Result<CheckedModule, Diagnostics> {
+    let mut has_embeds = false;
+    for item in &checked.module.items {
+        crate::visit::item(item, &mut |e| has_embeds |= matches!(e, Expr::Embed { .. }));
+    }
+    if !has_embeds {
+        return Ok(checked);
+    }
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("ncc-embed".into())
+            .stack_size(32 * 1024 * 1024)
+            .spawn_scoped(scope, || embed_module(checked, source))
+            .map_err(|e| Diagnostics::one(format!("cannot start embed evaluator: {e}"), 0..0))?
+            .join()
+            .map_err(|_| Diagnostics::one("embed evaluator panicked", 0..0))?
+    })
+}
+
+fn embed_module(
+    checked: CheckedModule,
+    source: &std::path::Path,
+) -> Result<CheckedModule, Diagnostics> {
+    let functions = checked
+        .module
+        .items
+        .iter()
+        .filter_map(|item| {
+            if let Item::Function(f) = item {
+                Some((f.name.clone(), f))
+            } else {
+                None
+            }
+        })
+        .collect();
+    let mut replacements = HashMap::new();
+    let mut embeds = Vec::new();
+    for item in &checked.module.items {
+        crate::visit::item(item, &mut |e| {
+            if matches!(e, Expr::Embed { .. }) {
+                embeds.push(e);
+            }
+        });
+    }
+    for e in embeds {
+        let Expr::Embed {
+            source_path, span, ..
+        } = e
+        else {
+            unreachable!()
+        };
+        let value = evaluate(e, &HashMap::new(), &functions, &checked, &mut 100_000)
+            .map_err(|error| error.at_source(source_path, span.clone()))?;
+        let Some(Value::Array(bytes)) = value else {
+            return Err(Diagnostics::one(
+                "@embed path must be a compile-time string; runtime values, side effects, or evaluation limits prevent evaluating this path", span.clone()
+            ).at_source(source_path, span.clone()));
+        };
+        let bytes = bytes
+            .into_iter()
+            .map(|v| match v {
+                Value::Byte(b) => b,
+                _ => unreachable!(),
+            })
+            .collect();
+        replacements.insert(e as *const Expr as usize, Expr::Bytes(bytes));
+    }
+    let mut module = checked.module;
+    for item in &mut module.items {
+        crate::visit::rewrite(item, &mut |e| {
+            if let Some(value) = replacements.remove(&(e as *const Expr as usize)) {
+                *e = value;
+            }
+        });
+    }
+    crate::sema::check(module, source)
+}
+
+fn embedded_bytes(path: &str, source: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    let file = source
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join(path);
+    let read = || {
+        let mut component_path = std::path::PathBuf::new();
+        for component in file.components() {
+            component_path.push(component);
+            if std::fs::symlink_metadata(&component_path)?
+                .file_type()
+                .is_symlink()
+            {
+                return Err(std::io::Error::other("@embed does not follow symlinks"));
+            }
+        }
+        if !std::fs::metadata(&file)?.is_file() {
+            return Err(std::io::Error::other("@embed requires a regular file"));
+        }
+        std::fs::read(&file)
+    };
+    read()
+        .map_err(|e| std::io::Error::new(e.kind(), format!("cannot embed {}: {e}", file.display())))
+}
+
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 enum Value {
     Int(i64),
@@ -311,8 +418,10 @@ fn evaluate(
     fuel: &mut usize,
 ) -> Result<Option<Value>, Diagnostics> {
     let mut lambdas = HashMap::new();
+    let mut expressions = HashMap::new();
     for item in &checked.module.items {
         crate::visit::item(item, &mut |e| {
+            expressions.insert(e as *const Expr as usize, e);
             if let Expr::Lambda(f) = e {
                 lambdas.insert(e as *const Expr as usize, &**f);
             }
@@ -321,6 +430,8 @@ fn evaluate(
     let mut evaluator = Evaluator {
         functions,
         lambdas,
+        expressions,
+        embed_error: None,
         checked,
         fuel,
         memo: HashMap::new(),
@@ -330,7 +441,9 @@ fn evaluate(
         indices: vec![],
     };
     let value = evaluator.evaluate(e, &mut env.clone());
-    if evaluator.arithmetic_failure {
+    if let Some(error) = evaluator.embed_error {
+        Err(error)
+    } else if evaluator.arithmetic_failure {
         Err(Diagnostics::one(
             "constant evaluation failed: integer overflow, division by zero, invalid shift/exponent, or non-finite float",
             0..0,
@@ -344,6 +457,8 @@ struct Evaluator<'a> {
     checked: &'a CheckedModule,
     fuel: &'a mut usize,
     lambdas: HashMap<usize, &'a Function>,
+    expressions: HashMap<usize, &'a Expr>,
+    embed_error: Option<Diagnostics>,
     memo: HashMap<(Value, Vec<Value>), Value>,
     depth: usize,
     arithmetic_failure: bool,
@@ -711,6 +826,25 @@ impl Evaluator<'_> {
             Expr::Bytes(bytes) => Some(Value::Array(
                 bytes.iter().copied().map(Value::Byte).collect(),
             )),
+            Expr::Embed {
+                path,
+                source_path,
+                span,
+            } => {
+                let Value::String(path) = self.evaluate(path, env)? else {
+                    return None;
+                };
+                match embedded_bytes(&path, source_path) {
+                    Ok(bytes) => Some(Value::Array(bytes.into_iter().map(Value::Byte).collect())),
+                    Err(error) => {
+                        self.embed_error = Some(
+                            Diagnostics::one(error.to_string(), span.clone())
+                                .at_source(source_path, span.clone()),
+                        );
+                        None
+                    }
+                }
+            }
             Expr::String(s) => Some(Value::String(s.clone())),
             Expr::Char(s) => Some(Value::Char(s.clone())),
             Expr::Array(values) => {
@@ -819,11 +953,22 @@ impl Evaluator<'_> {
                 .last()
                 .and_then(|n| n.checked_sub(1))
                 .map(Value::Uint),
-            Expr::Name(n) => env.get(n).cloned().or_else(|| {
+            Expr::Name(n) => {
+                if let Some(value) = env.get(n) {
+                    return Some(value.clone());
+                }
+                if let Some(key) = self
+                    .checked
+                    .constant_sources
+                    .get(&(e as *const Expr as usize))
+                {
+                    let initializer = *self.expressions.get(&(*key)?)?;
+                    return self.evaluate(initializer, &mut HashMap::new());
+                }
                 self.functions
                     .contains_key(n)
                     .then(|| Value::Function(n.clone()))
-            }),
+            }
             Expr::Unary { op, value } => match (op, self.evaluate(value, env)?) {
                 (UnaryOp::Neg, Value::Int(v)) => {
                     let result = v.checked_neg();

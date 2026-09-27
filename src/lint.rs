@@ -25,6 +25,7 @@ pub fn check_with_sources(
     let module =
         modules::load_with_sources(parser::parse_at(lexer::lex(source)?, path)?, path, sources)?;
     let checked = sema::check(crate::generics::specialize(module)?, path)?;
+    let checked = crate::optimizer::resolve_embeds(checked, path)?;
     let mut warnings = vec![];
     let mut seen = HashSet::new();
     for item in &checked.module.items {
