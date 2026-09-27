@@ -12,7 +12,7 @@ Everything below the line is the original LLM-written README. I cannot guarantee
 
 Rust front end, portable C output, and system-C-compiler executable builds.
 The language specification is in [docs/design.md](docs/design.md). Implementation
-is ongoing; see [the implementation ledger](docs/implementation.md).
+is ongoing; see [the remaining work](TODO.md).
 
 ```sh
 make build

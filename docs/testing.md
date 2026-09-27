@@ -36,6 +36,6 @@ only to avoid exponential runtime work. C integration tests exercise both modes.
 Negative tests distinguish rejected programs from runtime range/bounds failures.
 
 The tests are a regression suite, not a proof of specification completeness.
-See [the implementation audit](implementation.md) for remaining work, including
+See [the remaining work](../TODO.md), including
 LSP features not yet at parity with Gleam. The standalone language server and
 Tree-sitter grammar are tested independently of editor plugins.
