@@ -532,9 +532,9 @@ impl<'a> Index<'a> {
     pub fn imported_signature(&self, at: usize) -> Option<(String, String, usize)> {
         for (callee, active) in self.call_sites(at) {
             if self.builtin(callee).is_some()
-                || self
-                    .selected(callee)
-                    .is_some_and(|s| matches!(s.kind, 12 | 22))
+                || self.selected(callee).is_some_and(|s| {
+                    matches!(s.kind, 12 | 22) || matches!(s.ty, Some(Type::Function(_, _)))
+                })
             {
                 return None;
             }
@@ -793,6 +793,32 @@ mod tests {
             index.signature_help(source.find("local(3)").unwrap() + 7)["signatures"][0]["label"],
             "fn local(int n) int"
         );
+        for declaration in [
+            "(fn(int, str) bool) callback = fn(int n, str s) bool { return true }",
+            "struct Handlers { (fn(int, str) bool) callback } Handlers handlers = Handlers{.callback=fn(int n, str s) bool { return true }}",
+        ] {
+            let callee = if declaration.starts_with("struct") {
+                "handlers.callback"
+            } else {
+                "callback"
+            };
+            let source = format!(
+                "import {{ \"dep\" as dep }}\n{declaration}\n_ = dep.apply({callee}(1, \"x\"), 2)"
+            );
+            let index = Index::new(&source);
+            let at = source.rfind("\"x\"").unwrap();
+            assert!(index.imported_signature(at).is_none());
+            let signature = index.signature_help(at);
+            assert_eq!(signature["activeParameter"], 1);
+            assert_eq!(
+                signature["signatures"][0]["parameters"],
+                json!([{"label":"int"}, {"label":"str"}])
+            );
+            assert_eq!(
+                index.imported_signature(source.rfind('2').unwrap()),
+                Some(("dep".into(), "apply".into(), 1))
+            );
+        }
     }
 
     #[test]
