@@ -65,6 +65,31 @@ fn lsp_refactoring_and_signature_protocol() {
 }
 
 #[test]
+fn formatter_preserves_multiline_literals_and_indents_call_arguments() {
+    for source in [
+        "@println(\n\"hello\",\n[1, 2]\n)\n",
+        "fn f() str {\nstr s = \"\"\"\n  first\n    second\n  \"\"\"\nreturn s\n}\n",
+        "str s = \"\"\"\r\n  🍪\r\n  \"\"\"\r\n@println(s)\r\n",
+        "// comment\n\n@println(\"\\u{0}\\u{7b}literal}\") // trailing\n",
+    ] {
+        let formatted = ncc::formatter::format(source).unwrap();
+        assert_eq!(ncc::formatter::format(&formatted).unwrap(), formatted);
+        let tokens = |s: &str| {
+            ncc::lexer::lex(s)
+                .unwrap()
+                .into_iter()
+                .map(|t| t.kind)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(tokens(source), tokens(&formatted));
+    }
+    assert_eq!(
+        ncc::formatter::format("@println(\n1,\n2\n)").unwrap(),
+        "@println(\n  1,\n  2\n)\n"
+    );
+}
+
+#[test]
 fn unicode_escape_validation_is_strict() {
     for source in [
         r#""\u{}""#,

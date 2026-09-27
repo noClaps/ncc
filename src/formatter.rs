@@ -10,12 +10,16 @@ pub fn format(source: &str) -> Result<String, Diagnostics> {
     let mut output = String::new();
     let mut depth = 0usize;
     let mut offset = 0;
+    let mut cursor = 0;
     let mut blank = false;
     for line in source.split_inclusive('\n') {
         let end = offset + line.len();
-        let literal_continuation = tokens
-            .iter()
-            .any(|t| t.span.start < offset && t.span.end > offset);
+        let first = cursor;
+        while cursor < tokens.len() && tokens[cursor].span.start < end {
+            cursor += 1;
+        }
+        let line_tokens = &tokens[first..cursor];
+        let literal_continuation = first > 0 && tokens[first - 1].span.end > offset;
         if literal_continuation {
             output.push_str(line);
         } else {
@@ -26,14 +30,14 @@ pub fn format(source: &str) -> Result<String, Diagnostics> {
                 }
                 blank = true;
             } else {
-                let leading_close = tokens
-                    .iter()
-                    .find(|t| t.span.start >= offset && t.span.start < end)
-                    .is_some_and(|t| matches!(t.kind, TokenKind::RBrace | TokenKind::RBracket));
+                let leading_close = line_tokens.first().is_some_and(|t| {
+                    matches!(
+                        t.kind,
+                        TokenKind::RBrace | TokenKind::RBracket | TokenKind::RParen
+                    )
+                });
                 output.push_str(&"  ".repeat(depth.saturating_sub(usize::from(leading_close))));
-                let literal_on_line = tokens
-                    .iter()
-                    .any(|t| t.span.start >= offset && t.span.start < end && t.span.end >= end);
+                let literal_on_line = line_tokens.last().is_some_and(|t| t.span.end >= end);
                 output.push_str(if literal_on_line {
                     line.trim_start().trim_end_matches('\n')
                 } else {
@@ -43,13 +47,12 @@ pub fn format(source: &str) -> Result<String, Diagnostics> {
                 blank = false;
             }
         }
-        for token in tokens
-            .iter()
-            .filter(|t| t.span.start >= offset && t.span.start < end)
-        {
+        for token in line_tokens {
             match token.kind {
-                TokenKind::LBrace | TokenKind::LBracket => depth += 1,
-                TokenKind::RBrace | TokenKind::RBracket => depth = depth.saturating_sub(1),
+                TokenKind::LBrace | TokenKind::LBracket | TokenKind::LParen => depth += 1,
+                TokenKind::RBrace | TokenKind::RBracket | TokenKind::RParen => {
+                    depth = depth.saturating_sub(1)
+                }
                 _ => {}
             }
         }
