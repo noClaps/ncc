@@ -1,6 +1,58 @@
 use std::{fs, process::Command};
 
 #[test]
+fn c_abi_roundtrips_scalar_nominal_and_composite_values() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let input = directory.path().join("main.nc");
+    let cases = [
+        ("boolean", "bool", "true"),
+        ("octet", "byte", "255"),
+        ("signed_value", "int", "-9223372036854775808"),
+        ("unsigned_value", "uint", "18446744073709551615u"),
+        ("real", "float", "1.25"),
+        ("character", "char", "'🍪'"),
+        ("text", "str", r#""a\u{0}🍪""#),
+        ("nominal", "Count", "@as(Count, 42u)"),
+        ("array", "int[]", "[1, 2]"),
+        ("fixed", "int[2]", "[1, 2]"),
+        ("nested", "int[][]", "[[1], [2, 3]]"),
+        ("tuple", "(int, str)", "(1, \"two\")"),
+        ("mapping", "[str]int[]", "[\"one\":[1]]"),
+        ("record", "Record", "Record{.values=[1, 2]}"),
+        ("variant", "Choice", "Choice.Values([1, 2])"),
+        ("empty_variant", "Choice", "Choice.Empty"),
+        ("present", "int[]?", "[1, 2]"),
+        ("absent", "int[]?", "none"),
+        ("success", "int[]!", "[1, 2]"),
+        ("failure", "int[]!", "failed()"),
+    ];
+    let mut source = String::from(
+        "type Count = uint\nstruct Record { int[] values }\nenum Choice { Empty Values(int[]) }\nfn failed() int[]! { throw \"failure\" }\nextern \"native.c\" as native {\n",
+    );
+    let mut c = String::new();
+    for (name, ty, _) in cases {
+        source.push_str(&format!("fn {name}({ty} value) {ty} = \"{name}\"\n"));
+        c.push_str(&format!(
+            "nc_abi_{name}_result {name}(nc_abi_{name}_arg0 value) {{ return value; }}\n"
+        ));
+    }
+    source.push_str("fn callback((fn(int) int) value) (fn(int) int) = \"callback\"\nfn invoke((fn(int) int) callback, int n) int = \"invoke\"\nfn observe(fut int value) bool = \"observe\"\n}\nfn increment(int n) int { return n + 1 }\ntest \"ABI\" {\n");
+    c.push_str("nc_abi_callback_result callback(nc_abi_callback_arg0 value) { return value; }\n");
+    c.push_str("nc_abi_invoke_result invoke(nc_abi_invoke_arg0 callback, nc_abi_invoke_arg1 n) { return callback.call(callback.env, n); }\nnc_abi_observe_result observe(nc_abi_observe_arg0 value) { return value != 0; }\n");
+    for (name, ty, value) in cases {
+        source.push_str(&format!(
+            "{ty} {name} = {value}\nassert native.{name}({name}) == {name}\n"
+        ));
+    }
+    source.push_str(
+        "(fn(int) int) callback = native.callback(increment)\nassert callback(41) == 42\nint extra = 2\nassert native.invoke(fn(int n) int { return n + extra }, 40) == 42\nfut int future = async increment(41)\nassert native.observe(future)\nassert await future == 42\n}\n",
+    );
+    fs::write(directory.path().join("native.c"), c).unwrap();
+    fs::write(&input, source).unwrap();
+    run_both(&input, b"");
+}
+
+#[test]
 fn void_storage_and_native_void_returns_have_distinct_abi_types() {
     let directory = ncc::temp::Directory::new().unwrap();
     let input = directory.path().join("main.nc");
@@ -111,6 +163,18 @@ extern "native.c" as two { fn first(str n) int = "first" }
             .to_string()
             .contains("conflicting declarations")
     );
+    for symbol in [
+        "int",
+        "signed",
+        "unsigned",
+        "return",
+        "_Atomic",
+        "_Thread_local",
+    ] {
+        let source = format!("extern \"native.c\" as native {{ fn value() int = \"{symbol}\" }}");
+        let error = ncc::compile_source(&source, &input).unwrap_err();
+        assert!(error.to_string().contains("C keyword"), "{error}");
+    }
 }
 
 fn run_both(input: &std::path::Path, expected: &[u8]) {

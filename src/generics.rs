@@ -200,11 +200,11 @@ impl Pass {
     }
     fn hint_block(&self, body: &mut Block, ty: &Type) {
         for statement in &mut body.statements {
-            if let Stmt::Break(Some(value), None) = statement {
+            if let Stmt::Break(Some(value), None) = statement.unlocated_mut() {
                 self.hint(value, ty);
             }
         }
-        if let Some(Stmt::Expr(value)) = body.statements.last_mut() {
+        if let Some(Stmt::Expr(value)) = body.statements.last_mut().map(Stmt::unlocated_mut) {
             self.hint(value, ty);
         }
     }
@@ -310,7 +310,7 @@ impl Pass {
         let result = self.block(&mut f.body, b);
         self.values = values;
         self.return_type = ret;
-        result
+        result.map_err(|error| error.at_source(&f.source_path, f.span.clone()))
     }
     fn ty(&mut self, ty: &mut Type, bindings: &HashMap<String, Type>) -> Result<(), Diagnostics> {
         substitute(ty, bindings);
@@ -388,6 +388,19 @@ impl Pass {
         Ok(())
     }
     fn item_types(
+        &mut self,
+        item: &mut Item,
+        b: &HashMap<String, Type>,
+    ) -> Result<(), Diagnostics> {
+        self.item_types_inner(item, b).map_err(|error| {
+            if let Some((path, span)) = item.source() {
+                error.at_source(path, span.clone())
+            } else {
+                error
+            }
+        })
+    }
+    fn item_types_inner(
         &mut self,
         item: &mut Item,
         b: &HashMap<String, Type>,
@@ -487,6 +500,9 @@ impl Pass {
     }
     fn statement(&mut self, s: &mut Stmt, b: &HashMap<String, Type>) -> Result<(), Diagnostics> {
         match s {
+            Stmt::Located(inner, location) => self
+                .statement(inner, b)
+                .map_err(|error| error.at_source(&location.path, location.span.clone()))?,
             Stmt::Var(v) => {
                 self.variable(v, b)?;
             }

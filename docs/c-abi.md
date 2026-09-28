@@ -21,6 +21,12 @@ string from a C literal, including embedded zeros. A returned C buffer can be
 wrapped as `(nc_string){length, buffer}`. This is also the representation used
 by the stable external argument/result aliases.
 
+Function values contain `call` and `env`; C invokes a callback as
+`callback.call(callback.env, arguments...)`. Future parameters are borrowed opaque
+`nc_future *` pointers and must not be freed or retained beyond their NC lifetime.
+External functions cannot return futures. External symbol names must be C
+identifiers, not C keywords.
+
 NC copies value arguments before calling an external function. External code
 must not free arguments or retain pointers to mutable argument storage. Returned
 storage must remain valid for the duration of the program. External code is

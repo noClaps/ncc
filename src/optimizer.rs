@@ -301,8 +301,10 @@ fn optimize_module(checked: CheckedModule) -> Result<Module, Diagnostics> {
                     let _ = bind_declaration(&v.pattern, value, &mut env, &mut Vec::new());
                 }
             }
-            Item::Statement(Stmt::Expr(e)) => {
-                replacements.push((index, fold(e, &env, &functions, &checked)?))
+            Item::Statement(statement) => {
+                if let Stmt::Expr(e) = statement.unlocated() {
+                    replacements.push((index, fold(e, &env, &functions, &checked)?))
+                }
             }
             _ => {}
         }
@@ -322,7 +324,10 @@ fn optimize_module(checked: CheckedModule) -> Result<Module, Diagnostics> {
         if let Some(replacement) = replacement {
             match &mut module.items[index] {
                 Item::Global(v) => v.value = replacement,
-                Item::Statement(Stmt::Expr(e)) => *e = replacement,
+                Item::Statement(statement) => match statement.unlocated_mut() {
+                    Stmt::Expr(e) => *e = replacement,
+                    _ => unreachable!(),
+                },
                 _ => unreachable!(),
             }
         }
@@ -1521,7 +1526,7 @@ impl Evaluator<'_> {
         let mut result = Flow::Next;
         for (index, s) in b.statements.iter().enumerate() {
             *self.fuel = self.fuel.checked_sub(1)?;
-            let flow = match s {
+            let flow = match s.unlocated() {
                 Stmt::Var(v) => {
                     if v.mutex {
                         return None;

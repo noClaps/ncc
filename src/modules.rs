@@ -87,6 +87,7 @@ impl Loader {
                     path: implementation,
                     alias,
                     functions,
+                    location,
                 } => {
                     let external = path
                         .parent()
@@ -98,8 +99,9 @@ impl Loader {
                                 "cannot open external implementation {}: {e}",
                                 external.display()
                             ),
-                            0..0,
+                            location.span.clone(),
                         )
+                        .at_source(&location.path, location.span.clone())
                     })?;
                     *implementation = external.to_string_lossy().into_owned();
                     let mut symbols = Names::new();
@@ -308,6 +310,8 @@ fn statement(
     aliases: &HashMap<String, Names>,
 ) -> Result<(), Diagnostics> {
     match s {
+        Stmt::Located(inner, location) => statement(inner, names, aliases)
+            .map_err(|error| error.at_source(&location.path, location.span.clone()))?,
         Stmt::Var(v) => {
             qualify_type(&mut v.ty, names);
             expr(&mut v.value, names, aliases)?;

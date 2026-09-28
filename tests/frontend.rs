@@ -77,6 +77,87 @@ fn char_literals_are_extended_graphemes() {
 }
 
 #[test]
+fn semantic_errors_point_to_the_failing_statement() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let root = directory.path().join("main.nc");
+    let imported = directory.path().join("library.nc");
+    for (prefix, statement, suffix) in [
+        ("fn broken() int {", "return missing", "}"),
+        ("fn broken() { int x = 1", "x = 2", "}"),
+        ("fn broken() {", "break", "}"),
+        ("fn broken() {", "continue", "}"),
+        ("fn broken() {", "assert true", "}"),
+        ("fn target(int x) {} fn broken() {", "target(true)", "}"),
+        (
+            "fn target<T>(T x) {} fn broken() {",
+            "target<int, bool>(1)",
+            "}",
+        ),
+        (
+            "fn broken() int { return if { true -> {",
+            "false",
+            "} _ -> { 1 } } }",
+        ),
+        ("fn broken() { while true {", "return missing", "} }"),
+        ("", "@println(missing)", ""),
+    ] {
+        let source = format!("// header\n{prefix}\n  {statement}\n{suffix}\n");
+        for from_import in [false, true] {
+            std::fs::write(&imported, &source).unwrap();
+            let (text, path) = if from_import {
+                ("import { \"library\" as lib }", &imported)
+            } else {
+                (source.as_str(), &root)
+            };
+            let error = ncc::compile_source(text, &root).unwrap_err();
+            let diagnostic = &error.0[0];
+            assert_eq!(diagnostic.path.as_ref(), Some(path), "{source}: {error}");
+            assert_eq!(
+                &source[diagnostic.span.clone()],
+                statement,
+                "{source}: {error}"
+            );
+            assert!(
+                error.render(text, &root).contains(":3:3: error:"),
+                "{source}: {error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn imported_type_and_external_errors_retain_declaration_locations() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let root = directory.path().join("main.nc");
+    let imported = directory.path().join("library.nc");
+    std::fs::write(directory.path().join("native.c"), "").unwrap();
+    for declaration in [
+        "pub struct Bad { Missing field }",
+        "pub enum Bad { Value(Missing) }",
+        "pub type Bad = Missing",
+        "pub type Bad = Bad",
+        "pub struct Bad { Bad field }",
+        "extern \"native.c\" as c { fn bad(Missing value) = \"bad\" }",
+        "extern \"missing.c\" as c { fn bad() = \"bad\" }",
+        "struct Box<T> { T value }\npub type Bad = Box<int, bool>",
+    ] {
+        let text = format!("// header\n\n{declaration}\n");
+        std::fs::write(&imported, &text).unwrap();
+        let error = ncc::compile_source("import { \"library\" as lib }", &root).unwrap_err();
+        assert_eq!(
+            error.0[0].path.as_deref(),
+            Some(imported.as_path()),
+            "{error}"
+        );
+        assert!(!error.0[0].span.is_empty(), "{error}");
+        assert!(error.0[0].span.start >= "// header\n\n".len(), "{error}");
+        let rendered = error.render("import { \"library\" as lib }", &root);
+        assert!(rendered.contains("library.nc:"), "{rendered}");
+        assert!(!rendered.contains("library.nc:1:"), "{rendered}");
+    }
+}
+
+#[test]
 fn imported_errors_retain_source_paths_and_declaration_locations() {
     let directory = ncc::temp::Directory::new().unwrap();
     let root = directory.path().join("main.nc");

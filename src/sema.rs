@@ -30,6 +30,7 @@ struct Binding {
 }
 struct Checker {
     types: HashMap<String, TypeInfo>,
+    locations: HashMap<String, SourceLocation>,
     scopes: Vec<HashMap<String, Binding>>,
     function_return: Option<Type>,
     in_test: bool,
@@ -48,7 +49,7 @@ pub fn check(module: Module, _path: &Path) -> Result<CheckedModule, Diagnostics>
     let mut c = Checker::new();
     let mut external_symbols = HashMap::new();
     for item in &module.items {
-        c.declare(item)?;
+        c.declare(item).map_err(|error| at_item(error, item))?;
         if let Item::Extern { functions, .. } = item {
             for f in functions {
                 let signature = (
@@ -59,10 +60,12 @@ pub fn check(module: Module, _path: &Path) -> Result<CheckedModule, Diagnostics>
                     .insert(&f.symbol, signature.clone())
                     .is_some_and(|previous| previous != signature)
                 {
-                    return c.fail(format!(
-                        "conflicting declarations for external C symbol `{}`",
-                        f.symbol
-                    ));
+                    return c
+                        .fail(format!(
+                            "conflicting declarations for external C symbol `{}`",
+                            f.symbol
+                        ))
+                        .map_err(|error| at_item(error, item));
                 }
             }
         }
@@ -85,6 +88,13 @@ pub fn check(module: Module, _path: &Path) -> Result<CheckedModule, Diagnostics>
         captures: c.captures,
         constant_sources: c.constant_sources,
     })
+}
+fn at_item(error: Diagnostics, item: &Item) -> Diagnostics {
+    if let Some((path, span)) = item.source() {
+        error.at_source(path, span.clone())
+    } else {
+        error
+    }
 }
 impl Checker {
     fn contains_future(&self, ty: &Type) -> bool {
@@ -201,8 +211,15 @@ impl Checker {
         let mut names = self.types.keys().collect::<Vec<_>>();
         names.sort();
         for name in names {
-            visit(self, &named(name), &mut HashSet::new(), true)?;
-            visit(self, &named(name), &mut HashSet::new(), false)?;
+            for aliases_only in [true, false] {
+                visit(self, &named(name), &mut HashSet::new(), aliases_only).map_err(|error| {
+                    if let Some(location) = self.locations.get(name) {
+                        error.at_source(&location.path, location.span.clone())
+                    } else {
+                        error
+                    }
+                })?;
+            }
         }
         Ok(())
     }
@@ -231,6 +248,7 @@ impl Checker {
         }
         Self {
             types,
+            locations: HashMap::new(),
             scopes: vec![HashMap::new()],
             function_return: None,
             in_test: false,
@@ -248,6 +266,23 @@ impl Checker {
         Err(Diagnostics::one(s, 0..0))
     }
     fn declare(&mut self, item: &Item) -> Result<(), Diagnostics> {
+        let name = match item {
+            Item::Struct(s) => Some(&s.name),
+            Item::Enum(e) => Some(&e.name),
+            Item::TypeAlias { name, .. } => Some(name),
+            _ => None,
+        };
+        if let Some(name) = name
+            && let Some((path, span)) = item.source()
+        {
+            self.locations.insert(
+                name.clone(),
+                SourceLocation {
+                    path: path.into(),
+                    span: span.clone(),
+                },
+            );
+        }
         match item {
             Item::Extern { functions, .. } => {
                 for function in functions {
@@ -272,11 +307,7 @@ impl Checker {
         }
     }
     fn item(&mut self, item: &Item) -> Result<(), Diagnostics> {
-        self.item_inner(item).map_err(|error| match item {
-            Item::Function(f) => error.at_source(&f.source_path, f.span.clone()),
-            Item::Global(v) => error.at_source(&v.source_path, v.span.clone()),
-            _ => error,
-        })
+        self.item_inner(item).map_err(|error| at_item(error, item))
     }
     fn item_inner(&mut self, item: &Item) -> Result<(), Diagnostics> {
         match item {
@@ -293,6 +324,55 @@ impl Checker {
                         })
                     {
                         return self.fail("external symbol must be a C identifier");
+                    }
+                    if matches!(
+                        function.symbol.as_str(),
+                        "auto"
+                            | "break"
+                            | "case"
+                            | "char"
+                            | "const"
+                            | "continue"
+                            | "default"
+                            | "do"
+                            | "double"
+                            | "else"
+                            | "enum"
+                            | "extern"
+                            | "float"
+                            | "for"
+                            | "goto"
+                            | "if"
+                            | "inline"
+                            | "int"
+                            | "long"
+                            | "register"
+                            | "restrict"
+                            | "return"
+                            | "short"
+                            | "signed"
+                            | "sizeof"
+                            | "static"
+                            | "struct"
+                            | "switch"
+                            | "typedef"
+                            | "union"
+                            | "unsigned"
+                            | "void"
+                            | "volatile"
+                            | "while"
+                            | "_Alignas"
+                            | "_Alignof"
+                            | "_Atomic"
+                            | "_Bool"
+                            | "_Complex"
+                            | "_Generic"
+                            | "_Imaginary"
+                            | "_Noreturn"
+                            | "_Static_assert"
+                            | "_Thread_local"
+                    ) {
+                        return self.fail("external symbol cannot be a C keyword");
                     }
                     self.validate_type(&function.return_type)?;
                     if self.contains_future(&function.return_type) {
@@ -479,13 +559,14 @@ impl Checker {
         Ok(())
     }
     fn stmt(&mut self, s: &Stmt) -> Result<(), Diagnostics> {
-        self.stmt_inner(s).map_err(|error| match s {
-            Stmt::Var(v) => error.at_source(&v.source_path, v.span.clone()),
-            _ => error,
+        self.stmt_inner(s).map_err(|error| match s.source() {
+            Some((path, span)) => error.at_source(path, span.clone()),
+            None => error,
         })
     }
     fn stmt_inner(&mut self, s: &Stmt) -> Result<(), Diagnostics> {
         match s {
+            Stmt::Located(statement, _) => self.stmt(statement)?,
             Stmt::LabeledIf { label, value } => {
                 self.loops.push((Some(label.clone()), false, false));
                 self.expr(value)?;
@@ -1412,16 +1493,20 @@ impl Checker {
         self.push();
         for (i, statement) in block.statements.iter().enumerate() {
             if i + 1 == block.statements.len()
-                && let Stmt::Expr(value) = statement
+                && let Stmt::Expr(value) = statement.unlocated()
             {
-                self.expected(value, expected)?;
+                self.expected(value, expected)
+                    .map_err(|error| match statement.source() {
+                        Some((path, span)) => error.at_source(path, span.clone()),
+                        None => error,
+                    })?;
                 continue;
             }
             self.stmt(statement)?;
         }
         let exits = block.statements.last().is_some_and(|s| {
             matches!(
-                s,
+                s.unlocated(),
                 Stmt::Expr(_) | Stmt::Break(Some(_), _) | Stmt::Return(_) | Stmt::Throw(_)
             )
         });
@@ -1515,14 +1600,17 @@ fn numeric(t: &Type) -> bool {
 }
 
 fn returns(block: &Block) -> bool {
-    block.statements.iter().any(|statement| match statement {
-        Stmt::Return(_) | Stmt::Throw(_) => true,
-        Stmt::Block(block) | Stmt::Lock { body: block, .. } => returns(block),
-        Stmt::Expr(Expr::If { arms, .. })
-        | Stmt::LabeledIf {
-            value: Expr::If { arms, .. },
-            ..
-        } => !arms.is_empty() && arms.iter().all(|(_, block)| returns(block)),
-        _ => false,
-    })
+    block
+        .statements
+        .iter()
+        .any(|statement| match statement.unlocated() {
+            Stmt::Return(_) | Stmt::Throw(_) => true,
+            Stmt::Block(block) | Stmt::Lock { body: block, .. } => returns(block),
+            Stmt::Expr(Expr::If { arms, .. })
+            | Stmt::LabeledIf {
+                value: Expr::If { arms, .. },
+                ..
+            } => !arms.is_empty() && arms.iter().all(|(_, block)| returns(block)),
+            _ => false,
+        })
 }

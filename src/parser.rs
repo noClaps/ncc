@@ -24,6 +24,12 @@ struct Parser {
 }
 
 impl Parser {
+    fn location(&self, start: usize) -> SourceLocation {
+        SourceLocation {
+            path: self.path.clone(),
+            span: start..self.tokens[self.pos.saturating_sub(1)].span.end,
+        }
+    }
     fn current(&self) -> &Token {
         &self.tokens[self.pos]
     }
@@ -91,6 +97,7 @@ impl Parser {
     }
     fn item(&mut self) -> Result<Item, Diagnostics> {
         if self.keyword(Keyword::Extern) {
+            let start = self.tokens[self.pos - 1].span.start;
             let path = match self.bump().kind {
                 TokenKind::String(path) => path,
                 _ => return self.error("expected external implementation path"),
@@ -134,6 +141,7 @@ impl Parser {
             self.bump();
 
             return Ok(Item::Extern {
+                location: self.location(start),
                 path,
                 alias,
                 functions,
@@ -147,11 +155,17 @@ impl Parser {
             return self.enum_item(public).map(Item::Enum);
         }
         if self.keyword(Keyword::Type) {
+            let start = self.tokens[self.pos - 1].span.start;
             let name = self.ident()?;
             self.expect(TokenKind::Assign)?;
             let ty = self.ty()?;
 
-            return Ok(Item::TypeAlias { public, name, ty });
+            return Ok(Item::TypeAlias {
+                location: self.location(start),
+                public,
+                name,
+                ty,
+            });
         }
         if self.at(&TokenKind::Keyword(Keyword::Fn))
             && !matches!(
@@ -203,6 +217,7 @@ impl Parser {
         Ok(result)
     }
     fn struct_item(&mut self, public: bool) -> Result<StructDecl, Diagnostics> {
+        let start = self.tokens[self.pos - 1].span.start;
         let name = self.ident()?;
         let generics = self.generics()?;
         self.expect(TokenKind::LBrace)?;
@@ -216,6 +231,7 @@ impl Parser {
         self.bump();
 
         Ok(StructDecl {
+            location: self.location(start),
             public,
             name,
             generics,
@@ -223,6 +239,7 @@ impl Parser {
         })
     }
     fn enum_item(&mut self, public: bool) -> Result<EnumDecl, Diagnostics> {
+        let start = self.tokens[self.pos - 1].span.start;
         let name = self.ident()?;
         let generics = self.generics()?;
         self.expect(TokenKind::LBrace)?;
@@ -246,6 +263,7 @@ impl Parser {
         self.bump();
 
         Ok(EnumDecl {
+            location: self.location(start),
             public,
             name,
             generics,
@@ -454,6 +472,15 @@ impl Parser {
         Ok(Block { statements })
     }
     fn stmt(&mut self) -> Result<Stmt, Diagnostics> {
+        let start = self.current().span.start;
+        let statement = self.stmt_inner()?;
+        if matches!(statement, Stmt::Var(_)) {
+            Ok(statement)
+        } else {
+            Ok(Stmt::Located(Box::new(statement), self.location(start)))
+        }
+    }
+    fn stmt_inner(&mut self) -> Result<Stmt, Diagnostics> {
         if self.keyword(Keyword::Fn) {
             if matches!(
                 self.tokens.get(self.pos + 1).map(|t| &t.kind),

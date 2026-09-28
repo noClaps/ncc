@@ -17,6 +17,7 @@ fn block<'a>(b: &'a Block, f: &mut impl FnMut(&'a Expr)) {
 }
 fn stmt<'a>(s: &'a Stmt, f: &mut impl FnMut(&'a Expr)) {
     match s {
+        Stmt::Located(statement, _) => stmt(statement, f),
         Stmt::Block(b) | Stmt::Lock { body: b, .. } => block(b, f),
         Stmt::Var(v) => expr(&v.value, f),
         Stmt::Assign { target, value } => {
@@ -141,6 +142,7 @@ fn rewrite_block(b: &mut Block, f: &mut impl FnMut(&mut Expr)) {
 }
 fn rewrite_stmt(s: &mut Stmt, f: &mut impl FnMut(&mut Expr)) {
     match s {
+        Stmt::Located(statement, _) => rewrite_stmt(statement, f),
         Stmt::Block(b) | Stmt::Lock { body: b, .. } => rewrite_block(b, f),
         Stmt::Var(v) => rewrite_expr(&mut v.value, f),
         Stmt::Assign { target, value } => {

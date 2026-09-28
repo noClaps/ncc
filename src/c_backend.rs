@@ -647,6 +647,9 @@ impl Emitter<'_> {
     }
     fn statement(&mut self, statement: &Stmt) -> Result<(), Diagnostics> {
         match statement {
+            Stmt::Located(inner, location) => self
+                .statement(inner)
+                .map_err(|error| error.at_source(&location.path, location.span.clone()))?,
             Stmt::LabeledIf { label, value } => {
                 let end = self.fresh();
                 self.loops
@@ -2365,7 +2368,7 @@ impl Emitter<'_> {
         self.scopes.push(HashMap::new());
         for (i, statement) in body.statements.iter().enumerate() {
             if i + 1 == body.statements.len()
-                && let Stmt::Expr(value) = statement
+                && let Stmt::Expr(value) = statement.unlocated()
             {
                 let (result, end, ty) = self.value_targets.last().unwrap().clone();
                 let value = self.expr_as(value, &ty)?;

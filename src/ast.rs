@@ -3,6 +3,12 @@ use std::ops::Range;
 pub type Span = Range<usize>;
 
 #[derive(Clone, Debug)]
+pub struct SourceLocation {
+    pub path: std::path::PathBuf,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
 pub struct Module {
     pub items: Vec<Item>,
 }
@@ -13,6 +19,7 @@ pub enum Item {
         alias: String,
     },
     Extern {
+        location: SourceLocation,
         path: String,
         alias: String,
         functions: Vec<FunctionDecl>,
@@ -20,6 +27,7 @@ pub enum Item {
     Struct(StructDecl),
     Enum(EnumDecl),
     TypeAlias {
+        location: SourceLocation,
         public: bool,
         name: String,
         ty: Type,
@@ -34,13 +42,30 @@ pub enum Item {
 }
 #[derive(Clone, Debug)]
 pub struct StructDecl {
+    pub location: SourceLocation,
     pub public: bool,
     pub name: String,
     pub generics: Vec<String>,
     pub fields: Vec<Field>,
 }
+impl Item {
+    pub fn source(&self) -> Option<(&std::path::Path, &Span)> {
+        match self {
+            Self::Function(f) => Some((&f.source_path, &f.span)),
+            Self::Global(v) => Some((&v.source_path, &v.span)),
+            Self::Struct(s) => Some((&s.location.path, &s.location.span)),
+            Self::Enum(e) => Some((&e.location.path, &e.location.span)),
+            Self::TypeAlias { location, .. } | Self::Extern { location, .. } => {
+                Some((&location.path, &location.span))
+            }
+            Self::Statement(statement) => statement.source(),
+            _ => None,
+        }
+    }
+}
 #[derive(Clone, Debug)]
 pub struct EnumDecl {
+    pub location: SourceLocation,
     pub public: bool,
     pub name: String,
     pub generics: Vec<String>,
@@ -116,6 +141,7 @@ pub struct Block {
 }
 #[derive(Clone, Debug)]
 pub enum Stmt {
+    Located(Box<Stmt>, SourceLocation),
     LabeledIf {
         label: String,
         value: Expr,
@@ -148,6 +174,27 @@ pub enum Stmt {
         name: String,
         body: Block,
     },
+}
+impl Stmt {
+    pub fn unlocated(&self) -> &Self {
+        match self {
+            Self::Located(statement, _) => statement.unlocated(),
+            _ => self,
+        }
+    }
+    pub fn unlocated_mut(&mut self) -> &mut Self {
+        match self {
+            Self::Located(statement, _) => statement.unlocated_mut(),
+            _ => self,
+        }
+    }
+    pub fn source(&self) -> Option<(&std::path::Path, &Span)> {
+        match self {
+            Self::Located(_, location) => Some((&location.path, &location.span)),
+            Self::Var(v) => Some((&v.source_path, &v.span)),
+            _ => None,
+        }
+    }
 }
 #[derive(Clone, Debug)]
 pub enum Expr {
