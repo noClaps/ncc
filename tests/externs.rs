@@ -74,7 +74,7 @@ extern "native.c" as one { fn first(int n) int = "first" }
 extern "native.c" as two { fn first(str n) int = "first" }
 "#;
     assert!(
-        ncc::check_source(conflict, &input)
+        ncc::compile_source(conflict, &input)
             .unwrap_err()
             .to_string()
             .contains("conflicting declarations")

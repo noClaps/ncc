@@ -1,4 +1,4 @@
-//! Shared read-only expression traversal for linting and reachability.
+//! Shared expression traversal for compile-time evaluation and reachability.
 use crate::ast::*;
 
 pub fn item<'a>(item: &'a Item, f: &mut impl FnMut(&'a Expr)) {

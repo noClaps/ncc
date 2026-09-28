@@ -7,35 +7,24 @@ use std::{
 type Names = HashMap<String, String>;
 
 pub fn load(module: Module, path: &Path) -> Result<Module, Diagnostics> {
-    load_with_sources(module, path, &HashMap::new())
-}
-
-/// Unsaved editor buffers take precedence over files, including new files.
-pub fn load_with_sources(
-    module: Module,
-    path: &Path,
-    sources: &HashMap<PathBuf, String>,
-) -> Result<Module, Diagnostics> {
     let mut loader = Loader {
         done: HashMap::new(),
         active: HashSet::new(),
         items: vec![],
         next: 0,
-        sources,
     };
     loader.visit(module, path, true)?;
     Ok(Module {
         items: loader.items,
     })
 }
-struct Loader<'a> {
+struct Loader {
     done: HashMap<PathBuf, Names>,
     active: HashSet<PathBuf>,
     items: Vec<Item>,
     next: usize,
-    sources: &'a HashMap<PathBuf, String>,
 }
-impl Loader<'_> {
+impl Loader {
     fn visit(&mut self, mut module: Module, path: &Path, root: bool) -> Result<Names, Diagnostics> {
         let key = source_key(path);
         if let Some(exports) = self.done.get(&key) {
@@ -82,7 +71,7 @@ impl Loader<'_> {
                         .unwrap_or(Path::new("."))
                         .join(&*imported)
                         .with_extension("nc");
-                    let source = read_source(&imported_path, self.sources).map_err(|e| {
+                    let source = std::fs::read_to_string(&imported_path).map_err(|e| {
                         Diagnostics::one(
                             format!("cannot import {}: {e}", imported_path.display()),
                             0..0,
@@ -158,12 +147,7 @@ pub fn source_key(path: &Path) -> PathBuf {
     }
     normalized
 }
-pub fn read_source(path: &Path, sources: &HashMap<PathBuf, String>) -> std::io::Result<String> {
-    sources
-        .get(&source_key(path))
-        .cloned()
-        .map_or_else(|| std::fs::read_to_string(path), Ok)
-}
+
 fn symbols(item: &Item) -> Vec<(&str, bool)> {
     match item {
         Item::Function(f) => vec![(&f.name, f.public)],

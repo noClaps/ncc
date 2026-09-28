@@ -55,7 +55,7 @@ test "embedded" {{
         assert!(output.status.success());
         assert_eq!(output.stdout, b"256\n");
     }
-    let error = ncc::check_source("byte[] bytes = @embed(\"missing\")", &input).unwrap_err();
+    let error = ncc::compile_source("byte[] bytes = @embed(\"missing\")", &input).unwrap_err();
     assert!(error.to_string().contains("cannot embed"));
     assert_eq!(error.0[0].path.as_ref(), Some(&input));
     assert_eq!(error.0[0].span.start, 15);
@@ -67,7 +67,7 @@ test "embedded" {{
         "@embed(\"{variable}\")",
     ] {
         assert!(
-            ncc::check_source(&format!("_ = {invalid}"), &input).is_err(),
+            ncc::compile_source(&format!("_ = {invalid}"), &input).is_err(),
             "{invalid}"
         );
     }
@@ -83,7 +83,7 @@ fn rejects_symlink_files_and_parent_directories() {
     std::os::unix::fs::symlink("actual/data", root.join("link")).unwrap();
     std::os::unix::fs::symlink("actual", root.join("directory-link")).unwrap();
     for name in ["link", "directory-link/data"] {
-        let error = ncc::check_source(&format!("_ = @embed(\"{name}\")"), &root.join("main.nc"))
+        let error = ncc::compile_source(&format!("_ = @embed(\"{name}\")"), &root.join("main.nc"))
             .unwrap_err();
         assert!(
             error.to_string().contains("does not follow symlinks"),
@@ -93,7 +93,7 @@ fn rejects_symlink_files_and_parent_directories() {
 }
 
 #[test]
-fn computed_paths_follow_lexical_constants_in_debug_release_and_check() {
+fn computed_paths_follow_lexical_constants_in_debug_and_release() {
     let temp = ncc::temp::Directory::new().unwrap();
     let root = temp.path().canonicalize().unwrap();
     fs::write(root.join("data1.bin"), [0, 42, 255]).unwrap();
@@ -127,8 +127,7 @@ test "computed paths" {
 @println(a)
 "#;
     fs::write(&input, source).unwrap();
-    ncc::check_source(source, &input).unwrap();
-    ncc::lint::check(source, &input).unwrap();
+    ncc::compile_source(source, &input).unwrap();
     for mode in ["-d", "-r"] {
         let output = Command::new(env!("CARGO_BIN_EXE_ncc"))
             .args(["run", input.to_str().unwrap(), mode])
@@ -157,7 +156,7 @@ fn runtime_dependent_paths_fail_without_executing_effects() {
         "fn loop() str { return loop() }\nbyte[] b = @embed(loop())",
         "fn path() str { return \"data\" }\nfn f((fn() str) path) byte[] { return @embed(path()) }",
     ] {
-        let error = ncc::check_source(source, &input).unwrap_err();
+        let error = ncc::compile_source(source, &input).unwrap_err();
         assert!(
             error.to_string().contains("compile-time string"),
             "{source}: {error}"

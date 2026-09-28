@@ -3,12 +3,8 @@ pub mod ast;
 #[path = "c_backend.rs"]
 pub mod codegen;
 pub mod diagnostic;
-pub mod formatter;
 pub mod generics;
 pub mod lexer;
-pub mod lint;
-#[cfg(feature = "lsp")]
-pub mod lsp;
 pub mod modules;
 pub mod optimizer;
 pub mod parser;
@@ -41,11 +37,4 @@ pub fn compile_source_with_options(
         return codegen::emit(&checked);
     }
     codegen::emit(&checked)
-}
-
-/// Parse and type-check one NC source module.
-pub fn check_source(source: &str, path: &Path) -> Result<(), Diagnostics> {
-    let tokens = lexer::lex(source)?;
-    let module = modules::load(parser::parse_at(tokens, path)?, path)?;
-    optimizer::resolve_embeds(sema::check(generics::specialize(module)?, path)?, path).map(|_| ())
 }

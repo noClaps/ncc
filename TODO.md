@@ -18,16 +18,10 @@
   unrelated unknown-name error.
 - Extend compile-time evaluation to remaining operations while retaining safe
   runtime fallbacks when evaluation reaches its fuel or depth limits.
-- Implement canonical spacing and layout formatting beyond indentation.
 
 ## Verification and cleanup
 
 - Expand negative, debug/release differential, concurrency, and full-specification
-  tests across the compiler and language server.
+  tests across the compiler.
 - Use the expanded tests to simplify unnecessary code while preserving behavior
   and keeping dependencies minimal.
-
-## Language server (lower priority)
-
-- Complete member-type resolution and expand code actions toward Gleam LSP parity.
-- Improve workspace indexing performance and resilience during invalid edits.

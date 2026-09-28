@@ -287,7 +287,7 @@ fut Data work = async construct([4])
         "struct S { int n } @println(S)",
         "enum E { A } E e = E",
     ] {
-        assert!(ncc::check_source(source, Path::new("types.nc")).is_err());
+        assert!(ncc::compile_source(source, Path::new("types.nc")).is_err());
     }
 }
 

@@ -4,27 +4,28 @@
 
 - Implement the full language and compiler toolchain described in `docs/design.md`.
   Read the relevant specification and recent documentation changes before editing.
-- Prioritize compiler correctness, verification, and cleanup. LSP improvements
-  come afterward; the eventual LSP usability target is Gleam.
+- Prioritize compiler correctness, verification, and cleanup. Continue until the
+  remaining-work list is complete; report blockers rather than claiming completion.
 - Maintain the root `TODO.md` as a remaining-work list only. Remove completed
   items, narrow partially completed items, and add newly discovered gaps. Do not
   treat passing tests as proof that the specification is fully implemented.
-- Keep the standalone LSP. Do not add a Tree-sitter grammar, editor plugins,
-  extensions, or editor setup files; these are outside the requested scope.
+- The CLI provides `build` and `run`. Do not restore `check`, `fmt`, or `lsp`,
+  their linter/formatter/language-server code, a Tree-sitter grammar, editor
+  plugins, extensions, or editor setup files. These are outside the requested scope.
 - Do not implement a standard library. External implementations are C-only for
   now; an Etch backend is out of scope.
 
 ## Implementation constraints
 
 - Continue with Rust. Keep dependencies minimal: the compiler core must remain
-  self-contained and build without production dependencies when default features
-  are disabled. The user plans to self-host the compiler later.
+  self-contained and build without production dependencies. The user plans to
+  self-host the compiler later.
 - Prefer less code. Remove or rewrite obsolete code and simplify implementations
   as tests establish that behavior is preserved.
 - Ask when language semantics are materially ambiguous rather than inventing
   behavior. Previously resolved decisions:
-  - Anonymous functions capture surrounding values by value. Lint captures and
-    recommend explicit function parameters instead.
+  - Anonymous functions capture surrounding values by value. Prefer explicit
+    parameters in examples; the previously requested capture linter is removed.
   - Reject equality and string conversion for functions and unawaited futures,
     including when nested in containers.
   - Numeric byte-array encoding may use the simplest consistent implementation;

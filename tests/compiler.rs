@@ -39,14 +39,14 @@ fn compiles_and_runs_functions_conditionals_and_output() {
 #[test]
 fn rejects_immutable_assignment() {
     let source = "test \"immutable\" { int value = 1 value = 2 }";
-    let error = ncc::check_source(source, std::path::Path::new("test.nc")).unwrap_err();
+    let error = ncc::compile_source(source, std::path::Path::new("test.nc")).unwrap_err();
     assert!(error.to_string().contains("cannot mutate immutable"));
 }
 
 #[test]
 fn allows_top_level_builtin_calls() {
     let source = "@print(\"Hello world\")";
-    ncc::check_source(source, std::path::Path::new("hello-world.nc")).unwrap();
+    ncc::compile_source(source, std::path::Path::new("hello-world.nc")).unwrap();
     let c = ncc::compile_source(source, std::path::Path::new("hello-world.nc")).unwrap();
     assert!(c.contains("fwrite(") && c.contains(", stdout)"));
     assert!(c.contains("\"Hello world\""));
@@ -170,7 +170,7 @@ fn supports_multiple_conditional_patterns() {
 #[test]
 fn explains_missing_conditional_arrow() {
     let source = "test \"bad conditional\" { if 1 { 1 { } } }";
-    let error = ncc::check_source(source, std::path::Path::new("bad.nc")).unwrap_err();
+    let error = ncc::compile_source(source, std::path::Path::new("bad.nc")).unwrap_err();
     assert!(
         error
             .to_string()

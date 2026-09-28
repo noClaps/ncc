@@ -18,7 +18,6 @@ is ongoing; see [the remaining work](TODO.md).
 make build
 target/release/ncc run example.nc
 target/release/ncc build example.nc --release -o example.c
-target/release/ncc check example.nc
 target/release/ncc build --help
 ```
 
@@ -32,11 +31,6 @@ precedence. Native builds require the macOS C toolchain. `@target()` is a
 compile-time `(OS, architecture)` tuple. `@args()` and `@env()` read the running
 program's arguments and environment, never the compiler's. Pass arguments with
 `ncc run program.nc -- one two --help`.
-
-`check` performs mandatory checks and emits non-fatal lint warnings, including
-`capture`, which recommends passing function parameters instead of capturing
-surrounding values. Suppress it for a file with
-`// @ncc lint disable capture`. Imported files are also checked.
 
 Release builds perform bounded, memoized, type-aware constant evaluation of pure
 functions and loops, remove unreachable functions, and use the C compiler's
@@ -52,24 +46,10 @@ type's range. Effects, unsupported operations, and exhausted evaluation budgets
 remain runtime code; futures and external calls are never executed by the
 optimiser.
 
-## Editor tooling
-
-`ncc lsp` provides versioned incremental synchronization, diagnostics, formatting,
-local definition navigation, documentation hover, completion, and symbols from
-open documents. Imports are checked against unsaved buffers, and dependents are
-rechecked when those buffers change or close. Definition and documentation lookup
-also resolve exported import members, including unsaved files. Arbitrary struct
-members and every pattern binding are not yet indexed.
-
-Editor plugins and configuration are left to users; the standalone language
-server remains available through `ncc lsp`.
-
 ## Dependencies and self-hosting
 
-The compiler core needs only Rust's standard library. Build it with
-`cargo build --release --no-default-features` for **zero production crate
-dependencies**. The optional, default-enabled `lsp` feature uses `serde_json`
-for the editor protocol. The Unicode reference package is test-only.
+The compiler needs only Rust's standard library and has no production crate
+dependencies. The Unicode reference package is test-only.
 
 Generated programs use C library facilities and, only for futures/mutexes,
 POSIX threads. Unicode grapheme segmentation uses checked-in Unicode 16 data

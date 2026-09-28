@@ -12,7 +12,6 @@ pub fn parse_at(tokens: Vec<Token>, path: &std::path::Path) -> Result<Module, Di
         tokens,
         pos: 0,
         path: path.to_path_buf(),
-        symbols: None,
     }
     .module()
 }
@@ -20,100 +19,9 @@ struct Parser {
     tokens: Vec<Token>,
     pos: usize,
     path: std::path::PathBuf,
-    symbols: Option<Vec<SourceSymbol>>,
 }
 
-/// Source-level declarations retained for editor navigation, before lowering.
-#[derive(Clone, Debug)]
-pub struct SourceSymbol {
-    pub name: String,
-    pub selection: Span,
-    pub declaration: Span,
-    pub scope: Option<Span>,
-    pub visible_from: usize,
-    pub kind: u32,
-    pub owner: Option<String>,
-    pub ty: Option<Type>,
-    pub generics: Vec<String>,
-}
-
-/// Keep declarations preceding a syntax error useful while editing incomplete code.
-pub fn source_symbols(tokens: Vec<Token>) -> Vec<SourceSymbol> {
-    if tokens.is_empty() {
-        return Vec::new();
-    }
-    let mut parser = Parser {
-        tokens,
-        pos: 0,
-        path: "<editor>".into(),
-        symbols: Some(Vec::new()),
-    };
-    let _ = parser.module();
-    parser.symbols.unwrap()
-}
 impl Parser {
-    fn symbol(&mut self, token: Token, start: usize, kind: u32, visible_from: usize) {
-        if let Some(symbols) = &mut self.symbols
-            && let TokenKind::Ident(name) = token.kind
-        {
-            symbols.push(SourceSymbol {
-                name,
-                selection: token.span,
-                declaration: start..self.tokens[self.pos.saturating_sub(1)].span.end,
-                scope: None,
-                visible_from,
-                kind,
-                owner: None,
-                ty: None,
-                generics: vec![],
-            });
-        }
-    }
-    fn typed_symbol(
-        &mut self,
-        token: Token,
-        start: usize,
-        kind: u32,
-        visible_from: usize,
-        ty: &Type,
-    ) {
-        self.symbol(token, start, kind, visible_from);
-        if let Some(symbol) = self.symbols.as_mut().and_then(|symbols| symbols.last_mut()) {
-            symbol.ty = Some(ty.clone());
-        }
-    }
-    fn symbol_generics(&mut self, generics: &[String]) {
-        if let Some(symbol) = self.symbols.as_mut().and_then(|symbols| symbols.last_mut()) {
-            symbol.generics = generics.to_vec();
-        }
-    }
-    fn symbol_count(&self) -> usize {
-        self.symbols.as_ref().map_or(0, Vec::len)
-    }
-    fn scope_symbols(&mut self, from: usize, start: usize) {
-        let end = if self.at(&TokenKind::Eof)
-            && self.tokens[self.pos.saturating_sub(1)].kind != TokenKind::RBrace
-        {
-            self.current().span.end + 1
-        } else {
-            self.tokens[self.pos.saturating_sub(1)].span.end
-        };
-        if let Some(symbols) = &mut self.symbols {
-            for symbol in &mut symbols[from..] {
-                if symbol.scope.is_none() {
-                    symbol.scope = Some(start..end);
-                }
-            }
-        }
-    }
-    fn member_symbols(&mut self, from: usize, owner: &str, start: usize) {
-        self.scope_symbols(from, start);
-        if let Some(symbols) = &mut self.symbols {
-            for symbol in &mut symbols[from..] {
-                symbol.owner = Some(owner.into());
-            }
-        }
-    }
     fn current(&self) -> &Token {
         &self.tokens[self.pos]
     }
@@ -175,25 +83,12 @@ impl Parser {
                 self.bump();
                 continue;
             }
-            let start = self.pos;
-            let symbols = self.symbol_count();
-            match self.item() {
-                Ok(item) => items.push(item),
-                Err(error) if self.symbols.is_none() => return Err(error),
-                Err(_) => {
-                    self.recover_editor_statement(start, symbols);
-                    if self.at(&TokenKind::RBrace) {
-                        self.bump();
-                    }
-                }
-            }
+            items.push(self.item()?);
         }
         Ok(Module { items })
     }
     fn item(&mut self) -> Result<Item, Diagnostics> {
         if self.keyword(Keyword::Extern) {
-            let symbol_start = self.symbol_count();
-            let start = self.tokens[self.pos - 1].span.start;
             let path = match self.bump().kind {
                 TokenKind::String(path) => path,
                 _ => return self.error("expected external implementation path"),
@@ -235,7 +130,7 @@ impl Parser {
                 });
             }
             self.bump();
-            self.scope_symbols(symbol_start, start);
+
             return Ok(Item::Extern {
                 path,
                 alias,
@@ -250,12 +145,10 @@ impl Parser {
             return self.enum_item(public).map(Item::Enum);
         }
         if self.keyword(Keyword::Type) {
-            let token = self.current().clone();
-            let start = self.tokens[self.pos - 1].span.start;
             let name = self.ident()?;
             self.expect(TokenKind::Assign)?;
             let ty = self.ty()?;
-            self.typed_symbol(token, start, 26, 0, &ty);
+
             return Ok(Item::TypeAlias { public, name, ty });
         }
         if self.at(&TokenKind::Keyword(Keyword::Fn))
@@ -308,25 +201,18 @@ impl Parser {
         Ok(result)
     }
     fn struct_item(&mut self, public: bool) -> Result<StructDecl, Diagnostics> {
-        let token = self.current().clone();
-        let start = self.tokens[self.pos - 1].span.start;
         let name = self.ident()?;
         let generics = self.generics()?;
         self.expect(TokenKind::LBrace)?;
         let mut fields = vec![];
-        let symbol_start = self.symbol_count();
         while !self.at(&TokenKind::RBrace) {
-            let field_start = self.current().span.start;
             let ty = self.ty()?;
-            let field_token = self.current().clone();
             let name = self.ident()?;
-            self.typed_symbol(field_token, field_start, 8, 0, &ty);
+
             fields.push(Field { name, ty });
         }
         self.bump();
-        self.member_symbols(symbol_start, &name, start);
-        self.symbol(token, start, 23, 0);
-        self.symbol_generics(&generics);
+
         Ok(StructDecl {
             public,
             name,
@@ -335,17 +221,11 @@ impl Parser {
         })
     }
     fn enum_item(&mut self, public: bool) -> Result<EnumDecl, Diagnostics> {
-        let token = self.current().clone();
-        let start = self.tokens[self.pos - 1].span.start;
         let name = self.ident()?;
         let generics = self.generics()?;
         self.expect(TokenKind::LBrace)?;
         let mut variants = vec![];
-        let symbol_start = self.symbol_count();
-        let owner = name.clone();
         while !self.at(&TokenKind::RBrace) {
-            let variant_token = self.current().clone();
-            let variant_start = variant_token.span.start;
             let name = self.ident()?;
             let mut values = vec![];
             if self.at(&TokenKind::LParen) {
@@ -358,24 +238,11 @@ impl Parser {
                 }
                 let _ = self.bump();
             }
-            let enum_type = Type::Named(owner.clone(), vec![]);
-            self.typed_symbol(
-                variant_token,
-                variant_start,
-                22,
-                0,
-                &if values.is_empty() {
-                    enum_type
-                } else {
-                    Type::Function(values.clone(), Box::new(enum_type))
-                },
-            );
+
             variants.push(Variant { name, values });
         }
         self.bump();
-        self.member_symbols(symbol_start, &name, start);
-        self.symbol(token, start, 10, 0);
-        self.symbol_generics(&generics);
+
         Ok(EnumDecl {
             public,
             name,
@@ -385,9 +252,6 @@ impl Parser {
     }
     fn function(&mut self, public: bool) -> Result<Function, Diagnostics> {
         let start = self.current().span.start;
-        let declaration_start = self.tokens[self.pos - 1].span.start;
-        let token = self.current().clone();
-        let symbol_start = self.symbol_count();
         let name = self.ident()?;
         let generics = self.generics()?;
         let params = self.params()?;
@@ -406,18 +270,7 @@ impl Parser {
             false
         };
         let body = self.block()?;
-        self.scope_symbols(symbol_start, start);
-        self.typed_symbol(
-            token,
-            declaration_start,
-            12,
-            0,
-            &Type::Function(
-                params.iter().map(|p| p.ty.clone()).collect(),
-                Box::new(return_type.clone()),
-            ),
-        );
-        self.symbol_generics(&generics);
+
         Ok(Function {
             source_path: self.path.clone(),
             span: start..self.tokens[self.pos - 1].span.end,
@@ -434,11 +287,9 @@ impl Parser {
         self.expect(TokenKind::LParen)?;
         let mut out = vec![];
         while !self.at(&TokenKind::RParen) {
-            let start = self.current().span.start;
             let ty = self.ty()?;
-            let token = self.current().clone();
             let name = self.ident()?;
-            self.typed_symbol(token, start, 13, 0, &ty);
+
             out.push(Param { name, ty });
             if !self.at(&TokenKind::RParen) {
                 self.expect(TokenKind::Comma)?
@@ -560,7 +411,6 @@ impl Parser {
         let mutex = self.keyword(Keyword::Mutex);
         let mutable = self.keyword(Keyword::Mut);
         let mut ty = self.ty()?;
-        let mut names = vec![self.current().clone()];
         let mut pattern = Pattern::Name(self.ident()?);
         if self.at(&TokenKind::Comma) {
             let mut types = vec![ty];
@@ -568,7 +418,6 @@ impl Parser {
             while self.at(&TokenKind::Comma) {
                 self.bump();
                 types.push(self.ty()?);
-                names.push(self.current().clone());
                 patterns.push(Pattern::Name(self.ident()?));
             }
             ty = Type::Tuple(types);
@@ -576,23 +425,6 @@ impl Parser {
         }
         self.expect(TokenKind::Assign)?;
         let value = self.expr(0)?;
-        let types = if matches!(pattern, Pattern::Tuple(_)) {
-            let Type::Tuple(types) = &ty else {
-                unreachable!()
-            };
-            types.clone()
-        } else {
-            vec![ty.clone()]
-        };
-        for (token, binding_type) in names.into_iter().zip(types) {
-            self.typed_symbol(
-                token,
-                start,
-                if mutable { 13 } else { 14 },
-                self.tokens[self.pos - 1].span.end,
-                &binding_type,
-            );
-        }
         Ok(VarDecl {
             source_path: self.path.clone(),
             span: start..self.tokens[self.pos - 1].span.end,
@@ -605,48 +437,13 @@ impl Parser {
         })
     }
     fn block(&mut self) -> Result<Block, Diagnostics> {
-        let start = self.current().span.start;
-        let symbol_start = self.symbol_count();
         self.expect(TokenKind::LBrace)?;
         let mut statements = vec![];
         while !self.at(&TokenKind::RBrace) {
-            if self.at(&TokenKind::Eof) && self.symbols.is_some() {
-                break;
-            }
-            let start = self.pos;
-            let symbols = self.symbol_count();
-            match self.stmt() {
-                Ok(statement) => statements.push(statement),
-                Err(error) if self.symbols.is_none() => return Err(error),
-                Err(_) => self.recover_editor_statement(start, symbols),
-            }
+            statements.push(self.stmt()?);
         }
-        if self.at(&TokenKind::RBrace) {
-            self.bump();
-        }
-        self.scope_symbols(symbol_start, start);
+        self.bump();
         Ok(Block { statements })
-    }
-    /// Recovery is only enabled for the editor index, never compilation.
-    /// Re-scan from the failed statement so partially consumed tokens cannot
-    /// swallow the next line or leak unfinished declarations into another scope.
-    fn recover_editor_statement(&mut self, start: usize, symbols: usize) {
-        self.symbols.as_mut().unwrap().truncate(symbols);
-        self.pos = start;
-        let mut braces = 0usize;
-        while !self.at(&TokenKind::Eof) {
-            if braces == 0
-                && (self.at(&TokenKind::RBrace)
-                    || (self.pos > start && self.current().newline_before))
-            {
-                break;
-            }
-            match self.bump().kind {
-                TokenKind::LBrace => braces += 1,
-                TokenKind::RBrace => braces = braces.saturating_sub(1),
-                _ => {}
-            }
-        }
     }
     fn stmt(&mut self) -> Result<Stmt, Diagnostics> {
         if self.keyword(Keyword::Fn) {
@@ -670,7 +467,6 @@ impl Parser {
                     value: Expr::Lambda(Box::new(function)),
                 }));
             }
-            let token = self.current().clone();
             let start = self.tokens[self.pos - 1].span.start;
             let name = self.ident()?;
             self.expect(TokenKind::Assign)?;
@@ -682,7 +478,7 @@ impl Parser {
                 f.params.iter().map(|p| p.ty.clone()).collect(),
                 Box::new(f.return_type.clone()),
             );
-            self.typed_symbol(token, start, 12, self.tokens[self.pos - 1].span.end, &ty);
+
             return Ok(Stmt::Var(VarDecl {
                 source_path: self.path.clone(),
                 span: start..self.tokens[self.pos - 1].span.end,
@@ -760,17 +556,13 @@ impl Parser {
             return Ok(Stmt::Assert(self.expr(0)?));
         }
         if self.keyword(Keyword::For) {
-            let token = self.current().clone();
             let name = self.ident()?;
             if !self.keyword(Keyword::In) {
                 return self.error("expected `in`");
             };
             let iterable = self.expr(0)?;
-            let start = self.current().span.start;
             let body = self.block()?;
-            let symbols = self.symbol_count();
-            self.symbol(token, start, 13, start);
-            self.scope_symbols(symbols, start);
+
             return Ok(Stmt::For {
                 label,
                 name,
@@ -887,13 +679,10 @@ impl Parser {
                 continue;
             }
             if min == 0 && self.keyword(Keyword::Catch) {
-                let symbols = self.symbol_count();
-                let token = self.current().clone();
-                let start = token.span.start;
                 let name = self.ident()?;
-                self.symbol(token, start, 13, start);
+
                 let body = self.block()?;
-                self.scope_symbols(symbols, start);
+
                 left = Expr::Catch {
                     value: Box::new(left),
                     name,
@@ -983,7 +772,6 @@ impl Parser {
     fn prefix(&mut self) -> Result<Expr, Diagnostics> {
         let start = self.current().span.start;
         if self.keyword(Keyword::Fn) {
-            let symbol_start = self.symbol_count();
             let params = self.params()?;
             let return_type = if self.at(&TokenKind::LBrace) {
                 Type::void()
@@ -991,7 +779,7 @@ impl Parser {
                 self.ty()?
             };
             let body = self.block()?;
-            self.scope_symbols(symbol_start, start);
+
             return Ok(Expr::Lambda(Box::new(Function {
                 source_path: self.path.clone(),
                 span: start..self.tokens[self.pos - 1].span.end,
@@ -1113,7 +901,6 @@ impl Parser {
         self.expect(TokenKind::LBrace)?;
         let mut arms = vec![];
         while !self.at(&TokenKind::RBrace) {
-            let pattern_start = self.pos;
             let mut patterns = vec![self.pattern()?];
             while self.at(&TokenKind::Comma) {
                 self.bump();
@@ -1123,52 +910,8 @@ impl Parser {
                 return self.error("expected `->` after conditional pattern(s)");
             }
             self.bump();
-            let symbol_start = self.symbol_count();
-            let start = self.tokens[pattern_start].span.start;
-            if self.symbols.is_some() {
-                fn names(pattern: &Pattern, out: &mut Vec<String>) {
-                    match pattern {
-                        Pattern::Name(n) => out.push(n.clone()),
-                        Pattern::Tuple(ps)
-                        | Pattern::Array(ps)
-                        | Pattern::Variant { values: ps, .. } => {
-                            for p in ps {
-                                names(p, out);
-                            }
-                        }
-                        Pattern::Struct { fields, .. } => {
-                            for (_, p) in fields {
-                                names(p, out);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                let mut bindings = Vec::new();
-                for pattern in &patterns {
-                    names(pattern, &mut bindings);
-                }
-                bindings.sort();
-                bindings.dedup();
-                for binding in bindings {
-                    let existing = self.symbols.as_ref().unwrap().iter().any(|s| {
-                        s.name == binding
-                            && s.owner.is_none()
-                            && s.visible_from <= start
-                            && s.scope.as_ref().is_none_or(|scope| scope.contains(&start))
-                    });
-                    if !existing
-                        && let Some(token) = self.tokens[pattern_start..self.pos]
-                            .iter()
-                            .find(|t| matches!(&t.kind, TokenKind::Ident(n) if *n == binding))
-                            .cloned()
-                    {
-                        self.symbol(token, start, 13, start);
-                    }
-                }
-            }
             let body = self.block()?;
-            self.scope_symbols(symbol_start, start);
+
             arms.push((patterns, body));
         }
         self.bump();
@@ -1227,7 +970,6 @@ impl Parser {
                 path: self.path.clone(),
                 tokens: crate::lexer::lex(&text[start..end])?,
                 pos: 0,
-                symbols: None,
             };
             let value = parser.expr(0)?;
             parser.expect(TokenKind::Eof)?;

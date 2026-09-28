@@ -91,14 +91,14 @@ str os, str arch = @target()
         assert_eq!(output.status.success(), target == "macos-arm64");
     }
     for name in ["args", "env", "target"] {
-        let error = ncc::check_source(&format!("_ = @{name}(1)"), &file).unwrap_err();
+        let error = ncc::compile_source(&format!("_ = @{name}(1)"), &file).unwrap_err();
         assert!(error.to_string().contains("expects no arguments"));
     }
 }
 
 #[test]
 fn help_and_invalid_options() {
-    for command in ["build", "run", "check", "fmt", "lsp"] {
+    for command in ["build", "run"] {
         let out = cli(&[command, "--help"]);
         assert!(out.status.success());
         assert!(String::from_utf8_lossy(&out.stdout).contains(&format!("Usage: ncc {command}")));
@@ -120,6 +120,34 @@ fn help_and_invalid_options() {
         assert!(!String::from_utf8_lossy(&out.stderr).contains("No such file"));
     }
 }
+#[test]
+fn removed_commands_are_rejected_without_touching_input() {
+    let dir = ncc::temp::Directory::new().unwrap();
+    let path = dir.path().join("input.nc");
+    let source = "  @println(1)\n";
+    fs::write(&path, source).unwrap();
+    let help = cli(&["--help"]);
+    let help = String::from_utf8(help.stdout).unwrap();
+    for command in ["check", "fmt", "lsp"] {
+        assert!(
+            !help
+                .lines()
+                .any(|line| line.trim_start().starts_with(command))
+        );
+        for args in [
+            vec![command],
+            vec![command, "--help"],
+            vec![command, path.to_str().unwrap()],
+        ] {
+            let out = cli(&args);
+            assert!(!out.status.success());
+            assert!(String::from_utf8_lossy(&out.stderr).contains("unknown command"));
+        }
+    }
+    assert_eq!(fs::read_to_string(&path).unwrap(), source);
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
 #[test]
 fn release_changes_generated_code_and_detects_overflow() {
     let dir = ncc::temp::Directory::new().unwrap();
@@ -151,25 +179,4 @@ fn release_changes_generated_code_and_detects_overflow() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("integer overflow"));
     assert_eq!(fs::read_to_string(output).unwrap(), release);
     assert!(!cli(&["build", file, "-o", file]).status.success());
-}
-#[test]
-fn capture_warnings_imports_and_suppression() {
-    let dir = ncc::temp::Directory::new().unwrap();
-    let root = dir.path().join("main.nc");
-    let imported = dir.path().join("lib.nc");
-    let source = "pub fn make(int n) (fn() int) { return fn() int { return n } }";
-    fs::write(&imported, source).unwrap();
-    fs::write(&root, "import { \"lib\" as lib } _ = lib.make(1)").unwrap();
-    let out = cli(&["check", root.to_str().unwrap()]);
-    assert!(out.status.success());
-    let warning = String::from_utf8_lossy(&out.stderr);
-    assert!(warning.contains("lib.nc:1:"));
-    assert!(warning.contains("warning: [capture]"));
-    assert!(warning.contains("function parameters"));
-    fs::write(&imported, format!("// @ncc lint disable capture\n{source}")).unwrap();
-    let out = cli(&["check", root.to_str().unwrap()]);
-    assert!(out.status.success());
-    assert!(out.stderr.is_empty());
-    let clean = "fn make(int n) (fn(int) int) { return fn(int x) int { return x } }";
-    assert!(ncc::lint::check(clean, &root).unwrap().is_empty());
 }

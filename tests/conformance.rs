@@ -44,7 +44,7 @@ int fallback = native.sum([]) catch err { 42 }
         assert_eq!(output.stdout, b"6\n1\n42\n");
     }
     let rejects_external = |source: &str, expected: &str| {
-        let error = ncc::check_source(source, &input).unwrap_err().to_string();
+        let error = ncc::compile_source(source, &input).unwrap_err().to_string();
         assert!(error.contains(expected), "{error}");
     };
     fs::write(directory.path().join("native.etch"), "").unwrap();
@@ -789,7 +789,7 @@ extern "native.c" as native { fn add(int a, int b) int = "native_add" }
     assert_eq!(output.stdout, b"51\n3\nfour\n(6, 7)\n");
     for name in ["private_first", "private_second"] {
         assert!(
-            ncc::check_source(
+            ncc::compile_source(
                 &format!("import {{ \"one\" as one }} @println(one.{name})"),
                 &main
             )
@@ -799,14 +799,14 @@ extern "native.c" as native { fn add(int a, int b) int = "native_add" }
         );
     }
     assert!(
-        ncc::check_source("import { \"one\" as one } @println(one.hidden)", &main)
+        ncc::compile_source("import { \"one\" as one } @println(one.hidden)", &main)
             .unwrap_err()
             .to_string()
             .contains("does not export")
     );
     fs::write(dir.path().join("cycle.nc"), "import { \"cycle\" as again }").unwrap();
     assert!(
-        ncc::check_source("import { \"cycle\" as cycle }", &main)
+        ncc::compile_source("import { \"cycle\" as cycle }", &main)
             .unwrap_err()
             .to_string()
             .contains("cyclic")
@@ -1000,7 +1000,7 @@ fn success(source: &str, stdout: &str) {
     }
 }
 fn rejects(source: &str, message: &str) {
-    let error = ncc::check_source(source, Path::new("test.nc")).unwrap_err();
+    let error = ncc::compile_source(source, Path::new("test.nc")).unwrap_err();
     assert!(error.to_string().contains(message), "{error}");
 }
 
