@@ -11,6 +11,7 @@ pub struct CheckedModule {
     pub expression_types: HashMap<usize, Type>,
     pub captures: HashMap<usize, Vec<(String, Type, bool)>>,
     pub constant_sources: HashMap<usize, Option<usize>>,
+    pub constant_patterns: HashMap<usize, (Pattern, Type)>,
 }
 #[derive(Clone, Debug)]
 pub enum TypeInfo {
@@ -43,6 +44,7 @@ struct Checker {
     capture_frames: Vec<(usize, HashMap<String, Binding>)>,
     captures: HashMap<usize, Vec<(String, Type, bool)>>,
     constant_sources: HashMap<usize, Option<usize>>,
+    constant_patterns: HashMap<usize, (Pattern, Type)>,
 }
 
 pub fn check(module: Module, _path: &Path) -> Result<CheckedModule, Diagnostics> {
@@ -87,6 +89,7 @@ pub fn check(module: Module, _path: &Path) -> Result<CheckedModule, Diagnostics>
         expression_types: c.expression_types,
         captures: c.captures,
         constant_sources: c.constant_sources,
+        constant_patterns: c.constant_patterns,
     })
 }
 fn at_item(error: Diagnostics, item: &Item) -> Diagnostics {
@@ -260,6 +263,7 @@ impl Checker {
             capture_frames: vec![],
             captures: HashMap::new(),
             constant_sources: HashMap::new(),
+            constant_patterns: HashMap::new(),
         }
     }
     fn fail<T>(&self, s: impl Into<String>) -> Result<T, Diagnostics> {
@@ -541,13 +545,18 @@ impl Checker {
         self.scopes.iter().rev().find_map(|s| s.get(n))
     }
     fn mark_mutex(&mut self, v: &VarDecl) {
-        if let Pattern::Name(name) = &v.pattern
-            && let Some(binding) = self.scopes.last_mut().unwrap().get_mut(name)
-        {
-            binding.mutex = v.mutex;
-            if !v.mutable && !v.mutex {
-                binding.initializer = Some(&v.value as *const Expr as usize);
+        let key = &v.value as *const Expr as usize;
+        for name in v.binding_names() {
+            if let Some(binding) = self.scopes.last_mut().unwrap().get_mut(name) {
+                binding.mutex = v.mutex;
+                if !v.mutable && !v.mutex {
+                    binding.initializer = Some(key);
+                }
             }
+        }
+        if !v.mutable && !v.mutex && matches!(v.pattern, Pattern::Tuple(_)) {
+            self.constant_patterns
+                .insert(key, (v.pattern.clone(), v.ty.clone()));
         }
     }
     fn block(&mut self, b: &Block) -> Result<(), Diagnostics> {

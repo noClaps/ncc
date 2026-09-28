@@ -118,9 +118,22 @@ byte[] nested = @embed(if @embed("name").len {
     9 -> { "data1.bin" }
     _ -> { "missing" }
 })
+str first, str _ = ("data1.bin", "ignored")
+str _, (str, int) tail = ("ignored", "data1.bin", 5)
+str grouped, (int, str) rest = ("data1.bin", (1, "ignored"))
+byte[] tuple_path = @embed(first)
+byte[] partial_path = @embed(tail[0])
+byte[] grouped_path = @embed(grouped)
+fn tuple_local() byte[] {
+    str path, int n = ("data1.bin", 1)
+    str path, int n = (path, n + 1)
+    return @embed(path)
+}
 test "computed paths" {
     assert a == b and b == c and c == d and d == bytes()
     assert e == a and nested == a
+    assert tuple_path == a and partial_path == a and grouped_path == a
+    assert tuple_local() == a
     byte[] expected = [0, 42, 255]
     assert a == expected
 }
@@ -155,6 +168,9 @@ fn runtime_dependent_paths_fail_without_executing_effects() {
         "fn f(str path) byte[] { str copy = path\n return @embed(copy) }",
         "fn loop() str { return loop() }\nbyte[] b = @embed(loop())",
         "fn path() str { return \"data\" }\nfn f((fn() str) path) byte[] { return @embed(path()) }",
+        "mut str path, int n = (\"data\", 1)\n_ = @embed(path)",
+        "fn f(str runtime) byte[] { str path, int n = (runtime, 1)\n return @embed(path) }",
+        "str path, int n = (\"data\", 1)\nfn f(str path) byte[] { return @embed(path) }",
     ] {
         let error = ncc::compile_source(source, &input).unwrap_err();
         assert!(

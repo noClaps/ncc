@@ -296,7 +296,7 @@ fn optimize_module(checked: CheckedModule) -> Result<Module, Diagnostics> {
                     functions.remove(n);
                 }
                 if let Some(value) = constant
-                    && let Some(value) = declaration_value(v, value)
+                    && let Some(value) = declaration_value(&v.pattern, &v.ty, value)
                 {
                     let _ = bind_declaration(&v.pattern, value, &mut env, &mut Vec::new());
                 }
@@ -1070,8 +1070,16 @@ impl Evaluator<'_> {
                     .constant_sources
                     .get(&(e as *const Expr as usize))
                 {
-                    let initializer = *self.expressions.get(&(*key)?)?;
-                    return self.evaluate(initializer, &mut HashMap::new());
+                    let key = (*key)?;
+                    let initializer = *self.expressions.get(&key)?;
+                    let value = self.evaluate(initializer, &mut HashMap::new())?;
+                    if let Some((pattern, ty)) = self.checked.constant_patterns.get(&key) {
+                        let value = declaration_value(pattern, ty, value)?;
+                        let mut bindings = HashMap::new();
+                        bind_declaration(pattern, value, &mut bindings, &mut Vec::new())?;
+                        return bindings.remove(n);
+                    }
+                    return Some(value);
                 }
                 self.functions
                     .contains_key(n)
@@ -1382,9 +1390,8 @@ fn index_number(value: &Value) -> Option<usize> {
         _ => None,
     }
 }
-fn declaration_value(v: &VarDecl, value: Value) -> Option<Value> {
-    if let (Pattern::Tuple(_), Type::Tuple(types), Value::Tuple(values)) =
-        (&v.pattern, &v.ty, &value)
+fn declaration_value(pattern: &Pattern, ty: &Type, value: Value) -> Option<Value> {
+    if let (Pattern::Tuple(_), Type::Tuple(types), Value::Tuple(values)) = (pattern, ty, &value)
         && types.len() != values.len()
     {
         fn regroup(ty: &Type, values: &mut impl Iterator<Item = Value>) -> Option<Value> {
@@ -1402,7 +1409,7 @@ fn declaration_value(v: &VarDecl, value: Value) -> Option<Value> {
             unreachable!()
         };
         let mut values = values.into_iter();
-        let result = regroup(&v.ty, &mut values)?;
+        let result = regroup(ty, &mut values)?;
         return values.next().is_none().then_some(result);
     }
     Some(value)
@@ -1532,7 +1539,7 @@ impl Evaluator<'_> {
                         return None;
                     }
                     let value = self.evaluate(&v.value, env)?;
-                    let value = self.coerce(declaration_value(v, value)?, &v.ty)?;
+                    let value = self.coerce(declaration_value(&v.pattern, &v.ty, value)?, &v.ty)?;
                     bind_declaration(&v.pattern, value, env, &mut declared)?;
                     Flow::Next
                 }
