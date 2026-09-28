@@ -437,7 +437,7 @@ impl Checker {
                 this.block(&x.body)?;
                 if x.return_type != Type::void()
                     && x.return_type != Type::ErrorUnion(Box::new(Type::void()))
-                    && !returns(&x.body)
+                    && !crate::flow::returns(&x.body, &this.expression_types)
                 {
                     return this.fail(format!(
                         "function `{}` may finish without returning a value",
@@ -978,7 +978,7 @@ impl Checker {
                 self.block(&f.body)?;
                 if f.return_type != Type::void()
                     && f.return_type != Type::ErrorUnion(Box::new(Type::void()))
-                    && !returns(&f.body)
+                    && !crate::flow::returns(&f.body, &self.expression_types)
                 {
                     return self.fail("anonymous function may finish without returning a value");
                 }
@@ -1642,18 +1642,4 @@ fn named(x: &str) -> Type {
 }
 fn numeric(t: &Type) -> bool {
     matches!(t,Type::Named(n,_)if matches!(n.as_str(),"byte"|"int"|"uint"|"float"))
-}
-
-fn returns(block: &Block) -> bool {
-    block
-        .statements
-        .iter()
-        .any(|statement| match statement.unlocated() {
-            Stmt::Return(_) | Stmt::Throw(_) => true,
-            Stmt::Block(block) | Stmt::Lock { body: block, .. } => returns(block),
-            Stmt::Expr(value) | Stmt::LabeledIf { value, .. } => {
-                matches!(value.unlocated(), Expr::If { arms, .. } if !arms.is_empty() && arms.iter().all(|(_, block)| returns(block)))
-            }
-            _ => false,
-        })
 }

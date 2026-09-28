@@ -47,6 +47,9 @@
 - Treat pattern comparisons as equality operations: apply the same restrictions
   on functions and unawaited futures. Value-carrying `break` needs a surrounding
   value-producing block; labels belong only on `if`, `for`, `while`, or `lock`.
+- Return-path analysis must track jumps through nested blocks and expressions.
+  Unreachable returns after `break` or `continue` do not satisfy a function's
+  return requirement. Keep the defensive C fallthrough trap for non-void functions.
 - Compile-time string conversion must match runtime formatting, including field
   order, quoting, embedded NULs, Unicode, and nominal types. Keep a safe runtime
   fallback for operations that cannot yet be reproduced exactly.

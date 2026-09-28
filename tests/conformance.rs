@@ -531,6 +531,44 @@ test "futures" {
 }
 
 #[test]
+fn return_paths_do_not_count_statements_after_jumps() {
+    for source in [
+        "fn bad(bool b) int { label: if b { true -> { break :label return 1 } false -> { return 2 } } }",
+        "fn bad(bool b) int { label: if b { true -> { { break :label } return 1 } false -> { return 2 } } }",
+        "fn bad(bool b) int { outer: if b { true -> { inner: if b { true -> { break :outer return 1 } false -> { return 2 } } return 3 } false -> { return 4 } } }",
+        "fn bad(bool b) int { outer: if b { true -> { int n = if b { true -> { break :outer return 1 } false -> { 2 } } return n } false -> { return 3 } } }",
+        "fn bad(bool b) int { label: if b { true -> { int? maybe = none int n = maybe else { break :label return 1 } return n } false -> { return 2 } } }",
+        "fn bad = fn(bool b) int { label: if b { true -> { break :label return 1 } false -> { return 2 } } }",
+    ] {
+        rejects(source, "may finish without returning");
+    }
+    success(
+        r#"
+fn escaped(bool b) int {
+    label: if b { true -> { break :label return 1 } false -> { return 2 } }
+    return 3
+}
+fn expression_returns(bool b) int {
+    int unused = if b { true -> { return 4 } false -> { return 5 } }
+}
+fn loop_exits() int {
+    mutex int value = 0
+    outer: while true {
+        lock value { value = 6 break :outer }
+    }
+    return value
+}
+test "return paths" {
+    assert escaped(true) == 3 and escaped(false) == 2
+    assert expression_returns(true) == 4 and expression_returns(false) == 5
+    assert loop_exits() == 6
+}
+"#,
+        "",
+    );
+}
+
+#[test]
 fn error_union_output_supports_both_streams_and_embedded_nuls() {
     let source = r#"
 fn result(bool fail) str! {

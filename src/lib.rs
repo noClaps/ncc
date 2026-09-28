@@ -3,6 +3,7 @@ pub mod ast;
 #[path = "c_backend.rs"]
 pub mod codegen;
 pub mod diagnostic;
+mod flow;
 pub mod generics;
 pub mod lexer;
 pub mod modules;
