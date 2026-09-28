@@ -86,7 +86,6 @@ pub struct FunctionDecl {
     pub name: String,
     pub params: Vec<Param>,
     pub return_type: Type,
-    pub throws: bool,
     pub symbol: String,
 }
 #[derive(Clone, Debug)]
@@ -98,7 +97,6 @@ pub struct Function {
     pub generics: Vec<String>,
     pub params: Vec<Param>,
     pub return_type: Type,
-    pub throws: bool,
     pub body: Block,
 }
 #[derive(Clone, Debug)]
@@ -198,6 +196,7 @@ impl Stmt {
 }
 #[derive(Clone, Debug)]
 pub enum Expr {
+    Located(Box<Expr>, SourceLocation),
     Bytes(Vec<u8>),
     Embed {
         path: Box<Expr>,
@@ -262,6 +261,38 @@ pub enum Expr {
         name: String,
         body: Block,
     },
+}
+impl Expr {
+    pub fn unlocated(&self) -> &Self {
+        match self {
+            Self::Located(value, _) => value.unlocated(),
+            _ => self,
+        }
+    }
+    pub fn unlocated_mut(&mut self) -> &mut Self {
+        match self {
+            Self::Located(value, _) => value.unlocated_mut(),
+            _ => self,
+        }
+    }
+    pub fn into_unlocated(self) -> Self {
+        match self {
+            Self::Located(value, _) => value.into_unlocated(),
+            value => value,
+        }
+    }
+    pub fn located(self, location: SourceLocation) -> Self {
+        Self::Located(Box::new(self.into_unlocated()), location)
+    }
+    pub fn id(&self) -> usize {
+        self.unlocated() as *const Self as usize
+    }
+    pub fn location(&self) -> Option<&SourceLocation> {
+        match self {
+            Self::Located(_, location) => Some(location),
+            _ => None,
+        }
+    }
 }
 #[derive(Clone, Debug)]
 pub enum Pattern {

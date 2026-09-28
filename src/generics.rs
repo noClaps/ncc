@@ -1,8 +1,31 @@
 //! Monomorphize generic applications before checking bodies.
 use crate::{ast::*, diagnostic::Diagnostics};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub fn specialize(mut module: Module) -> Result<Module, Diagnostics> {
+    // Check before removing templates: collection into a map would otherwise
+    // silently overwrite duplicate generic declarations, even unused ones.
+    let mut names = HashSet::new();
+    for item in &module.items {
+        let declared: Vec<_> = match item {
+            Item::Function(f) => vec![&f.name],
+            Item::Struct(s) => vec![&s.name],
+            Item::Enum(e) => vec![&e.name],
+            Item::TypeAlias { name, .. } => vec![name],
+            Item::Extern { functions, .. } => functions.iter().map(|f| &f.name).collect(),
+            _ => vec![],
+        };
+        for name in declared {
+            if !names.insert(name) {
+                let error = Diagnostics::one(format!("duplicate declaration `{name}`"), 0..0);
+                return Err(if let Some((path, span)) = item.source() {
+                    error.at_source(path, span.clone())
+                } else {
+                    error
+                });
+            }
+        }
+    }
     let templates = module
         .items
         .iter()
@@ -146,6 +169,7 @@ impl Pass {
         })
     }
     fn expression_type(&self, e: &Expr) -> Option<Type> {
+        let e = e.unlocated();
         match e {
             Expr::Name(n) => self.values.get(n).cloned().or_else(|| {
                 self.generated.iter().find(|f| f.name == *n).map(|f| {
@@ -175,7 +199,7 @@ impl Pass {
             Expr::Index { object, index } => match self.expression_type(object)? {
                 Type::Array(ty, _) | Type::Map(_, ty) => Some(*ty),
                 Type::Tuple(types) => {
-                    if let Expr::Int(n) = &**index {
+                    if let Expr::Int(n) = index.unlocated() {
                         types.get(crate::lexer::integer(n).ok()? as usize).cloned()
                     } else {
                         None
@@ -209,6 +233,7 @@ impl Pass {
         }
     }
     fn hint(&self, e: &mut Expr, ty: &Type) {
+        let e = e.unlocated_mut();
         if let Type::Optional(inner) | Type::ErrorUnion(inner) = ty {
             self.hint(e, inner);
             return;
@@ -245,8 +270,8 @@ impl Pass {
                 }
             }
             (Expr::Call { callee, args, .. }, Type::Named(instance, _)) => {
-                if let Expr::Member { object, name } = &mut **callee
-                    && let Expr::Name(owner) = &mut **object
+                if let Expr::Member { object, name } = callee.unlocated_mut()
+                    && let Expr::Name(owner) = object.unlocated_mut()
                 {
                     if self
                         .type_instances
@@ -266,7 +291,7 @@ impl Pass {
                 }
             }
             (Expr::Member { object, .. }, Type::Named(instance, _)) => {
-                if let Expr::Name(owner) = &mut **object
+                if let Expr::Name(owner) = object.unlocated_mut()
                     && self
                         .type_instances
                         .iter()
@@ -539,6 +564,11 @@ impl Pass {
         Ok(())
     }
     fn expr(&mut self, e: &mut Expr, b: &HashMap<String, Type>) -> Result<(), Diagnostics> {
+        if let Expr::Located(value, location) = e {
+            return self
+                .expr(value, b)
+                .map_err(|error| error.at_source(&location.path, location.span.clone()));
+        }
         match e {
             Expr::Lambda(f) => {
                 for p in &mut f.params {
@@ -556,7 +586,7 @@ impl Pass {
                     self.ty(t, b)?;
                 }
                 if !generics.is_empty() {
-                    let Expr::Name(name) = &**callee else {
+                    let Expr::Name(name) = callee.unlocated() else {
                         return Err(Diagnostics::one(
                             "generic call requires a named function",
                             0..0,
@@ -565,7 +595,7 @@ impl Pass {
                     let name = self.instance(name, generics)?;
                     **callee = Expr::Name(name);
                     generics.clear();
-                } else if let Expr::Name(name) = &**callee
+                } else if let Expr::Name(name) = callee.unlocated()
                     && self.templates.contains_key(name)
                 {
                     return Err(Diagnostics::one(
@@ -584,13 +614,13 @@ impl Pass {
                 }
             }
             Expr::Cast { ty, value } => {
-                let constructor = matches!((&*ty, &**value), (Type::Named(n, args), Expr::StructInit { name, .. }) if n == name && !args.is_empty());
+                let constructor = matches!((&*ty, value.unlocated()), (Type::Named(n, args), Expr::StructInit { name, .. }) if n == name && !args.is_empty());
                 self.ty(ty, b)?;
                 if constructor {
                     let Type::Named(instance, _) = ty else {
                         unreachable!()
                     };
-                    if let Expr::StructInit { name, .. } = &mut **value {
+                    if let Expr::StructInit { name, .. } = value.unlocated_mut() {
                         *name = instance.clone();
                     }
                 }

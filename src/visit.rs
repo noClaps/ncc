@@ -62,6 +62,7 @@ pub(crate) fn pattern<'a>(p: &'a Pattern, f: &mut impl FnMut(&'a Expr)) {
     }
 }
 fn expr<'a>(e: &'a Expr, f: &mut impl FnMut(&'a Expr)) {
+    let e = e.unlocated();
     f(e);
     match e {
         Expr::Lambda(fun) => block(&fun.body, f),
@@ -187,6 +188,7 @@ fn rewrite_pattern(p: &mut Pattern, f: &mut impl FnMut(&mut Expr)) {
     }
 }
 fn rewrite_expr(e: &mut Expr, f: &mut impl FnMut(&mut Expr)) {
+    let e = e.unlocated_mut();
     match e {
         Expr::Lambda(fun) => rewrite_block(&mut fun.body, f),
         Expr::Embed { path: value, .. }

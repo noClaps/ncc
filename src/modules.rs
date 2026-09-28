@@ -358,6 +358,10 @@ fn statement(
     Ok(())
 }
 fn expr(e: &mut Expr, names: &Names, aliases: &HashMap<String, Names>) -> Result<(), Diagnostics> {
+    if let Expr::Located(value, location) = e {
+        return expr(value, names, aliases)
+            .map_err(|error| error.at_source(&location.path, location.span.clone()));
+    }
     match e {
         Expr::Embed { path, .. } => expr(path, names, aliases)?,
         Expr::Lambda(f) => {
@@ -375,7 +379,7 @@ fn expr(e: &mut Expr, names: &Names, aliases: &HashMap<String, Names>) -> Result
             }
         }
         Expr::Member { object, name } => {
-            if let Expr::Name(alias) = &**object
+            if let Expr::Name(alias) = object.unlocated()
                 && !names.contains_key(alias)
                 && let Some(exports) = aliases.get(alias)
             {

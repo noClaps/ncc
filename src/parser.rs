@@ -119,12 +119,6 @@ impl Parser {
                 } else {
                     self.ty()?
                 };
-                let throws = if self.at(&TokenKind::Bang) {
-                    self.bump();
-                    true
-                } else {
-                    false
-                };
                 self.expect(TokenKind::Assign)?;
                 let symbol = match self.bump().kind {
                     TokenKind::String(symbol) => symbol,
@@ -134,7 +128,6 @@ impl Parser {
                     name,
                     params,
                     return_type,
-                    throws,
                     symbol,
                 });
             }
@@ -208,7 +201,11 @@ impl Parser {
         let mut result = vec![];
         while !self.at(&TokenKind::Gt) {
             self.keyword(Keyword::Type);
-            result.push(self.ident()?);
+            let name = self.ident()?;
+            if result.contains(&name) {
+                return self.error(format!("duplicate generic parameter `{name}`"));
+            }
+            result.push(name);
             if !self.at(&TokenKind::Gt) {
                 self.expect(TokenKind::Comma)?
             }
@@ -225,7 +222,9 @@ impl Parser {
         while !self.at(&TokenKind::RBrace) {
             let ty = self.ty()?;
             let name = self.ident()?;
-
+            if fields.iter().any(|field: &Field| field.name == name) {
+                return self.error(format!("duplicate field `{name}`"));
+            }
             fields.push(Field { name, ty });
         }
         self.bump();
@@ -246,6 +245,12 @@ impl Parser {
         let mut variants = vec![];
         while !self.at(&TokenKind::RBrace) {
             let name = self.ident()?;
+            if variants
+                .iter()
+                .any(|variant: &Variant| variant.name == name)
+            {
+                return self.error(format!("duplicate enum variant `{name}`"));
+            }
             let mut values = vec![];
             if self.at(&TokenKind::LParen) {
                 self.bump();
@@ -283,12 +288,6 @@ impl Parser {
         } else {
             self.ty()?
         };
-        let throws = if self.at(&TokenKind::Bang) {
-            self.bump();
-            true
-        } else {
-            false
-        };
         let body = self.block()?;
 
         Ok(Function {
@@ -299,7 +298,6 @@ impl Parser {
             generics,
             params,
             return_type,
-            throws,
             body,
         })
     }
@@ -506,7 +504,7 @@ impl Parser {
             let name = self.ident()?;
             self.expect(TokenKind::Assign)?;
             let value = self.expr(0)?;
-            let Expr::Lambda(f) = &value else {
+            let Expr::Lambda(f) = value.unlocated() else {
                 return self.error("inferred `fn` declarations require an anonymous function");
             };
             let ty = Type::Function(
@@ -543,6 +541,14 @@ impl Parser {
         } else {
             None
         };
+        if label.is_some()
+            && !matches!(
+                self.current().kind,
+                TokenKind::Keyword(Keyword::If | Keyword::For | Keyword::While | Keyword::Lock)
+            )
+        {
+            return self.error("labels may only be applied to if, for, while, or lock blocks");
+        }
         if self.keyword(Keyword::Break) {
             let label_target = if self.at(&TokenKind::Colon) {
                 self.bump();
@@ -622,13 +628,10 @@ impl Parser {
             });
         }
         if let Some(label) = label {
-            if self.at(&TokenKind::Keyword(Keyword::If)) {
-                return Ok(Stmt::LabeledIf {
-                    label,
-                    value: self.expr(0)?,
-                });
-            }
-            return self.error("labels may only be applied to if, for, while, or lock blocks");
+            return Ok(Stmt::LabeledIf {
+                label,
+                value: self.expr(0)?,
+            });
         }
         let saved = self.pos;
         let saved_tokens = self.tokens.clone();
@@ -653,9 +656,13 @@ impl Parser {
         Ok(Stmt::Expr(target))
     }
     fn expr(&mut self, min: u8) -> Result<Expr, Diagnostics> {
+        let start = self.current().span.start;
         let mut left = self.prefix()?;
         loop {
-            if self.at(&TokenKind::Lt) && matches!(left, Expr::Name(_) | Expr::Member { .. }) {
+            left = left.located(self.location(start));
+            if self.at(&TokenKind::Lt)
+                && matches!(left.unlocated(), Expr::Name(_) | Expr::Member { .. })
+            {
                 let position = self.pos;
                 let tokens = self.tokens.clone();
                 if let Ok(generics) = self.type_args() {
@@ -804,9 +811,14 @@ impl Parser {
                 right: Box::new(right),
             }
         }
-        Ok(left)
+        Ok(left.located(self.location(start)))
     }
     fn prefix(&mut self) -> Result<Expr, Diagnostics> {
+        let start = self.current().span.start;
+        let value = self.prefix_inner()?;
+        Ok(value.located(self.location(start)))
+    }
+    fn prefix_inner(&mut self) -> Result<Expr, Diagnostics> {
         let start = self.current().span.start;
         if self.keyword(Keyword::Fn) {
             let params = self.params()?;
@@ -825,7 +837,6 @@ impl Parser {
                 generics: vec![],
                 params,
                 return_type,
-                throws: false,
                 body,
             })));
         }
@@ -853,7 +864,7 @@ impl Parser {
                         Ok(Expr::Embed {
                             path,
                             source_path: self.path.clone(),
-                            span: start..self.tokens[self.pos - 1].span.end,
+                            span: self.location(start).span,
                         })
                     } else {
                         Ok(Expr::Name(format!("@{name}")))
@@ -862,7 +873,7 @@ impl Parser {
             }
             TokenKind::Int(x) => Ok(Expr::Int(x)),
             TokenKind::Float(x) => Ok(Expr::Float(x)),
-            TokenKind::String(x) => self.string_expression(&x),
+            TokenKind::String(x) => self.string_expression(&x, t.span),
             TokenKind::Char(x) => Ok(Expr::Char(x)),
             TokenKind::Ident(x) => Ok(Expr::Name(x)),
             TokenKind::Keyword(Keyword::True) => Ok(Expr::Bool(true)),
@@ -954,7 +965,7 @@ impl Parser {
         self.bump();
         Ok(Expr::If { subject, arms })
     }
-    fn string_expression(&self, text: &str) -> Result<Expr, Diagnostics> {
+    fn string_expression(&self, text: &str, span: Span) -> Result<Expr, Diagnostics> {
         let mut parts = vec![];
         let mut literal = String::new();
         let mut chars = text.char_indices().peekable();
@@ -1001,11 +1012,25 @@ impl Parser {
                 }
             }
             let Some(end) = end else {
-                return self.error("unterminated format-string expression");
+                return Err(Diagnostics::one(
+                    "unterminated format-string expression",
+                    span,
+                ));
             };
+            // Escape decoding changes byte offsets. Keep diagnostics on the
+            // original literal instead of reporting offsets in the decoded text.
+            let mut tokens = crate::lexer::lex(&text[start..end]).map_err(|mut error| {
+                for diagnostic in &mut error.0 {
+                    diagnostic.span = span.clone();
+                }
+                error
+            })?;
+            for token in &mut tokens {
+                token.span = span.clone();
+            }
             let mut parser = Parser {
                 path: self.path.clone(),
-                tokens: crate::lexer::lex(&text[start..end])?,
+                tokens,
                 pos: 0,
                 type_lookahead: false,
             };
@@ -1063,13 +1088,20 @@ impl Parser {
 }
 
 fn expression_path(expr: &Expr) -> Option<String> {
-    match expr {
+    match expr.unlocated() {
         Expr::Name(n) => Some(n.clone()),
         Expr::Member { object, name } => Some(format!("{}.{name}", expression_path(object)?)),
         _ => None,
     }
 }
 fn expression_pattern(expr: Expr) -> Pattern {
+    if let Expr::Located(value, location) = expr {
+        let pattern = expression_pattern(*value);
+        return match pattern {
+            Pattern::Literal(value) => Pattern::Literal(Box::new(value.located(location))),
+            pattern => pattern,
+        };
+    }
     match expr {
         Expr::Name(n) if n == "_" => Pattern::Wildcard,
         Expr::Name(n) => Pattern::Name(n),
@@ -1082,9 +1114,9 @@ fn expression_pattern(expr: Expr) -> Pattern {
                 .map(|(n, e)| (n, expression_pattern(e)))
                 .collect(),
         },
-        Expr::Call { callee, args, .. } if matches!(&*callee, Expr::Member { object, .. } if expression_path(object).is_some()) =>
+        Expr::Call { callee, args, .. } if matches!(callee.unlocated(), Expr::Member { object, .. } if expression_path(object).is_some()) =>
         {
-            let Expr::Member { object, name } = *callee else {
+            let Expr::Member { object, name } = callee.into_unlocated() else {
                 unreachable!()
             };
             let ty = expression_path(&object).unwrap();

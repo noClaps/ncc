@@ -77,7 +77,7 @@ fn char_literals_are_extended_graphemes() {
 }
 
 #[test]
-fn semantic_errors_point_to_the_failing_statement() {
+fn semantic_errors_point_to_the_failing_expression_or_statement() {
     let directory = ncc::temp::Directory::new().unwrap();
     let root = directory.path().join("main.nc");
     let imported = directory.path().join("library.nc");
@@ -112,17 +112,94 @@ fn semantic_errors_point_to_the_failing_statement() {
             let error = ncc::compile_source(text, &root).unwrap_err();
             let diagnostic = &error.0[0];
             assert_eq!(diagnostic.path.as_ref(), Some(path), "{source}: {error}");
+            let expected = match statement {
+                "return missing" | "@println(missing)" => "missing",
+                "x = 2" => "x",
+                "target(true)" => "true",
+                _ => statement,
+            };
             assert_eq!(
                 &source[diagnostic.span.clone()],
-                statement,
+                expected,
                 "{source}: {error}"
             );
             assert!(
-                error.render(text, &root).contains(":3:3: error:"),
+                error.render(text, &root).contains(&format!(
+                    ":3:{}: error:",
+                    statement.find(expected).unwrap() + 3
+                )),
                 "{source}: {error}"
             );
         }
     }
+}
+
+#[test]
+fn nested_expression_errors_keep_exact_ranges_through_specialization() {
+    for (source, expected) in [
+        ("int value = 1 + missing * 2", "missing"),
+        ("fn take(int n) {} take(1 + true)", "1 + true"),
+        ("fn take(int n) {} take(false)", "false"),
+        ("int[] values = [1, false, 3]", "false"),
+        ("struct S { int value } S s = S{.value = false}", "false"),
+        (
+            "int[] values = [1] _ = values.missing.len",
+            "values.missing",
+        ),
+        (
+            "fn generic<T>(T value) T { return missing } _ = generic<int>(1)",
+            "missing",
+        ),
+        ("str text = \"🍪\"\nint value = 1 + missing", "missing"),
+        (
+            "fn f() {}\nint x = if true { true -> { 1 } false -> { false } }",
+            "false",
+        ),
+    ] {
+        for release in [false, true] {
+            let path = std::path::Path::new("expressions.nc");
+            let error = ncc::compile_source_with_options(source, path, release).unwrap_err();
+            let diagnostic = &error.0[0];
+            assert_eq!(
+                &source[diagnostic.span.clone()],
+                expected,
+                "{source}: {error}"
+            );
+            assert_eq!(diagnostic.path.as_deref(), Some(path));
+        }
+    }
+}
+
+#[test]
+fn interpolation_errors_point_to_the_original_literal() {
+    for literal in [
+        r#""value {missing}""#,
+        r#""🍪\u{41}\n{missing}""#,
+        r#""{1 + }""#,
+        r#""{`}""#,
+        "\"\"\"\n  🍪 {missing}\n  \"\"\"",
+    ] {
+        let source = format!("// header\n\n@println({literal})");
+        let error = ncc::compile_source(&source, std::path::Path::new("format.nc")).unwrap_err();
+        assert_eq!(&source[error.0[0].span.clone()], literal, "{error}");
+    }
+}
+
+#[test]
+fn constant_evaluation_errors_retain_imported_expression_locations() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let root = directory.path().join("main.nc");
+    let imported = directory.path().join("library.nc");
+    let source = "// header\npub fn bad() int {\n  return 1 / 0\n}\n";
+    std::fs::write(&imported, source).unwrap();
+    let error = ncc::compile_source_with_options(
+        "import { \"library\" as lib } @println(lib.bad())",
+        &root,
+        true,
+    )
+    .unwrap_err();
+    assert_eq!(error.0[0].path.as_ref(), Some(&imported));
+    assert_eq!(&source[error.0[0].span.clone()], "1 / 0");
 }
 
 #[test]
@@ -172,7 +249,7 @@ fn imported_errors_retain_source_paths_and_declaration_locations() {
     assert_eq!(error.0[0].path.as_deref(), Some(imported.as_path()));
     let rendered = error.render(source, &root);
     assert!(
-        rendered.contains(&format!("{}:4:3:", imported.display())),
+        rendered.contains(&format!("{}:4:11:", imported.display())),
         "{rendered}"
     );
     assert!(rendered.contains("int n = false"));

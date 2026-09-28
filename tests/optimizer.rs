@@ -39,6 +39,153 @@ fn folded(source: &str, names: &[&str], expected: &str) {
 }
 
 #[test]
+fn evaluation_limits_keep_safe_runtime_fallbacks() {
+    let source = r#"
+fn depth(uint n) uint {
+    if n { 0 -> { return 0 } _ -> { return 1 + depth(n - 1) } }
+}
+fn fuel(uint n) uint {
+    mut uint i = 0
+    while i < n { i = i + 1 }
+    return i
+}
+@println(depth(600))
+@println(fuel(100001))
+test "unreachable failures" {
+    assert true or (1 / 0 == 0)
+    assert not (false and (1 / 0 == 0))
+    int value = if true { true -> { 42 } false -> { 1 / 0 } }
+    assert value == 42
+}
+"#;
+    let c = ncc::compile_source_with_options(source, Path::new("limits.nc"), true).unwrap();
+    assert!(
+        c.contains("nc_fn_depth("),
+        "depth-limited evaluation must fall back"
+    );
+    assert!(
+        c.contains("nc_fn_fuel("),
+        "fuel-limited evaluation must fall back"
+    );
+    folded(source, &[], "600\n100001\n");
+}
+
+#[test]
+fn pure_subexpressions_fold_in_tests_top_level_blocks_and_closures() {
+    folded(
+        r#"
+fn total(uint n) uint {
+    mut uint sum = 0
+    for i in [1, 2, 3] { sum = sum + n + i }
+    return sum
+}
+test "constant expressions" {
+    assert total(2) == 9
+    fn answer = fn() uint { return total(3) }
+    assert answer() == 12
+    mut uint[] values = [total(1)]
+    values[0] = total(4)
+    assert values[0] == 15
+}
+{
+    uint n = total(5)
+    @println(n)
+}
+"#,
+        &["total"],
+        "18\n",
+    );
+}
+
+#[test]
+fn float_string_folding_matches_c_for_boundaries_and_sampled_bit_patterns() {
+    let mut values = vec![
+        0.0,
+        -0.0,
+        1.0,
+        -1.0,
+        0.1,
+        0.0001,
+        0.00001,
+        1e16,
+        1e17,
+        f64::MAX,
+        f64::MIN,
+        f64::MIN_POSITIVE,
+        f64::from_bits(1),
+        f64::from_bits(0x000f_ffff_ffff_ffff),
+    ];
+    let mut bits = 0x5eed_u64;
+    for _ in 0..256 {
+        bits ^= bits << 13;
+        bits ^= bits >> 7;
+        bits ^= bits << 17;
+        let value = f64::from_bits(bits);
+        if value.is_finite() {
+            values.push(value);
+        }
+    }
+    let mut source = String::from("fn render(float n) str { return @as(str, n) }\n");
+    for value in values {
+        source.push_str(&format!("@println(render({value:.340}))\n"));
+    }
+    let c = ncc::compile_source_with_options(&source, Path::new("floats.nc"), true).unwrap();
+    assert!(
+        !c.contains("nc_fn_render("),
+        "float conversion was not folded"
+    );
+    let directory = ncc::temp::Directory::new().unwrap();
+    let input = directory.path().join("floats.nc");
+    fs::write(&input, source).unwrap();
+    let outputs = ["--debug", "--release"].map(|mode| {
+        let output = Command::new(env!("CARGO_BIN_EXE_ncc"))
+            .arg("run")
+            .arg(mode)
+            .arg(&input)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    });
+    assert_eq!(outputs[0], outputs[1]);
+}
+
+#[test]
+fn composite_string_conversions_fold_with_runtime_formatting() {
+    folded(
+        r#"
+type Text = str
+struct Record { str name int[] values }
+enum Choice { Empty Data(str, int?[]) }
+fn array() str { return @as(str, ["a", "b\u{0}🍪"]) }
+fn alias() str { Text[1] values = ["plain"] return @as(str, values) }
+fn optional() str { int?[3] values = [none, 2, none] return @as(str, values) }
+fn tuple() str { return @as(str, ("hi", [true, false], 9u)) }
+fn map() str { return @as(str, ["key": [1, 2]]) }
+fn record() str { return @as(str, Record{.values = [3, 4], .name = "x"}) }
+fn variant() str { return @as(str, Choice.Data("quoted", [none, 1])) }
+fn empty() str { return @as(str, Choice.Empty) }
+@println(array())
+@println(alias())
+@println(optional())
+@println(tuple())
+@println(map())
+@println(record())
+@println(variant())
+@println(empty())
+"#,
+        &[
+            "array", "alias", "optional", "tuple", "map", "record", "variant", "empty",
+        ],
+        "[\"a\", \"b\0🍪\"]\n[plain]\n[none, 2, none]\n(hi, [true, false], 9)\n[key: [1, 2]]\nRecord{.name = x, .values = [3, 4]}\nChoice.Data(\"quoted\", [none, 1])\nChoice.Empty\n",
+    );
+}
+
+#[test]
 fn nominal_void_constants_keep_alias_chains_in_containers_and_errors() {
     folded(
         r#"

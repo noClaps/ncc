@@ -9,9 +9,16 @@ pub struct CheckedModule {
     pub module: Module,
     pub types: HashMap<String, TypeInfo>,
     pub expression_types: HashMap<usize, Type>,
-    pub captures: HashMap<usize, Vec<(String, Type, bool)>>,
+    pub captures: HashMap<usize, Vec<Capture>>,
     pub constant_sources: HashMap<usize, Option<usize>>,
     pub constant_patterns: HashMap<usize, (Pattern, Type)>,
+}
+#[derive(Clone, Debug)]
+pub struct Capture {
+    pub name: String,
+    pub ty: Type,
+    pub mutex: bool,
+    pub initializer: Option<usize>,
 }
 #[derive(Clone, Debug)]
 pub enum TypeInfo {
@@ -42,7 +49,7 @@ struct Checker {
     indexing: usize,
     value_targets: Vec<Type>,
     capture_frames: Vec<(usize, HashMap<String, Binding>)>,
-    captures: HashMap<usize, Vec<(String, Type, bool)>>,
+    captures: HashMap<usize, Vec<Capture>>,
     constant_sources: HashMap<usize, Option<usize>>,
     constant_patterns: HashMap<usize, (Pattern, Type)>,
 }
@@ -234,7 +241,7 @@ impl Checker {
             if v.mutable || v.mutex {
                 return self.fail("futures cannot be mutable or mutex protected");
             }
-            if !matches!(v.value, Expr::Async(_)) {
+            if !matches!(v.value.unlocated(), Expr::Async(_)) {
                 return self.fail("a future must be initialized by an async function call");
             }
         } else if self.contains_future(&v.ty) {
@@ -545,7 +552,7 @@ impl Checker {
         self.scopes.iter().rev().find_map(|s| s.get(n))
     }
     fn mark_mutex(&mut self, v: &VarDecl) {
-        let key = &v.value as *const Expr as usize;
+        let key = v.value.id();
         for name in v.binding_names() {
             if let Some(binding) = self.scopes.last_mut().unwrap().get_mut(name) {
                 binding.mutex = v.mutex;
@@ -590,13 +597,12 @@ impl Checker {
                 self.mark_mutex(x);
             }
             Stmt::Assign { target, value } => {
-                if matches!(target, Expr::Name(n) if n == "_") {
+                if matches!(target.unlocated(), Expr::Name(n) if n == "_") {
                     self.expr(value)?;
                     return Ok(());
                 }
                 let expected = self.lvalue(target)?;
-                self.expression_types
-                    .insert(target as *const Expr as usize, expected.clone());
+                self.expression_types.insert(target.id(), expected.clone());
                 self.expected(value, &expected)?;
             }
             Stmt::Expr(x) | Stmt::Assert(x) => {
@@ -604,7 +610,9 @@ impl Checker {
                 if matches!(s, Stmt::Assert(_)) && !self.in_test {
                     return self.fail("assert is only available inside test blocks");
                 }
-                if matches!(s, Stmt::Expr(Expr::Call { .. })) && t != Type::void() {
+                if matches!(s, Stmt::Expr(value) if matches!(value.unlocated(), Expr::Call { .. }))
+                    && t != Type::void()
+                {
                     return self
                         .fail("return value of function not used; assign it to `_` to discard it");
                 }
@@ -702,8 +710,10 @@ impl Checker {
                 self.loops.pop();
                 self.pop()
             }
-            Stmt::Break(Some(value), None) if !self.value_targets.is_empty() => {
-                let expected = self.value_targets.last().unwrap().clone();
+            Stmt::Break(Some(value), _) => {
+                let Some(expected) = self.value_targets.last().cloned() else {
+                    return self.fail("break with a value requires a value-producing conditional, else, or catch block");
+                };
                 self.expected(value, &expected)?;
             }
             Stmt::Break(_, label) | Stmt::Continue(label) => {
@@ -727,6 +737,11 @@ impl Checker {
         Ok(())
     }
     fn lvalue(&mut self, e: &Expr) -> Result<Type, Diagnostics> {
+        if let Expr::Located(value, location) = e {
+            return self
+                .lvalue(value)
+                .map_err(|error| error.at_source(&location.path, location.span.clone()));
+        }
         match e {
             Expr::Name(n) => {
                 let b = self
@@ -753,16 +768,20 @@ impl Checker {
         }
     }
     fn expr(&mut self, e: &Expr) -> Result<Type, Diagnostics> {
+        if let Expr::Located(value, location) = e {
+            return self
+                .expr(value)
+                .map_err(|error| error.at_source(&location.path, location.span.clone()));
+        }
         let ty = self.expr_inner(e)?;
-        self.expression_types
-            .insert(e as *const Expr as usize, ty.clone());
+        self.expression_types.insert(e.id(), ty.clone());
         Ok(ty)
     }
     fn declaration_value(&mut self, v: &VarDecl) -> Result<(), Diagnostics> {
         if let (Pattern::Tuple(_), Type::Tuple(types)) = (&v.pattern, &v.ty)
             && types.iter().any(|ty| matches!(ty, Type::Tuple(_)))
         {
-            let count = match &v.value {
+            let count = match v.value.unlocated() {
                 Expr::Tuple(values) => Some(values.len()),
                 _ => match self.expr(&v.value)? {
                     Type::Tuple(fields) => Some(fields.len()),
@@ -792,6 +811,11 @@ impl Checker {
         self.expected(&v.value, &v.ty)
     }
     fn expected(&mut self, e: &Expr, ty: &Type) -> Result<(), Diagnostics> {
+        if let Expr::Located(value, location) = e {
+            return self
+                .expected(value, ty)
+                .map_err(|error| error.at_source(&location.path, location.span.clone()));
+        }
         if let Type::Named(n, _) = ty
             && let Some(TypeInfo::Alias(base)) = self.types.get(n).cloned()
             && matches!(
@@ -810,8 +834,7 @@ impl Checker {
             return Ok(());
         }
         if matches!(e, Expr::If { .. }) {
-            self.expression_types
-                .insert(e as *const Expr as usize, ty.clone());
+            self.expression_types.insert(e.id(), ty.clone());
             self.value_targets.push(ty.clone());
             let result = self.expr(e);
             self.value_targets.pop();
@@ -839,8 +862,7 @@ impl Checker {
         }
         if let Type::Optional(inner) = ty {
             if matches!(e, Expr::None) {
-                self.expression_types
-                    .insert(e as *const Expr as usize, ty.clone());
+                self.expression_types.insert(e.id(), ty.clone());
                 return Ok(());
             }
             if matches!(
@@ -919,12 +941,12 @@ impl Checker {
                 self.assignable(ty, &got)?;
             }
         }
-        self.expression_types
-            .insert(e as *const Expr as usize, ty.clone());
+        self.expression_types.insert(e.id(), ty.clone());
         Ok(())
     }
     fn expr_inner(&mut self, e: &Expr) -> Result<Type, Diagnostics> {
         match e {
+            Expr::Located(_, _) => unreachable!("expression locations are handled by expr"),
             Expr::Bytes(_) => Ok(Type::Array(Box::new(named("byte")), None)),
             Expr::Embed { path, .. } => {
                 self.expected(path, &named("str"))?;
@@ -972,15 +994,23 @@ impl Checker {
                     .unwrap()
                     .1
                     .into_iter()
-                    .map(|(n, b)| (n, b.ty, b.mutex))
+                    .map(|(name, binding)| Capture {
+                        name,
+                        ty: binding.ty,
+                        mutex: binding.mutex,
+                        initializer: binding.initializer,
+                    })
                     .collect();
-                captures.sort_by(|a, b| a.0.cmp(&b.0));
-                if captures.iter().any(|(_, ty, _)| self.contains_future(ty)) {
+                captures.sort_by(|a, b| a.name.cmp(&b.name));
+                if captures
+                    .iter()
+                    .any(|capture| self.contains_future(&capture.ty))
+                {
                     return self.fail(
                         "functions cannot capture futures; await the value before capturing it",
                     );
                 }
-                self.captures.insert(e as *const Expr as usize, captures);
+                self.captures.insert(e.id(), captures);
                 Ok(Type::Function(
                     f.params.iter().map(|p| p.ty.clone()).collect(),
                     Box::new(f.return_type.clone()),
@@ -994,7 +1024,7 @@ impl Checker {
                     // Give literals the base type's context (empty containers, unsigned
                     // values and optional promotions need it before they can be checked).
                     if matches!(
-                        &**value,
+                        value.unlocated(),
                         Expr::Int(_)
                             | Expr::Float(_)
                             | Expr::String(_)
@@ -1067,8 +1097,7 @@ impl Checker {
                     .rev()
                     .find_map(|(i, s)| s.get(n).map(|v| (i, v.clone())))
                 {
-                    self.constant_sources
-                        .insert(e as *const Expr as usize, binding.initializer);
+                    self.constant_sources.insert(e.id(), binding.initializer);
                     for (depth, captures) in &mut self.capture_frames {
                         if i < *depth {
                             captures.insert(n.clone(), binding.clone());
@@ -1128,10 +1157,9 @@ impl Checker {
             )),
             Expr::Unary { op, value } => {
                 if *op == UnaryOp::Neg
-                    && matches!(&**value, Expr::Int(text) if !text.ends_with('u') && integer(text).ok() == Some(1u64 << 63))
+                    && matches!(value.unlocated(), Expr::Int(text) if !text.ends_with('u') && integer(text).ok() == Some(1u64 << 63))
                 {
-                    self.expression_types
-                        .insert(&**value as *const Expr as usize, named("uint"));
+                    self.expression_types.insert(value.id(), named("uint"));
                     return Ok(named("int"));
                 }
                 let t = self.expr(value)?;
@@ -1149,8 +1177,8 @@ impl Checker {
                 Ok(t)
             }
             Expr::Binary { left, op, right } => {
-                let l = if matches!(&**left, Expr::Int(_))
-                    && !matches!(&**right, Expr::Int(_))
+                let l = if matches!(left.unlocated(), Expr::Int(_))
+                    && !matches!(right.unlocated(), Expr::Int(_))
                     && *op != BinaryOp::In
                 {
                     let r = self.expr(right)?;
@@ -1163,7 +1191,10 @@ impl Checker {
                 } else {
                     self.expr(left)?
                 };
-                let r = if matches!(&**right, Expr::Int(_)) && numeric(&l) && l != named("float") {
+                let r = if matches!(right.unlocated(), Expr::Int(_))
+                    && numeric(&l)
+                    && l != named("float")
+                {
                     self.expected(right, &l)?;
                     l.clone()
                 } else {
@@ -1243,7 +1274,7 @@ impl Checker {
                 }
             }
             Expr::Call { callee, args, .. } => {
-                if let Expr::Name(name) = &**callee {
+                if let Expr::Name(name) = callee.unlocated() {
                     let ty = match name.as_str() {
                         "@args" => Some(Type::Array(Box::new(named("str")), None)),
                         "@env" => Some(Type::Map(Box::new(named("str")), Box::new(named("str")))),
@@ -1257,7 +1288,7 @@ impl Checker {
                         return Ok(ty);
                     }
                 }
-                if let Expr::Name(name) = &**callee
+                if let Expr::Name(name) = callee.unlocated()
                     && matches!(
                         name.as_str(),
                         "@print" | "@println" | "@eprint" | "@eprintln"
@@ -1288,7 +1319,7 @@ impl Checker {
                     return Ok((**value).clone());
                 }
                 if let Type::Tuple(types) = &o {
-                    if let Expr::Int(text) = &**index {
+                    if let Expr::Int(text) = index.unlocated() {
                         let n = integer(text)? as usize;
                         self.expr(index)?;
                         return types
@@ -1312,15 +1343,14 @@ impl Checker {
                 }
             }
             Expr::Member { object, name } => {
-                let namespace = matches!(&**object, Expr::Name(n)
+                let namespace = matches!(object.unlocated(), Expr::Name(n)
                     if self.lookup(n).is_none() && matches!(self.types.get(n), Some(TypeInfo::Enum(_))));
                 let o = if namespace {
-                    let Expr::Name(n) = &**object else {
+                    let Expr::Name(n) = object.unlocated() else {
                         unreachable!()
                     };
                     let ty = named(n);
-                    self.expression_types
-                        .insert(&**object as *const Expr as usize, ty.clone());
+                    self.expression_types.insert(object.id(), ty.clone());
                     ty
                 } else {
                     self.expr(object)?
@@ -1369,7 +1399,7 @@ impl Checker {
                 let mut variants = HashSet::new();
                 let target = self
                     .expression_types
-                    .get(&(e as *const Expr as usize))
+                    .get(&e.id())
                     .filter(|ty| **ty != Type::void())
                     .cloned();
                 for (patterns, body) in arms {
@@ -1391,10 +1421,10 @@ impl Checker {
                         match pattern {
                             Pattern::Wildcard => wildcard = true,
                             Pattern::Literal(value) => {
-                                if let Expr::Bool(b) = &**value {
+                                if let Expr::Bool(b) = value.unlocated() {
                                     booleans.insert(*b);
                                 }
-                                if let Expr::Member { name, .. } = &**value {
+                                if let Expr::Member { name, .. } = value.unlocated() {
                                     variants.insert(name.clone());
                                 }
                             }
@@ -1432,7 +1462,7 @@ impl Checker {
                 Ok(target.unwrap_or_else(Type::void))
             }
             Expr::Async(x) => {
-                if !matches!(&**x, Expr::Call { .. }) {
+                if !matches!(x.unlocated(), Expr::Call { .. }) {
                     return self.fail("async requires a function call");
                 }
                 Ok(Type::Future(Box::new(self.expr(x)?)))
@@ -1530,6 +1560,7 @@ impl Checker {
             Pattern::Wildcard => Ok(true),
             Pattern::Name(n) => {
                 if let Some(binding) = self.lookup(n) {
+                    self.value_operation(ty, "pattern equality")?;
                     self.assignable(ty, &binding.ty)?;
                     Ok(false)
                 } else {
@@ -1538,6 +1569,7 @@ impl Checker {
                 }
             }
             Pattern::Literal(value) => {
+                self.value_operation(ty, "pattern equality")?;
                 self.expected(value, ty)?;
                 Ok(false)
             }
@@ -1570,7 +1602,11 @@ impl Checker {
                     return self.fail("unknown struct pattern");
                 };
                 let mut total = true;
+                let mut seen = HashSet::new();
                 for (name, p) in fields {
+                    if !seen.insert(name) {
+                        return self.fail(format!("duplicate field `{name}` in struct pattern"));
+                    }
                     let Some(f) = declaration.fields.iter().find(|f| f.name == *name) else {
                         return self.fail("unknown field in struct pattern");
                     };
@@ -1615,11 +1651,9 @@ fn returns(block: &Block) -> bool {
         .any(|statement| match statement.unlocated() {
             Stmt::Return(_) | Stmt::Throw(_) => true,
             Stmt::Block(block) | Stmt::Lock { body: block, .. } => returns(block),
-            Stmt::Expr(Expr::If { arms, .. })
-            | Stmt::LabeledIf {
-                value: Expr::If { arms, .. },
-                ..
-            } => !arms.is_empty() && arms.iter().all(|(_, block)| returns(block)),
+            Stmt::Expr(value) | Stmt::LabeledIf { value, .. } => {
+                matches!(value.unlocated(), Expr::If { arms, .. } if !arms.is_empty() && arms.iter().all(|(_, block)| returns(block)))
+            }
             _ => false,
         })
 }

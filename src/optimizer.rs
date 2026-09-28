@@ -76,12 +76,12 @@ fn embed_module(
                 _ => unreachable!(),
             })
             .collect();
-        replacements.insert(e as *const Expr as usize, Expr::Bytes(bytes));
+        replacements.insert(e.id(), Expr::Bytes(bytes));
     }
     let mut module = checked.module;
     for item in &mut module.items {
         crate::visit::rewrite(item, &mut |e| {
-            if let Some(value) = replacements.remove(&(e as *const Expr as usize)) {
+            if let Some(value) = replacements.remove(&e.id()) {
                 *e = value;
             }
         });
@@ -134,6 +134,32 @@ enum Value {
     Failure(Type, String),
     Function(String),
     Closure(usize, Vec<(String, Value)>),
+}
+// Match the C backend's %.17g formatting, including its explicit decimal suffix.
+fn float_string(value: f64) -> Option<String> {
+    if !value.is_finite() {
+        return None;
+    }
+    let scientific = format!("{value:.16e}");
+    let (mantissa, exponent) = scientific.split_once('e')?;
+    let exponent: i32 = exponent.parse().ok()?;
+    if !(-4..17).contains(&exponent) {
+        return Some(format!(
+            "{}e{exponent:+03}",
+            mantissa.trim_end_matches('0').trim_end_matches('.')
+        ));
+    }
+    let precision = (16 - exponent) as usize;
+    let fixed = format!("{value:.precision$}");
+    let mut result = if fixed.contains('.') {
+        fixed.trim_end_matches('0').trim_end_matches('.').to_owned()
+    } else {
+        fixed
+    };
+    if !result.contains('.') {
+        result.push_str(".0");
+    }
+    Some(result)
 }
 impl Value {
     fn materializable(&self) -> bool {
@@ -309,16 +335,14 @@ fn optimize_module(checked: CheckedModule) -> Result<Module, Diagnostics> {
             _ => {}
         }
     }
-    let mut body_replacements = function_constants(&checked, &functions);
+    let mut body_replacements = expression_constants(&checked, &functions);
     let mut module = checked.module;
     for item in &mut module.items {
-        if matches!(item, Item::Function(_)) {
-            crate::visit::rewrite(item, &mut |e| {
-                if let Some(value) = body_replacements.remove(&(e as *const Expr as usize)) {
-                    *e = value;
-                }
-            });
-        }
+        crate::visit::rewrite(item, &mut |e| {
+            if let Some(value) = body_replacements.remove(&e.id()) {
+                *e = value;
+            }
+        });
     }
     for (index, replacement) in replacements {
         if let Some(replacement) = replacement {
@@ -363,7 +387,7 @@ fn optimize_module(checked: CheckedModule) -> Result<Module, Diagnostics> {
         .retain(|item| !matches!(item, Item::Function(f) if !reachable.contains(&f.name)));
     Ok(module)
 }
-fn function_constants(
+fn expression_constants(
     checked: &CheckedModule,
     functions: &HashMap<String, &Function>,
 ) -> HashMap<usize, Expr> {
@@ -372,7 +396,7 @@ fn function_constants(
     for item in &checked.module.items {
         crate::visit::item(item, &mut |e| {
             if let Expr::Async(call) = e {
-                preserved.insert(&**call as *const Expr as usize);
+                preserved.insert(call.id());
             }
             // Pattern literals must retain their syntax for exhaustiveness
             // checking and pattern lowering (not become constant thunks).
@@ -380,7 +404,7 @@ fn function_constants(
                 for (patterns, _) in arms {
                     for pattern in patterns {
                         crate::visit::pattern(pattern, &mut |value| {
-                            preserved.insert(value as *const Expr as usize);
+                            preserved.insert(value.id());
                         });
                     }
                 }
@@ -388,13 +412,10 @@ fn function_constants(
         });
     }
     for item in &checked.module.items {
-        if !matches!(item, Item::Function(_)) {
-            continue;
-        }
         let mut fuel = 100_000;
         crate::visit::item(item, &mut |e| {
             if fuel == 0
-                || preserved.contains(&(e as *const Expr as usize))
+                || preserved.contains(&e.id())
                 || !matches!(
                     e,
                     Expr::Call { .. }
@@ -415,7 +436,7 @@ fn function_constants(
             if let Ok(Some(value)) = evaluate(e, &HashMap::new(), functions, checked, &mut fuel)
                 && value.materializable()
             {
-                replacements.insert(e as *const Expr as usize, materialize(value, e, checked));
+                replacements.insert(e.id(), materialize(value, e, checked));
             }
         });
     }
@@ -437,8 +458,8 @@ fn fold(
         callee,
         args,
         generics,
-    } = e
-        && matches!(&**callee,Expr::Name(n) if n.starts_with('@'))
+    } = e.unlocated()
+        && matches!(callee.unlocated(),Expr::Name(n) if n.starts_with('@'))
     {
         let args = args
             .iter()
@@ -465,9 +486,7 @@ fn materialize(value: Value, original: &Expr, checked: &CheckedModule) -> Expr {
         return value.expr();
     }
     let expr = value.expr();
-    let ty = checked
-        .expression_types
-        .get(&(original as *const Expr as usize));
+    let ty = checked.expression_types.get(&original.id());
     // A typed constant thunk supplies context for empty arrays, optionals, and
     // nominal values even when the caller (e.g. @println) supplies no type.
     if let Some(ty) = ty
@@ -490,7 +509,6 @@ fn constant_statement(statement: Stmt, ty: Type) -> Expr {
             generics: vec![],
             params: vec![],
             return_type: ty,
-            throws: false,
             body: Block {
                 statements: vec![statement],
             },
@@ -510,9 +528,9 @@ fn evaluate(
     let mut expressions = HashMap::new();
     for item in &checked.module.items {
         crate::visit::item(item, &mut |e| {
-            expressions.insert(e as *const Expr as usize, e);
+            expressions.insert(e.id(), e);
             if let Expr::Lambda(f) = e {
-                lambdas.insert(e as *const Expr as usize, &**f);
+                lambdas.insert(e.id(), &**f);
             }
         });
     }
@@ -526,6 +544,7 @@ fn evaluate(
         memo: HashMap::new(),
         depth: 0,
         arithmetic_failure: false,
+        arithmetic_location: None,
         flow: None,
         indices: vec![],
     };
@@ -533,10 +552,15 @@ fn evaluate(
     if let Some(error) = evaluator.embed_error {
         Err(error)
     } else if evaluator.arithmetic_failure {
-        Err(Diagnostics::one(
+        let error = Diagnostics::one(
             "constant evaluation failed: integer overflow, division by zero, invalid shift/exponent, or non-finite float",
             0..0,
-        ))
+        );
+        Err(if let Some(location) = evaluator.arithmetic_location {
+            error.at_source(&location.path, location.span)
+        } else {
+            error
+        })
     } else {
         Ok(value)
     }
@@ -551,11 +575,23 @@ struct Evaluator<'a> {
     memo: HashMap<(Value, Vec<Value>), Value>,
     depth: usize,
     arithmetic_failure: bool,
+    arithmetic_location: Option<SourceLocation>,
     // A return/throw inside a value expression exits its enclosing function.
     flow: Option<Flow>,
     indices: Vec<u64>,
 }
 impl Evaluator<'_> {
+    fn constant_binding(&mut self, key: usize, name: &str) -> Option<Value> {
+        let initializer = *self.expressions.get(&key)?;
+        let value = self.evaluate(initializer, &mut HashMap::new())?;
+        if let Some((pattern, ty)) = self.checked.constant_patterns.get(&key) {
+            let value = declaration_value(pattern, ty, value)?;
+            let mut bindings = HashMap::new();
+            bind_declaration(pattern, value, &mut bindings, &mut Vec::new())?;
+            return bindings.remove(name);
+        }
+        Some(value)
+    }
     fn index(
         &mut self,
         index: &Expr,
@@ -579,7 +615,7 @@ impl Evaluator<'_> {
         env: &mut HashMap<String, Value>,
         path: &mut Vec<Access>,
     ) -> Option<String> {
-        match e {
+        match e.unlocated() {
             Expr::Name(name) => Some(name.clone()),
             Expr::Member { object, name } => {
                 let root = self.place(object, env, path)?;
@@ -687,7 +723,94 @@ impl Evaluator<'_> {
             (value, _) => Some(value),
         }
     }
-    fn cast(&mut self, ty: &Type, value: Value) -> Option<Value> {
+    fn string(&self, value: &Value, ty: &Type) -> Option<String> {
+        let ty = self.base_type(ty);
+        let sequence = |values: &[Value], types: &[Type], quoted: bool| {
+            values
+                .iter()
+                .zip(types)
+                .map(|(value, ty)| {
+                    let text = self.string(value, ty)?;
+                    Some(if quoted && *ty == Type::Named("str".into(), vec![]) {
+                        format!("\"{text}\"")
+                    } else {
+                        text
+                    })
+                })
+                .collect::<Option<Vec<_>>>()
+                .map(|parts| parts.join(", "))
+        };
+        Some(match (value, ty) {
+            (Value::String(s) | Value::Char(s), _) => s.clone(),
+            (Value::Int(n), _) => n.to_string(),
+            (Value::Uint(n), _) => n.to_string(),
+            (Value::Byte(n), _) => n.to_string(),
+            (Value::Float(bits), _) => float_string(f64::from_bits(*bits))?,
+            (Value::Bool(b), _) => b.to_string(),
+            (Value::Optional(_, None), _) => "none".into(),
+            (Value::Optional(_, Some(value)), Type::Optional(inner)) => {
+                self.string(value, inner)?
+            }
+            (Value::Array(values), Type::Array(inner, _)) => {
+                let types = vec![(**inner).clone(); values.len()];
+                format!("[{}]", sequence(values, &types, true)?)
+            }
+            (Value::Tuple(values), Type::Tuple(types)) => {
+                format!("({})", sequence(values, types, false)?)
+            }
+            (Value::Map(entries), Type::Map(key, val)) => {
+                let parts = entries
+                    .iter()
+                    .map(|(k, v)| {
+                        Some(format!(
+                            "{}: {}",
+                            self.string(k, key)?,
+                            self.string(v, val)?
+                        ))
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                format!("[{}]", parts.join(", "))
+            }
+            (Value::Struct(name, values), _) => {
+                let TypeInfo::Struct(declaration) = self.checked.types.get(name)? else {
+                    return None;
+                };
+                let parts = declaration
+                    .fields
+                    .iter()
+                    .map(|field| {
+                        let (_, value) = values.iter().find(|(name, _)| *name == field.name)?;
+                        Some(format!(
+                            ".{} = {}",
+                            field.name,
+                            self.string(value, &field.ty)?
+                        ))
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                format!("{name}{{{}}}", parts.join(", "))
+            }
+            (Value::Enum(name, variant, values), _) => {
+                let TypeInfo::Enum(declaration) = self.checked.types.get(name)? else {
+                    return None;
+                };
+                let types = &declaration
+                    .variants
+                    .iter()
+                    .find(|v| v.name == *variant)?
+                    .values;
+                if values.is_empty() {
+                    format!("{name}.{variant}")
+                } else {
+                    format!("{name}.{variant}({})", sequence(values, types, true)?)
+                }
+            }
+            _ => return None,
+        })
+    }
+    fn cast(&mut self, ty: &Type, from: &Type, value: Value) -> Option<Value> {
+        if *self.base_type(ty) == Type::Named("str".into(), vec![]) {
+            return self.string(&value, from).map(Value::String);
+        }
         if let Type::Array(inner, None) = self.base_type(ty) {
             if **inner == Type::Named("byte".into(), vec![]) {
                 let bytes = match value {
@@ -749,14 +872,6 @@ impl Evaluator<'_> {
                 Value::Int(n) => Some(Value::Float((n as f64).to_bits())),
                 Value::Uint(n) => Some(Value::Float((n as f64).to_bits())),
                 Value::Byte(n) => Some(Value::Float((n as f64).to_bits())),
-                _ => None,
-            },
-            "str" => match value {
-                Value::String(s) | Value::Char(s) => Some(Value::String(s)),
-                Value::Int(n) => Some(Value::String(n.to_string())),
-                Value::Uint(n) => Some(Value::String(n.to_string())),
-                Value::Byte(n) => Some(Value::String(n.to_string())),
-                Value::Bool(b) => Some(Value::String(b.to_string())),
                 _ => None,
             },
             "char" if matches!(value, Value::Char(_)) => Some(value),
@@ -867,7 +982,7 @@ impl Evaluator<'_> {
     fn expr_type(&self, e: &Expr) -> Option<&Type> {
         self.checked
             .expression_types
-            .get(&(e as *const Expr as usize))
+            .get(&e.id())
             .map(|ty| self.base_type(ty))
     }
     fn evaluate(&mut self, e: &Expr, env: &mut HashMap<String, Value>) -> Option<Value> {
@@ -876,27 +991,27 @@ impl Evaluator<'_> {
         }
         self.depth += 1;
         let result = self.expression(e, env).and_then(|value| {
-            if let Some(ty) = self
-                .checked
-                .expression_types
-                .get(&(e as *const Expr as usize))
-            {
+            if let Some(ty) = self.checked.expression_types.get(&e.id()) {
                 self.coerce(value, ty)
             } else {
                 Some(value)
             }
         });
         self.depth -= 1;
+        if self.arithmetic_failure && self.arithmetic_location.is_none() {
+            self.arithmetic_location = e.location().cloned();
+        }
         result
     }
     fn expression(&mut self, e: &Expr, env: &mut HashMap<String, Value>) -> Option<Value> {
+        let e = e.unlocated();
         let fuel = &mut *self.fuel;
         *fuel = fuel.checked_sub(1)?;
         if let Expr::Unary {
             op: UnaryOp::Neg,
             value,
         } = e
-            && let Expr::Int(n) = &**value
+            && let Expr::Int(n) = value.unlocated()
             && crate::lexer::integer(n).ok()? == 1u64 << 63
         {
             return Some(Value::Int(i64::MIN));
@@ -918,15 +1033,18 @@ impl Evaluator<'_> {
             }
             Expr::Bool(b) => Some(Value::Bool(*b)),
             Expr::Lambda(_) => {
-                let key = e as *const Expr as usize;
+                let key = e.id();
                 let captures = self.checked.captures.get(&key)?;
                 let values = captures
                     .iter()
-                    .map(|(name, _, mutex)| {
-                        if *mutex {
+                    .map(|capture| {
+                        if capture.mutex {
                             return None;
                         }
-                        Some((name.clone(), env.get(name)?.clone()))
+                        let value = env.get(&capture.name).cloned().or_else(|| {
+                            self.constant_binding(capture.initializer?, &capture.name)
+                        })?;
+                        Some((capture.name.clone(), value))
                     })
                     .collect::<Option<_>>()?;
                 Some(Value::Closure(key, values))
@@ -999,7 +1117,7 @@ impl Evaluator<'_> {
                 Some(Value::Optional((**inner).clone(), None))
             }
             Expr::Member { object, name } => {
-                if let Expr::Name(owner) = &**object
+                if let Expr::Name(owner) = object.unlocated()
                     && let Some(TypeInfo::Enum(_)) = self.checked.types.get(owner)
                 {
                     return Some(Value::Enum(owner.clone(), name.clone(), vec![]));
@@ -1053,7 +1171,7 @@ impl Evaluator<'_> {
                 if self.base_type(ty) == self.base_type(&from) {
                     self.coerce(value, ty)
                 } else {
-                    self.cast(ty, value)
+                    self.cast(ty, &from, value)
                 }
             }
             Expr::Name(n) if n == "$" => self
@@ -1065,21 +1183,8 @@ impl Evaluator<'_> {
                 if let Some(value) = env.get(n) {
                     return Some(value.clone());
                 }
-                if let Some(key) = self
-                    .checked
-                    .constant_sources
-                    .get(&(e as *const Expr as usize))
-                {
-                    let key = (*key)?;
-                    let initializer = *self.expressions.get(&key)?;
-                    let value = self.evaluate(initializer, &mut HashMap::new())?;
-                    if let Some((pattern, ty)) = self.checked.constant_patterns.get(&key) {
-                        let value = declaration_value(pattern, ty, value)?;
-                        let mut bindings = HashMap::new();
-                        bind_declaration(pattern, value, &mut bindings, &mut Vec::new())?;
-                        return bindings.remove(n);
-                    }
-                    return Some(value);
+                if let Some(key) = self.checked.constant_sources.get(&e.id()) {
+                    return self.constant_binding((*key)?, n);
                 }
                 self.functions
                     .contains_key(n)
@@ -1218,14 +1323,14 @@ impl Evaluator<'_> {
                 }
             }
             Expr::Call { callee, args, .. } => {
-                if matches!(&**callee, Expr::Name(name) if name == "@target") {
+                if matches!(callee.unlocated(), Expr::Name(name) if name == "@target") {
                     return Some(Value::Tuple(vec![
                         Value::String(crate::target::OS.into()),
                         Value::String(crate::target::ARCH.into()),
                     ]));
                 }
-                if let Expr::Member { object, name } = &**callee
-                    && let Expr::Name(owner) = &**object
+                if let Expr::Member { object, name } = callee.unlocated()
+                    && let Expr::Name(owner) = object.unlocated()
                     && let Some(TypeInfo::Enum(_)) = self.checked.types.get(owner)
                 {
                     return Some(Value::Enum(
@@ -1548,10 +1653,7 @@ impl Evaluator<'_> {
                     let name = self.place(target, env, &mut path)?;
                     let v = self.evaluate(value, env)?;
                     if name != "_" {
-                        let ty = self
-                            .checked
-                            .expression_types
-                            .get(&(target as *const Expr as usize))?;
+                        let ty = self.checked.expression_types.get(&target.id())?;
                         let v = self.coerce(v, ty)?;
                         assign(env.get_mut(&name)?, &path, v)?;
                     }
@@ -1563,12 +1665,17 @@ impl Evaluator<'_> {
                     Value::String(message) => Flow::Throw(message),
                     _ => return None,
                 },
-                Stmt::Expr(Expr::If { subject, arms }) => self.conditional(
-                    subject.as_deref(),
-                    arms,
-                    env,
-                    valued && index + 1 == b.statements.len(),
-                )?,
+                Stmt::Expr(value) if matches!(value.unlocated(), Expr::If { .. }) => {
+                    let Expr::If { subject, arms } = value.unlocated() else {
+                        unreachable!()
+                    };
+                    self.conditional(
+                        subject.as_deref(),
+                        arms,
+                        env,
+                        valued && index + 1 == b.statements.len(),
+                    )?
+                }
                 Stmt::Expr(e) if valued && index + 1 == b.statements.len() => {
                     Flow::Value(self.evaluate(e, env)?)
                 }
@@ -1631,13 +1738,15 @@ impl Evaluator<'_> {
                     }
                     flow
                 }
-                Stmt::LabeledIf {
-                    label,
-                    value: Expr::If { subject, arms },
-                } => match self.conditional(subject.as_deref(), arms, env, false)? {
-                    Flow::Break(Some(target)) if target == *label => Flow::Next,
-                    flow => flow,
-                },
+                Stmt::LabeledIf { label, value } => {
+                    let Expr::If { subject, arms } = value.unlocated() else {
+                        return None;
+                    };
+                    match self.conditional(subject.as_deref(), arms, env, false)? {
+                        Flow::Break(Some(target)) if target == *label => Flow::Next,
+                        flow => flow,
+                    }
+                }
                 Stmt::Block(body) => self.block(body, env)?,
                 Stmt::Break(None, label) => Flow::Break(label.clone()),
                 Stmt::Break(Some(e), None) => Flow::Value(self.evaluate(e, env)?),

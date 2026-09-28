@@ -35,11 +35,26 @@
 - Release mode must actually optimize, correctly across all supported types.
   Preserve effects, evaluation order, value semantics, and runtime failures.
 - Include C headers only when needed by the generated program.
+- Preserve source locations through module loading, generic specialization, and
+  optimization. Semantic errors should identify the failing expression or
+  statement in its original file, including imported code.
+- Preserve location wrappers during AST rewrites and use the canonical expression
+  ID for type and capture metadata. Interpolation is parsed after escape decoding;
+  report its original string literal, not offsets into the decoded text.
+- Treat pattern comparisons as equality operations: apply the same restrictions
+  on functions and unawaited futures. Value-carrying `break` needs a surrounding
+  value-producing block; labels belong only on `if`, `for`, `while`, or `lock`.
+- Compile-time string conversion must match runtime formatting, including field
+  order, quoting, embedded NULs, Unicode, and nominal types. Keep a safe runtime
+  fallback for operations that cannot yet be reproduced exactly.
 
 ## Verification and workflow
 
 - Add regression tests for fixes and expand positive, negative, differential,
   concurrency, and full-language coverage. Compare debug and release behavior.
+- Run negative conformance cases in both modes. Include immutable tuple bindings
+  and by-value closure captures in compile-time evaluation tests; runtime-dependent
+  `@embed` paths must fail without executing effects.
 - Run relevant tests during development and broader checks before handoff:
   `cargo test --offline`, `cargo test --offline --no-default-features`,
   `cargo clippy --offline --all-targets -- -D warnings`, `cargo fmt --check`,
@@ -48,3 +63,6 @@
   variables. Run the large Fibonacci example only in release mode.
 - Preserve user changes and examples. Commit small, coherent changes often.
   Never push. Report remaining limitations honestly.
+- Keep this file current as the user refines the scope or verification needs.
+  If commit approval is unavailable, preserve the changes and report the blocker;
+  do not bypass approval controls.

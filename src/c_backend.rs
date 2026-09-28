@@ -4,7 +4,7 @@ use crate::{
     ast::*,
     diagnostic::Diagnostics,
     lexer::integer,
-    sema::{CheckedModule, TypeInfo},
+    sema::{Capture, CheckedModule, TypeInfo},
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -39,8 +39,8 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
     for item in &checked.module.items {
         match item {
             Item::Function(f) => {
-                if !f.generics.is_empty() || f.throws {
-                    return unsupported("generic or throwing functions");
+                if !f.generics.is_empty() {
+                    return unsupported("unspecialized generic functions");
                 }
                 let ret = e.c_return_type(&f.return_type)?;
                 let params = f
@@ -406,7 +406,7 @@ impl Emitter<'_> {
     fn ty(&self, expr: &Expr) -> Result<Type, Diagnostics> {
         self.checked
             .expression_types
-            .get(&(expr as *const Expr as usize))
+            .get(&expr.id())
             .cloned()
             .ok_or_else(|| Diagnostics::one("internal error: missing expression type", 0..0))
     }
@@ -501,7 +501,15 @@ impl Emitter<'_> {
             return Ok(name);
         }
         if let Type::Array(element, _) = ty {
-            let key = Type::Array(element.clone(), None);
+            // Length constraints are checked by sema, not encoded in the C layout.
+            // Erase them at every array depth so int[2][] and int[][] agree.
+            fn layout(ty: &Type) -> Type {
+                match ty {
+                    Type::Array(element, _) => Type::Array(Box::new(layout(element)), None),
+                    _ => ty.clone(),
+                }
+            }
+            let key = layout(ty);
             if let Some((_, name, _)) = self.array_types.iter().find(|(t, _, _)| *t == key) {
                 return Ok(name.clone());
             }
@@ -654,7 +662,7 @@ impl Emitter<'_> {
                 let end = self.fresh();
                 self.loops
                     .push((Some(label.clone()), None, end.clone(), false));
-                let Expr::If { subject, arms } = value else {
+                let Expr::If { subject, arms } = value.unlocated() else {
                     return unsupported("labelled non-conditional");
                 };
                 self.conditional(subject.as_deref(), arms, false)?;
@@ -682,6 +690,7 @@ impl Emitter<'_> {
                 self.declare_pattern(&v.pattern, &v.ty, &value)?;
             }
             Stmt::Assign { target, value } => {
+                let target = target.unlocated();
                 if let Expr::Index { object, index } = target
                     && self.ty(object)? == Type::Named("str".into(), vec![])
                 {
@@ -725,7 +734,10 @@ impl Emitter<'_> {
                     _ => return unsupported("composite assignment"),
                 }
             }
-            Stmt::Expr(Expr::If { subject, arms }) => {
+            Stmt::Expr(value) if matches!(value.unlocated(), Expr::If { .. }) => {
+                let Expr::If { subject, arms } = value.unlocated() else {
+                    unreachable!()
+                };
                 self.conditional(subject.as_deref(), arms, false)?
             }
             Stmt::Expr(value) => {
@@ -1041,7 +1053,8 @@ impl Emitter<'_> {
         }
     }
     fn expr(&mut self, e: &Expr) -> Result<String, Diagnostics> {
-        if let Some(value) = self.expression_values.get(&(e as *const Expr as usize)) {
+        let e = e.unlocated();
+        if let Some(value) = self.expression_values.get(&e.id()) {
             return Ok(value.clone());
         }
         let value = match e {
@@ -1392,7 +1405,7 @@ impl Emitter<'_> {
             }
             Expr::Unary { op, value } => {
                 if *op == UnaryOp::Neg
-                    && matches!(&**value, Expr::Int(text) if !text.ends_with('u') && integer(text).ok() == Some(1u64 << 63))
+                    && matches!(value.unlocated(), Expr::Int(text) if !text.ends_with('u') && integer(text).ok() == Some(1u64 << 63))
                 {
                     return self.temp(e, "(-9223372036854775807LL - 1LL)".into());
                 }
@@ -1501,7 +1514,7 @@ impl Emitter<'_> {
                 }
             }
             Expr::Call { callee, args, .. } => {
-                if let Expr::Name(name) = &**callee {
+                if let Expr::Name(name) = callee.unlocated() {
                     match name.as_str() {
                         "@target" => {
                             let ct = self.c_type(&self.ty(e)?)?;
@@ -1543,7 +1556,7 @@ impl Emitter<'_> {
                         _ => {}
                     }
                 }
-                if let Expr::Member { object, name } = &**callee {
+                if let Expr::Member { object, name } = callee.unlocated() {
                     let ty = self.ty(object)?;
                     if let Some(declaration) = self.enum_decl(&ty) {
                         let tag = declaration
@@ -1567,7 +1580,7 @@ impl Emitter<'_> {
                         return self.temp(e, format!("({ct}){{{tag},{pointer}}}"));
                     }
                 }
-                if let Expr::Name(name) = &**callee
+                if let Expr::Name(name) = callee.unlocated()
                     && name.starts_with('@')
                 {
                     self.headers.insert("stdio.h");
@@ -1623,7 +1636,7 @@ impl Emitter<'_> {
                 let Type::Function(params, _) = self.ty(callee)? else {
                     return unsupported("calling this type");
                 };
-                if let Expr::Name(name) = &**callee
+                if let Expr::Name(name) = callee.unlocated()
                     && !self.scopes.iter().any(|s| s.contains_key(name))
                 {
                     let values = args
@@ -1690,10 +1703,10 @@ impl Emitter<'_> {
     }
     fn spawn(&mut self, e: &Expr, call: &Expr) -> Result<String, Diagnostics> {
         self.async_support();
-        let Expr::Call { callee, args, .. } = call else {
+        let Expr::Call { callee, args, .. } = call.unlocated() else {
             return unsupported("async non-call");
         };
-        let builtin = matches!(&**callee, Expr::Name(name) if name.starts_with('@'));
+        let builtin = matches!(callee.unlocated(), Expr::Name(name) if name.starts_with('@'));
         let callee_type = if builtin {
             Type::Function(
                 args.iter()
@@ -1740,15 +1753,12 @@ impl Emitter<'_> {
         let body = if builtin {
             let saved = std::mem::take(&mut self.out);
             for (i, arg) in args.iter().enumerate() {
-                self.expression_values.insert(
-                    arg as *const Expr as usize,
-                    format!("job->args.f_{}", i + 1),
-                );
+                self.expression_values
+                    .insert(arg.id(), format!("job->args.f_{}", i + 1));
             }
             let value = self.expr(call)?;
             for arg in args {
-                self.expression_values
-                    .remove(&(arg as *const Expr as usize));
+                self.expression_values.remove(&arg.id());
             }
             if **ret != Type::void() {
                 self.line(format!("job->result = {value};"));
@@ -1825,14 +1835,14 @@ impl Emitter<'_> {
         self.temp(e, format!("({ct}){{{wrapper},0}}"))
     }
     fn lambda(&mut self, e: &Expr, f: &Function) -> Result<String, Diagnostics> {
-        let captures = self.checked.captures[&(e as *const Expr as usize)].clone();
+        let captures = self.checked.captures[&e.id()].clone();
         let env_ct = if captures.is_empty() {
             None
         } else {
             let name = self.fresh();
             let mut fields = vec![];
             let mut dependencies = vec![];
-            for (i, (_, ty, mutex)) in captures.iter().enumerate() {
+            for (i, Capture { ty, mutex, .. }) in captures.iter().enumerate() {
                 let ct = if *mutex {
                     format!("{} *", self.mutex_type(ty)?)
                 } else {
@@ -1853,7 +1863,7 @@ impl Emitter<'_> {
         let ret_ct = self.c_return_type(&f.return_type)?;
         let mut params = vec!["void *nc_env".into()];
         let mut scope = HashMap::new();
-        for (i, (n, _, mutex)) in captures.iter().enumerate() {
+        for (i, Capture { name: n, mutex, .. }) in captures.iter().enumerate() {
             let code = format!("(({}*)nc_env)->f_{i}", env_ct.as_ref().unwrap());
             if *mutex {
                 self.mutexes.insert(code);
@@ -1893,7 +1903,13 @@ impl Emitter<'_> {
             self.allocation_support();
             let env = self.fresh();
             self.line(format!("{env_ct} *{env} = nc_alloc(1,sizeof({env_ct}));"));
-            for (i, (name, ty, mutex)) in captures.iter().enumerate() {
+            for (
+                i,
+                Capture {
+                    name, ty, mutex, ..
+                },
+            ) in captures.iter().enumerate()
+            {
                 let value = if *mutex {
                     self.name(name)
                 } else {
@@ -1909,14 +1925,14 @@ impl Emitter<'_> {
     }
     // A writable place must retain the original storage, not an expression copy.
     fn place(&mut self, e: &Expr) -> Result<String, Diagnostics> {
-        match e {
+        match e.unlocated() {
             Expr::Name(name) => Ok(self.name(name)),
             Expr::Member { object, name } => Ok(format!("({}).f_{name}", self.place(object)?)),
             Expr::Index { object, index } => {
                 let storage = self.place(object)?;
                 let ty = self.ty(object)?;
                 if let Type::Tuple(_) = ty {
-                    let Expr::Int(i) = &**index else {
+                    let Expr::Int(i) = index.unlocated() else {
                         return unsupported("dynamic tuple indexing");
                     };
                     return Ok(format!("({storage}).f_{}", integer(i)?));
@@ -1960,7 +1976,7 @@ impl Emitter<'_> {
         }
         if matches!(self.ty(object)?, Type::Tuple(_)) {
             let object = self.expr(object)?;
-            let Expr::Int(index) = index else {
+            let Expr::Int(index) = index.unlocated() else {
                 return unsupported("dynamic tuple indexing");
             };
             return Ok(format!("({object}).f_{}", integer(index)?));

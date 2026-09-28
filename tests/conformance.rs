@@ -67,6 +67,45 @@ int fallback = native.sum([]) catch err { 42 }
 }
 
 #[test]
+fn duplicate_generic_and_record_declarations_are_not_silently_overwritten() {
+    for source in [
+        "fn f<T, T>(T value) T { return value }",
+        "struct Box<T, T> { T value }",
+        "enum Either<T, T> { Value(T) }",
+        "struct Box<T> { T value T value }",
+        "struct Box { int value int value }",
+        "enum Either<T> { Value(T) Value }",
+        "enum Either { Value(int) Value }",
+        "fn f<T>(T value) T { return value } fn f<T>(T value) T { return value }",
+        "fn f<T>(T value) T { return value } fn f() {}",
+        "struct Box<T> { T value } struct Box<T> { T other }",
+        "enum Box<T> { Value(T) } struct Box<T> { T value }",
+        "type Box = int struct Box<T> { T value }",
+    ] {
+        rejects(source, "duplicate");
+    }
+}
+
+#[test]
+fn expanding_generic_recursion_reports_a_limit_instead_of_crashing() {
+    for source in [
+        "fn grow<T>(T value) int { return grow<T[]>([value]) } _ = grow<int>(1)",
+        "struct Grow<T> { Grow<T[]>[] next } fn use(Grow<int> value) {}",
+        "enum Grow<T> { Next(Grow<T[]>) } fn use(Grow<int> value) {}",
+    ] {
+        for release in [false, true] {
+            let output = run_mode(source, release);
+            assert!(!output.status.success());
+            let error = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                error.contains("specialization limit exceeded"),
+                "{source}: {error}"
+            );
+        }
+    }
+}
+
+#[test]
 fn generic_constructors_receive_nested_type_context() {
     success(
         r#"
@@ -78,6 +117,12 @@ fn read(Choice<int> choice) int {
 }
 fn identity<type T>(T value) T { return value }
 fn make() Choice<int> { return Choice.Value(7) }
+fn wrap<T>(T value) Choice<T> { return Choice.Value(value) }
+fn unwrap<T>(Choice<T>? maybe, T fallback) T {
+    Choice<T> value = maybe else { Choice.Value(fallback) }
+    return if value { Choice.Value(v) -> { v } Choice.Empty -> { fallback } }
+}
+fn wait<T>(fut T work) T { return await work }
 test "nested contexts" {
     Choice<int>? optional = Choice.Value(1)
     Choice<int> choice = optional else { Choice.Empty }
@@ -93,6 +138,12 @@ test "nested contexts" {
     Choice<int> conditional = if true { true -> { Choice.Value(8) } false -> { Choice.Empty } }
     assert read(conditional) == 8
     if make() { Choice.Value(n) -> { assert n == 7 } Choice.Empty -> { assert false } }
+    Choice<Choice<int>> nested = wrap<Choice<int>>(Choice.Value(9))
+    assert read(unwrap<Choice<int>>(nested, Choice.Empty)) == 9
+    assert read(unwrap<Choice<int>>(none, Choice.Value(10))) == 10
+    fut Choice<int> work = async make()
+    fut Choice<int> forwarded = async wait<Choice<int>>(work)
+    assert read(await forwarded) == 7
 }
 "#,
         "",
@@ -336,6 +387,45 @@ test "labels" {
 }
 
 #[test]
+fn invalid_labels_value_breaks_and_pattern_comparisons_are_rejected() {
+    for statement in [
+        "return",
+        "break",
+        "continue",
+        "throw \"bad\"",
+        "assert true",
+        "int x = 1",
+        "@println(1)",
+    ] {
+        rejects(
+            &format!("fn f() ! {{ while true {{ wrong: {statement}\n }} }}"),
+            "labels may only be applied",
+        );
+    }
+    for source in [
+        "while true { break 1 }",
+        "for i in [1] { break missing }",
+        "label: if true { true -> { break 1 } false -> {} }",
+        "mutex int x = 0 lock x { break 1 }",
+        "int x = if true { true -> { fn nested() { break 1 } 1 } false -> { 2 } }",
+    ] {
+        rejects(source, "break with a value requires");
+    }
+    for source in [
+        "fn f() {} (fn() void) value = f if value { value -> {} _ -> {} }",
+        "fn f() {} (fn() void) value = f if [value] { [value] -> {} _ -> {} }",
+        "fn f() {} fut void value = async f() if value { value -> {} _ -> {} }",
+        "fn f() {} struct Box { (fn() void) value } Box box = Box{.value = f} if box { box -> {} _ -> {} }",
+    ] {
+        rejects(source, "pattern equality is not defined");
+    }
+    rejects(
+        "struct S { int x } S s = S{.x = 1} if s { S{.x = a, .x = b} -> {} _ -> {} }",
+        "duplicate field",
+    );
+}
+
+#[test]
 fn unicode_string_length_indexing_and_iteration() {
     success(
         r#"
@@ -438,6 +528,36 @@ test "futures" {
     );
     rejects("fn bad() fut int { }", "futures cannot be returned");
     rejects("fut int f = async 1", "async requires a function call");
+}
+
+#[test]
+fn repeated_concurrent_awaits_copy_results_and_discarded_workers_finish() {
+    success(
+        r#"
+fn produce() int[] { return [1, 2] }
+fn consume(fut int[] input) int {
+    mut int[] copy = await input
+    copy[0] = 7
+    return copy[0]
+}
+fn child() { @println("child") }
+fn parent() { fut void job = async child() }
+test "concurrent await" {
+    mut int i = 0
+    while i < 16 {
+        fut int[] original = async produce()
+        fut int a = async consume(original)
+        fut int b = async consume(original)
+        assert await a == 7 and await b == 7
+        assert await original == [1, 2]
+        assert await original == [1, 2]
+        i = i + 1
+    }
+    fut void discarded = async parent()
+}
+"#,
+        "child\n",
+    );
 }
 
 #[test]
@@ -1000,8 +1120,14 @@ fn success(source: &str, stdout: &str) {
     }
 }
 fn rejects(source: &str, message: &str) {
-    let error = ncc::compile_source(source, Path::new("test.nc")).unwrap_err();
-    assert!(error.to_string().contains(message), "{error}");
+    for release in [false, true] {
+        let error =
+            ncc::compile_source_with_options(source, Path::new("test.nc"), release).unwrap_err();
+        assert!(
+            error.to_string().contains(message),
+            "release={release}: {error}"
+        );
+    }
 }
 
 #[test]
@@ -1041,6 +1167,52 @@ fn functions_cannot_be_used_as_type_names() {
             &format!("fn function() int {{ return 1 }} {declaration}"),
             "not a type",
         );
+    }
+}
+
+#[test]
+fn invalid_operator_type_matrix_is_rejected_in_both_modes() {
+    for (ty, value, operators) in [
+        ("bool", "true", "+ - * / % ** < <= > >= & | ^ << >> <>"),
+        ("str", "\"x\"", "+ - * / % ** < <= > >= & | ^ << >> and or"),
+        (
+            "char",
+            "'x'",
+            "+ - * / % ** < <= > >= & | ^ << >> and or <>",
+        ),
+        ("float", "1.0", "& | ^ << >> and or <>"),
+        ("int", "1", "and or <>"),
+        ("uint", "1", "and or <>"),
+        ("byte", "1", "and or <>"),
+        ("int[]", "[1]", "+ - * / % ** < <= > >= & | ^ << >> and or"),
+        (
+            "[str]int",
+            "[\"x\": 1]",
+            "+ - * / % ** < <= > >= & | ^ << >> and or",
+        ),
+        (
+            "(int, str)",
+            "(1, \"x\")",
+            "+ - * / % ** < <= > >= & | ^ << >> and or <>",
+        ),
+    ] {
+        for op in operators.split_whitespace() {
+            let source = format!("{ty} a = {value}\n{ty} b = {value}\n_ = a {op} b");
+            for release in [false, true] {
+                assert!(
+                    ncc::compile_source_with_options(&source, Path::new("operators.nc"), release)
+                        .is_err(),
+                    "release={release}: {source}"
+                );
+            }
+        }
+    }
+    for source in [
+        "fn identity<T>(T value) T { return value } fn f() int { return 1 } fut int work = async f() _ = identity<fut int>(work)",
+        "enum Hidden<T> { Value(T) } fn bad() Hidden<fut int> {}",
+        "struct Hidden<T> { T value } fn bad() Hidden<fut int>[] {}",
+    ] {
+        rejects(source, "futures cannot be returned");
     }
 }
 
@@ -1175,6 +1347,57 @@ test "array lengths" {
     rejects("int[-1] values = []", "expected integer array size");
     rejects("int[size] values = []", "expected integer array size");
     rejects("int[0x2] values = [1]", "array");
+}
+
+#[test]
+fn composite_construction_preserves_effect_order_and_deep_copies() {
+    success(
+        r#"
+fn mark(int n) int { @print(n) return n }
+struct Pair { int first int second }
+enum Choice { Pair(int, int) }
+int[] array = [mark(1), mark(2)]
+(int, int) tuple = (mark(3), mark(4))
+[int]int map = [mark(5): mark(6), mark(7): mark(8)]
+Pair pair = Pair{.second = mark(9), .first = mark(10)}
+Choice choice = Choice.Pair(mark(11), mark(12))
+@println("")
+struct Bundle { int[][] rows [str]int[] table int[]? maybe }
+fn returned(Bundle bundle) Bundle { return bundle }
+test "deep copies" {
+    mut int[] row = [1, 2]
+    Bundle original = Bundle{.rows = [row], .table = ["row": row], .maybe = row}
+    mut Bundle copy = returned(original)
+    row[0] = 99
+    copy.rows[0][0] = 3
+    copy.table["row"][0] = 4
+    mut int[] optional = copy.maybe else []
+    optional[0] = 5
+    assert original.rows == [[1, 2]]
+    assert original.table["row"] == [1, 2]
+    assert (original.maybe else []) == [1, 2]
+    assert copy.rows == [[3, 2]]
+    assert copy.table["row"] == [4, 2]
+    assert (copy.maybe else []) == [1, 2]
+    fn captured = fn() int[][] { return copy.rows }
+    copy.rows[0][0] = 6
+    mut int[][] captured_rows = captured()
+    captured_rows[0][0] = 7
+    assert captured() == [[3, 2]]
+    assert array == [1, 2] and tuple == (3, 4)
+    assert map == [5: 6, 7: 8]
+    assert pair == Pair{.first = 10, .second = 9}
+    assert choice == Choice.Pair(11, 12)
+    int[2][2] fixed = [[1, 2], [3, 4]]
+    int[][] dynamic = fixed
+    assert dynamic == fixed
+    int[][][] deep = [fixed]
+    assert deep == [[[1, 2], [3, 4]]]
+    assert fixed in [dynamic]
+}
+"#,
+        "123456789101112\n",
+    );
 }
 
 #[test]

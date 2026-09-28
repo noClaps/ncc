@@ -129,11 +129,25 @@ fn tuple_local() byte[] {
     str path, int n = (path, n + 1)
     return @embed(path)
 }
+fn captured_path() byte[] {
+    str name, str suffix = ("data1", ".bin")
+    fn choose = fn() str { return name <> suffix }
+    return @embed(choose())
+}
+fn nested_capture() byte[] {
+    str name = "data1.bin"
+    fn outer = fn() str {
+        fn inner = fn() str { return name }
+        return inner()
+    }
+    return @embed(outer())
+}
 test "computed paths" {
     assert a == b and b == c and c == d and d == bytes()
     assert e == a and nested == a
     assert tuple_path == a and partial_path == a and grouped_path == a
     assert tuple_local() == a
+    assert captured_path() == a and nested_capture() == a
     byte[] expected = [0, 42, 255]
     assert a == expected
 }
@@ -171,6 +185,8 @@ fn runtime_dependent_paths_fail_without_executing_effects() {
         "mut str path, int n = (\"data\", 1)\n_ = @embed(path)",
         "fn f(str runtime) byte[] { str path, int n = (runtime, 1)\n return @embed(path) }",
         "str path, int n = (\"data\", 1)\nfn f(str path) byte[] { return @embed(path) }",
+        "fn f(str path) byte[] { fn choose = fn() str { return path } return @embed(choose()) }",
+        "mut str path = \"data\"\nfn choose = fn() str { return path }\n_ = @embed(choose())",
     ] {
         let error = ncc::compile_source(source, &input).unwrap_err();
         assert!(
