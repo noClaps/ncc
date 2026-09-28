@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 pub fn specialize(mut module: Module) -> Result<Module, Diagnostics> {
     // Check before removing templates: collection into a map would otherwise
     // silently overwrite duplicate generic declarations, even unused ones.
-    let mut names = HashSet::new();
+    let mut names: HashSet<&str> = BUILTIN_TYPES.into_iter().collect();
     for item in &module.items {
         let declared: Vec<_> = match item {
             Item::Function(f) => vec![&f.name],
@@ -16,7 +16,7 @@ pub fn specialize(mut module: Module) -> Result<Module, Diagnostics> {
             _ => vec![],
         };
         for name in declared {
-            if !names.insert(name) {
+            if !names.insert(name.as_str()) {
                 let error = Diagnostics::one(format!("duplicate declaration `{name}`"), 0..0);
                 return Err(if let Some((path, span)) = item.source() {
                     error.at_source(path, span.clone())

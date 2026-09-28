@@ -251,9 +251,7 @@ impl Checker {
     }
     fn new() -> Self {
         let mut types = HashMap::new();
-        for n in [
-            "bool", "byte", "char", "int", "uint", "float", "str", "void", "error",
-        ] {
+        for n in BUILTIN_TYPES {
             types.insert(n.into(), TypeInfo::Builtin);
         }
         Self {

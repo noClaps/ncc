@@ -81,6 +81,9 @@ fn duplicate_generic_and_record_declarations_are_not_silently_overwritten() {
         "struct Box<T> { T value } struct Box<T> { T other }",
         "enum Box<T> { Value(T) } struct Box<T> { T value }",
         "type Box = int struct Box<T> { T value }",
+        "struct int<T> { T value }",
+        "enum bool<T> { Value(T) }",
+        "fn str<T>(T value) T { return value }",
     ] {
         rejects(source, "duplicate");
     }

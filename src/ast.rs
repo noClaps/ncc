@@ -1,6 +1,9 @@
 use std::ops::Range;
 
 pub type Span = Range<usize>;
+pub(crate) const BUILTIN_TYPES: [&str; 9] = [
+    "bool", "byte", "char", "int", "uint", "float", "str", "void", "error",
+];
 
 #[derive(Clone, Debug)]
 pub struct SourceLocation {
