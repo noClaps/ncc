@@ -1516,11 +1516,6 @@ The `!` in the return type signifies that this is a throwing function, and its r
 int! sum = add_throws(1, 2)
 ```
 
-Printing, string interpolation, and conversion to `str` display the active
-success value or the error message, without requiring `try` or `catch` first.
-A successful `void!` contributes an empty string. This conversion does not
-propagate an error and never reads the inactive payload.
-
 However, it's likely not very useful in this type. To get the value out, you must handle the error with the `catch` keyword:
 
 ```nc
@@ -2234,6 +2229,7 @@ The conversion table is as follows:
 | `str`                     | `char[]`, `byte[]`               |
 | struct                    | `str`                            |
 | tuple                     | `str`                            |
+| error union (`T!`)        | `str`                            |
 
 The `str` conversion of all the types is what the `@print` and `@eprint` functions and format strings use to convert types to their string representations. For example:
 
@@ -2283,7 +2279,18 @@ struct Data {
 
 (str, int) data = ("Nathan", 24)
 @println(data) // output: (Nathan, 24)
+
+fn throwing(int val) int! {
+    if val {
+        5 -> { throw "wrong!" }
+        _ -> { return val }
+    }
+}
+@println(throwing(1)) // output: 1
+@println(throwing(5)) // output: error: wrong!
 ```
+
+The container types (error union, enum, struct, arrays, etc.) can only be converted to `str` if their constituent types can be converted to `str`. For custom types, they must first be converted to their underlying base types before being converted to `str`.
 
 #### `@args`
 
