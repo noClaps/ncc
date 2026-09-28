@@ -39,6 +39,29 @@ fn folded(source: &str, names: &[&str], expected: &str) {
 }
 
 #[test]
+fn nominal_void_constants_keep_alias_chains_in_containers_and_errors() {
+    folded(
+        r#"
+type Unit = void
+type Second = Unit
+fn unit() {}
+fn wrapped() Second { return @as(Second, @as(Unit, unit())) }
+fn values() Second[] { return [wrapped(), wrapped()] }
+fn optional() Second? { return wrapped() }
+fn checked() Second! { return wrapped() }
+Second value = wrapped()
+Second[] array = values()
+Second? present = optional()
+Second unwrapped = present else { wrapped() }
+Second success = try checked()
+@println(array.len)
+"#,
+        &["unit", "wrapped", "values", "optional", "checked"],
+        "2\n",
+    );
+}
+
+#[test]
 fn pure_void_calls_fold_without_hiding_effects() {
     folded(
         r#"

@@ -1027,6 +1027,24 @@ test "shadow" {
 }
 
 #[test]
+fn functions_cannot_be_used_as_type_names() {
+    for declaration in [
+        "type Bad = function",
+        "struct Bad { function value }",
+        "enum Bad { Value(function) }",
+        "fn bad(function value) {}",
+        "fn bad() function { return function }",
+        "function value = function",
+        "function[] values = []",
+    ] {
+        rejects(
+            &format!("fn function() int {{ return 1 }} {declaration}"),
+            "not a type",
+        );
+    }
+}
+
+#[test]
 fn scalar_semantic_errors() {
     rejects("fn bad() int { return missing }", "unknown name");
     rejects("fn bad() int {}", "without returning");

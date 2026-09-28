@@ -379,6 +379,12 @@ impl Checker {
     fn validate_type(&self, t: &Type) -> Result<(), Diagnostics> {
         match t {
             Type::Named(n, args) => {
+                if matches!(
+                    self.types.get(n),
+                    Some(TypeInfo::Function(_) | TypeInfo::External(_))
+                ) {
+                    return self.fail(format!("`{n}` is a function, not a type"));
+                }
                 if !self.types.contains_key(n) && !self.generic_in_scope(n) {
                     return self.fail(format!("unknown type `{n}`"));
                 }

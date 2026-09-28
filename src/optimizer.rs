@@ -116,7 +116,7 @@ fn embedded_bytes(path: &str, source: &std::path::Path) -> std::io::Result<Vec<u
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 enum Value {
-    Void,
+    Void(Vec<Type>),
     Int(i64),
     Uint(u64),
     Byte(u8),
@@ -185,7 +185,13 @@ impl Value {
     }
     fn expr(self) -> Expr {
         match self {
-            Self::Void => constant_statement(Stmt::Return(None), Type::void()),
+            Self::Void(aliases) => aliases.into_iter().rev().fold(
+                constant_statement(Stmt::Return(None), Type::void()),
+                |value, ty| Expr::Cast {
+                    ty,
+                    value: Box::new(value),
+                },
+            ),
             Self::Int(n) if n < 0 => Expr::Unary {
                 op: UnaryOp::Neg,
                 value: Box::new(Expr::Int(n.unsigned_abs().to_string())),
@@ -448,8 +454,8 @@ fn fold(
     Ok(None)
 }
 fn materialize(value: Value, original: &Expr, checked: &CheckedModule) -> Expr {
-    if matches!(value, Value::Void)
-        || matches!(value, Value::Success(_, ref v) if **v == Value::Void)
+    if matches!(value, Value::Void(_))
+        || matches!(value, Value::Success(ref inner, _) if *inner == Type::void())
     {
         return value.expr();
     }
@@ -585,13 +591,20 @@ impl Evaluator<'_> {
         }
     }
     fn coerce(&self, value: Value, ty: &Type) -> Option<Value> {
-        // Void constants have no literal carrying a nominal type. Keep these
-        // casts at runtime until materialization can preserve the alias chain.
-        if matches!(value, Value::Void)
-            && *ty != Type::void()
-            && self.base_type(ty) == &Type::void()
-        {
-            return None;
+        if matches!(value, Value::Void(_)) && self.base_type(ty) == &Type::void() {
+            let mut aliases = Vec::new();
+            let mut current = ty;
+            while *current != Type::void() {
+                aliases.push(current.clone());
+                let Type::Named(name, _) = current else {
+                    return None;
+                };
+                let TypeInfo::Alias(base) = self.checked.types.get(name)? else {
+                    return None;
+                };
+                current = base;
+            }
+            return Some(Value::Void(aliases));
         }
         match (value, self.base_type(ty)) {
             (value @ Value::Failure(_, _), Type::ErrorUnion(inner)) if matches!(&value, Value::Failure(actual, _) if actual == &**inner) => {
@@ -858,7 +871,11 @@ impl Evaluator<'_> {
         }
         self.depth += 1;
         let result = self.expression(e, env).and_then(|value| {
-            if let Some(ty) = self.expr_type(e) {
+            if let Some(ty) = self
+                .checked
+                .expression_types
+                .get(&(e as *const Expr as usize))
+            {
                 self.coerce(value, ty)
             } else {
                 Some(value)
@@ -1233,7 +1250,7 @@ impl Evaluator<'_> {
                         if f.return_type == Type::void()
                             || f.return_type == Type::ErrorUnion(Box::new(Type::void())) =>
                     {
-                        let v = self.coerce(Value::Void, &f.return_type)?;
+                        let v = self.coerce(Value::Void(vec![]), &f.return_type)?;
                         self.memo.insert(key, v.clone());
                         Some(v)
                     }
@@ -1529,7 +1546,7 @@ impl Evaluator<'_> {
                     Flow::Next
                 }
                 Stmt::Return(Some(e)) => Flow::Return(self.evaluate(e, env)?),
-                Stmt::Return(None) => Flow::Return(Value::Void),
+                Stmt::Return(None) => Flow::Return(Value::Void(vec![])),
                 Stmt::Throw(e) => match self.evaluate(e, env)? {
                     Value::String(message) => Flow::Throw(message),
                     _ => return None,

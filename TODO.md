@@ -13,8 +13,6 @@
   many errors still point to the start of the file.
 - Extend compile-time evaluation to remaining operations while retaining safe
   runtime fallbacks when evaluation reaches its fuel or depth limits.
-  In particular, preserve nominal alias chains when materializing void constants;
-  those casts currently remain at runtime.
 
 ## Verification and cleanup
 
