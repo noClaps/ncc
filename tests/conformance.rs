@@ -572,6 +572,104 @@ test "return paths" {
 }
 
 #[test]
+fn string_conversion_requires_convertible_constituents_and_explicit_custom_unwrapping() {
+    for (declaration, expression, diagnostic) in [
+        (
+            "type Number = int Number n = 1",
+            "n",
+            "underlying base types",
+        ),
+        (
+            "type Text = str Text n = \"text\"",
+            "n",
+            "underlying base types",
+        ),
+        (
+            "type Number = int Number[] n = []",
+            "n",
+            "underlying base types",
+        ),
+        (
+            "type Number = int fn table() [str]Number { return [] }",
+            "table()",
+            "underlying base types",
+        ),
+        (
+            "type Text = str fn table() [Text]int { return [] }",
+            "table()",
+            "underlying base types",
+        ),
+        (
+            "type Number = int Number? n = none",
+            "n",
+            "underlying base types",
+        ),
+        (
+            "type Number = int (Number, int) n = (1, 2)",
+            "n",
+            "underlying base types",
+        ),
+        (
+            "type Number = int struct Box { Number value } Box n = Box{.value = 1}",
+            "n",
+            "underlying base types",
+        ),
+        (
+            "type Number = int enum Box { Empty Value(Number) } Box n = Box.Empty",
+            "n",
+            "underlying base types",
+        ),
+        (
+            "type Number = int fn result() Number! { throw \"bad\" }",
+            "result()",
+            "underlying base types",
+        ),
+        (
+            "enum Recursive { Children(Recursive[]) Value(void) Empty } Recursive n = Recursive.Empty",
+            "n",
+            "not defined for void",
+        ),
+        ("void[] n = []", "n", "not defined for void"),
+        ("void? n = none", "n", "not defined for void"),
+        ("fn result() ! {}", "result()", "not defined for void"),
+        (
+            "fn result() ! { throw \"bad\" }",
+            "result()",
+            "not defined for void",
+        ),
+    ] {
+        for operation in [
+            format!("@println({expression})"),
+            format!("@eprintln({expression})"),
+            format!("_ = \"{{{expression}}}\""),
+            format!("_ = @as(str, {expression})"),
+        ] {
+            // A custom string can be explicitly unwrapped directly to str.
+            if declaration.starts_with("type Text = str Text") && operation.starts_with("_ = @as") {
+                continue;
+            }
+            rejects(&format!("{declaration}\n{operation}"), diagnostic);
+        }
+    }
+    success(
+        r#"
+type Text = str
+type Outer = Text
+type Number = int
+type Result = int!
+fn result() int! { throw "wrong!" }
+Outer text = @as(Outer, @as(Text, "hello"))
+Number number = 42
+Result wrapped = @as(Result, result())
+@println(@as(str, @as(Text, text)))
+@println(@as(str, @as(int, number)))
+@println(@as(str, @as(int!, wrapped)))
+"#,
+        "hello\n42\nerror: wrong!\n",
+    );
+}
+
+#[test]
 fn error_union_output_supports_both_streams_and_embedded_nuls() {
     let source = r#"
 fn result(bool fail) str! {
@@ -589,7 +687,7 @@ fn result(bool fail) str! {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(output.stdout, "ok:bad\0🍪\n".as_bytes());
+        assert_eq!(output.stdout, "ok:error: bad\0🍪\n".as_bytes());
         assert_eq!(output.stderr, output.stdout);
     }
 }

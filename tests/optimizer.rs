@@ -43,26 +43,32 @@ fn error_union_formatting_folds_only_the_active_payload() {
     folded(
         r#"
 type Result = int!
-type Unit = void
-fn unit() {}
+struct Record { int! value }
+enum Choice { Value(int!) }
 fn number(bool fail) int! {
     if fail { true -> { throw "bad\u{0}🍪" } false -> { return 42 } }
 }
-fn empty(bool fail) ! {
-    if fail { true -> { throw "empty failed" } false -> {} }
-}
-fn wrapped() Unit! { return @as(Unit, unit()) }
 fn render() str {
     int![] values = [number(false), number(true)]
-    return "{values}|{empty(false)}|{empty(true)}|{wrapped()}"
+    return "{values}"
 }
-fn nominal() str { return @as(str, @as(Result, number(false))) }
+fn nominal() str { return @as(str, @as(int!, @as(Result, number(false)))) }
+fn nested() str {
+    int!? absent = none
+    int!? present = number(true)
+    Record record = Record{.value = number(true)}
+    [str]int! table = ["key": number(true)]
+    return "{record}|{Choice.Value(number(false))}|{table}|{(number(false), number(true))}|{absent}|{present}"
+}
+fn blank() int! { throw "" }
 @println(render())
 @println(nominal())
-@println(empty(false), ":", empty(true))
+@println(@as(str, number(true)))
+@println(nested())
+@println(blank())
 "#,
-        &["unit", "number", "empty", "wrapped", "render", "nominal"],
-        "[42, bad\0🍪]||empty failed|\n42\n:empty failed\n",
+        &["number", "render", "nominal", "nested", "blank"],
+        "[42, error: bad\0🍪]\n42\nerror: bad\0🍪\nRecord{.value = error: bad\0🍪}|Choice.Value(42)|[key: error: bad\0🍪]|(42, error: bad\0🍪)|none|error: bad\0🍪\nerror: \n",
     );
 }
 
@@ -190,7 +196,7 @@ type Text = str
 struct Record { str name int[] values }
 enum Choice { Empty Data(str, int?[]) }
 fn array() str { return @as(str, ["a", "b\u{0}🍪"]) }
-fn alias() str { Text[1] values = ["plain"] return @as(str, values) }
+fn alias() str { Text value = "plain" return @as(str, [@as(str, value)]) }
 fn optional() str { int?[3] values = [none, 2, none] return @as(str, values) }
 fn tuple() str { return @as(str, ("hi", [true, false], 9u)) }
 fn map() str { return @as(str, ["key": [1, 2]]) }
@@ -209,7 +215,7 @@ fn empty() str { return @as(str, Choice.Empty) }
         &[
             "array", "alias", "optional", "tuple", "map", "record", "variant", "empty",
         ],
-        "[\"a\", \"b\0🍪\"]\n[plain]\n[none, 2, none]\n(hi, [true, false], 9)\n[key: [1, 2]]\nRecord{.name = x, .values = [3, 4]}\nChoice.Data(\"quoted\", [none, 1])\nChoice.Empty\n",
+        "[\"a\", \"b\0🍪\"]\n[\"plain\"]\n[none, 2, none]\n(hi, [true, false], 9)\n[key: [1, 2]]\nRecord{.name = x, .values = [3, 4]}\nChoice.Data(\"quoted\", [none, 1])\nChoice.Empty\n",
     );
 }
 
@@ -550,7 +556,7 @@ mut int[] copy = list()
 copy[0] = 99
 @println(list())
 Text original = @as(Text, "same")
-@println(@as(Text, original))
+@println(@as(str, @as(Text, original)))
 @println(@as(int?, @as(Maybe, none)) else 9)
 @println(@as(int?, @as(Maybe, 7)) else 9)
 @println(@as(int[], @as(List, [])))
@@ -814,7 +820,7 @@ fn callback((fn(int) int) operation, int value) int { return operation(value) }
 @println(truth(false))
 @println(character('🍪'))
 @println(text("yes"))
-@println(count(4))
+@println(@as(uint, count(4)))
 @println(array([1,2]))
 @println(tuple((1,"two")))
 @println(mapping(["one":1]))

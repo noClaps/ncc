@@ -214,6 +214,7 @@ impl Value {
             Self::Void(aliases) => aliases.into_iter().rev().fold(
                 constant_statement(Stmt::Return(None), Type::void()),
                 |value, ty| Expr::Cast {
+                    implicit: false,
                     ty,
                     value: Box::new(value),
                 },
@@ -225,6 +226,7 @@ impl Value {
             Self::Int(n) => Expr::Int(n.to_string()),
             Self::Uint(n) => Expr::Int(format!("{n}u")),
             Self::Byte(n) => Expr::Cast {
+                implicit: false,
                 ty: Type::Named("byte".into(), vec![]),
                 value: Box::new(Expr::Int(n.to_string())),
             },
@@ -492,7 +494,22 @@ fn materialize(value: Value, original: &Expr, checked: &CheckedModule) -> Expr {
     if let Some(ty) = ty
         && !matches!(ty, Type::Named(name, _) if matches!(name.as_str(), "int" | "uint" | "byte" | "float" | "str" | "char" | "bool"))
     {
-        return constant_thunk(expr, ty.clone());
+        let mut base = ty;
+        let mut aliases = Vec::new();
+        while let Type::Named(name, _) = base
+            && let Some(TypeInfo::Alias(inner)) = checked.types.get(name)
+        {
+            aliases.push(base.clone());
+            base = inner;
+        }
+        return aliases
+            .into_iter()
+            .rev()
+            .fold(constant_thunk(expr, base.clone()), |value, ty| Expr::Cast {
+                ty,
+                value: Box::new(value),
+                implicit: false,
+            });
     }
     expr
 }
@@ -748,14 +765,8 @@ impl Evaluator<'_> {
             (Value::Float(bits), _) => float_string(f64::from_bits(*bits))?,
             (Value::Bool(b), _) => b.to_string(),
             (Value::Optional(_, None), _) => "none".into(),
-            (Value::Failure(_, message), _) => message.clone(),
-            (Value::Success(inner, value), _) => {
-                if *self.base_type(inner) == Type::void() {
-                    String::new()
-                } else {
-                    self.string(value, inner)?
-                }
-            }
+            (Value::Failure(_, message), _) => format!("error: {message}"),
+            (Value::Success(inner, value), _) => self.string(value, inner)?,
             (Value::Optional(_, Some(value)), Type::Optional(inner)) => {
                 self.string(value, inner)?
             }
@@ -1173,7 +1184,7 @@ impl Evaluator<'_> {
                     _ => None,
                 }
             }
-            Expr::Cast { ty, value } => {
+            Expr::Cast { ty, value, .. } => {
                 let from = self.expr_type(value)?.clone();
                 let value = self.evaluate(value, env)?;
                 if self.base_type(ty) == self.base_type(&from) {

@@ -682,6 +682,7 @@ impl Parser {
                         }
                         self.bump();
                         left = Expr::Cast {
+                            implicit: false,
                             ty: Type::Named(name.clone(), generics),
                             value: Box::new(Expr::StructInit { name, fields }),
                         };
@@ -853,7 +854,11 @@ impl Parser {
                     self.expect(TokenKind::Comma)?;
                     let value = Box::new(self.expr(0)?);
                     self.expect(TokenKind::RParen)?;
-                    Ok(Expr::Cast { ty, value })
+                    Ok(Expr::Cast {
+                        ty,
+                        value,
+                        implicit: false,
+                    })
                 } else {
                     let start = self.tokens[self.pos - 1].span.start;
                     let name = self.ident()?;
@@ -1037,6 +1042,7 @@ impl Parser {
             let value = parser.expr(0)?;
             parser.expect(TokenKind::Eof)?;
             parts.push(Expr::Cast {
+                implicit: true,
                 ty: Type::Named("str".into(), vec![]),
                 value: Box::new(value),
             });

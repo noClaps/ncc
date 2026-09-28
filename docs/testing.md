@@ -33,6 +33,9 @@ Negative tests distinguish rejected programs from runtime range/bounds failures.
 Negative conformance cases run in both modes, including the operator/type matrix,
 escaping futures, duplicate generics, expansion limits, and return paths containing
 unreachable statements. Concurrency tests cover shared awaits and discarded workers.
+String-conversion tests cover the `error: ` prefix, inactive error payloads,
+recursive constituent restrictions, and explicit custom-type unwrapping (including
+custom strings versus interpolation and chained custom types).
 
 The tests are a regression suite, not a proof of specification completeness.
 See [the remaining work](../TODO.md) for known gaps.

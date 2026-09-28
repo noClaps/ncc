@@ -163,6 +163,16 @@ impl Checker {
         if *ty == Type::void() {
             return self.fail(format!("{operation} requires a value, not void"));
         }
+        if operation == "string conversion" {
+            if self.contains_type(ty, &|ty| matches!(ty, Type::Named(name, _) if matches!(self.types.get(name), Some(TypeInfo::Alias(_))))) {
+                return self.fail("string conversion requires custom types to be explicitly converted to their underlying base types, including inside composite values");
+            }
+            if self.contains_type(ty, &|ty| *ty == Type::void()) {
+                return self.fail(
+                    "string conversion is not defined for void, including inside composite values",
+                );
+            }
+        }
         Ok(())
     }
     fn validate_layouts(&self) -> Result<(), Diagnostics> {
@@ -1014,7 +1024,11 @@ impl Checker {
                     Box::new(f.return_type.clone()),
                 ))
             }
-            Expr::Cast { ty, value } => {
+            Expr::Cast {
+                ty,
+                value,
+                implicit,
+            } => {
                 self.validate_type(ty)?;
                 if let Type::Named(n, _) = ty
                     && let Some(TypeInfo::Alias(base)) = self.types.get(n).cloned()
@@ -1036,20 +1050,23 @@ impl Checker {
                         self.expected(value, &base)?;
                     } else {
                         let from = self.expr(value)?;
-                        if from != *ty {
+                        if from != *ty
+                            && !matches!(&from, Type::Named(name, _) if matches!(self.types.get(name), Some(TypeInfo::Alias(inner)) if inner == ty))
+                        {
                             self.assignable(&base, &from)?;
                         }
                     }
                     return Ok(ty.clone());
                 }
                 let from = self.expr(value)?;
-                if *ty == named("str") {
-                    self.value_operation(&from, "string conversion")?;
-                }
-                if let Type::Named(n, _) = &from
+                if !implicit
+                    && let Type::Named(n, _) = &from
                     && matches!(self.types.get(n),Some(TypeInfo::Alias(base)) if base == ty)
                 {
                     return Ok(ty.clone());
+                }
+                if *ty == named("str") {
+                    self.value_operation(&from, "string conversion")?;
                 }
                 if let (Type::Array(a, None), Type::Array(b, Some(_))) = (ty, &from)
                     && a == b

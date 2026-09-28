@@ -613,7 +613,7 @@ impl Pass {
                     self.expr(arg, b)?;
                 }
             }
-            Expr::Cast { ty, value } => {
+            Expr::Cast { ty, value, .. } => {
                 let constructor = matches!((&*ty, value.unlocated()), (Type::Named(n, args), Expr::StructInit { name, .. }) if n == name && !args.is_empty());
                 self.ty(ty, b)?;
                 if constructor {

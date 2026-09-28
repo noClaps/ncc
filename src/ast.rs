@@ -210,6 +210,8 @@ pub enum Expr {
     Cast {
         ty: Type,
         value: Box<Expr>,
+        // Interpolation converts to str but must not implicitly unwrap custom types.
+        implicit: bool,
     },
     Int(String),
     Float(String),

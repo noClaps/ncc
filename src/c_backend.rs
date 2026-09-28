@@ -1304,11 +1304,12 @@ impl Emitter<'_> {
                 let ct = self.c_type(&ty)?;
                 format!("*({ct}*)({value}->result)")
             }
-            Expr::Cast { ty, value } => {
+            Expr::Cast { ty, value, .. } => {
                 let from = self.ty(value)?;
                 if let Type::Named(n, _) = ty
                     && let Some(TypeInfo::Alias(base)) = self.checked.types.get(n)
                     && from != *ty
+                    && !matches!(&from, Type::Named(name, _) if matches!(self.checked.types.get(name), Some(TypeInfo::Alias(inner)) if inner == ty))
                 {
                     return self.expr_as(value, &base.clone());
                 }
@@ -2140,17 +2141,13 @@ impl Emitter<'_> {
         }
         if let Type::ErrorUnion(inner) = ty {
             let result = self.fresh();
-            self.line(format!("nc_string {result} = NC_STRING(\"\"); if (({value}).failed) {{ {result} = ({value}).error; }} else {{"));
-            let mut payload = inner.as_ref();
-            while let Type::Named(name, _) = payload
-                && let Some(TypeInfo::Alias(base)) = self.checked.types.get(name)
-            {
-                payload = base;
-            }
-            if *payload != Type::void() {
-                let success = self.string_value(&format!("({value}).value"), inner)?;
-                self.line(format!("{result} = {success};"));
-            }
+            self.line(format!(
+                "nc_string {result} = NC_STRING(\"error: \"); if (({value}).failed) {{"
+            ));
+            self.append_string(&result, &format!("({value}).error"))?;
+            self.line("} else {");
+            let success = self.string_value(&format!("({value}).value"), inner)?;
+            self.line(format!("{result} = {success};"));
             self.line("}");
             return Ok(result);
         }

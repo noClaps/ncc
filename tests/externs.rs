@@ -136,7 +136,7 @@ int[]![] results = [failure, native.succeeded()]
     .unwrap();
     run_both(
         &input,
-        b"true\ntrue\nfailure\n[9]\nfailure:[7]\nfailure:[7]\nfailure:[7]\n[failure, [7]]\n",
+        b"true\ntrue\nfailure\n[9]\nerror: failure:[7]\nerror: failure:[7]\nerror: failure:[7]\n[error: failure, [7]]\n",
     );
 }
 

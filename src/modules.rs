@@ -390,7 +390,7 @@ fn expr(e: &mut Expr, names: &Names, aliases: &HashMap<String, Names>) -> Result
             }
             expr(object, names, aliases)?;
         }
-        Expr::Cast { ty, value } => {
+        Expr::Cast { ty, value, .. } => {
             qualify_type(ty, names);
             expr(value, names, aliases)?;
         }
