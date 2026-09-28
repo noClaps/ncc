@@ -585,6 +585,14 @@ impl Evaluator<'_> {
         }
     }
     fn coerce(&self, value: Value, ty: &Type) -> Option<Value> {
+        // Void constants have no literal carrying a nominal type. Keep these
+        // casts at runtime until materialization can preserve the alias chain.
+        if matches!(value, Value::Void)
+            && *ty != Type::void()
+            && self.base_type(ty) == &Type::void()
+        {
+            return None;
+        }
         match (value, self.base_type(ty)) {
             (value @ Value::Failure(_, _), Type::ErrorUnion(inner)) if matches!(&value, Value::Failure(actual, _) if actual == &**inner) => {
                 Some(value)

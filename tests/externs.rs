@@ -1,6 +1,38 @@
 use std::{fs, process::Command};
 
 #[test]
+fn void_storage_and_native_void_returns_have_distinct_abi_types() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let input = directory.path().join("main.nc");
+    fs::write(
+        directory.path().join("native.c"),
+        r#"
+static int calls;
+nc_abi_touch_result touch(nc_abi_touch_arg0 value) { calls += value == 0; }
+nc_abi_count_result count(void) { return calls; }
+nc_abi_roundtrip_result roundtrip(nc_abi_roundtrip_arg0 values) { return values; }
+"#,
+    )
+    .unwrap();
+    fs::write(
+        &input,
+        r#"
+extern "native.c" as native {
+    fn touch(void value) = "touch"
+    fn count() int = "count"
+    fn roundtrip(void[] values) void[] = "roundtrip"
+}
+fn unit() {}
+void value = native.touch(unit())
+void[] values = native.roundtrip([value, native.touch(value)])
+@println(native.count(), ":", values.len)
+"#,
+    )
+    .unwrap();
+    run_both(&input, b"2:2\n");
+}
+
+#[test]
 fn inactive_external_payloads_are_not_read_or_copied() {
     let directory = ncc::temp::Directory::new().unwrap();
     let input = directory.path().join("main.nc");

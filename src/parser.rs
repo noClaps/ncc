@@ -12,6 +12,7 @@ pub fn parse_at(tokens: Vec<Token>, path: &std::path::Path) -> Result<Module, Di
         tokens,
         pos: 0,
         path: path.to_path_buf(),
+        type_lookahead: false,
     }
     .module()
 }
@@ -19,6 +20,7 @@ struct Parser {
     tokens: Vec<Token>,
     pos: usize,
     path: std::path::PathBuf,
+    type_lookahead: bool,
 }
 
 impl Parser {
@@ -338,8 +340,14 @@ impl Parser {
                 let n = if self.at(&TokenKind::RBracket) {
                     None
                 } else {
+                    // A declaration probe only recognizes structure. Decoding
+                    // its bound now would discard the real declaration error.
+                    if self.type_lookahead && self.at(&TokenKind::Minus) {
+                        self.bump();
+                    }
                     let token = self.bump();
                     match token.kind {
+                        _ if self.type_lookahead => Some(0),
                         TokenKind::Int(x) => Some(
                             crate::lexer::integer(&x)
                                 .ok()
@@ -599,7 +607,9 @@ impl Parser {
         let saved_tokens = self.tokens.clone();
         self.keyword(Keyword::Mut);
         self.keyword(Keyword::Mutex);
+        self.type_lookahead = true;
         let is_decl = self.ty().is_ok() && matches!(self.current().kind, TokenKind::Ident(_));
+        self.type_lookahead = false;
         self.pos = saved;
         self.tokens = saved_tokens;
         if is_decl {
@@ -970,6 +980,7 @@ impl Parser {
                 path: self.path.clone(),
                 tokens: crate::lexer::lex(&text[start..end])?,
                 pos: 0,
+                type_lookahead: false,
             };
             let value = parser.expr(0)?;
             parser.expect(TokenKind::Eof)?;

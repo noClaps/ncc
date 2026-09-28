@@ -9,15 +9,12 @@
 - Make error-union formatting inspect only the active payload; the current
   field-wise conversion can read inactive payloads returned by C. Clarify the
   intended string representation before defining new formatting behavior.
-- Support `void` as a regular value type, as permitted by the specification;
-  audit variables, parameters, and composite storage rather than emitting invalid C.
 - Preserve source paths and precise locations for all semantic diagnostics;
   many errors still point to the start of the file.
-- Preserve declaration-type errors during parser lookahead: malformed array sizes
-  in variable declarations can fall back to expression parsing and report an
-  unrelated unknown-name error.
 - Extend compile-time evaluation to remaining operations while retaining safe
   runtime fallbacks when evaluation reaches its fuel or depth limits.
+  In particular, preserve nominal alias chains when materializing void constants;
+  those casts currently remain at runtime.
 
 ## Verification and cleanup
 

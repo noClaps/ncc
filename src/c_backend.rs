@@ -42,7 +42,7 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
                 if !f.generics.is_empty() || f.throws {
                     return unsupported("generic or throwing functions");
                 }
-                let ret = e.c_type(&f.return_type)?;
+                let ret = e.c_return_type(&f.return_type)?;
                 let params = f
                     .params
                     .iter()
@@ -80,7 +80,7 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
                 path, functions, ..
             } => {
                 for f in functions {
-                    let ret = e.c_type(&f.return_type)?;
+                    let ret = e.c_return_type(&f.return_type)?;
                     let params = f
                         .params
                         .iter()
@@ -116,7 +116,7 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
         if let Item::Function(f) = item {
             e.return_type = f.return_type.clone();
             e.scopes.push(HashMap::new());
-            let ret = e.c_type(&f.return_type)?;
+            let ret = e.c_return_type(&f.return_type)?;
             let mut params = vec![];
             for p in &f.params {
                 let ty = e.c_type(&p.ty)?;
@@ -410,6 +410,13 @@ impl Emitter<'_> {
             .cloned()
             .ok_or_else(|| Diagnostics::one("internal error: missing expression type", 0..0))
     }
+    fn c_return_type(&mut self, ty: &Type) -> Result<String, Diagnostics> {
+        if *ty == Type::void() {
+            Ok("void".into())
+        } else {
+            self.c_type(ty)
+        }
+    }
     fn c_type(&mut self, ty: &Type) -> Result<String, Diagnostics> {
         if matches!(ty, Type::Future(_)) {
             self.async_support();
@@ -429,7 +436,7 @@ impl Emitter<'_> {
             }
             let name = format!("nc_callable_{}", self.function_types.len());
             self.function_types.push((ty.clone(), name.clone()));
-            let ret = self.c_type(ret)?;
+            let ret = self.c_return_type(ret)?;
             let params = params
                 .iter()
                 .map(|t| self.c_type(t))
@@ -513,7 +520,7 @@ impl Emitter<'_> {
         }
         Ok(match ty {
             Type::Named(n, _) => match n.as_str() {
-                "void" => "void",
+                "void" => "unsigned char",
                 "float" => "double",
                 "str" | "char" | "error" => {
                     self.headers.insert("stddef.h");
@@ -546,7 +553,7 @@ impl Emitter<'_> {
         let ty = self.ty(expr)?;
         if ty == Type::void() {
             self.line(format!("{value};"));
-            return Ok(String::new());
+            return Ok("0".into());
         }
         let ct = self.c_type(&ty)?;
         let id = self.fresh();
@@ -722,6 +729,13 @@ impl Emitter<'_> {
                 self.expr(value)?;
             }
             Stmt::Return(value) => {
+                if self.return_type == Type::void() {
+                    if let Some(value) = value {
+                        self.expr(value)?;
+                    }
+                    self.line("return;");
+                    return Ok(());
+                }
                 if value.is_none() && matches!(self.return_type, Type::ErrorUnion(_)) {
                     let ct = self.c_type(&self.return_type.clone())?;
                     self.line(format!("return ({ct}){{0}};"));
@@ -1048,7 +1062,7 @@ impl Emitter<'_> {
                 self.throw_value(&format!("{value}.error"))?;
                 self.line("}");
                 if self.ty(e)? == Type::void() {
-                    return Ok(String::new());
+                    return Ok("0".into());
                 }
                 format!("{value}.value")
             }
@@ -1079,7 +1093,7 @@ impl Emitter<'_> {
                 self.value_targets.pop();
                 self.scopes.pop();
                 self.line(format!("}}\n{end}:;"));
-                return Ok(if void { String::new() } else { result });
+                return Ok(if void { "0".into() } else { result });
             }
             Expr::None => {
                 let ct = self.c_type(&self.ty(e)?)?;
@@ -1261,7 +1275,7 @@ impl Emitter<'_> {
                 self.line(format!("nc_wait({value});"));
                 let ty = self.ty(e)?;
                 if ty == Type::void() {
-                    return Ok(String::new());
+                    return Ok("0".into());
                 }
                 let ct = self.c_type(&ty)?;
                 format!("*({ct}*)({value}->result)")
@@ -1601,7 +1615,7 @@ impl Emitter<'_> {
                     if name.ends_with("println") {
                         self.line(format!("fputc('\\n', {stream});"));
                     }
-                    return Ok(String::new());
+                    return Ok("0".into());
                 }
                 let Type::Function(params, _) = self.ty(callee)? else {
                     return unsupported("calling this type");
@@ -1790,7 +1804,7 @@ impl Emitter<'_> {
             unreachable!()
         };
         let ct = self.c_type(&ty)?;
-        let ret_c = self.c_type(ret)?;
+        let ret_c = self.c_return_type(ret)?;
         let wrapper = self.fresh();
         let mut decls = vec!["void *env".into()];
         let mut args = vec![];
@@ -1833,7 +1847,7 @@ impl Emitter<'_> {
         };
         let ct = self.c_type(&self.ty(e)?)?;
         let function = self.fresh();
-        let ret_ct = self.c_type(&f.return_type)?;
+        let ret_ct = self.c_return_type(&f.return_type)?;
         let mut params = vec!["void *nc_env".into()];
         let mut scope = HashMap::new();
         for (i, (n, _, mutex)) in captures.iter().enumerate() {

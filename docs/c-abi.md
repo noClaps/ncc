@@ -10,6 +10,9 @@ Struct fields are prefixed with `f_`. Maps use the array layout with tuple entri
 containing the key and value. Optionals have `present` and `value`; error unions
 have `failed`, `error`, and `value`. A zero-initialized error union means success.
 An error union with a void result uses an unused byte for `value`.
+Stored `void` values (including parameters and container elements) use an unused
+`unsigned char`, initialized to zero by NC. A function returning plain `void`
+still uses C `void`; a nominal alias of `void` uses the byte representation.
 
 Strings, characters, and error messages use `nc_string`, with a `bytes` byte
 length and `data` pointer to UTF-8 storage. Embedded zero bytes are supported;

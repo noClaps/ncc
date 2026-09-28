@@ -1059,6 +1059,67 @@ test "control" {
 }
 
 #[test]
+fn void_values_can_be_stored_and_passed_without_losing_effects() {
+    success(
+        r#"
+fn unit() { @print("u") }
+fn take(void value) void { @print("t") return value }
+fn identity<T>(T value) T { return value }
+struct Holder { void value }
+enum Choice { Value(void) Empty }
+void global = unit()
+test "void storage" {
+    mut void local = unit()
+    local = take(local)
+    void[2] array = [local, unit()]
+    (void, int) tuple = (local, 2)
+    [int]void map = [1:local]
+    Holder holder = Holder{.value=unit()}
+    Choice choice = Choice.Value(local)
+    void? optional = local
+    void value = optional else { unit() }
+    void copied = identity<void>(local)
+    take(array[0])
+    take(tuple[0])
+    take(map[1])
+    take(holder.value)
+    take(value)
+    take(copied)
+    if choice { Choice.Value(v) -> { take(v) } Choice.Empty -> {} }
+    fn callback = fn(void value) { take(value) }
+    callback(local)
+    fut void task = async take(local)
+    void awaited = await task
+    take(awaited)
+    assert array.len == 2
+    assert map.len == 1
+}
+"#,
+        "uutuutttttttttt",
+    );
+}
+
+#[test]
+fn nominal_void_and_optional_void_preserve_type_context() {
+    success(
+        r#"
+type Unit = void
+fn unit() {}
+fn wrapped() Unit { return @as(Unit, unit()) }
+Unit value = wrapped()
+void plain = @as(void, value)
+void? present = plain
+void? absent = none
+void unwrapped = present else { @println("wrong") }
+void fallback = absent else { @println("fallback") }
+Unit[2] values = [value, wrapped()]
+@println(values.len)
+"#,
+        "fallback\n2\n",
+    );
+}
+
+#[test]
 fn fixed_array_lengths_use_integer_literal_syntax() {
     success(
         r#"
@@ -1076,14 +1137,25 @@ test "array lengths" {
         "",
     );
     for literal in ["0x", "0b2", "0o8", "18446744073709551616", "1.5"] {
-        let source = format!("fn f(int[{literal}] values) {{}}");
-        for release in [false, true] {
-            let errors = ncc::compile_source_with_options(&source, Path::new("size.nc"), release)
-                .unwrap_err();
-            assert!(errors.to_string().contains("array size"), "{errors}");
-            assert_eq!(errors.0[0].span, 9..9 + literal.len());
+        for source in [
+            format!("fn f(int[{literal}] values) {{}}"),
+            format!("int[{literal}] values = []"),
+            format!("fn f() {{ int[{literal}] values = [] }}"),
+            format!("int[{literal}]? values = none"),
+            format!("int[{literal}][2] values = []"),
+        ] {
+            let start = source.find(literal).unwrap();
+            for release in [false, true] {
+                let errors =
+                    ncc::compile_source_with_options(&source, Path::new("size.nc"), release)
+                        .unwrap_err();
+                assert!(errors.to_string().contains("array size"), "{errors}");
+                assert_eq!(errors.0[0].span, start..start + literal.len());
+            }
         }
     }
+    rejects("int[-1] values = []", "expected integer array size");
+    rejects("int[size] values = []", "expected integer array size");
     rejects("int[0x2] values = [1]", "array");
 }
 
