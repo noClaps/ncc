@@ -531,6 +531,29 @@ test "futures" {
 }
 
 #[test]
+fn error_union_output_supports_both_streams_and_embedded_nuls() {
+    let source = r#"
+fn result(bool fail) str! {
+    if fail { true -> { throw "bad\u{0}🍪" } false -> { return "ok" } }
+}
+@print(result(false), ":")
+@println(result(true))
+@eprint(result(false), ":")
+@eprintln(result(true))
+"#;
+    for release in [false, true] {
+        let output = run_mode(source, release);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, "ok:bad\0🍪\n".as_bytes());
+        assert_eq!(output.stderr, output.stdout);
+    }
+}
+
+#[test]
 fn repeated_concurrent_awaits_copy_results_and_discarded_workers_finish() {
     success(
         r#"

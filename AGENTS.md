@@ -30,6 +30,9 @@
     including when nested in containers.
   - Numeric byte-array encoding may use the simplest consistent implementation;
     the implementation uses little-endian bytes and IEEE-754 bits for floats.
+  - Printing, interpolation, and string conversion of an error union use its
+    active success value or error message without requiring `try`/`catch` first.
+    A successful void payload contributes no text. Never read inactive payloads.
 - `ncc run` must leave no generated files. `ncc build` must emit only the requested
   output, or the executable when output is unspecified. Honor explicit formats.
 - Release mode must actually optimize, correctly across all supported types.

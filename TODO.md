@@ -2,9 +2,8 @@
 
 ## Compiler
 
-- Make error-union formatting inspect only the active payload; the current
-  field-wise conversion can read inactive payloads returned by C. Clarify the
-  intended string representation before defining new formatting behavior.
+- Strengthen return-path checking so jumps before unreachable returns cannot
+  make a function with a missing return appear valid.
 
 ## Verification and cleanup
 

@@ -102,6 +102,13 @@ nc_abi_failed_result failed(void) {
     result.value.len = 1; result.value.vals = 0;
     return result;
 }
+nc_abi_succeeded_result succeeded(void) {
+    static int64_t values[] = {7};
+    nc_abi_succeeded_result result = {0};
+    result.error.bytes = 1; result.error.data = 0;
+    result.value.len = 1; result.value.cap = 1; result.value.vals = values;
+    return result;
+}
 "#,
     )
     .unwrap();
@@ -111,6 +118,7 @@ nc_abi_failed_result failed(void) {
 extern "native.c" as native {
     fn absent() int[]? = "absent"
     fn failed() int[]! = "failed"
+    fn succeeded() int[]! = "succeeded"
 }
 int[]? optional = native.absent()
 int[]! failure = native.failed()
@@ -118,10 +126,18 @@ int[]! failure = native.failed()
 @println(failure == native.failed())
 int[] fallback = failure catch message { @println(message) break [9] }
 @println(fallback)
+@println(failure, ":", native.succeeded())
+@println("{failure}:{native.succeeded()}")
+@println(@as(str, failure), ":", @as(str, native.succeeded()))
+int[]![] results = [failure, native.succeeded()]
+@println(results)
 "#,
     )
     .unwrap();
-    run_both(&input, b"true\ntrue\nfailure\n[9]\n");
+    run_both(
+        &input,
+        b"true\ntrue\nfailure\n[9]\nfailure:[7]\nfailure:[7]\nfailure:[7]\n[failure, [7]]\n",
+    );
 }
 
 #[test]

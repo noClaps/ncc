@@ -39,6 +39,34 @@ fn folded(source: &str, names: &[&str], expected: &str) {
 }
 
 #[test]
+fn error_union_formatting_folds_only_the_active_payload() {
+    folded(
+        r#"
+type Result = int!
+type Unit = void
+fn unit() {}
+fn number(bool fail) int! {
+    if fail { true -> { throw "bad\u{0}🍪" } false -> { return 42 } }
+}
+fn empty(bool fail) ! {
+    if fail { true -> { throw "empty failed" } false -> {} }
+}
+fn wrapped() Unit! { return @as(Unit, unit()) }
+fn render() str {
+    int![] values = [number(false), number(true)]
+    return "{values}|{empty(false)}|{empty(true)}|{wrapped()}"
+}
+fn nominal() str { return @as(str, @as(Result, number(false))) }
+@println(render())
+@println(nominal())
+@println(empty(false), ":", empty(true))
+"#,
+        &["unit", "number", "empty", "wrapped", "render", "nominal"],
+        "[42, bad\0🍪]||empty failed|\n42\n:empty failed\n",
+    );
+}
+
+#[test]
 fn evaluation_limits_keep_safe_runtime_fallbacks() {
     let source = r#"
 fn depth(uint n) uint {

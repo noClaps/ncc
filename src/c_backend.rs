@@ -133,11 +133,7 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
                 }
             ));
             e.block(&f.body)?;
-            if f.return_type == Type::ErrorUnion(Box::new(Type::void())) {
-                let ct = e.c_type(&f.return_type)?;
-                e.line(format!("return ({ct}){{0}};"));
-            }
-            e.line("}");
+            e.finish_function(&f.return_type)?;
             e.scopes.pop();
         }
     }
@@ -416,6 +412,18 @@ impl Emitter<'_> {
         } else {
             self.c_type(ty)
         }
+    }
+    fn finish_function(&mut self, ty: &Type) -> Result<(), Diagnostics> {
+        if *ty == Type::ErrorUnion(Box::new(Type::void())) {
+            let ct = self.c_type(ty)?;
+            self.line(format!("return ({ct}){{0}};"));
+        } else if *ty != Type::void() {
+            // C cannot always prove exhaustive NC branches return. Keep a
+            // defensive trap instead of allowing a non-void C fallthrough.
+            self.line("__builtin_trap();");
+        }
+        self.line("}");
+        Ok(())
     }
     fn c_type(&mut self, ty: &Type) -> Result<String, Diagnostics> {
         if matches!(ty, Type::Future(_)) {
@@ -1888,10 +1896,7 @@ impl Emitter<'_> {
         let indices = std::mem::take(&mut self.index_context);
         self.line(format!("{signature} {{"));
         self.block(&f.body)?;
-        if f.return_type == Type::ErrorUnion(Box::new(Type::void())) {
-            self.line(format!("return ({ret_ct}){{0}};"));
-        }
-        self.line("}");
+        self.finish_function(&f.return_type)?;
         let body = std::mem::replace(&mut self.out, out);
         self.runtime_functions.push(body);
         self.scopes = scopes;
@@ -2131,6 +2136,22 @@ impl Emitter<'_> {
             ));
             let s = self.string_value(&format!("{value}.value"), inner)?;
             self.line(format!("{result} = {s}; }}"));
+            return Ok(result);
+        }
+        if let Type::ErrorUnion(inner) = ty {
+            let result = self.fresh();
+            self.line(format!("nc_string {result} = NC_STRING(\"\"); if (({value}).failed) {{ {result} = ({value}).error; }} else {{"));
+            let mut payload = inner.as_ref();
+            while let Type::Named(name, _) = payload
+                && let Some(TypeInfo::Alias(base)) = self.checked.types.get(name)
+            {
+                payload = base;
+            }
+            if *payload != Type::void() {
+                let success = self.string_value(&format!("({value}).value"), inner)?;
+                self.line(format!("{result} = {success};"));
+            }
+            self.line("}");
             return Ok(result);
         }
         if matches!(ty, Type::Array(_, _) | Type::Map(_, _)) {

@@ -1516,6 +1516,11 @@ The `!` in the return type signifies that this is a throwing function, and its r
 int! sum = add_throws(1, 2)
 ```
 
+Printing, string interpolation, and conversion to `str` display the active
+success value or the error message, without requiring `try` or `catch` first.
+A successful `void!` contributes an empty string. This conversion does not
+propagate an error and never reads the inactive payload.
+
 However, it's likely not very useful in this type. To get the value out, you must handle the error with the `catch` keyword:
 
 ```nc

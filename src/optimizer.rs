@@ -748,6 +748,14 @@ impl Evaluator<'_> {
             (Value::Float(bits), _) => float_string(f64::from_bits(*bits))?,
             (Value::Bool(b), _) => b.to_string(),
             (Value::Optional(_, None), _) => "none".into(),
+            (Value::Failure(_, message), _) => message.clone(),
+            (Value::Success(inner, value), _) => {
+                if *self.base_type(inner) == Type::void() {
+                    String::new()
+                } else {
+                    self.string(value, inner)?
+                }
+            }
             (Value::Optional(_, Some(value)), Type::Optional(inner)) => {
                 self.string(value, inner)?
             }
