@@ -11,8 +11,8 @@ Everything below the line is the original LLM-written README. I cannot guarantee
 # NC compiler
 
 Rust front end, portable C output, and system-C-compiler executable builds.
-The language specification is in [docs/design.md](docs/design.md). Implementation
-is ongoing; see [the remaining work](TODO.md).
+The language specification is in [docs/design.md](docs/design.md).
+Known remaining work is tracked in [TODO.md](TODO.md).
 
 ```sh
 make build
@@ -41,7 +41,7 @@ Numeric casts to `byte[]` produce eight little-endian bytes; floats use their
 
 Constant evaluation supports signed/unsigned integers, bytes, floats, booleans,
 characters, strings, arrays, tuples, maps, structs, enums, optionals, successful
-error unions, nominal types, and named function callbacks. Arithmetic uses each
+and failed error unions, nominal types, and by-value closures. Arithmetic uses each
 type's range. Effects, unsupported operations, and exhausted evaluation budgets
 remain runtime code; futures and external calls are never executed by the
 optimiser.
