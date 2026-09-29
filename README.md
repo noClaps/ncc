@@ -41,9 +41,10 @@ Numeric casts to `byte[]` produce eight little-endian bytes; floats use their
 
 Constant evaluation supports signed/unsigned integers, bytes, floats, booleans,
 characters, strings, arrays, tuples, maps, structs, enums, optionals, successful
-and failed error unions, nominal types, and closures with immutable captures.
-Closures share mutable outer bindings, whose storage survives returned closures;
-these captures currently remain runtime code. Arithmetic uses each type's range. Effects, unsupported operations, and exhausted evaluation budgets
+and failed error unions, nominal types, and closures. Mutable captures share
+bindings within an evaluation, including returned closures; stateful calls are
+not memoized. Access to persistent outer mutable state remains runtime code.
+Arithmetic uses each type's range. Effects, unsupported operations, and exhausted evaluation budgets
 remain runtime code; futures and external calls are never executed by the
 optimiser.
 

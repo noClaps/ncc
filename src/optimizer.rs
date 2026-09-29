@@ -134,6 +134,7 @@ enum Value {
     Failure(Type, String),
     Function(String),
     Closure(usize, Vec<(String, Value)>),
+    Cell(usize),
 }
 // Match the C backend's %.17g formatting, including its explicit decimal suffix.
 fn float_string(value: f64) -> Option<String> {
@@ -162,9 +163,25 @@ fn float_string(value: f64) -> Option<String> {
     Some(result)
 }
 impl Value {
+    fn contains_cell(&self) -> bool {
+        match self {
+            Self::Cell(_) => true,
+            Self::Closure(_, values) | Self::Struct(_, values) => {
+                values.iter().any(|(_, value)| value.contains_cell())
+            }
+            Self::Array(values) | Self::Tuple(values) | Self::Enum(_, _, values) => {
+                values.iter().any(Self::contains_cell)
+            }
+            Self::Map(values) => values
+                .iter()
+                .any(|(key, value)| key.contains_cell() || value.contains_cell()),
+            Self::Optional(_, Some(value)) | Self::Success(_, value) => value.contains_cell(),
+            _ => false,
+        }
+    }
     fn materializable(&self) -> bool {
         match self {
-            Self::Closure(..) => false,
+            Self::Closure(..) | Self::Cell(_) => false,
             Self::Array(values) | Self::Tuple(values) | Self::Enum(_, _, values) => {
                 values.iter().all(Self::materializable)
             }
@@ -276,7 +293,9 @@ impl Value {
                 Stmt::Throw(Expr::String(message)),
                 Type::ErrorUnion(Box::new(inner)),
             ),
-            Self::Closure(..) => unreachable!("closure constants retain their original source"),
+            Self::Closure(..) | Self::Cell(_) => {
+                unreachable!("closure constants retain their original source")
+            }
         }
     }
 }
@@ -559,6 +578,7 @@ fn evaluate(
         checked,
         fuel,
         memo: HashMap::new(),
+        cells: Vec::new(),
         depth: 0,
         arithmetic_failure: false,
         arithmetic_location: None,
@@ -579,7 +599,8 @@ fn evaluate(
             error
         })
     } else {
-        Ok(value)
+        // Cell identities are private to this evaluation, never reusable constants.
+        Ok(value.filter(|value| !value.contains_cell()))
     }
 }
 struct Evaluator<'a> {
@@ -590,6 +611,7 @@ struct Evaluator<'a> {
     expressions: HashMap<usize, &'a Expr>,
     embed_error: Option<Diagnostics>,
     memo: HashMap<(Value, Vec<Value>), Value>,
+    cells: Vec<Value>,
     depth: usize,
     arithmetic_failure: bool,
     arithmetic_location: Option<SourceLocation>,
@@ -601,6 +623,10 @@ impl Evaluator<'_> {
     fn constant_binding(&mut self, key: usize, name: &str) -> Option<Value> {
         let initializer = *self.expressions.get(&key)?;
         let value = self.evaluate(initializer, &mut HashMap::new())?;
+        // Re-evaluating an outer initializer must not recreate shared state.
+        if value.contains_cell() {
+            return None;
+        }
         if let Some((pattern, ty)) = self.checked.constant_patterns.get(&key) {
             let value = declaration_value(pattern, ty, value)?;
             let mut bindings = HashMap::new();
@@ -1057,8 +1083,16 @@ impl Evaluator<'_> {
                 let values = captures
                     .iter()
                     .map(|capture| {
-                        if capture.mutex || capture.mutable {
+                        if capture.mutex {
                             return None;
+                        }
+                        if capture.mutable {
+                            return match env.get(&capture.name)? {
+                                value @ Value::Cell(_) => {
+                                    Some((capture.name.clone(), value.clone()))
+                                }
+                                _ => None,
+                            };
                         }
                         let value = env.get(&capture.name).cloned().or_else(|| {
                             self.constant_binding(capture.initializer?, &capture.name)
@@ -1200,7 +1234,10 @@ impl Evaluator<'_> {
                 .map(Value::Uint),
             Expr::Name(n) => {
                 if let Some(value) = env.get(n) {
-                    return Some(value.clone());
+                    return match value {
+                        Value::Cell(index) => self.cells.get(*index).cloned(),
+                        value => Some(value.clone()),
+                    };
                 }
                 if let Some(key) = self.checked.constant_sources.get(&e.id()) {
                     return self.constant_binding((*key)?, n);
@@ -1375,8 +1412,10 @@ impl Evaluator<'_> {
                     values.push(value.clone());
                     scope.insert(p.name.clone(), value);
                 }
+                let cacheable =
+                    !callable.contains_cell() && !values.iter().any(Value::contains_cell);
                 let key = (callable, values);
-                if let Some(value) = self.memo.get(&key) {
+                if cacheable && let Some(value) = self.memo.get(&key) {
                     return Some(value.clone());
                 }
                 match self
@@ -1388,12 +1427,16 @@ impl Evaluator<'_> {
                             || f.return_type == Type::ErrorUnion(Box::new(Type::void())) =>
                     {
                         let v = self.coerce(Value::Void(vec![]), &f.return_type)?;
-                        self.memo.insert(key, v.clone());
+                        if cacheable && !v.contains_cell() {
+                            self.memo.insert(key, v.clone());
+                        }
                         Some(v)
                     }
                     Flow::Return(v) => {
                         let v = self.coerce(v, &f.return_type)?;
-                        self.memo.insert(key, v.clone());
+                        if cacheable && !v.contains_cell() {
+                            self.memo.insert(key, v.clone());
+                        }
                         Some(v)
                     }
                     Flow::Throw(message) => {
@@ -1401,7 +1444,9 @@ impl Evaluator<'_> {
                             return None;
                         };
                         let value = Value::Failure((**inner).clone(), message);
-                        self.memo.insert(key, value.clone());
+                        if cacheable {
+                            self.memo.insert(key, value.clone());
+                        }
                         Some(value)
                     }
                     _ => None,
@@ -1570,6 +1615,10 @@ impl Evaluator<'_> {
             (Pattern::Wildcard, _) => Some(true),
             (Pattern::Name(name), _) => {
                 if let Some(existing) = env.get(name) {
+                    let existing = match existing {
+                        Value::Cell(index) => self.cells.get(*index)?,
+                        existing => existing,
+                    };
                     Some(existing.equals(value))
                 } else {
                     env.insert(name.clone(), value.clone());
@@ -1665,6 +1714,14 @@ impl Evaluator<'_> {
                     let value = self.evaluate(&v.value, env)?;
                     let value = self.coerce(declaration_value(&v.pattern, &v.ty, value)?, &v.ty)?;
                     bind_declaration(&v.pattern, value, env, &mut declared)?;
+                    if v.mutable {
+                        for name in v.binding_names() {
+                            let value = env.get_mut(name)?;
+                            let index = self.cells.len();
+                            self.cells
+                                .push(std::mem::replace(value, Value::Cell(index)));
+                        }
+                    }
                     Flow::Next
                 }
                 Stmt::Assign { target, value } => {
@@ -1674,7 +1731,12 @@ impl Evaluator<'_> {
                     if name != "_" {
                         let ty = self.checked.expression_types.get(&target.id())?;
                         let v = self.coerce(v, ty)?;
-                        assign(env.get_mut(&name)?, &path, v)?;
+                        let binding = env.get_mut(&name)?;
+                        let storage = match binding {
+                            Value::Cell(index) => self.cells.get_mut(*index)?,
+                            value => value,
+                        };
+                        assign(storage, &path, v)?;
                     }
                     Flow::Next
                 }

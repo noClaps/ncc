@@ -51,8 +51,10 @@ custom strings versus interpolation and chained custom types).
 Function side-effect coverage includes shared mutable scalar and container
 bindings, named callbacks, nested and returned closures, write-only captures,
 shadowing, tuple bindings, and independent factory invocations. Immutable closure
-captures still have compile-time folding coverage. Mutable captures currently
-use the runtime fallback in the constant evaluator. Closures created inside lock
+captures retain compile-time folding coverage. Shared mutable captures are tested
+for folding, independent factory calls, repeated mutations, loop scopes, errors,
+container callbacks, and computed embed paths. Persistent outer state and runtime
+effects retain their runtime fallback. Closures created inside lock
 scopes cannot inherit write permission; returned closures that acquire their own
 locks are tested sequentially and concurrently.
 

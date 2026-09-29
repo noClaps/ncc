@@ -142,7 +142,15 @@ fn nested_capture() byte[] {
     }
     return @embed(outer())
 }
+fn shared_path() str {
+    mut str name = "missing"
+    fn choose() { name = "data1.bin" }
+    choose()
+    return name
+}
+byte[] shared = @embed(shared_path())
 test "computed paths" {
+    assert shared == a
     assert a == b and b == c and c == d and d == bytes()
     assert e == a and nested == a
     assert tuple_path == a and partial_path == a and grouped_path == a
@@ -176,6 +184,7 @@ fn runtime_dependent_paths_fail_without_executing_effects() {
     fs::write(root.join("data"), [42]).unwrap();
     let input = root.join("main.nc");
     for source in [
+        "fn path() str { mut str name = \"data\" fn choose() str { @println(\"effect\") return name } return choose() } _ = @embed(path())",
         "mut str path = \"data\"\nbyte[] b = @embed(path)",
         "str path = \"data\"\nfn f(str path) byte[] { return @embed(path) }",
         "fn path() str { @println(\"effect\")\n return \"data\" }\nbyte[] b = @embed(path())",
@@ -188,12 +197,14 @@ fn runtime_dependent_paths_fail_without_executing_effects() {
         "fn f(str path) byte[] { fn choose = fn() str { return path } return @embed(choose()) }",
         "mut str path = \"data\"\nfn choose = fn() str { return path }\n_ = @embed(choose())",
     ] {
-        let error = ncc::compile_source(source, &input).unwrap_err();
-        assert!(
-            error.to_string().contains("compile-time string"),
-            "{source}: {error}"
-        );
-        assert_eq!(error.0[0].path.as_ref(), Some(&input));
-        assert!(source[error.0[0].span.clone()].starts_with("@embed("));
+        for release in [false, true] {
+            let error = ncc::compile_source_with_options(source, &input, release).unwrap_err();
+            assert!(
+                error.to_string().contains("compile-time string"),
+                "release={release}: {source}: {error}"
+            );
+            assert_eq!(error.0[0].path.as_ref(), Some(&input));
+            assert!(source[error.0[0].span.clone()].starts_with("@embed("));
+        }
     }
 }

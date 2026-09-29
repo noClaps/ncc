@@ -872,3 +872,121 @@ fn left(int value, int count) int { return value << count }
         "-2\n-2\n-9223372036854775808\n-4611686018427387904\n-4611686018427387904\n-1\n-1\n0\n-6\n-9223372036854775808\n",
     );
 }
+
+#[test]
+fn shared_mutable_closures_fold_without_reusing_stateful_calls() {
+    folded(
+        r#"
+struct Counter { (fn() int) read (fn(int) void) write (fn() int) next }
+fn counter(int initial) Counter {
+    mut int n = initial
+    return Counter{
+        .read = fn() int { return n },
+        .write = fn(int value) { n = value },
+        .next = fn() int { n = n + 1 return n }
+    }
+}
+fn apply((fn() int) callback) int { return callback() }
+fn compute() int {
+    Counter first = counter(0)
+    Counter alias = first
+    Counter second = counter(0)
+    int a = apply(first.next)
+    int b = apply(alias.next)
+    int c = apply(second.next)
+    first.write(10)
+    int d = first.read()
+    first.write(20)
+    return a * 10000 + b * 1000 + c * 100 + d + first.read()
+}
+fn branches() int {
+    mut int a, int b = (1, 2)
+    fn add() { a = a + b }
+    if true { true -> { add() } false -> {} }
+    { mut int a = 100 fn local() { a = a + 1 } local() }
+    b = 4
+    add()
+    return a + b
+}
+fn composites() int {
+    mut int[] values = [1]
+    fn update() { values[0] = values[0] + 1 }
+    int[] copy = values
+    update()
+    values = [10]
+    update()
+    return values[0] + copy[0]
+}
+@println(compute())
+@println(branches())
+@println(composites())
+"#,
+        &["compute", "branches", "composites", "counter", "apply"],
+        "12130\n11\n12\n",
+    );
+}
+
+#[test]
+fn shared_closures_preserve_runtime_state_and_effects() {
+    folded(
+        r#"
+fn make() (fn() int) {
+    mut int n = 0
+    return fn() int { n = n + 1 return n }
+}
+(fn() int) global = make()
+@println(global())
+@println(global())
+fn effectful() int {
+    mut int n = 0
+    fn next() int { @print("effect:") n = n + 1 return n }
+    return next() + next()
+}
+@println(effectful())
+"#,
+        &[],
+        "1\n2\neffect:effect:3\n",
+    );
+}
+
+#[test]
+fn shared_cells_survive_loop_scopes_errors_and_container_callbacks() {
+    folded(
+        r#"
+fn loops() int {
+    mut (fn() int)[] callbacks = []
+    for i in [1, 2, 3] {
+        mut int n = @as(int, i)
+        callbacks = callbacks <> [fn() int { n = n + 1 return n }]
+    }
+    return callbacks[0]() * 100 + callbacks[0]() * 10 + callbacks[1]()
+}
+fn errors() int {
+    mut int n = 0
+    fn fail() int! { n = n + 1 throw "failure" }
+    int a = fail() catch _ { n }
+    int b = fail() catch _ { n }
+    return a * 10 + b
+}
+struct Box { (fn() int) next }
+fn step(Box box) int { return box.next() }
+fn boxed() int {
+    mut int n = 0
+    Box box = Box{.next = fn() int { n = n + 1 return n }}
+    return step(box) * 10 + step(box)
+}
+fn pattern() int {
+    mut int expected = 2
+    fn bump() { expected = expected + 1 }
+    bump()
+    return if 3 { expected -> { 7 } _ -> { 0 } }
+}
+@println(loops())
+@println(errors())
+@println(boxed())
+@println(pattern())
+"#,
+        &["loops", "errors", "boxed", "step", "pattern"],
+        "122\n12\n12\n7\n",
+    );
+}
