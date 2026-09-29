@@ -1843,7 +1843,7 @@ You can declare a Mutex by using the `mutex` keyword:
 mutex int[] numbers = [1, 2, 3, 4, 5]
 ```
 
-In order to make a Mutex mutable, you must create a scope where the value is locked so that no other thread can access it, using the `lock` keyword. By forcing a lock for mutability, we can ensure that there will be no data races.
+In order to make a Mutex accessible, you must create a scope where the value is locked so that no other thread can access it, using the `lock` keyword. By forcing a lock for accessibility, we can ensure that there will be no data races.
 
 ```nc
 lock numbers {
@@ -1851,9 +1851,7 @@ lock numbers {
 }
 ```
 
-Inside the `lock` scope, you are free to mutate the value however you'd like. During this time, other threads cannot read from the variable, and only the thread that has the lock can write to or read from it. Once the scope is complete, the Mutex gets unlocked, which will return it to its previous immutable state.
-
-While it's immutable, any number of threads can freely read from the Mutex, however none can write to it.
+Inside the `lock` scope, you are free to read and mutate the value however you'd like. During this time, other threads cannot read from the variable, and only the thread that has the lock can write to or read from it. Once the scope is complete, the Mutex gets unlocked, which will return it to its previous inaccessible state.
 
 An example of using Mutexes with async would be:
 
