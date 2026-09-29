@@ -25,7 +25,10 @@ compiler has no production dependencies. Unicode segmentation is a test oracle o
 | Escapes, multiline literals, graphemes, expression ranges, imported/specialized/constant-evaluation diagnostics | `tests/frontend.rs` |
 | Grapheme boundaries against an independent oracle | Unit tests in `src/unicode.rs` |
 
-Successful conformance fixtures use debug and release execution. Optimizer tests
+Successful conformance fixtures use debug and release execution, including
+module exports, imported generic types and patterns, and external C calls.
+Module visibility, cyclic imports, and external-declaration errors are checked
+in both modes. Optimizer tests
 compare emitted behavior in both modes and, where specified, verify that evaluated
 functions disappear from generated C. The very large Fibonacci test is release
 only to avoid exponential runtime work. C integration tests exercise both modes.

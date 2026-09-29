@@ -44,8 +44,12 @@ int fallback = native.sum([]) catch err { 42 }
         assert_eq!(output.stdout, b"6\n1\n42\n");
     }
     let rejects_external = |source: &str, expected: &str| {
-        let error = ncc::compile_source(source, &input).unwrap_err().to_string();
-        assert!(error.contains(expected), "{error}");
+        for release in [false, true] {
+            let error = ncc::compile_source_with_options(source, &input, release)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "release={release}: {error}");
+        }
     };
     fs::write(directory.path().join("native.etch"), "").unwrap();
     rejects_external(
@@ -1057,41 +1061,49 @@ extern "native.c" as native { fn add(int a, int b) int = "native_add" }
 "#,
     )
     .unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_ncc"))
-        .arg("run")
-        .arg(&main)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(output.stdout, b"51\n3\nfour\n(6, 7)\n");
-    for name in ["private_first", "private_second"] {
+    for release in [false, true] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ncc"));
+        command.arg("run");
+        if release {
+            command.arg("--release");
+        }
+        let output = command.arg(&main).output().unwrap();
         assert!(
-            ncc::compile_source(
-                &format!("import {{ \"one\" as one }} @println(one.{name})"),
-                &main
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"51\n3\nfour\n(6, 7)\n");
+        for name in ["private_first", "private_second"] {
+            assert!(
+                ncc::compile_source_with_options(
+                    &format!("import {{ \"one\" as one }} @println(one.{name})"),
+                    &main,
+                    release
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("does not export")
+            );
+        }
+        assert!(
+            ncc::compile_source_with_options(
+                "import { \"one\" as one } @println(one.hidden)",
+                &main,
+                release
             )
             .unwrap_err()
             .to_string()
             .contains("does not export")
         );
+        fs::write(dir.path().join("cycle.nc"), "import { \"cycle\" as again }").unwrap();
+        assert!(
+            ncc::compile_source_with_options("import { \"cycle\" as cycle }", &main, release)
+                .unwrap_err()
+                .to_string()
+                .contains("cyclic")
+        );
     }
-    assert!(
-        ncc::compile_source("import { \"one\" as one } @println(one.hidden)", &main)
-            .unwrap_err()
-            .to_string()
-            .contains("does not export")
-    );
-    fs::write(dir.path().join("cycle.nc"), "import { \"cycle\" as again }").unwrap();
-    assert!(
-        ncc::compile_source("import { \"cycle\" as cycle }", &main)
-            .unwrap_err()
-            .to_string()
-            .contains("cyclic")
-    );
 }
 
 #[test]
@@ -1126,16 +1138,19 @@ test "imported types" {
 "#,
     )
     .unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_ncc"))
-        .arg("run")
-        .arg(&main)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    for release in [false, true] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ncc"));
+        command.arg("run");
+        if release {
+            command.arg("--release");
+        }
+        let output = command.arg(&main).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 #[test]
