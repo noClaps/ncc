@@ -1849,3 +1849,47 @@ test "iteration cells" {
         "",
     );
 }
+
+#[test]
+fn closures_capture_mutexes_without_inheriting_lock_permissions() {
+    for body in [
+        "fn later = fn() { value = 2 }",
+        "fn later() { value = 2 }",
+        "fn outer = fn() { fn inner = fn() { value = 2 } }",
+    ] {
+        rejects(
+            &format!("mutex int value = 1 lock value {{ {body} }}"),
+            "immutable",
+        );
+    }
+    success(
+        r#"
+fn make() (fn() int) {
+    mutex int value = 1
+    lock value {
+        value = 2
+        return fn() int {
+            lock value { value = value + 1 return value }
+        }
+    }
+}
+test "lock permissions" {
+    (fn() int) next = make()
+    assert next() == 3
+    assert next() == 4
+    mutex int value = 5
+    mut (fn() int) read = fn() int { return 0 }
+    lock value { read = fn() int { return value } }
+    lock value { value = 6 }
+    assert read() == 6
+    fut int first = async next()
+    fut int second = async next()
+    int a = await first
+    int b = await second
+    assert a + b == 11
+    assert next() == 7
+}
+"#,
+        "",
+    );
+}

@@ -35,6 +35,7 @@ pub enum TypeInfo {
 struct Binding {
     ty: Type,
     declaration: Option<usize>,
+    locked: bool,
     mutable: bool,
     mutex: bool,
     initializer: Option<usize>,
@@ -539,6 +540,7 @@ impl Checker {
             Binding {
                 ty,
                 declaration: None,
+                locked: false,
                 mutable,
                 mutex: false,
                 initializer: None,
@@ -718,6 +720,12 @@ impl Checker {
                 }
                 self.push();
                 self.bind(name, b.ty, true)?;
+                self.scopes
+                    .last_mut()
+                    .unwrap()
+                    .get_mut(name)
+                    .unwrap()
+                    .locked = true;
                 self.loops.push((label.clone(), false, true));
                 self.block(body)?;
                 self.loops.pop();
@@ -971,6 +979,15 @@ impl Checker {
                 }
                 self.validate_type(&f.return_type)?;
                 let old_scopes = self.scopes.clone();
+                // A function does not inherit permission granted by an enclosing
+                // lock. Capture the mutex itself and require a new lock to write.
+                for binding in self.scopes.iter_mut().flat_map(|scope| scope.values_mut()) {
+                    if binding.locked {
+                        binding.mutable = false;
+                        binding.mutex = true;
+                        binding.locked = false;
+                    }
+                }
                 self.capture_frames
                     .push((self.scopes.len(), HashMap::new()));
                 self.push();

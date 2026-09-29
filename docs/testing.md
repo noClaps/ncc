@@ -51,7 +51,9 @@ Function side-effect coverage includes shared mutable scalar and container
 bindings, named callbacks, nested and returned closures, write-only captures,
 shadowing, tuple bindings, and independent factory invocations. Immutable closure
 captures still have compile-time folding coverage. Mutable captures currently
-use the runtime fallback in the constant evaluator.
+use the runtime fallback in the constant evaluator. Closures created inside lock
+scopes cannot inherit write permission; returned closures that acquire their own
+locks are tested sequentially and concurrently.
 
 The tests are a regression suite, not a proof of specification completeness.
 See [the remaining work](../TODO.md) for known gaps.

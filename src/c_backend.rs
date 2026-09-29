@@ -29,6 +29,7 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
         function_types: vec![],
         type_definitions: vec![],
         mutexes: HashSet::new(),
+        locked_mutexes: HashMap::new(),
         mutex_types: vec![],
         value_helpers: HashMap::new(),
         expression_values: HashMap::new(),
@@ -313,6 +314,7 @@ struct Emitter<'a> {
     function_types: Vec<(Type, String)>,
     type_definitions: Vec<TypeDefinition>,
     mutexes: HashSet<String>,
+    locked_mutexes: HashMap<String, String>,
     mutex_types: Vec<(Type, String)>,
     value_helpers: HashMap<(ValueOperation, Type), String>,
 }
@@ -864,8 +866,9 @@ impl Emitter<'_> {
                 let guard = self.fresh();
                 let end = self.fresh();
                 self.line(format!("{{ pthread_mutex_lock(&({mutex})->lock); nc_lock_guard {guard} __attribute__((cleanup(nc_unlock))) = {{ &({mutex})->lock }};"));
-                self.scopes
-                    .push(HashMap::from([(name.clone(), format!("({mutex})->value"))]));
+                let view = format!("({mutex})->value");
+                self.locked_mutexes.insert(view.clone(), mutex.clone());
+                self.scopes.push(HashMap::from([(name.clone(), view)]));
                 self.loops.push((label.clone(), None, end.clone(), true));
                 self.block(body)?;
                 self.loops.pop();
@@ -1946,7 +1949,8 @@ impl Emitter<'_> {
             ) in captures.iter().enumerate()
             {
                 let value = if *mutex {
-                    self.name(name)
+                    let name = self.name(name);
+                    self.locked_mutexes.get(&name).cloned().unwrap_or(name)
                 } else if *mutable {
                     format!("&({})", self.name(name))
                 } else {
