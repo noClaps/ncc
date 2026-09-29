@@ -1145,6 +1145,9 @@ impl Checker {
                     .rev()
                     .find_map(|(i, s)| s.get(n).map(|v| (i, v.clone())))
                 {
+                    if binding.mutex {
+                        return self.fail(format!("cannot read mutex `{n}` outside a lock scope"));
+                    }
                     if i == 0 && binding.mutable && !binding.mutex {
                         self.shared_accesses.insert(e.id());
                     }
@@ -1611,6 +1614,9 @@ impl Checker {
             Pattern::Wildcard => Ok(true),
             Pattern::Name(n) => {
                 if let Some(binding) = self.lookup(n) {
+                    if binding.mutex {
+                        return self.fail(format!("cannot read mutex `{n}` outside a lock scope"));
+                    }
                     self.value_operation(ty, "pattern equality")?;
                     self.assignable(ty, &binding.ty)?;
                     Ok(false)

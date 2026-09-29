@@ -56,7 +56,9 @@ for folding, independent factory calls, repeated mutations, loop scopes, errors,
 container callbacks, and computed embed paths. Persistent outer state and runtime
 effects retain their runtime fallback. Closures created inside lock
 scopes cannot inherit write permission; returned closures that acquire their own
-locks are tested sequentially and concurrently.
+locks are tested sequentially and concurrently. Unlocked mutex reads are rejected
+for scalar and container access, interpolation, comparisons and patterns; generic
+imported read errors retain their original expression location.
 
 Data-race warning tests compile the racing examples without asserting a particular
 result. CLI execution tests use an awaited single worker for deterministic output.

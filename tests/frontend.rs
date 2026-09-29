@@ -261,3 +261,19 @@ fn imported_errors_retain_source_paths_and_declaration_locations() {
         Some(imported.as_path())
     );
 }
+
+#[test]
+fn imported_generic_mutex_reads_report_the_original_expression() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let root = directory.path().join("main.nc");
+    let imported = directory.path().join("library.nc");
+    let library = "mutex int value = 1\npub fn read<T>(T ignored) int {\n  return value\n}\n";
+    std::fs::write(&imported, library).unwrap();
+    let source = "import { \"library\" as lib } _ = lib.read<int>(0)";
+    for release in [false, true] {
+        let error = ncc::compile_source_with_options(source, &root, release).unwrap_err();
+        assert_eq!(error.0[0].path.as_deref(), Some(imported.as_path()));
+        assert_eq!(&library[error.0[0].span.clone()], "value");
+        assert!(error.to_string().contains("outside a lock scope"));
+    }
+}

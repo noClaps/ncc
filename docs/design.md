@@ -1889,7 +1889,7 @@ test "async with mutex" {
     _ -> { throw "Something went wrong" }
   }
 
-  assert numbers == [4, 5, 6, 7, 8]
+  lock numbers { assert numbers == [4, 5, 6, 7, 8] }
 }
 ```
 

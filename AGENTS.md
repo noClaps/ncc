@@ -43,8 +43,9 @@
     explicit parameters in examples; the capture linter remains removed.
   - Data races on ordinary mutable variables are allowed. Emit a non-fatal
     potential-data-race warning for async access; do not reject the program.
-  - Lock scopes grant temporary mutability only. Closures capture the mutex,
-    not the surrounding lock permission, and must lock it before writing.
+  - Mutex values are inaccessible outside explicit lock scopes, for reads as
+    well as writes. Closures capture the mutex, not surrounding lock permission,
+    and must acquire their own lock before accessing its value.
   - Reject equality and string conversion for functions and unawaited futures,
     including when nested in containers.
   - Numeric byte-array encoding may use the simplest consistent implementation;

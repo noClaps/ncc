@@ -28,7 +28,6 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
         runtime_functions: vec![],
         function_types: vec![],
         type_definitions: vec![],
-        mutexes: HashSet::new(),
         locked_mutexes: HashMap::new(),
         mutex_types: vec![],
         value_helpers: HashMap::new(),
@@ -68,9 +67,6 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
                         e.c_type(ty)?
                     };
                     let name = e.bind(binding);
-                    if v.mutex {
-                        e.mutexes.insert(name.clone());
-                    }
                     declarations.push_str(&format!("static {ct} {name};\n"));
                     slots.push(name);
                 }
@@ -313,7 +309,6 @@ struct Emitter<'a> {
     runtime_functions: Vec<String>,
     function_types: Vec<(Type, String)>,
     type_definitions: Vec<TypeDefinition>,
-    mutexes: HashSet<String>,
     locked_mutexes: HashMap<String, String>,
     mutex_types: Vec<(Type, String)>,
     value_helpers: HashMap<(ValueOperation, Type), String>,
@@ -692,7 +687,6 @@ impl Emitter<'_> {
                     let name = self.bind(pattern_name(&v.pattern)?);
                     self.line(format!("{ty} *{name};"));
                     self.init_mutex(&name, &v.ty, &value)?;
-                    self.mutexes.insert(name);
                     return Ok(());
                 }
                 let value = self.declaration_value(v)?;
@@ -1284,14 +1278,6 @@ impl Emitter<'_> {
                     .ok_or_else(|| Diagnostics::one("$ outside indexing", 0..0))?
             ),
             Expr::Name(n) => {
-                let name = self.name(n);
-                if self.mutexes.contains(&name) {
-                    self.line(format!("pthread_mutex_lock(&({name})->lock);"));
-                    let value = self.copy(&self.ty(e)?, &format!("({name})->value"))?;
-                    let value = self.temp(e, value)?;
-                    self.line(format!("pthread_mutex_unlock(&({name})->lock);"));
-                    return Ok(value);
-                }
                 if matches!(self.ty(e)?, Type::Function(_, _))
                     && !self.scopes.iter().any(|s| s.contains_key(n))
                 {
@@ -1898,9 +1884,6 @@ impl Emitter<'_> {
         ) in captures.iter().enumerate()
         {
             let code = format!("(({}*)nc_env)->f_{i}", env_ct.as_ref().unwrap());
-            if *mutex {
-                self.mutexes.insert(code.clone());
-            }
             scope.insert(
                 n.clone(),
                 if *mutable && !*mutex {

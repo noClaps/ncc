@@ -382,7 +382,7 @@ test "labels" {
     while i < 2 {
         lock value { value = value + 1 i = i + 1 continue }
     }
-    assert value == 2
+    lock value { assert value == 2 }
 }
 "#,
         "",
@@ -489,7 +489,7 @@ test "mutexes" {
     fut bool second = async add_2()
     assert await first
     assert await second
-    assert numbers == [4,5,6]
+    lock numbers { assert numbers == [4,5,6] }
     escape: lock numbers {
         for i in numbers { numbers[i] = 10 break :escape }
     }
@@ -498,7 +498,7 @@ test "mutexes" {
     int fallback = fail() catch err { 7 }
     assert fallback == 7
     lock numbers { numbers[0] = 11 }
-    assert numbers[0] == 11
+    lock numbers { assert numbers[0] == 11 }
 }
 "#,
         "",
@@ -563,7 +563,7 @@ fn loop_exits() int {
     outer: while true {
         lock value { value = 6 break :outer }
     }
-    return value
+    lock value { return value }
 }
 test "return paths" {
     assert escaped(true) == 3 and escaped(false) == 2
@@ -1879,7 +1879,7 @@ test "lock permissions" {
     assert next() == 4
     mutex int value = 5
     mut (fn() int) read = fn() int { return 0 }
-    lock value { read = fn() int { return value } }
+    lock value { read = fn() int { lock value { return value } } }
     lock value { value = 6 }
     assert read() == 6
     fut int first = async next()
@@ -1891,5 +1891,70 @@ test "lock permissions" {
 }
 "#,
         "",
+    );
+}
+
+#[test]
+fn mutex_reads_require_an_explicit_lock_in_each_function() {
+    for expression in [
+        "_ = value",
+        "int copy = value",
+        "@println(value)",
+        "str text = \"{value}\"",
+        "str text = @as(str, value)",
+        "bool same = value == 1",
+        "if value { 1 -> {} _ -> {} }",
+        "if 1 { value -> {} _ -> {} }",
+        "if (1, 2) { (value, _) -> {} _ -> {} }",
+        "fn read() int { return value }",
+        "fn read = fn() int { return value }",
+        "lock value {} int copy = value",
+        "lock value { fn read() int { return value } }",
+        "lock value { fn read = fn() int { return value } }",
+    ] {
+        rejects(
+            &format!("mutex int value = 1 {expression}"),
+            "cannot read mutex `value` outside a lock scope",
+        );
+    }
+    for expression in [
+        "uint length = values.len",
+        "int first = values[0]",
+        "int[] copy = values",
+        "for i in values {}",
+        "bool present = 1 in values",
+    ] {
+        rejects(
+            &format!("mutex int[] values = [1] {expression}"),
+            "cannot read mutex `values` outside a lock scope",
+        );
+    }
+    rejects(
+        "struct State { int count } mutex State state = State{.count = 1} int n = state.count",
+        "cannot read mutex `state` outside a lock scope",
+    );
+    success(
+        r#"
+test "explicit read scopes" {
+    mutex int[] values = [1, 2]
+    mut int[] snapshot = []
+    lock values {
+        snapshot = values
+        assert values.len == 2
+        assert values[0] == 1
+        assert 2 in values
+        for i in values { assert values[i] > 0 }
+        fut void printed = async @println(values)
+        await printed
+    }
+    snapshot[0] = 99
+    lock values { assert values == [1, 2] }
+    mutex int value = 1
+    lock value {
+        if 1 { value -> {} _ -> { assert false } }
+    }
+}
+"#,
+        "[1, 2]\n",
     );
 }
