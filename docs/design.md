@@ -1965,6 +1965,41 @@ To exit out of a `lock` scope early, you can:
   }
   ```
 
+### Data races
+
+Data races with mutable variables are permissible in the language. For example, a data race can happen when two async functions try to mutate the same variable at the same time.
+
+```nc
+mut int count = 0
+
+fn increment() {
+  count = count + 1
+}
+
+fut void a = async increment()
+fut void b = async increment()
+await a
+await b
+
+@println(count)
+```
+
+Both calls to `increment` could read 0 at the same time and output 1:
+
+1. `a` reads `count = 0`
+2. `b` reads `count = 0`
+3. `a` writes `count = 1`
+4. `b` writes `count = 1`
+
+or they could run in order and output 2:
+
+1. `a` reads `count = 0`
+2. `a` writes `count = 1`
+3. `b` reads `count = 1`
+4. `b` writes `count = 2`
+
+This leads to unpredictable behavior, but is allowed.
+
 ## Modules
 
 Import statements import the whole module and assign it to a variable. Specific things from the module cannot be imported, such as JavaScript's `import { function } from pkg` or Python's `from pkg import function`. Wildcard imports like Python's `from pkg import *` are also not allowed.
