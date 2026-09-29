@@ -21,6 +21,7 @@ compiler has no production dependencies. Unicode segmentation is a test oracle o
 | Binary embedding, lexical/tuple/captured paths, empty files, symlink and runtime-dependency rejection | `tests/embed.rs` |
 | C ABI declarations, shared implementation files, inactive optional/error payloads | `tests/externs.rs` |
 | CLI help/options, removed-command rejection, release mode, targets, runtime process state | `tests/cli.rs` |
+| Non-fatal async race warnings, mutex-safe cases, indirect/recursive calls, imported specialization locations, build/run success | `tests/warnings.rs` |
 | Build formats, artifact isolation, required C headers, basic diagnostics | `tests/compiler.rs` |
 | Escapes, multiline literals, graphemes, expression ranges, imported/specialized/constant-evaluation diagnostics | `tests/frontend.rs` |
 | Grapheme boundaries against an independent oracle | Unit tests in `src/unicode.rs` |
@@ -54,6 +55,10 @@ captures still have compile-time folding coverage. Mutable captures currently
 use the runtime fallback in the constant evaluator. Closures created inside lock
 scopes cannot inherit write permission; returned closures that acquire their own
 locks are tested sequentially and concurrently.
+
+Data-race warning tests compile the racing examples without asserting a particular
+result. CLI execution tests use an awaited single worker for deterministic output.
+Warnings are collected before optimization and checked in both modes.
 
 The tests are a regression suite, not a proof of specification completeness.
 See [the remaining work](../TODO.md) for known gaps.

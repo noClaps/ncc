@@ -47,6 +47,15 @@ these captures currently remain runtime code. Arithmetic uses each type's range.
 remain runtime code; futures and external calls are never executed by the
 optimiser.
 
+Async calls that may access ordinary shared mutable state produce a non-fatal
+potential-data-race warning. Such programs remain valid. The analysis follows
+named functions, immutable callback aliases and captures conservatively; opaque
+external or unresolved indirect calls may also warn. It does not prove that tasks
+overlap or that a race will occur. Mutex-protected access remains supported.
+Warnings preserve original source locations and are emitted in both build modes.
+Library callers can use `compile_source_with_diagnostics` to receive generated C
+and warnings separately; existing compilation helpers continue to return C only.
+
 ## Dependencies and self-hosting
 
 The compiler needs only Rust's standard library and has no production crate

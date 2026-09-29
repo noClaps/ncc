@@ -1,4 +1,4 @@
-use ncc::compile_source_with_options;
+use ncc::compile_source_with_diagnostics;
 use std::{
     env, fs,
     path::PathBuf,
@@ -183,8 +183,10 @@ fn build(o: &Options, source: &str) -> Result<ExitCode, String> {
     {
         return Err("output would overwrite the input source file".into());
     }
-    let c = compile_source_with_options(source, &o.input, o.release)
+    let compiled = compile_source_with_diagnostics(source, &o.input, o.release)
         .map_err(|e| e.render(source, &o.input))?;
+    eprint!("{}", compiled.warnings.render_warnings(source, &o.input));
+    let c = compiled.c;
     if format == Format::C && !run {
         fs::write(&output, c).map_err(|e| format!("{}: {e}", output.display()))?;
         return Ok(ExitCode::SUCCESS);

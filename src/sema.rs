@@ -10,6 +10,8 @@ pub struct CheckedModule {
     pub types: HashMap<String, TypeInfo>,
     pub expression_types: HashMap<usize, Type>,
     pub captures: HashMap<usize, Vec<Capture>>,
+    pub shared_accesses: HashSet<usize>,
+    pub async_sites: HashMap<usize, SourceLocation>,
     pub constant_sources: HashMap<usize, Option<usize>>,
     pub constant_patterns: HashMap<usize, (Pattern, Type)>,
 }
@@ -54,6 +56,8 @@ struct Checker {
     value_targets: Vec<Type>,
     capture_frames: Vec<(usize, HashMap<String, Binding>)>,
     captures: HashMap<usize, Vec<Capture>>,
+    shared_accesses: HashSet<usize>,
+    async_sites: HashMap<usize, SourceLocation>,
     constant_sources: HashMap<usize, Option<usize>>,
     constant_patterns: HashMap<usize, (Pattern, Type)>,
 }
@@ -99,6 +103,8 @@ pub fn check(module: Module, _path: &Path) -> Result<CheckedModule, Diagnostics>
         types: c.types,
         expression_types: c.expression_types,
         captures: c.captures,
+        shared_accesses: c.shared_accesses,
+        async_sites: c.async_sites,
         constant_sources: c.constant_sources,
         constant_patterns: c.constant_patterns,
     })
@@ -281,6 +287,8 @@ impl Checker {
             value_targets: vec![],
             capture_frames: vec![],
             captures: HashMap::new(),
+            shared_accesses: HashSet::new(),
+            async_sites: HashMap::new(),
             constant_sources: HashMap::new(),
             constant_patterns: HashMap::new(),
         }
@@ -790,6 +798,9 @@ impl Checker {
     }
     fn expr(&mut self, e: &Expr) -> Result<Type, Diagnostics> {
         if let Expr::Located(value, location) = e {
+            if matches!(value.unlocated(), Expr::Async(_)) {
+                self.async_sites.insert(e.id(), location.clone());
+            }
             return self
                 .expr(value)
                 .map_err(|error| error.at_source(&location.path, location.span.clone()));
@@ -833,6 +844,9 @@ impl Checker {
     }
     fn expected(&mut self, e: &Expr, ty: &Type) -> Result<(), Diagnostics> {
         if let Expr::Located(value, location) = e {
+            if matches!(value.unlocated(), Expr::Async(_)) {
+                self.async_sites.insert(e.id(), location.clone());
+            }
             return self
                 .expected(value, ty)
                 .map_err(|error| error.at_source(&location.path, location.span.clone()));
@@ -1131,6 +1145,9 @@ impl Checker {
                     .rev()
                     .find_map(|(i, s)| s.get(n).map(|v| (i, v.clone())))
                 {
+                    if i == 0 && binding.mutable && !binding.mutex {
+                        self.shared_accesses.insert(e.id());
+                    }
                     self.constant_sources.insert(e.id(), binding.initializer);
                     for (depth, captures) in &mut self.capture_frames {
                         if i < *depth {

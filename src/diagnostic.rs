@@ -23,6 +23,12 @@ impl Diagnostics {
         self
     }
     pub fn render(&self, source: &str, path: &std::path::Path) -> String {
+        self.render_level(source, path, "error")
+    }
+    pub fn render_warnings(&self, source: &str, path: &std::path::Path) -> String {
+        self.render_level(source, path, "warning")
+    }
+    fn render_level(&self, source: &str, path: &std::path::Path, level: &str) -> String {
         let mut out = String::new();
         for diagnostic in &self.0 {
             let actual_path = diagnostic.path.as_deref().unwrap_or(path);
@@ -41,7 +47,7 @@ impl Diagnostics {
             let line = source[..start].bytes().filter(|b| *b == b'\n').count() + 1;
             let column = source[line_start..start].chars().count() + 1;
             out.push_str(&format!(
-                "{}:{line}:{column}: error: {}\n  |\n{line:>2} | {}\n  | {}^\n",
+                "{}:{line}:{column}: {level}: {}\n  |\n{line:>2} | {}\n  | {}^\n",
                 actual_path.display(),
                 diagnostic.message,
                 &source[line_start..line_end],

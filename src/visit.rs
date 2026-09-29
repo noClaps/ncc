@@ -10,7 +10,7 @@ pub fn item<'a>(item: &'a Item, f: &mut impl FnMut(&'a Expr)) {
         _ => {}
     }
 }
-fn block<'a>(b: &'a Block, f: &mut impl FnMut(&'a Expr)) {
+pub(crate) fn block<'a>(b: &'a Block, f: &mut impl FnMut(&'a Expr)) {
     for s in &b.statements {
         stmt(s, f);
     }

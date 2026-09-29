@@ -41,6 +41,8 @@
   - Functions share surrounding mutable bindings, including nested/anonymous
     functions and returned closures. Immutable captures remain by value. Prefer
     explicit parameters in examples; the capture linter remains removed.
+  - Data races on ordinary mutable variables are allowed. Emit a non-fatal
+    potential-data-race warning for async access; do not reject the program.
   - Lock scopes grant temporary mutability only. Closures capture the mutex,
     not the surrounding lock permission, and must lock it before writing.
   - Reject equality and string conversion for functions and unawaited futures,

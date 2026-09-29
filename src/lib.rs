@@ -15,6 +15,7 @@ pub mod temp;
 pub mod unicode;
 mod unicode_data;
 mod visit;
+mod warnings;
 
 use std::path::Path;
 
@@ -29,13 +30,34 @@ pub fn compile_source_with_options(
     path: &Path,
     release: bool,
 ) -> Result<String, Diagnostics> {
+    compile_source_with_diagnostics(source, path, release).map(|output| output.c)
+}
+
+pub struct CompileOutput {
+    pub c: String,
+    pub warnings: Diagnostics,
+}
+
+/// Compile with non-fatal diagnostics, without writing to either output stream.
+pub fn compile_source_with_diagnostics(
+    source: &str,
+    path: &Path,
+    release: bool,
+) -> Result<CompileOutput, Diagnostics> {
     let tokens = lexer::lex(source)?;
     let module = modules::load(parser::parse_at(tokens, path)?, path)?;
     let checked = sema::check(generics::specialize(module)?, path)?;
+    let warnings = warnings::data_races(&checked);
     let checked = optimizer::resolve_embeds(checked, path)?;
     if release {
         let checked = sema::check(optimizer::optimize(checked)?, path)?;
-        return codegen::emit(&checked);
+        return Ok(CompileOutput {
+            c: codegen::emit(&checked)?,
+            warnings,
+        });
     }
-    codegen::emit(&checked)
+    Ok(CompileOutput {
+        c: codegen::emit(&checked)?,
+        warnings,
+    })
 }
