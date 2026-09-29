@@ -1448,6 +1448,10 @@ impl Checker {
                 } else {
                     named("bool")
                 };
+                if matches!(subject_type, Type::Map(_, _)) {
+                    return self
+                        .fail("maps cannot be matched directly; use a bare `if` with comparisons");
+                }
                 let mut wildcard = false;
                 let mut booleans = HashSet::new();
                 let mut variants = HashSet::new();

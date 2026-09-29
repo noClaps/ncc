@@ -63,6 +63,8 @@ imported read errors retain their original expression location.
 Pattern-only captures are checked across scalar, tuple, array, struct, and enum
 patterns, including returned closures, mutable updates, comparison order,
 constant folding, and shared-read race warnings.
+Direct map subjects are rejected, including generic specializations; bare `if`
+branches retain map equality and membership comparisons.
 
 Data-race warning tests compile the racing examples without asserting a particular
 result. CLI execution tests use an awaited single worker for deterministic output.

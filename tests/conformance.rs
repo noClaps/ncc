@@ -1,6 +1,33 @@
 use std::{fs, path::Path, process::Command};
 
 #[test]
+fn maps_require_bare_if_comparisons() {
+    for source in [
+        "[str]int values = [] if values { _ -> {} }",
+        "[str]int values = [\"a\": 1] if values { values -> {} _ -> {} }",
+        "fn values() [str]int { return [] } if values() { _ -> {} }",
+        "fn choose<T>(T value) { if value { _ -> {} } } choose<[str]int>([])",
+    ] {
+        rejects(source, "maps cannot be matched directly");
+    }
+    success(
+        r#"
+[str]int values = ["a": 1]
+if {
+    values == ["a": 2] -> { @println("wrong") }
+    values == ["a": 1] -> { @println("equal") }
+    _ -> { @println("wrong") }
+}
+if {
+    "a" in values -> { @println("present") }
+    _ -> { @println("wrong") }
+}
+"#,
+        "equal\npresent\n",
+    );
+}
+
+#[test]
 fn external_c_composite_signatures_have_stable_aliases() {
     let directory = ncc::temp::Directory::new().unwrap();
     fs::write(
