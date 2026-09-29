@@ -60,6 +60,10 @@ locks are tested sequentially and concurrently. Unlocked mutex reads are rejecte
 for scalar and container access, interpolation, comparisons and patterns; generic
 imported read errors retain their original expression location.
 
+Pattern-only captures are checked across scalar, tuple, array, struct, and enum
+patterns, including returned closures, mutable updates, comparison order,
+constant folding, and shared-read race warnings.
+
 Data-race warning tests compile the racing examples without asserting a particular
 result. CLI execution tests use an awaited single worker for deterministic output.
 Warnings are collected before optimization and checked in both modes.

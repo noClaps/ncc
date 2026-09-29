@@ -990,3 +990,30 @@ fn pattern() int {
         "122\n12\n12\n7\n",
     );
 }
+
+#[test]
+fn pattern_only_captures_fold_with_current_values_and_lexical_bindings() {
+    folded(
+        r#"
+int expected = 2
+fn global(int value) bool {
+    return if value { expected -> { true } _ -> { false } }
+}
+fn local() int {
+    mut int expected = 1
+    fn matches(int[] value) bool {
+        return if value { [expected, _] -> { true } _ -> { false } }
+    }
+    expected = 3
+    int a = if matches([3, 9]) { true -> { 10 } false -> { 0 } }
+    int b = if matches([1, 9]) { true -> { 100 } false -> { 1 } }
+    return a + b
+}
+@println(global(1))
+@println(global(2))
+@println(local())
+"#,
+        &["global", "local"],
+        "false\ntrue\n11\n",
+    );
+}

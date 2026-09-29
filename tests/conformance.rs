@@ -1958,3 +1958,70 @@ test "explicit read scopes" {
         "[1, 2]\n",
     );
 }
+
+#[test]
+fn pattern_comparisons_capture_existing_outer_bindings() {
+    success(
+        r#"
+fn make(int initial) (fn(int) bool) {
+    mut int expected = initial
+    fn matches(int value) bool { return if value { expected -> { true } _ -> { false } } }
+    expected = expected + 1
+    return matches
+}
+test "pattern captures" {
+    (fn(int) bool) matches = make(2)
+    assert matches(3)
+    assert not matches(2)
+    int expected = 4
+    fn tuple((int, int) value) bool {
+        return if value { (expected, _) -> { true } _ -> { false } }
+    }
+    assert tuple((4, 9))
+    assert not tuple((5, 9))
+}
+"#,
+        "",
+    );
+}
+
+#[test]
+fn composite_patterns_preserve_captures_and_comparison_order() {
+    success(
+        r#"
+struct Item { int key str label }
+enum Choice { Item(Item) Empty }
+fn mark(int n) int { @print(n) return n }
+test "composite captures" {
+    mut int expected = 1
+    str label = "item"
+    fn array(int[] value) bool {
+        return if value { [expected, _] -> { true } _ -> { false } }
+    }
+    fn record(Item value) bool {
+        return if value { Item{.key = expected, .label = label} -> { true } _ -> { false } }
+    }
+    fn variant(Choice value) bool {
+        return if value { Choice.Item(Item{.key = expected, .label = label}) -> { true } _ -> { false } }
+    }
+    expected = 2
+    assert array([2, 9])
+    assert not array([1, 9])
+    assert not array([2])
+    assert record(Item{.key = 2, .label = "item"})
+    assert not record(Item{.key = 2, .label = "other"})
+    assert variant(Choice.Item(Item{.key = 2, .label = "item"}))
+    assert not variant(Choice.Empty)
+    assert not variant(Choice.Item(Item{.key = 1, .label = "item"}))
+    if mark(2) {
+        mark(1) -> { assert false }
+        mark(2) -> {}
+        mark(3) -> { assert false }
+        _ -> { assert false }
+    }
+    @println("")
+}
+"#,
+        "212\n",
+    );
+}

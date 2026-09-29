@@ -110,3 +110,10 @@ fn recursive_and_indirect_async_calls_are_conservative_and_terminate() {
     assert!(warnings("fn a(int n) { if n > 0 { true -> { b(n - 1) } false -> {} } } fn b(int n) { a(n) } fut void job = async b(2) await job").is_empty());
     assert!(!warnings("fn apply((fn() void) f) { f() } mut int count = 0 fn increment() { count = count + 1 } fut void job = async apply(increment) await job").is_empty());
 }
+
+#[test]
+fn pattern_comparisons_count_as_shared_reads() {
+    assert!(!warnings("mut int expected = 1 fn matches(int value) bool { return if value { expected -> { true } _ -> { false } } } fut bool job = async matches(1) _ = await job").is_empty());
+    assert!(!warnings("test \"local\" { mut int expected = 1 fn matches(int value) bool { return if value { expected -> { true } _ -> { false } } } fut bool job = async matches(1) _ = await job }").is_empty());
+    assert!(warnings("mutex int expected = 1 fn matches(int value) bool { lock expected { return if value { expected -> { true } _ -> { false } } } } fut bool job = async matches(1) _ = await job").is_empty());
+}
