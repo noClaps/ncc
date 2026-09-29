@@ -776,11 +776,30 @@ _ = hello() // discarded
 hello() // error: return value of function not used
 ```
 
+### Side effects
+
+When a function references a mutable variable declared outside it, it gets a mutable reference to that variable. This means that mutating the variable outside the function will also mutate it inside the function, and vice versa.
+
+```nc
+mut int val = 0
+fn increment() {
+    val = val + 1
+}
+
+@println(val) // 0
+increment()
+@println(val) // 1
+val = val + 5
+@println(val) // 6
+increment()
+@println(val) // 7
+```
+
+This is known as a side effect.
+
 ### Functions as values
 
 You can pass a function as an argument to other functions, or assign them as values to variables.
-
-If you use a variable from outside the function inside, it will capture that variable by value and create an immutable copy when the function is created so that later changes to the variable don't affect the value inside the function, and vice versa. In general, you should avoid capturing values and just use function parameters, since it is unlikely to do what you expect.
 
 ```nc
 // This function takes a function `operation` as its third parameter
