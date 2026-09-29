@@ -940,12 +940,17 @@ Bit arithmetic will only be allowed for integers.
 ```nc
 // bit shift left
 1 << 4 == 16
+-3 << 1 == -6
 ```
 
 ```nc
 // bit shift right
 6 >> 1 == 3
+-3 >> 1 == -2
 ```
+
+> [!NOTE]
+> The bit shift operators are [arithmetic shifts](https://en.wikipedia.org/wiki/Arithmetic_shift). This means that a left shift is equivalent to multiplication by 2 and a right shift is equivalent to division by 2, rounded down towards negative infinity for negative numbers and towards 0 for positive numbers.
 
 ```nc
 // bitwise and
