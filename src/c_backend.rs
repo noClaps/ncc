@@ -695,7 +695,11 @@ impl Emitter<'_> {
                 }
                 let value = self.declaration_value(v)?;
                 let value = self.copy(&v.ty, &value)?;
-                self.declare_pattern(&v.pattern, &v.ty, &value)?;
+                let shared = v.mutable
+                    && self.checked.captures.values().flatten().any(|capture| {
+                        capture.mutable && capture.declaration == Some(v.value.id())
+                    });
+                self.declare_pattern(&v.pattern, &v.ty, &value, shared)?;
             }
             Stmt::Assign { target, value } => {
                 let target = target.unlocated();
@@ -1851,9 +1855,17 @@ impl Emitter<'_> {
             let name = self.fresh();
             let mut fields = vec![];
             let mut dependencies = vec![];
-            for (i, Capture { ty, mutex, .. }) in captures.iter().enumerate() {
+            for (
+                i,
+                Capture {
+                    ty, mutex, mutable, ..
+                },
+            ) in captures.iter().enumerate()
+            {
                 let ct = if *mutex {
                     format!("{} *", self.mutex_type(ty)?)
+                } else if *mutable {
+                    format!("{} *", self.c_type(ty)?)
                 } else {
                     self.c_type(ty)?
                 };
@@ -1872,14 +1884,27 @@ impl Emitter<'_> {
         let ret_ct = self.c_return_type(&f.return_type)?;
         let mut params = vec!["void *nc_env".into()];
         let mut scope = HashMap::new();
-        for (i, Capture { name: n, mutex, .. }) in captures.iter().enumerate() {
+        for (
+            i,
+            Capture {
+                name: n,
+                mutex,
+                mutable,
+                ..
+            },
+        ) in captures.iter().enumerate()
+        {
             let code = format!("(({}*)nc_env)->f_{i}", env_ct.as_ref().unwrap());
             if *mutex {
-                self.mutexes.insert(code);
+                self.mutexes.insert(code.clone());
             }
             scope.insert(
                 n.clone(),
-                format!("(({}*)nc_env)->f_{i}", env_ct.as_ref().unwrap()),
+                if *mutable && !*mutex {
+                    format!("(*{code})")
+                } else {
+                    code
+                },
             );
         }
         for p in &f.params {
@@ -1912,12 +1937,18 @@ impl Emitter<'_> {
             for (
                 i,
                 Capture {
-                    name, ty, mutex, ..
+                    name,
+                    ty,
+                    mutex,
+                    mutable,
+                    ..
                 },
             ) in captures.iter().enumerate()
             {
                 let value = if *mutex {
                     self.name(name)
+                } else if *mutable {
+                    format!("&({})", self.name(name))
                 } else {
                     self.copy(ty, &self.name(name))?
                 };
@@ -2493,11 +2524,25 @@ impl Emitter<'_> {
         pattern: &Pattern,
         ty: &Type,
         value: &str,
+        mutable: bool,
     ) -> Result<(), Diagnostics> {
         for (binding, ty, value) in binding_values(pattern, ty, value)? {
             let ct = self.c_type(ty)?;
             let name = self.bind(binding);
-            self.line(format!("{ct} {name} = {value};"));
+            if mutable {
+                // Captured bindings can outlive this invocation. Keep their shared
+                // storage alive with the program's other managed allocations.
+                self.allocation_support();
+                self.line(format!(
+                    "{ct} *{name} = nc_alloc(1, sizeof({ct})); *{name} = {value};"
+                ));
+                self.scopes
+                    .last_mut()
+                    .unwrap()
+                    .insert(binding.into(), format!("(*{name})"));
+            } else {
+                self.line(format!("{ct} {name} = {value};"));
+            }
         }
         Ok(())
     }

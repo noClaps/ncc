@@ -38,8 +38,9 @@
 - Previously resolved decisions (consult `docs/design.md` for the full language):
   - Bit shifts are arithmetic: signed right shifts round toward negative infinity.
     Generate portable C without relying on negative signed right shifts.
-  - Anonymous functions capture surrounding values by value. Prefer explicit
-    parameters in examples; the previously requested capture linter is removed.
+  - Functions share surrounding mutable bindings, including nested/anonymous
+    functions and returned closures. Immutable captures remain by value. Prefer
+    explicit parameters in examples; the capture linter remains removed.
   - Reject equality and string conversion for functions and unawaited futures,
     including when nested in containers.
   - Numeric byte-array encoding may use the simplest consistent implementation;
@@ -77,7 +78,7 @@
 - Add regression tests for fixes and expand positive, negative, differential,
   concurrency, and full-language coverage. Compare debug and release behavior.
 - Run negative conformance cases in both modes. Include immutable tuple bindings
-  and by-value closure captures in compile-time evaluation tests; runtime-dependent
+  and immutable by-value closure captures in compile-time evaluation tests; runtime-dependent
   `@embed` paths must fail without executing effects.
 - Run relevant tests during development and broader checks before handoff:
   `cargo test --offline`, `cargo test --offline --no-default-features`,

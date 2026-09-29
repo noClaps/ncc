@@ -377,9 +377,8 @@ fn pure_by_value_closures_fold_without_conflating_captured_environments() {
 fn make(int n) (fn(int) int) { return fn(int x) int { return n + x } }
 fn apply((fn(int) int) f, int n) int { return f(n) }
 fn compute() int {
-    mut int n = 4
+    int n = 4
     fn captured(int x) int { return n * x }
-    n = 99
     return captured(3) + apply(make(10), 2) + apply(make(20), 2)
 }
 fn collection() int {

@@ -16,6 +16,8 @@ pub struct CheckedModule {
 #[derive(Clone, Debug)]
 pub struct Capture {
     pub name: String,
+    pub mutable: bool,
+    pub declaration: Option<usize>,
     pub ty: Type,
     pub mutex: bool,
     pub initializer: Option<usize>,
@@ -32,6 +34,7 @@ pub enum TypeInfo {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Binding {
     ty: Type,
+    declaration: Option<usize>,
     mutable: bool,
     mutex: bool,
     initializer: Option<usize>,
@@ -535,6 +538,7 @@ impl Checker {
             n.into(),
             Binding {
                 ty,
+                declaration: None,
                 mutable,
                 mutex: false,
                 initializer: None,
@@ -564,6 +568,7 @@ impl Checker {
         for name in v.binding_names() {
             if let Some(binding) = self.scopes.last_mut().unwrap().get_mut(name) {
                 binding.mutex = v.mutex;
+                binding.declaration = Some(key);
                 if !v.mutable && !v.mutex {
                     binding.initializer = Some(key);
                 }
@@ -758,7 +763,7 @@ impl Checker {
                 if !b.mutable {
                     return self.fail(format!("cannot mutate immutable `{n}`"));
                 }
-                Ok(b.ty.clone())
+                self.expr(e)
             }
             Expr::Member { object, name } if name == "len" => {
                 let ty = self.expr(object)?;
@@ -966,11 +971,6 @@ impl Checker {
                 }
                 self.validate_type(&f.return_type)?;
                 let old_scopes = self.scopes.clone();
-                for scope in &mut self.scopes {
-                    for binding in scope.values_mut() {
-                        binding.mutable = false;
-                    }
-                }
                 self.capture_frames
                     .push((self.scopes.len(), HashMap::new()));
                 self.push();
@@ -1004,6 +1004,8 @@ impl Checker {
                     .into_iter()
                     .map(|(name, binding)| Capture {
                         name,
+                        mutable: binding.mutable,
+                        declaration: binding.declaration,
                         ty: binding.ty,
                         mutex: binding.mutex,
                         initializer: binding.initializer,

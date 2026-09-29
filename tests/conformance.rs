@@ -727,7 +727,7 @@ test "concurrent await" {
 }
 
 #[test]
-fn anonymous_functions_capture_by_value() {
+fn anonymous_functions_share_mutable_captures() {
     success(
         r#"
 fn map<type T, type U>(T[] arr, (fn(T) U) apply) U[] {
@@ -742,19 +742,19 @@ test "closures" {
     fn add = fn(int x) int { return original + numbers[0] + x }
     original = 30
     numbers[0] = 20
-    assert add(1) == 6
+    assert add(1) == 51
     assert make(5)(2) == 7
     str[] strings = map<int,str>([1,2,3], fn(int n) str { return "{n}" })
     assert strings == ["1","2","3"]
     fn outer = fn(int n) (fn(int) int) { return fn(int x) int { return original+n+x } }
     (fn(int) int) inner = outer(4)
     original = 300
-    assert inner(5) == 39
+    assert inner(5) == 309
 }
 "#,
         "",
     );
-    rejects("mut int a = 1 fn f = fn() { a = 2 }", "immutable");
+    rejects("int a = 1 fn f = fn() { a = 2 }", "immutable");
 }
 
 #[test]
@@ -1564,7 +1564,7 @@ test "deep copies" {
     copy.rows[0][0] = 6
     mut int[][] captured_rows = captured()
     captured_rows[0][0] = 7
-    assert captured() == [[3, 2]]
+    assert captured() == [[6, 2]]
     assert array == [1, 2] and tuple == (3, 4)
     assert map == [5: 6, 7: 8]
     assert pair == Pair{.first = 10, .second = 9}
@@ -1732,4 +1732,120 @@ fn arithmetic_shifts_match_floor_division_for_every_valid_count() {
     }
     source.push_str("}\n");
     success(&source, "");
+}
+
+#[test]
+fn named_function_side_effects_share_outer_mutable_bindings() {
+    success(
+        r#"
+mut int val = 0
+fn increment() { val = val + 1 }
+@println(val)
+increment()
+@println(val)
+val = val + 5
+@println(val)
+increment()
+@println(val)
+
+struct State { int[] values [str]int counts }
+mut State state = State{.values = [1], .counts = ["calls": 0]}
+fn update() int {
+    state.values[0] = state.values[0] + val
+    state.counts["calls"] = state.counts["calls"] + 1
+    return state.values[0]
+}
+fn invoke((fn() int) callback) int { return callback() }
+fn forward() int { return update() }
+test "outer effects" {
+    val = 10
+    assert invoke(forward) == 11
+    assert state.counts["calls"] == 1
+    state = State{.values = [20], .counts = ["calls": 4]}
+    (fn() int) alias = update
+    assert alias() == 30
+    assert state.values == [30]
+    assert state.counts["calls"] == 5
+    State copy = state
+    _ = alias()
+    assert state.values == [40]
+    assert copy.values == [30]
+    assert copy.counts["calls"] == 5
+}
+"#,
+        "0\n1\n6\n7\n",
+    );
+}
+
+#[test]
+fn escaped_closures_share_bindings_and_keep_independent_invocations() {
+    success(
+        r#"
+struct Counter { (fn() int) read (fn(int) void) write (fn() void) increment }
+fn counter(int initial) Counter {
+    mut int value = initial
+    fn read() int { return value }
+    fn write(int next) { value = next }
+    fn increment() { value = value + 1 }
+    return Counter{.read = read, .write = write, .increment = increment}
+}
+test "shared cells" {
+    Counter first = counter(2)
+    Counter copy = first
+    Counter second = counter(10)
+    first.write(5)
+    copy.increment()
+    assert first.read() == 6
+    assert copy.read() == 6
+    assert second.read() == 10
+    mut int outer = 1
+    fn write_only = fn() { outer = 8 }
+    write_only()
+    assert outer == 8
+    fn nested = fn() (fn() void) { return fn() { outer = outer + 1 } }
+    (fn() void) increment = nested()
+    increment()
+    assert outer == 9
+    mut int outer = 100
+    increment()
+    assert outer == 100
+    assert first.read() == 6
+    mut int a, int b = (1, 2)
+    fn change = fn() { a = 3 b = 4 }
+    change()
+    assert a == 3 and b == 4
+}
+"#,
+        "",
+    );
+}
+
+#[test]
+fn loop_closures_retain_distinct_mutable_cells_and_immutable_values() {
+    success(
+        r#"
+fn make() (fn() int)[] {
+    mut (fn() int)[] callbacks = []
+    for i in [10, 20, 30] {
+        mut int count = @as(int, i)
+        fn next = fn() int { count = count + 1 return count }
+        callbacks = callbacks <> [next]
+    }
+    return callbacks
+}
+test "iteration cells" {
+    (fn() int)[] callbacks = make()
+    assert callbacks[0]() == 1
+    assert callbacks[1]() == 2
+    assert callbacks[0]() == 2
+    assert callbacks[2]() == 3
+    assert callbacks[1]() == 3
+    int fixed = 7
+    fn read = fn() int { return fixed }
+    int fixed = 99
+    assert read() == 7
+}
+"#,
+        "",
+    );
 }

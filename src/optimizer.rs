@@ -1057,7 +1057,7 @@ impl Evaluator<'_> {
                 let values = captures
                     .iter()
                     .map(|capture| {
-                        if capture.mutex {
+                        if capture.mutex || capture.mutable {
                             return None;
                         }
                         let value = env.get(&capture.name).cloned().or_else(|| {

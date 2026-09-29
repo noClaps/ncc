@@ -47,5 +47,11 @@ String-conversion tests cover the `error: ` prefix, inactive error payloads,
 recursive constituent restrictions, and explicit custom-type unwrapping (including
 custom strings versus interpolation and chained custom types).
 
+Function side-effect coverage includes shared mutable scalar and container
+bindings, named callbacks, nested and returned closures, write-only captures,
+shadowing, tuple bindings, and independent factory invocations. Immutable closure
+captures still have compile-time folding coverage. Mutable captures currently
+use the runtime fallback in the constant evaluator.
+
 The tests are a regression suite, not a proof of specification completeness.
 See [the remaining work](../TODO.md) for known gaps.
