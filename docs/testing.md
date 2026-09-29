@@ -30,6 +30,10 @@ compare emitted behavior in both modes and, where specified, verify that evaluat
 functions disappear from generated C. The very large Fibonacci test is release
 only to avoid exponential runtime work. C integration tests exercise both modes.
 Negative tests distinguish rejected programs from runtime range/bounds failures.
+Integer boundary coverage includes byte, signed and unsigned 64-bit arithmetic,
+with runtime-dependent operands for overflow cases so release folding cannot
+replace the runtime checks. Runtime-failure conformance helpers require successful
+compilation, exit code 1, and the expected diagnostic in both modes.
 Negative conformance cases run in both modes, including the operator/type matrix,
 escaping futures, duplicate generics, expansion limits, and return paths containing
 unreachable statements. Concurrency tests cover shared awaits and discarded workers.

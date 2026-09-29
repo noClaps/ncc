@@ -462,7 +462,7 @@ test "unicode" {
 "#,
         "cookie 🍪\n",
     );
-    assert!(!run("str empty = \"\" @println(empty[0])").status.success());
+    runtime_failure("str empty = \"\" @println(empty[0])", "out of bounds");
 }
 
 #[test]
@@ -874,8 +874,7 @@ test "nominal" {
         "type Name = str fn plain(str s) {} Name n = \"hello\" plain(n)",
         "expected",
     );
-    let out = run("@println(@as(uint,-1))");
-    assert!(!out.status.success());
+    runtime_failure("@println(@as(uint, -@as(int, @args().len)))", "panic:");
 }
 
 #[test]
@@ -1158,9 +1157,10 @@ test "errors" {
         "notification\n",
     );
     rejects("fn bad() int { throw \"bad\" }", "throwing function");
-    let out = run("fn bad() int! { throw \"failure\" } int n = try bad()");
-    assert!(!out.status.success());
-    assert_eq!(String::from_utf8(out.stderr).unwrap(), "failure\n");
+    runtime_failure(
+        "fn bad() int! { throw \"failure\" } int n = try bad()",
+        "failure\n",
+    );
 }
 
 #[test]
@@ -1213,19 +1213,13 @@ fn checked_integer_arithmetic() {
         "",
     );
     for source in [
-        "int n = 9223372036854775807 @println(n + 1)",
-        "byte b = 255 @println(b + 1)",
-        "int n = 0 @println(1 / n)",
-        "@println(1 << 64)",
-        "@println(2 ** 63)",
+        "int n = 9223372036854775807 @println(n + @as(int, @args().len))",
+        "byte b = 255 @println(b + @as(byte, @args().len))",
+        "int n = @as(int, @args().len) - 1 @println(1 / n)",
+        "@println(@as(int, @args().len) << 64)",
+        "@println((@as(int, @args().len) + 1) ** 63)",
     ] {
-        let out = run(source);
-        assert!(!out.status.success());
-        assert!(
-            String::from_utf8_lossy(&out.stderr).contains("panic:"),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
+        runtime_failure(source, "panic:");
     }
 }
 
@@ -1252,8 +1246,18 @@ test "records" {
     rejects("struct A { int x } A a = A{.y = 1}", "unknown field");
 }
 
-fn run(source: &str) -> std::process::Output {
-    run_mode(source, false)
+fn runtime_failure(source: &str, message: &str) {
+    for release in [false, true] {
+        // Require valid NC first: a front-end error must not masquerade as a panic.
+        ncc::compile_source_with_options(source, Path::new("test.nc"), release).unwrap();
+        let output = run_mode(source, release);
+        assert_eq!(output.status.code(), Some(1), "release={release}: {source}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(message),
+            "release={release}: {source}\n{stderr}"
+        );
+    }
 }
 fn run_mode(source: &str, release: bool) -> std::process::Output {
     let dir = ncc::temp::Directory::new().unwrap();
@@ -1592,7 +1596,69 @@ test "arrays" {
     );
     rejects("test \"bad\" { int[] a = [1] a[0] = 2 }", "immutable");
     rejects("int[2] a = [1]", "length");
-    let out = run("int[] a = [1] @println(a[2])");
-    assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("out of bounds"));
+    runtime_failure("int[] a = [1] @println(a[2])", "out of bounds");
+}
+
+#[test]
+fn integer_arithmetic_boundaries_and_overflow_in_both_modes() {
+    // The CLI passes only the executable name. Reading its argument count keeps
+    // failure operands runtime-dependent even with release constant evaluation.
+    for (ty, max, high_power) in [
+        ("byte", "255", "7"),
+        ("int", "9223372036854775807", "62"),
+        ("uint", "18446744073709551615u", "63"),
+    ] {
+        success(
+            &format!(
+                r#"test "boundaries" {{
+                    {ty} max = {max}
+                    {ty} zero = 0
+                    {ty} one = 1
+                    {ty} two = 2
+                    {ty} power = {high_power}
+                    assert max + zero == max
+                    assert max - zero == max
+                    assert max * one == max
+                    assert max / one == max
+                    assert max % one == zero
+                    assert max ** one == max
+                    assert max << zero == max
+                    assert max >> zero == max
+                    assert two ** power == one << power
+                    assert (one << power) >> power == one
+                }}"#
+            ),
+            "",
+        );
+        for expression in ["max + one", "max * two", "max ** two", "max << one"] {
+            runtime_failure(
+                &format!(
+                    "{ty} max = {max} {ty} one = @as({ty}, @args().len) {ty} two = one + one @println({expression})"
+                ),
+                "panic: integer overflow",
+            );
+        }
+    }
+    success(
+        r#"test "signed lower boundary" {
+            int min = -9223372036854775808
+            assert min + 0 == min
+            assert min - 0 == min
+            assert min * 1 == min
+            assert min / 1 == min
+            assert min ** 1 == min
+            assert min << 0 == min
+        }"#,
+        "",
+    );
+    for source in [
+        "int min = -9223372036854775808 @println(min - @as(int, @args().len))",
+        "int min = -9223372036854775808 @println(min * -@as(int, @args().len))",
+        "int min = -9223372036854775808 @println(min / -@as(int, @args().len))",
+        "int min = -9223372036854775808 @println(min << @as(int, @args().len))",
+        "byte zero = 0 @println(zero - @as(byte, @args().len))",
+        "uint zero = 0 @println(zero - @args().len)",
+    ] {
+        runtime_failure(source, "panic: integer overflow");
+    }
 }
