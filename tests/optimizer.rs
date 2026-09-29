@@ -851,3 +851,25 @@ int value = try okay(9)
         "true\n🍪\nyes!\n5\n[1, 2, 3]\n(1, two)\n[one: 1]\nPair{.first = 1, .second = two}\nChoice.Number(7)\n8\nnone\n9\n[]\n11\n",
     );
 }
+
+#[test]
+fn arithmetic_shifts_fold_with_signed_boundary_semantics() {
+    folded(
+        r#"
+fn right(int value, int count) int { return value >> count }
+fn left(int value, int count) int { return value << count }
+@println(right(-3, 1))
+@println(right(-4, 1))
+@println(right(-9223372036854775808, 0))
+@println(right(-9223372036854775808, 1))
+@println(right(-9223372036854775807, 1))
+@println(right(-9223372036854775808, 63))
+@println(right(-1, 63))
+@println(right(9223372036854775807, 63))
+@println(left(-3, 1))
+@println(left(-1, 63))
+"#,
+        &["right", "left"],
+        "-2\n-2\n-9223372036854775808\n-4611686018427387904\n-4611686018427387904\n-1\n-1\n0\n-6\n-9223372036854775808\n",
+    );
+}

@@ -36,6 +36,8 @@
 ## Resolved semantics and compiler invariants
 
 - Previously resolved decisions (consult `docs/design.md` for the full language):
+  - Bit shifts are arithmetic: signed right shifts round toward negative infinity.
+    Generate portable C without relying on negative signed right shifts.
   - Anonymous functions capture surrounding values by value. Prefer explicit
     parameters in examples; the previously requested capture linter is removed.
   - Reject equality and string conversion for functions and unawaited futures,

@@ -1662,3 +1662,59 @@ fn integer_arithmetic_boundaries_and_overflow_in_both_modes() {
         runtime_failure(source, "panic: integer overflow");
     }
 }
+
+#[test]
+fn arithmetic_shifts_round_negative_values_down_at_runtime() {
+    success(
+        r#"
+fn right(int value, int count) int { return value >> count }
+fn left(int value, int count) int { return value << count }
+type Signed = int
+fn nominal(Signed value, Signed count) Signed { return @as(Signed, @as(int, value) >> @as(int, count)) }
+test "arithmetic shifts" {
+    int zero = @as(int, @args().len) - 1
+    int[] values = [-9223372036854775808, -9223372036854775807, -5, -4, -3, -2, -1, 0, 1, 2, 3, 9223372036854775807]
+    int[] halves = [-4611686018427387904, -4611686018427387904, -3, -2, -2, -1, -1, 0, 0, 1, 1, 4611686018427387903]
+    for i in values {
+        assert right(values[i], zero) == values[i]
+        assert right(values[i], zero + 1) == halves[i]
+        int sign = if values[i] < 0 { true -> { -1 } false -> { 0 } }
+        assert right(values[i], zero + 63) == sign
+    }
+    assert left(-3, zero + 1) == -6
+    assert left(-1, zero + 63) == -9223372036854775808
+    assert @as(int, nominal(@as(Signed, -3), @as(Signed, zero + 1))) == -2
+    uint high = 18446744073709551615u
+    assert high >> @as(uint, zero + 63) == 1u
+    byte high_byte = 255
+    assert high_byte >> @as(byte, zero + 7) == 1
+}
+"#,
+        "",
+    );
+}
+
+#[test]
+fn arithmetic_shifts_match_floor_division_for_every_valid_count() {
+    let values = [i64::MIN, i64::MIN + 1, -65, -3, -1, 0, 1, 3, 65, i64::MAX];
+    let mut source = String::from(
+        "fn shift(int value, int count) int { return value >> count }\n\
+         test \"floor division oracle\" {\n\
+         int zero = @as(int, @args().len) - 1\n",
+    );
+    for value in values {
+        // Use wider floor division as an oracle independent of bit shifting.
+        let expected = (0..64)
+            .map(|count| (i128::from(value).div_euclid(2_i128.pow(count))).to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        source.push_str(&format!(
+            "int[] expected = [{expected}]\n\
+             for count in expected {{\n\
+             assert shift({value}, @as(int, count) + zero) == expected[count]\n\
+             }}\n"
+        ));
+    }
+    source.push_str("}\n");
+    success(&source, "");
+}

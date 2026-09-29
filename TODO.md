@@ -7,9 +7,6 @@
    potentially undefined cases, clarify the intended behavior with the user, and
    let the user document those decisions before implementing them and adding
    regression tests.
-   - Negative signed right shifts: arithmetic shift was agreed (`-3 >> 1 == -2`);
-     await the user's specification update, then make generated C portable and add
-     debug/release regression coverage.
 3. Once the entire language has been captured in tests, remove as much unnecessary
    compiler code as possible while keeping all tests passing. Preserve a fully
    functional general-purpose compiler; do not overfit implementations to the

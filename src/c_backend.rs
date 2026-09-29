@@ -2475,6 +2475,11 @@ impl Emitter<'_> {
                 if op == BinaryOp::Shl {
                     let i = self.fresh();
                     self.line(format!("for (uint64_t {i} = 0; {i} < (uint64_t){right}; ++{i}) if (__builtin_mul_overflow({result}, 2, &{result})) nc_panic(\"integer overflow\");"));
+                } else if matches!(&ty, Type::Named(n, _) if n == "int") {
+                    // C leaves negative signed right shifts implementation-defined.
+                    // Shift only nonnegative values, then reconstruct floor division.
+                    // -(left + 1) is representable even when left is INT64_MIN.
+                    self.line(format!("{result} = {left} >= 0 ? {left} >> {right} : -1 - ((-({left} + 1)) >> {right});"));
                 } else {
                     self.line(format!("{result} = {left} >> {right};"));
                 }

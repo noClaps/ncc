@@ -34,6 +34,9 @@ Integer boundary coverage includes byte, signed and unsigned 64-bit arithmetic,
 with runtime-dependent operands for overflow cases so release folding cannot
 replace the runtime checks. Runtime-failure conformance helpers require successful
 compilation, exit code 1, and the expected diagnostic in both modes.
+Arithmetic right shifts cover every valid signed shift count against a wider
+floor-division oracle, including negative odd values and signed boundaries;
+constant-folding tests check the same rounding and boundary behavior.
 Negative conformance cases run in both modes, including the operator/type matrix,
 escaping futures, duplicate generics, expansion limits, and return paths containing
 unreachable statements. Concurrency tests cover shared awaits and discarded workers.
