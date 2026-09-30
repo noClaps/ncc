@@ -1,0 +1,18 @@
+{
+  "grammars": [
+    {
+      "name": "nc",
+      "scope": "source.nc",
+      "path": ".",
+      "file-types": ["nc"],
+      "highlights": "queries/highlights.scm"
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "description": "Tree-sitter syntax grammar for the NC programming language"
+  },
+  "bindings": {
+    "c": true
+  }
+}

@@ -1,0 +1,408 @@
+==================
+Conditional subjects shape patterns and multiple arms
+==================
+if value {
+  1, 2 -> { @println("small") }
+  Result.Value(3) -> { @println("variant") }
+  (1, "one") -> { @println("tuple") }
+  [1, 2] -> { @println("array") }
+  Pair{.first = 1, .second = "one"} -> { @println("struct") }
+  $ > 10 -> { @println("large") }
+}
+if {
+  ready and not stopped -> { assert ready }
+  true -> {}
+}
+
+---
+
+(source_file
+  (expression_statement
+    (if_expression
+      (identifier)
+      (if_arm
+        (pattern
+          (integer))
+        (pattern
+          (integer))
+        (block
+          (expression_statement
+            (call_expression
+              (builtin
+                (identifier))
+              (arguments
+                (string
+                  (quoted_string
+                    (string_content))))))))
+      (if_arm
+        (pattern
+          (call_expression
+            (member_expression
+              (identifier)
+              (identifier))
+            (arguments
+              (integer))))
+        (block
+          (expression_statement
+            (call_expression
+              (builtin
+                (identifier))
+              (arguments
+                (string
+                  (quoted_string
+                    (string_content))))))))
+      (if_arm
+        (pattern
+          (tuple_expression
+            (integer)
+            (string
+              (quoted_string
+                (string_content)))))
+        (block
+          (expression_statement
+            (call_expression
+              (builtin
+                (identifier))
+              (arguments
+                (string
+                  (quoted_string
+                    (string_content))))))))
+      (if_arm
+        (pattern
+          (array_expression
+            (integer)
+            (integer)))
+        (block
+          (expression_statement
+            (call_expression
+              (builtin
+                (identifier))
+              (arguments
+                (string
+                  (quoted_string
+                    (string_content))))))))
+      (if_arm
+        (pattern
+          (struct_expression
+            (identifier)
+            (field_initializer
+              (identifier)
+              (integer))
+            (field_initializer
+              (identifier)
+              (string
+                (quoted_string
+                  (string_content))))))
+        (block
+          (expression_statement
+            (call_expression
+              (builtin
+                (identifier))
+              (arguments
+                (string
+                  (quoted_string
+                    (string_content))))))))
+      (if_arm
+        (pattern
+          (binary_expression
+            (index_placeholder)
+            (integer)))
+        (block
+          (expression_statement
+            (call_expression
+              (builtin
+                (identifier))
+              (arguments
+                (string
+                  (quoted_string
+                    (string_content))))))))))
+  (expression_statement
+    (if_expression
+      (if_arm
+        (pattern
+          (binary_expression
+            (identifier)
+            (unary_expression
+              (identifier))))
+        (block
+          (assert_statement
+            (identifier))))
+      (if_arm
+        (pattern
+          (boolean))
+        (block)))))
+
+==================
+Loops labels and value carrying breaks
+==================
+outer: for index in values {
+  while values[index] > 0 {
+    values[index] = values[index] - 1
+    continue :outer
+  }
+  break :outer
+}
+retry: while ready {
+  continue :retry
+}
+choice: if value {
+  1 -> { break :choice }
+}
+int selected = if ready {
+  true -> { break 7 }
+  false -> { break 0 }
+}
+
+---
+
+(source_file
+  (labeled_statement
+    (identifier)
+    (for_statement
+      (identifier)
+      (identifier)
+      (block
+        (while_statement
+          (binary_expression
+            (index_expression
+              (identifier)
+              (identifier))
+            (integer))
+          (block
+            (assignment_statement
+              (index_expression
+                (identifier)
+                (identifier))
+              (binary_expression
+                (index_expression
+                  (identifier)
+                  (identifier))
+                (integer)))
+            (continue_statement
+              (label_target
+                (identifier)))))
+        (break_statement
+          (label_target
+            (identifier))))))
+  (labeled_statement
+    (identifier)
+    (while_statement
+      (identifier)
+      (block
+        (continue_statement
+          (label_target
+            (identifier))))))
+  (labeled_statement
+    (identifier)
+    (if_expression
+      (identifier)
+      (if_arm
+        (pattern
+          (integer))
+        (block
+          (break_statement
+            (label_target
+              (identifier)))))))
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (if_expression
+      (identifier)
+      (if_arm
+        (pattern
+          (boolean))
+        (block
+          (break_statement
+            (integer))))
+      (if_arm
+        (pattern
+          (boolean))
+        (block
+          (break_statement
+            (integer)))))))
+
+==================
+Optional fallback error propagation catch and throw
+==================
+fn load(int? input) int! {
+  int value = input else 0
+  int other = input else { break 1 }
+  int loaded = try read(value)
+  return loaded + other
+}
+int recovered = load(none) catch message {
+  @println(message)
+  break 0
+}
+fn fail() int! {
+  throw "failed"
+}
+
+---
+
+(source_file
+  (function_declaration
+    (identifier)
+    (parameters
+      (parameter
+        (optional_type
+          (named_type
+            (identifier)))
+        (identifier)))
+    (error_type
+      (named_type
+        (identifier)))
+    (block
+      (binding_declaration
+        (typed_binding
+          (named_type
+            (identifier))
+          (identifier))
+        (else_expression
+          (identifier)
+          (integer)))
+      (binding_declaration
+        (typed_binding
+          (named_type
+            (identifier))
+          (identifier))
+        (else_expression
+          (identifier)
+          (block
+            (break_statement
+              (integer)))))
+      (binding_declaration
+        (typed_binding
+          (named_type
+            (identifier))
+          (identifier))
+        (unary_expression
+          (call_expression
+            (identifier)
+            (arguments
+              (identifier)))))
+      (return_statement
+        (binary_expression
+          (identifier)
+          (identifier)))))
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (catch_expression
+      (call_expression
+        (identifier)
+        (arguments
+          (none)))
+      (identifier)
+      (block
+        (expression_statement
+          (call_expression
+            (builtin
+              (identifier))
+            (arguments
+              (identifier))))
+        (break_statement
+          (integer)))))
+  (function_declaration
+    (identifier)
+    (parameters)
+    (error_type
+      (named_type
+        (identifier)))
+    (block
+      (throw_statement
+        (string
+          (quoted_string
+            (string_content)))))))
+
+==================
+Async futures mutex locks and test blocks
+==================
+mutex mut int counter = 0
+fn increment() int {
+  lock counter {
+    counter = counter + 1
+    return counter
+  }
+}
+fut int pending = async increment()
+int result = await pending
+protected: lock counter {
+  assert counter >= 0
+  break :protected
+}
+test "async counter" {
+  assert await async increment() > 0
+}
+
+---
+
+(source_file
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (integer))
+  (function_declaration
+    (identifier)
+    (parameters)
+    (named_type
+      (identifier))
+    (block
+      (lock_statement
+        (identifier)
+        (block
+          (assignment_statement
+            (identifier)
+            (binary_expression
+              (identifier)
+              (integer)))
+          (return_statement
+            (identifier))))))
+  (binding_declaration
+    (typed_binding
+      (future_type
+        (named_type
+          (identifier)))
+      (identifier))
+    (unary_expression
+      (call_expression
+        (identifier)
+        (arguments))))
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (unary_expression
+      (identifier)))
+  (labeled_statement
+    (identifier)
+    (lock_statement
+      (identifier)
+      (block
+        (assert_statement
+          (binary_expression
+            (identifier)
+            (integer)))
+        (break_statement
+          (label_target
+            (identifier))))))
+  (test_declaration
+    (string
+      (quoted_string
+        (string_content)))
+    (block
+      (assert_statement
+        (binary_expression
+          (unary_expression
+            (unary_expression
+              (call_expression
+                (identifier)
+                (arguments))))
+          (integer))))))

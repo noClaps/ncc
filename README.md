@@ -14,6 +14,11 @@ Rust front end, portable C output, and system-C-compiler executable builds.
 The language specification is in [docs/design.md](docs/design.md).
 Known remaining work is tracked in [TODO.md](TODO.md).
 
+A standalone Tree-sitter grammar, generated parser, syntax corpus, and highlighting
+queries are in [tree-sitter-nc](tree-sitter-nc/README.md). Run `make grammar-test`
+to validate it independently of the Rust compiler. Tree-sitter CLI 0.27.0 or newer,
+Python 3, and a C compiler are required; no Node/npm or compiler dependency is added.
+
 ```sh
 make build
 target/release/ncc run example.nc

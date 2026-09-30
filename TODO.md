@@ -11,4 +11,7 @@
    compiler code as possible while keeping all tests passing. Preserve a fully
    functional general-purpose compiler; do not overfit implementations to the
    test cases.
-4. Implement a Tree-sitter grammar, language server (LSP), and formatter.
+4. Expand Tree-sitter coverage for incremental edits, incomplete-source recovery,
+   highlighting, and interpolation delimiters formed after escape decoding.
+   Resolve compiler/grammar parity for empty struct initializers and anonymous
+   bare-`!` return shorthand. Implement a language server (LSP) and formatter.

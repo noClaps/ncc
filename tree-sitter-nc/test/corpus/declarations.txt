@@ -1,0 +1,331 @@
+==================
+Imports and C extern signatures
+==================
+import {
+  "models.nc" as models
+  "helpers.nc" as helpers
+}
+extern "native.c" as native {
+  fn emit(str text) = "nc_emit"
+  fn add(int left, int right) int = "nc_add"
+}
+
+---
+
+(source_file
+  (import_declaration
+    (import_entry
+      (string
+        (quoted_string
+          (string_content)))
+      (identifier))
+    (import_entry
+      (string
+        (quoted_string
+          (string_content)))
+      (identifier)))
+  (extern_declaration
+    (string
+      (quoted_string
+        (string_content)))
+    (identifier)
+    (extern_function
+      (identifier)
+      (parameters
+        (parameter
+          (named_type
+            (identifier))
+          (identifier)))
+      (string
+        (quoted_string
+          (string_content))))
+    (extern_function
+      (identifier)
+      (parameters
+        (parameter
+          (named_type
+            (identifier))
+          (identifier))
+        (parameter
+          (named_type
+            (identifier))
+          (identifier)))
+      (named_type
+        (identifier))
+      (string
+        (quoted_string
+          (string_content))))))
+
+==================
+Public generic structs enums and aliases
+==================
+pub struct Pair<type T, U> {
+  T first
+  U second
+}
+pub enum Result<type T> {
+  Empty
+  Value(T)
+  Failed(str, int)
+}
+pub type Identifier = uint
+pub type Qualified = models.Record<int>
+
+---
+
+(source_file
+  (struct_declaration
+    (identifier)
+    (type_parameters
+      (type_parameter
+        (identifier))
+      (type_parameter
+        (identifier)))
+    (field_declaration
+      (named_type
+        (identifier))
+      (identifier))
+    (field_declaration
+      (named_type
+        (identifier))
+      (identifier)))
+  (enum_declaration
+    (identifier)
+    (type_parameters
+      (type_parameter
+        (identifier)))
+    (enum_variant
+      (identifier))
+    (enum_variant
+      (identifier)
+      (named_type
+        (identifier)))
+    (enum_variant
+      (identifier)
+      (named_type
+        (identifier))
+      (named_type
+        (identifier))))
+  (type_declaration
+    (identifier)
+    (named_type
+      (identifier)))
+  (type_declaration
+    (identifier)
+    (named_type
+      (identifier)
+      (identifier)
+      (type_arguments
+        (named_type
+          (identifier))))))
+
+==================
+Public bindings sigils and composite types
+==================
+pub int version = 1
+pub mutex mut int counter = 0
+mut int left, int right = (1, 2)
+(int, str) pair = (3, "three")
+int[3] fixed = [1, 2, 3]
+int[] dynamic = []
+[str]int lookup = ["one": 1]
+int? optional = none
+int! result = 1
+fut int pending = async compute()
+
+---
+
+(source_file
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (integer))
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (integer))
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (tuple_expression
+      (integer)
+      (integer)))
+  (binding_declaration
+    (typed_binding
+      (tuple_type
+        (named_type
+          (identifier))
+        (named_type
+          (identifier)))
+      (identifier))
+    (tuple_expression
+      (integer)
+      (string
+        (quoted_string
+          (string_content)))))
+  (binding_declaration
+    (typed_binding
+      (array_type
+        (named_type
+          (identifier))
+        (integer))
+      (identifier))
+    (array_expression
+      (integer)
+      (integer)
+      (integer)))
+  (binding_declaration
+    (typed_binding
+      (array_type
+        (named_type
+          (identifier)))
+      (identifier))
+    (array_expression))
+  (binding_declaration
+    (typed_binding
+      (map_type
+        (named_type
+          (identifier))
+        (named_type
+          (identifier)))
+      (identifier))
+    (map_expression
+      (map_entry
+        (string
+          (quoted_string
+            (string_content)))
+        (integer))))
+  (binding_declaration
+    (typed_binding
+      (optional_type
+        (named_type
+          (identifier)))
+      (identifier))
+    (none))
+  (binding_declaration
+    (typed_binding
+      (error_type
+        (named_type
+          (identifier)))
+      (identifier))
+    (integer))
+  (binding_declaration
+    (typed_binding
+      (future_type
+        (named_type
+          (identifier)))
+      (identifier))
+    (unary_expression
+      (call_expression
+        (identifier)
+        (arguments)))))
+
+==================
+Generic functions function types and lambdas
+==================
+pub fn identity<type T>(T value) T {
+  return value
+}
+fn pair(int value) (int, int) {
+  return value, value + 1
+}
+(fn(int) int) transform = fn(int value) int {
+  return value * 2
+}
+pub fn increment = fn(int value) int {
+  return value + 1
+}
+fn stop() ! {
+  throw "stopped"
+}
+
+---
+
+(source_file
+  (function_declaration
+    (identifier)
+    (type_parameters
+      (type_parameter
+        (identifier)))
+    (parameters
+      (parameter
+        (named_type
+          (identifier))
+        (identifier)))
+    (named_type
+      (identifier))
+    (block
+      (return_statement
+        (identifier))))
+  (function_declaration
+    (identifier)
+    (parameters
+      (parameter
+        (named_type
+          (identifier))
+        (identifier)))
+    (tuple_type
+      (named_type
+        (identifier))
+      (named_type
+        (identifier)))
+    (block
+      (return_statement
+        (identifier)
+        (binary_expression
+          (identifier)
+          (integer)))))
+  (binding_declaration
+    (typed_binding
+      (function_type
+        (named_type
+          (identifier))
+        (named_type
+          (identifier)))
+      (identifier))
+    (function_expression
+      (parameters
+        (parameter
+          (named_type
+            (identifier))
+          (identifier)))
+      (named_type
+        (identifier))
+      (block
+        (return_statement
+          (binary_expression
+            (identifier)
+            (integer))))))
+  (function_binding
+    (identifier)
+    (function_expression
+      (parameters
+        (parameter
+          (named_type
+            (identifier))
+          (identifier)))
+      (named_type
+        (identifier))
+      (block
+        (return_statement
+          (binary_expression
+            (identifier)
+            (integer))))))
+  (function_declaration
+    (identifier)
+    (parameters)
+    (block
+      (throw_statement
+        (string
+          (quoted_string
+            (string_content)))))))

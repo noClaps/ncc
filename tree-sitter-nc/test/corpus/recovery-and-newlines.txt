@@ -1,0 +1,58 @@
+==================
+Comments and empty blocks
+==================
+// Declaration comment
+fn noop() {
+  // Empty body apart from a comment
+}
+int value = 1 // Trailing comment
+{}
+test "empty" {}
+
+---
+
+(source_file
+  (comment)
+  (function_declaration
+    (identifier)
+    (parameters)
+    (block
+      (comment)))
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (integer))
+  (comment)
+  (block)
+  (test_declaration
+    (string
+      (quoted_string
+        (string_content)))
+    (block)))
+
+==================
+Invalid token recovery preserves a following declaration
+==================
+// Recovery may change the preceding declaration's shape.
+// The declaration after the invalid token remains visible.
+int broken = 1
+`
+int recovered = 2
+
+---
+
+(source_file
+  (comment)
+  (comment)
+  (expression_statement (identifier))
+  (assignment_statement (identifier) (integer))
+  (ERROR
+    (UNEXPECTED '`'))
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (integer)))

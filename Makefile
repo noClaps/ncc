@@ -7,3 +7,7 @@ install: build
 test: build
 	@cargo test
 	@cargo clippy --all-targets -- -D warnings
+
+.PHONY: grammar-test
+grammar-test:
+	@python3 tree-sitter-nc/scripts/test.py

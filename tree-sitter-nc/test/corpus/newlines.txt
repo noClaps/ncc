@@ -1,0 +1,175 @@
+==================
+Newline terminates a valueless return including after a comment
+==================
+fn stop() {
+  return // no return value
+  @println("separate statement")
+}
+
+---
+
+(source_file
+  (function_declaration
+    (identifier)
+    (parameters)
+    (block
+      (return_statement)
+      (comment)
+      (expression_statement
+        (call_expression
+          (builtin
+            (identifier))
+          (arguments
+            (string
+              (quoted_string
+                (string_content)))))))))
+
+==================
+Newline terminates a valueless break
+==================
+for index in [1] {
+  break
+  @println(index)
+}
+
+---
+
+(source_file
+  (for_statement
+    (identifier)
+    (array_expression
+      (integer))
+    (block
+      (break_statement)
+      (expression_statement
+        (call_expression
+          (builtin
+            (identifier))
+          (arguments
+            (identifier)))))))
+
+==================
+Calls and indices stop at a newline but members may continue
+==================
+value
+(1)
+values
+[2]
+record
+.field
+
+---
+
+(source_file
+  (expression_statement
+    (identifier))
+  (expression_statement
+    (parenthesized_expression
+      (integer)))
+  (expression_statement
+    (identifier))
+  (expression_statement
+    (array_expression
+      (integer)))
+  (expression_statement
+    (member_expression
+      (identifier)
+      (identifier))))
+
+==================
+Binary operations and explicit generic calls may span lines
+==================
+int sum = 1 +
+  2
+int value = identity<int>
+  (sum)
+Box<int> boxed = Box<int>
+  {.value = value}
+
+---
+
+(source_file
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (binary_expression
+      (integer)
+      (integer)))
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (call_expression
+      (identifier)
+      (type_arguments
+        (named_type
+          (identifier)))
+      (arguments
+        (identifier))))
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier)
+        (type_arguments
+          (named_type
+            (identifier))))
+      (identifier))
+    (struct_expression
+      (identifier)
+      (type_arguments
+        (named_type
+          (identifier)))
+      (field_initializer
+        (identifier)
+        (identifier)))))
+
+==================
+Nested generic brackets and throwing anonymous functions
+==================
+Box<Box<int>> value = Box<Box<int>>{.value = Box<int>{.value = 1}}
+fn fail = fn() ! { throw "failed" }
+
+---
+
+(source_file
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier)
+        (type_arguments
+          (named_type
+            (identifier)
+            (type_arguments
+              (named_type
+                (identifier))))))
+      (identifier))
+    (struct_expression
+      (identifier)
+      (type_arguments
+        (named_type
+          (identifier)
+          (type_arguments
+            (named_type
+              (identifier)))))
+      (field_initializer
+        (identifier)
+        (struct_expression
+          (identifier)
+          (type_arguments
+            (named_type
+              (identifier)))
+          (field_initializer
+            (identifier)
+            (integer))))))
+  (function_binding
+    (identifier)
+    (function_expression
+      (parameters)
+      (block
+        (throw_statement
+          (string
+            (quoted_string
+              (string_content))))))))
