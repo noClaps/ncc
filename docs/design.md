@@ -1398,6 +1398,36 @@ for month in months {
 }
 ```
 
+For loops will always traverse over the original indices of the value. This means that if you mutate the value inside the loop such that it causes the length to change, that won't be reflected in the actual loop.
+
+```nc
+test "mutating inside for loop" {
+  mut int[] vals = [1, 2, 3, 4, 5]
+
+  for i in vals {
+    vals = vals <> [vals[i] * 10]
+  }
+
+  assert vals == [1, 2, 3, 4, 5, 10, 20, 30, 40, 50]
+}
+```
+
+This means that you can end up with an out-of-bounds panic if you remove items from the value while looping over it, as the index would be out of bounds by the time you reach it.
+
+```
+fn remove<type T>(T[] arr, uint idx) T[] { ... }
+int[] vals = [1, 2, 3, 4, 5]
+for i in vals {
+  vals = remove_last(vals, vals.len - i - 1)
+  // i = 0 -> removes 5
+  // i = 1 -> removes 4
+  // i = 2 -> removes 3
+  // i = 3 -> error: index 3 out of bounds
+}
+```
+
+In cases like this, it may be better to use a while loop.
+
 ### While loops
 
 ```nc
