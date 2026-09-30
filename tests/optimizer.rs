@@ -410,6 +410,138 @@ fn membership(float nan, float positive) bool[] {
 }
 
 #[test]
+fn numeric_byte_encodings_fold_without_losing_ieee_bits_or_capture_values() {
+    let mut source = String::from(
+        r#"
+fn encode_signed(int value) byte[] { return @as(byte[], value) }
+fn encode_unsigned(uint value) byte[] { return @as(byte[], value) }
+fn captured_bytes(float value) byte[] {
+    (float, uint) pair = (value, 258u)
+    fn callback = fn() byte[] { return @as(byte[], pair[0]) }
+    return callback()
+}
+"#,
+    );
+    let mut expected = String::new();
+    let mut cases = Vec::new();
+    for value in [i64::MIN, -258, -1, 0, 1, 258, i64::MAX] {
+        cases.push((format!("encode_signed({value})"), value.to_le_bytes()));
+    }
+    for value in [0u64, 1, 258, 1 << 63, u64::MAX] {
+        cases.push((format!("encode_unsigned({value}u)"), value.to_le_bytes()));
+    }
+    for value in [
+        0.0f64,
+        -0.0,
+        1.0,
+        -1.0,
+        0.5,
+        -2.5,
+        f64::from_bits(1),
+        -f64::from_bits(1),
+        f64::MIN_POSITIVE,
+        f64::MAX,
+    ] {
+        // NC source literals have no exponent notation. Enough decimal places
+        // retain even the smallest subnormal exactly when both parsers round it.
+        let literal = format!("{value:.1074}");
+        cases.push((format!("captured_bytes({literal})"), value.to_le_bytes()));
+    }
+    for literal in ["inf", "-inf"] {
+        let value = if literal == "inf" {
+            f64::INFINITY
+        } else {
+            f64::NEG_INFINITY
+        };
+        cases.push((format!("captured_bytes({literal})"), value.to_le_bytes()));
+    }
+    for (call, bytes) in cases {
+        source.push_str(&format!("@println({call})\n"));
+        expected.push_str(&format!(
+            "[{}]\n",
+            bytes.map(|byte| byte.to_string()).join(", "),
+        ));
+    }
+    folded(
+        &source,
+        &["encode_signed", "encode_unsigned", "captured_bytes"],
+        &expected,
+    );
+}
+
+#[test]
+fn every_byte_char_conversion_folds_to_matching_utf8_bytes() {
+    let mut source = String::from(
+        r#"
+fn utf8_bytes(byte value) byte[] {
+    (byte, bool) captured = (value, true)
+    fn convert = fn() byte[] { return @as(byte[], @as(char, captured[0])) }
+    return convert()
+}
+"#,
+    );
+    let mut expected = String::new();
+    for value in 0u8..=255 {
+        source.push_str(&format!("@println(utf8_bytes({value}))\n"));
+        let mut buffer = [0; 4];
+        let encoded = char::from(value).encode_utf8(&mut buffer);
+        let bytes = encoded
+            .as_bytes()
+            .iter()
+            .map(u8::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        expected.push_str(&format!("[{bytes}]\n"));
+    }
+    folded(&source, &["utf8_bytes"], &expected);
+}
+
+#[test]
+fn finite_float_integer_casts_fold_at_exact_representable_boundaries() {
+    folded(
+        r#"
+fn truncate_signed(float value) int { return @as(int, value) }
+fn truncate_unsigned(float value) uint { return @as(uint, value) }
+@println(truncate_signed(-9223372036854775808.0))
+@println(truncate_signed(-9223372036854774784.0))
+@println(truncate_signed(9223372036854774784.0))
+@println(truncate_unsigned(18446744073709549568.0))
+@println(truncate_unsigned(9223372036854775808.0))
+@println(truncate_signed(-0.0), ":", truncate_unsigned(-0.0))
+@println(truncate_signed(-1.75), ":", truncate_signed(1.75))
+@println(truncate_unsigned(1.75), ":", truncate_signed(-0.75))
+"#,
+        &["truncate_signed", "truncate_unsigned"],
+        "-9223372036854775808\n-9223372036854774784\n9223372036854774784\n\
+         18446744073709549568\n9223372036854775808\n0:0\n-1:1\n1:0\n",
+    );
+}
+
+#[test]
+fn finite_out_of_range_numeric_casts_are_rejected_during_folding() {
+    for (from, to, value) in [
+        ("float", "int", "9223372036854775808.0"),
+        ("float", "int", "-9223372036854777856.0"),
+        ("float", "uint", "18446744073709551616.0"),
+        ("float", "uint", "-1.0"),
+        ("int", "uint", "-1"),
+        ("uint", "int", "9223372036854775808u"),
+        ("uint", "int", "18446744073709551615u"),
+    ] {
+        let source = format!(
+            "fn cast({from} value) {to} {{ return @as({to}, value) }} @println(cast({value}))",
+        );
+        ncc::compile_source(&source, Path::new("cast.nc")).unwrap();
+        let error =
+            ncc::compile_source_with_options(&source, Path::new("cast.nc"), true).unwrap_err();
+        assert!(
+            error.to_string().contains("constant evaluation failed"),
+            "{from} -> {to}, {value}: {error}",
+        );
+    }
+}
+
+#[test]
 fn nonfinite_float_integer_casts_remain_rejected_during_folding() {
     for value in ["0.0 / 0.0", "1.0 / 0.0", "-1.0 / 0.0"] {
         for ty in ["int", "uint"] {

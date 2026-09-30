@@ -5,7 +5,8 @@
    is unclear, then capture the agreed behavior in tests. Review malformed design
    examples excluded by Tree-sitter/compiler syntax parity checks: parenthesized
    struct field patterns, `uint len ==` declarations, an unterminated test name,
-   and assignment in an assertion.
+   and assignment in an assertion. Clarify whether a negative fractional float
+   converted to `uint` must panic or may truncate to zero before range checking.
 2. Attempt to eliminate all undefined behavior from the language. Identify
    potentially undefined cases, clarify the intended behavior with the user, and
    let the user document those decisions before implementing them and adding

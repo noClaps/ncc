@@ -79,6 +79,144 @@ fn nonfinite_float_integer_casts_fail_at_runtime() {
 }
 
 #[test]
+fn numeric_byte_encodings_preserve_boundaries_and_ieee_bits() {
+    let mut source = String::from(
+        "fn signed(int value) int { @print(\"\") return value }\n\
+         fn unsigned(uint value) uint { @print(\"\") return value }\n\
+         fn floating(float value) float { @print(\"\") return value }\n",
+    );
+    source.push_str("test \"numeric bytes\" {\n");
+    let mut cases = Vec::new();
+    for value in [i64::MIN, -258, -1, 0, 1, 258, i64::MAX] {
+        cases.push((format!("signed({value})"), value.to_le_bytes()));
+    }
+    for value in [0u64, 1, 258, 1 << 63, u64::MAX] {
+        cases.push((format!("unsigned({value}u)"), value.to_le_bytes()));
+    }
+    for (literal, value) in [
+        ("0.0", 0.0f64),
+        ("-0.0", -0.0),
+        ("1.0", 1.0),
+        ("-1.0", -1.0),
+        ("0.5", 0.5),
+        ("-2.5", -2.5),
+        ("inf", f64::INFINITY),
+        ("-inf", f64::NEG_INFINITY),
+    ] {
+        cases.push((format!("floating({literal})"), value.to_le_bytes()));
+    }
+    for (index, (value, bytes)) in cases.into_iter().enumerate() {
+        let expected = bytes.map(|byte| byte.to_string()).join(", ");
+        source.push_str(&format!(
+            "byte[8] expected_{index} = [{expected}]\n\
+             mut byte[] encoded_{index} = @as(byte[], {value})\n\
+             assert encoded_{index} == expected_{index}\n\
+             assert encoded_{index}.len == 8\n\
+             encoded_{index}[0] = 99\n\
+             assert @as(byte[], {value}) == expected_{index}\n",
+        ));
+    }
+    source.push_str("}\n@println(\"numeric bytes\")\n");
+    success(&source, "numeric bytes\n");
+}
+
+#[test]
+fn every_byte_converts_to_a_char_with_matching_utf8_bytes() {
+    let characters = (0u8..=255)
+        .map(|value| format!("'\\u{{{value:x}}}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let encodings = (0u8..=255)
+        .map(|value| {
+            let mut buffer = [0; 4];
+            let encoded = char::from(value).encode_utf8(&mut buffer);
+            let bytes = encoded
+                .as_bytes()
+                .iter()
+                .map(u8::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("[{bytes}]")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    success(
+        &format!(
+            r#"
+fn runtime(byte value) byte {{ @print("") return value }}
+test "all byte characters" {{
+    char[] characters = [{characters}]
+    byte[][] encodings = [{encodings}]
+    mut uint index = @args().len - 1
+    while index < 256 {{
+        byte value = runtime(@as(byte, index))
+        char converted = @as(char, value)
+        assert converted == characters[index]
+        str text = @as(str, converted)
+        assert text.len == 1
+        assert text[0] == converted
+        mut byte[] encoded = @as(byte[], converted)
+        byte[] copied = @as(byte[], text)
+        assert encoded == encodings[index]
+        assert copied == encoded
+        encoded[0] = 255
+        assert copied == encodings[index]
+        index = index + 1
+    }}
+}}
+@println("byte characters")
+"#,
+        ),
+        "byte characters\n",
+    );
+}
+
+#[test]
+fn finite_float_integer_casts_cover_exact_representable_boundaries() {
+    success(
+        r#"
+fn runtime(float value) float { @print("") return value }
+test "finite casts" {
+assert @as(int, runtime(-9223372036854775808.0)) == -9223372036854775808
+assert @as(int, runtime(-9223372036854774784.0)) == -9223372036854774784
+assert @as(int, runtime(9223372036854774784.0)) == 9223372036854774784
+assert @as(uint, runtime(18446744073709549568.0)) == 18446744073709549568u
+assert @as(uint, runtime(9223372036854775808.0)) == 9223372036854775808u
+assert @as(int, runtime(-0.0)) == 0
+assert @as(uint, runtime(-0.0)) == 0u
+assert @as(int, runtime(-1.75)) == -1
+assert @as(int, runtime(1.75)) == 1
+assert @as(uint, runtime(1.75)) == 1u
+assert @as(int, runtime(-0.75)) == 0
+}
+@println("finite casts")
+"#,
+        "finite casts\n",
+    );
+}
+
+#[test]
+fn finite_out_of_range_numeric_casts_panic_before_c_conversion() {
+    for (from, to, value) in [
+        ("float", "int", "9223372036854775808.0"),
+        ("float", "int", "-9223372036854777856.0"),
+        ("float", "uint", "18446744073709551616.0"),
+        ("float", "uint", "-1.0"),
+        ("int", "uint", "-1"),
+        ("uint", "int", "9223372036854775808u"),
+        ("uint", "int", "18446744073709551615u"),
+    ] {
+        runtime_failure(
+            &format!(
+                "fn runtime({from} value) {from} {{ @print(\"\") return value }} \
+                 _ = @as({to}, runtime({value}))",
+            ),
+            "cast out of range",
+        );
+    }
+}
+
+#[test]
 fn inclusion_checks_array_values_and_map_keys() {
     success(
         r#"
