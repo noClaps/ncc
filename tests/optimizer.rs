@@ -1177,6 +1177,58 @@ fn target_is_a_compile_time_value() {
 }
 
 #[test]
+fn nested_assignment_indices_are_evaluated_once_during_folding() {
+    folded(
+        r#"
+fn nested_places() (int, int) {
+    mut int calls = 0
+    fn index() int { calls = calls + 1 return 0 }
+    mut int[][] grid = [[1]]
+    grid[index()][index()] = 7
+    return calls, grid[0][0]
+}
+@println(nested_places())
+"#,
+        &["nested_places"],
+        "(2, 7)\n",
+    );
+}
+
+#[test]
+fn mixed_nested_assignment_places_preserve_folding_effect_order() {
+    folded(
+        r#"
+struct Bucket { int[] values str text }
+fn mixed_places() (int, int, str, int) {
+    mut int trace = 0
+    fn index(int marker) int { trace = trace * 10 + marker return 0 }
+    fn key() str { trace = trace * 10 + 1 return "item" }
+    fn replacement() int { trace = trace * 10 + 3 return 9 }
+    mut [str]Bucket buckets = ["item": Bucket{.values = [1], .text = "X"}]
+    buckets[key()].values[index(2)] = replacement()
+    buckets[key()].text[index(4)] = 'Z'
+    mut (Bucket, int) pair = (Bucket{.values = [1], .text = "Y"}, 2)
+    pair[0].values[index(5)] = 8
+    return trace, buckets["item"].values[0], buckets["item"].text, pair[0].values[0]
+}
+fn deep_places() (int, int, int, int) {
+    mut int calls = 0
+    fn index() int { calls = calls + 1 return 0 }
+    mut int[][][] cube = [[[1, 2]]]
+    int[][][] original = cube
+    cube[index()][index()][index()] = 9
+    cube[index()][index()][$] = 8
+    return calls, cube[0][0][0], cube[0][0][1], original[0][0][0]
+}
+@println(mixed_places())
+@println(deep_places())
+"#,
+        &["mixed_places", "deep_places"],
+        "(123145, 9, Z, 8)\n(5, 9, 8, 1)\n",
+    );
+}
+
+#[test]
 fn loops_labels_and_local_places_are_evaluated() {
     folded(
         r#"

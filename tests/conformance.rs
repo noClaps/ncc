@@ -1616,6 +1616,50 @@ test "callbacks" {
 }
 
 #[test]
+fn nested_assignment_places_evaluate_indices_and_rhs_once_in_order() {
+    success(
+        r#"
+struct Bucket { int[] values str text }
+fn nested_places() (int, int, str, int, int) {
+    mut int trace = 0
+    fn index(int marker) int { @print("") trace = trace * 10 + marker return 0 }
+    fn key() str { @print("") trace = trace * 10 + 1 return "item" }
+    fn replacement() int { @print("") trace = trace * 10 + 3 return 9 }
+    mut [str]Bucket buckets = ["item": Bucket{.values = [1], .text = "X"}]
+    [str]Bucket original = buckets
+    buckets[key()].values[index(2)] = replacement()
+    buckets[key()].text[index(4)] = 'Z'
+    mut (Bucket, int) pair = (Bucket{.values = [1], .text = "Y"}, 2)
+    pair[0].values[index(5)] = 8
+    return trace, buckets["item"].values[0], buckets["item"].text, pair[0].values[0], original["item"].values[0]
+}
+@println(nested_places())
+"#,
+        "(123145, 9, Z, 8, 1)\n",
+    );
+}
+
+#[test]
+fn nested_assignment_failures_are_preserved_in_release() {
+    for (source, message) in [
+        (
+            "fn invalid() int { mut int[][] rows = [[1]] rows[1][0] = 7 return 9 } @println(invalid())",
+            "out of bounds",
+        ),
+        (
+            "struct Bucket { int[] values } fn invalid() int { mut [str]Bucket buckets = [\"present\": Bucket{.values = [1]}] buckets[\"missing\"].values[0] = 7 return 9 } @println(invalid())",
+            "map key not found",
+        ),
+        (
+            "fn invalid() str { mut str[] texts = [\"x\"] texts[0][1] = 'y' return texts[0] } @println(invalid())",
+            "out of bounds",
+        ),
+    ] {
+        runtime_failure(source, message);
+    }
+}
+
+#[test]
 fn writable_places_and_evaluation_order() {
     success(
         r#"

@@ -718,7 +718,14 @@ impl Evaluator<'_> {
             }
             Expr::Index { object, index } => {
                 let root = self.place(object, env, path)?;
-                let object = self.evaluate(object, env)?;
+                let binding = env.get(&root)?;
+                let storage = match binding {
+                    Value::Cell(index) => self.cells.get(*index)?,
+                    value => value,
+                };
+                // Reuse evaluated keys/indices instead of executing the parent
+                // expression again while resolving a nested assignment target.
+                let object = place_value(storage, path)?.clone();
                 path.push(Access::Index(self.index(index, &object, env)?));
                 Some(root)
             }
@@ -1554,6 +1561,24 @@ enum Flow {
 enum Access {
     Field(String),
     Index(Value),
+}
+
+fn place_value<'a>(mut value: &'a Value, path: &[Access]) -> Option<&'a Value> {
+    for access in path {
+        value = match (value, access) {
+            (Value::Struct(_, fields), Access::Field(name)) => {
+                &fields.iter().find(|(field, _)| field == name)?.1
+            }
+            (Value::Array(values) | Value::Tuple(values), Access::Index(index)) => {
+                values.get(index_number(index)?)?
+            }
+            (Value::Map(entries), Access::Index(key)) => {
+                &entries.iter().find(|(stored, _)| stored.equals(key))?.1
+            }
+            _ => return None,
+        };
+    }
+    Some(value)
 }
 
 fn assign(value: &mut Value, path: &[Access], replacement: Value) -> Option<()> {
