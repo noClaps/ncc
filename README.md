@@ -69,6 +69,19 @@ and a small runtime, without ICU or another external Unicode library.
 `UNICODE-LICENSE` contains the data license. `scripts/unicode-tables.mjs` is an
 optional regeneration tool, not part of building or running the compiler.
 
+Strings retain their `char[]` element boundaries after indexed replacement,
+concatenation, interpolation, and string conversion. Printing and `byte[]`
+conversion flatten their UTF-8 bytes, but equality, inclusion, length, and
+indexing operate on the retained character elements.
+
+The generated C `nc_string` representation has `bytes`, `data`, `len`, and
+`ends` fields. `ends` optionally stores cumulative byte-end offsets for `len`
+character elements; a null `ends` means raw UTF-8 whose initial elements are
+Unicode graphemes. C externs returning newly constructed raw strings can use
+`NC_STRING` or zero-initialize the boundary fields. Externs passing existing NC
+strings through should preserve all four fields. Rebuild native code that depends
+on the generated string layout.
+
 ```sh
 make test
 ```

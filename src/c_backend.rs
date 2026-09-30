@@ -171,7 +171,7 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
         output.push_str(&format!("#include <{header}>\n"));
     }
     if e.helpers.contains("/* string type */") {
-        output.push_str("typedef struct { size_t bytes; const char *data; } nc_string;\n#define NC_STRING(s) ((nc_string){sizeof(s)-1, s})\n");
+        output.push_str("typedef struct { size_t bytes; const char *data; size_t len; const size_t *ends; } nc_string;\n#define NC_STRING(s) ((nc_string){sizeof(s)-1, s, 0, NULL})\n");
     }
     if e.helpers.contains("/* async runtime */") {
         output.push_str(include_str!("runtime_async.h"));
@@ -1053,10 +1053,8 @@ impl Emitter<'_> {
             return Ok(result);
         }
         if matches!(ty, Type::Named(n, _) if n == "str" || n == "char" || n == "error") {
-            self.headers.insert("string.h");
-            Ok(format!(
-                "({left}).bytes == ({right}).bytes && (!({left}).bytes || memcmp(({left}).data, ({right}).data, ({left}).bytes) == 0)"
-            ))
+            self.unicode_support();
+            Ok(format!("nc_str_equal({left}, {right})"))
         } else {
             Ok(format!("{left} == {right}"))
         }
@@ -1373,10 +1371,7 @@ impl Emitter<'_> {
                         ));
                     } else {
                         let i = self.fresh();
-                        let cursor = self.fresh();
-                        let next = self.fresh();
-                        let ch = self.fresh();
-                        self.line(format!("const char *{cursor} = {value}.data; for (uint64_t {i}=0; {i}<{result}.len; ++{i}) {{ const char *{next} = nc_grapheme_next({cursor}, {value}.data + {value}.bytes); size_t length=(size_t)({next}-{cursor}); char *{ch}=nc_alloc(length+1,1); memcpy({ch},{cursor},length); {result}.vals[{i}]=(nc_string){{length,{ch}}}; {cursor}={next}; }}"));
+                        self.line(format!("for (uint64_t {i}=0; {i}<{result}.len; ++{i}) {result}.vals[{i}]=nc_str_index({value}, {i});"));
                     }
                     return Ok(result);
                 }
@@ -1503,13 +1498,8 @@ impl Emitter<'_> {
                             }
                             return Ok(result);
                         }
-                        self.allocation_support();
-                        self.headers.insert("string.h");
-                        let result = self.fresh();
-                        let a = self.fresh();
-                        let b = self.fresh();
-                        self.line(format!("size_t {a} = {l}.bytes, {b} = {r}.bytes;\nif ({a} > (size_t)-1 - {b} - 1) nc_panic(\"string length overflow\");\nchar *{result} = nc_alloc({a} + {b} + 1, 1);\nif ({a}) memcpy({result}, {l}.data, {a}); if ({b}) memcpy({result} + {a}, {r}.data, {b});"));
-                        return self.temp(e, format!("(nc_string){{{a}+{b}, {result}}}"));
+                        self.unicode_support();
+                        return self.temp(e, format!("nc_str_concat({l}, {r})"));
                     }
                     BinaryOp::In => {
                         if let Type::Map(key, _) = self.ty(right)? {
@@ -1525,10 +1515,8 @@ impl Emitter<'_> {
                             self.line(format!("if ({eq}) {{ {result} = true; break; }}\n}}"));
                             return Ok(result);
                         }
-                        self.headers.insert("string.h");
-                        let found = self.fresh();
-                        self.line(format!("int {found} = 0; if ({l}.bytes <= {r}.bytes) for (size_t i=0; i <= {r}.bytes - {l}.bytes; ++i) {{ if (!{l}.bytes || memcmp({r}.data+i,{l}.data,{l}.bytes)==0) {{ {found}=1; break; }} }}"));
-                        found
+                        self.unicode_support();
+                        format!("nc_str_contains({r}, {l})")
                     }
                     _ => format!("({l} {} {r})", operator(*op)),
                 }
@@ -2276,18 +2264,16 @@ impl Emitter<'_> {
         Ok(format!("((nc_string){{strlen({result}), {result}}})"))
     }
     fn append_string(&mut self, result: &str, suffix: &str) -> Result<(), Diagnostics> {
-        self.allocation_support();
-        self.headers.insert("string.h");
-        let a = self.fresh();
-        let b = self.fresh();
-        let text = self.fresh();
+        self.unicode_support();
         let suffix = if suffix.starts_with('"') {
             format!("NC_STRING({suffix})")
         } else {
             suffix.into()
         };
         let value = self.fresh();
-        self.line(format!("nc_string {value} = {suffix}; size_t {a} = {result}.bytes, {b} = {value}.bytes; if ({a} > (size_t)-1 - {b} - 1) nc_panic(\"string length overflow\");\nchar *{text} = nc_alloc({a} + {b} + 1, 1); if ({a}) memcpy({text},{result}.data,{a}); if ({b}) memcpy({text}+{a},{value}.data,{b}); {result} = (nc_string){{{a}+{b},{text}}};"));
+        self.line(format!(
+            "nc_string {value} = {suffix}; {result} = nc_str_concat({result}, {value});"
+        ));
         Ok(())
     }
     fn enum_decl(&self, ty: &Type) -> Option<EnumDecl> {

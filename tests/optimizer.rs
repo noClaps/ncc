@@ -44,6 +44,96 @@ fn folded(source: &str, names: &[&str], expected: &str) {
 }
 
 #[test]
+fn string_char_array_boundaries_survive_mutation_and_concatenation() {
+    folded(
+        r#"
+fn mutated() str {
+    mut str text = "x\n"
+    text[0] = '\r'
+    text[1] = '\n'
+    return text
+}
+fn joined() str { return "a" <> "\u{301}" }
+fn inspect(str text) str {
+    mut uint count = 0
+    mut str copy = ""
+    for i in text {
+        count = count + 1
+        copy = copy <> @as(str, text[i])
+    }
+    char[] chars = @as(char[], text)
+    return "{text.len}|{count}|{chars.len}|{copy == text}"
+}
+fn comparisons() str {
+    str split = joined()
+    str canonical = "a\u{301}"
+    str first = "a"
+    str empty = ""
+    return "{split == canonical}|{canonical in split}|{first in split}|{'\u{301}' in split}|{empty in split}|{split in [canonical]}"
+}
+fn last() bool { return mutated()[$] == '\n' }
+fn unicode() bool {
+    str hangul = "ᄀ" <> "ᅡ"
+    str emoji = "👩" <> "\u{200d}" <> "💻"
+    str left = "🇦" <> "🇧🇨"
+    str right = "🇦🇧" <> "🇨"
+    return hangul.len == 2 and hangul != "가"
+        and emoji.len == 3 and emoji != "👩‍💻"
+        and left.len == 2 and right.len == 2 and left != right
+        and @as(byte[], left) == @as(byte[], right)
+}
+@println(inspect(mutated()))
+@println(inspect(joined()))
+@println(comparisons())
+@println(last())
+@println(mutated() == "\r\n")
+@println(mutated())
+@println(joined())
+@println(unicode())
+"#,
+        &[
+            "mutated",
+            "joined",
+            "inspect",
+            "comparisons",
+            "last",
+            "unicode",
+        ],
+        "2|2|2|true\n2|2|2|true\nfalse|false|true|true|true|false\ntrue\nfalse\n\r\n\na\u{301}\ntrue\n",
+    );
+}
+
+#[test]
+fn string_boundaries_survive_interpolation_nested_formatting_and_errors() {
+    folded(
+        r#"
+fn split() str { return "a" <> "\u{301}" }
+fn message() bool! { throw split() }
+fn caught() bool {
+    return message() catch err {
+            str text = @as(str, err)
+            text == split() and text.len == 2
+        }
+}
+fn formatting() str {
+    str text = split()
+    str converted = @as(str, text)
+    str interpolated = "{text}"
+    str nested = @as(str, (text, true))
+    str error = @as(str, message())
+    return "{converted.len}|{interpolated.len}|{nested.len}|{error.len}|{interpolated == text}"
+}
+@println(caught())
+@println(formatting())
+@println(message())
+@println(@as(str, ('a', '\u{301}')).len)
+"#,
+        &["split", "message", "caught", "formatting"],
+        "true\n2|2|10|9|true\nerror: a\u{301}\n6\n",
+    );
+}
+
+#[test]
 fn error_union_formatting_folds_only_the_active_payload() {
     folded(
         r#"

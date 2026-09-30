@@ -122,7 +122,7 @@ enum Value {
     Byte(u8),
     Float(u64),
     Bool(bool),
-    String(String),
+    String(Vec<String>),
     Char(String),
     Array(Vec<Value>),
     Tuple(Vec<Value>),
@@ -131,11 +131,42 @@ enum Value {
     Enum(String, String, Vec<Value>),
     Optional(Type, Option<Box<Value>>),
     Success(Type, Box<Value>),
-    Failure(Type, String),
+    Failure(Type, Vec<String>),
     Function(String),
     Closure(usize, Vec<(String, Value)>),
     Cell(usize),
 }
+// Only literal text is segmented; subsequent operations preserve char-array elements.
+fn string_parts(text: &str) -> Vec<String> {
+    let starts = crate::unicode::boundaries(text);
+    starts
+        .iter()
+        .enumerate()
+        .map(|(i, start)| text[*start..starts.get(i + 1).copied().unwrap_or(text.len())].to_owned())
+        .collect()
+}
+
+fn string_expr(mut parts: Vec<String>) -> Expr {
+    fn balanced(parts: &mut [String]) -> Expr {
+        if parts.len() == 1 {
+            return Expr::String(std::mem::take(&mut parts[0]));
+        }
+        let middle = parts.len() / 2;
+        let (left, right) = parts.split_at_mut(middle);
+        Expr::Binary {
+            left: Box::new(balanced(left)),
+            op: BinaryOp::Concat,
+            right: Box::new(balanced(right)),
+        }
+    }
+    let text = parts.concat();
+    if string_parts(&text) == parts {
+        Expr::String(text)
+    } else {
+        balanced(&mut parts)
+    }
+}
+
 // Match the C backend's %.17g formatting, including its explicit decimal suffix.
 fn float_string(value: f64) -> Option<String> {
     if value.is_nan() {
@@ -192,6 +223,9 @@ impl Value {
     fn materializable(&self) -> bool {
         match self {
             Self::Closure(..) | Self::Cell(_) => false,
+            Self::String(parts) | Self::Failure(_, parts) => parts
+                .iter()
+                .all(|part| crate::unicode::boundaries(part).len() == 1),
             Self::Array(values) | Self::Tuple(values) | Self::Enum(_, _, values) => {
                 values.iter().all(Self::materializable)
             }
@@ -266,7 +300,7 @@ impl Value {
                 })
             }
             Self::Bool(b) => Expr::Bool(b),
-            Self::String(s) => Expr::String(s),
+            Self::String(s) => string_expr(s),
             Self::Char(s) => Expr::Char(s),
             Self::Array(values) => Expr::Array(values.into_iter().map(Value::expr).collect()),
             Self::Tuple(values) => Expr::Tuple(values.into_iter().map(Value::expr).collect()),
@@ -307,7 +341,7 @@ impl Value {
             }
             Self::Function(name) => Expr::Name(name),
             Self::Failure(inner, message) => constant_statement(
-                Stmt::Throw(Expr::String(message)),
+                Stmt::Throw(string_expr(message)),
                 Type::ErrorUnion(Box::new(inner)),
             ),
             Self::Closure(..) | Self::Cell(_) => {
@@ -661,7 +695,7 @@ impl Evaluator<'_> {
         let length = match object {
             Value::Array(values) | Value::Tuple(values) => values.len(),
             Value::Map(entries) => entries.len(),
-            Value::String(text) => crate::unicode::boundaries(text).len(),
+            Value::String(text) => text.len(),
             _ => return None,
         };
         self.indices.push(length as u64);
@@ -783,73 +817,78 @@ impl Evaluator<'_> {
             (value, _) => Some(value),
         }
     }
-    fn string(&self, value: &Value, ty: &Type) -> Option<String> {
+    fn string(&self, value: &Value, ty: &Type) -> Option<Vec<String>> {
         let ty = self.base_type(ty);
         let sequence = |values: &[Value], types: &[Type], quoted: bool| {
-            values
-                .iter()
-                .zip(types)
-                .map(|(value, ty)| {
-                    let text = self.string(value, ty)?;
-                    Some(if quoted && *ty == Type::Named("str".into(), vec![]) {
-                        format!("\"{text}\"")
-                    } else {
-                        text
-                    })
-                })
-                .collect::<Option<Vec<_>>>()
-                .map(|parts| parts.join(", "))
+            let mut result = Vec::new();
+            for (i, (value, ty)) in values.iter().zip(types).enumerate() {
+                if i != 0 {
+                    result.extend(string_parts(", "));
+                }
+                let quote = quoted && *ty == Type::Named("str".into(), vec![]);
+                if quote {
+                    result.extend(string_parts("\""));
+                }
+                result.extend(self.string(value, ty)?);
+                if quote {
+                    result.extend(string_parts("\""));
+                }
+            }
+            Some(result)
+        };
+        let wrap = |prefix: &str, mut parts: Vec<String>, suffix: &str| {
+            let mut result = string_parts(prefix);
+            result.append(&mut parts);
+            result.extend(string_parts(suffix));
+            result
         };
         Some(match (value, ty) {
-            (Value::String(s) | Value::Char(s), _) => s.clone(),
-            (Value::Int(n), _) => n.to_string(),
-            (Value::Uint(n), _) => n.to_string(),
-            (Value::Byte(n), _) => n.to_string(),
-            (Value::Float(bits), _) => float_string(f64::from_bits(*bits))?,
-            (Value::Bool(b), _) => b.to_string(),
-            (Value::Optional(_, None), _) => "none".into(),
-            (Value::Failure(_, message), _) => format!("error: {message}"),
+            (Value::String(s), _) => s.clone(),
+            (Value::Char(s), _) => vec![s.clone()],
+            (Value::Int(n), _) => string_parts(&n.to_string()),
+            (Value::Uint(n), _) => string_parts(&n.to_string()),
+            (Value::Byte(n), _) => string_parts(&n.to_string()),
+            (Value::Float(bits), _) => string_parts(&float_string(f64::from_bits(*bits))?),
+            (Value::Bool(b), _) => string_parts(&b.to_string()),
+            (Value::Optional(_, None), _) => string_parts("none"),
+            (Value::Failure(_, message), _) => wrap("error: ", message.clone(), ""),
             (Value::Success(inner, value), _) => self.string(value, inner)?,
             (Value::Optional(_, Some(value)), Type::Optional(inner)) => {
                 self.string(value, inner)?
             }
             (Value::Array(values), Type::Array(inner, _)) => {
                 let types = vec![(**inner).clone(); values.len()];
-                format!("[{}]", sequence(values, &types, true)?)
+                wrap("[", sequence(values, &types, true)?, "]")
             }
             (Value::Tuple(values), Type::Tuple(types)) => {
-                format!("({})", sequence(values, types, false)?)
+                wrap("(", sequence(values, types, false)?, ")")
             }
             (Value::Map(entries), Type::Map(key, val)) => {
-                let parts = entries
-                    .iter()
-                    .map(|(k, v)| {
-                        Some(format!(
-                            "{}: {}",
-                            self.string(k, key)?,
-                            self.string(v, val)?
-                        ))
-                    })
-                    .collect::<Option<Vec<_>>>()?;
-                format!("[{}]", parts.join(", "))
+                let mut parts = Vec::new();
+                for (i, (k, v)) in entries.iter().enumerate() {
+                    if i != 0 {
+                        parts.extend(string_parts(", "));
+                    }
+                    parts.extend(self.string(k, key)?);
+                    parts.extend(string_parts(": "));
+                    parts.extend(self.string(v, val)?);
+                }
+                wrap("[", parts, "]")
             }
             (Value::Struct(name, values), _) => {
                 let TypeInfo::Struct(declaration) = self.checked.types.get(name)? else {
                     return None;
                 };
-                let parts = declaration
-                    .fields
-                    .iter()
-                    .map(|field| {
-                        let (_, value) = values.iter().find(|(name, _)| *name == field.name)?;
-                        Some(format!(
-                            ".{} = {}",
-                            field.name,
-                            self.string(value, &field.ty)?
-                        ))
-                    })
-                    .collect::<Option<Vec<_>>>()?;
-                format!("{name}{{{}}}", parts.join(", "))
+                let mut parts = Vec::new();
+                for (i, field) in declaration.fields.iter().enumerate() {
+                    if i != 0 {
+                        parts.extend(string_parts(", "));
+                    }
+                    let (_, value) = values.iter().find(|(name, _)| *name == field.name)?;
+                    parts.extend(string_parts(&format!(".{} = ", field.name)));
+                    parts.extend(self.string(value, &field.ty)?);
+                }
+                wrap(&format!("{name}{{"), parts, "}")
             }
             (Value::Enum(name, variant, values), _) => {
                 let TypeInfo::Enum(declaration) = self.checked.types.get(name)? else {
@@ -861,9 +900,13 @@ impl Evaluator<'_> {
                     .find(|v| v.name == *variant)?
                     .values;
                 if values.is_empty() {
-                    format!("{name}.{variant}")
+                    string_parts(&format!("{name}.{variant}"))
                 } else {
-                    format!("{name}.{variant}({})", sequence(values, types, true)?)
+                    wrap(
+                        &format!("{name}.{variant}("),
+                        sequence(values, types, true)?,
+                        ")",
+                    )
                 }
             }
             _ => return None,
@@ -878,7 +921,8 @@ impl Evaluator<'_> {
                 let bytes = match value {
                     Value::Int(n) => n.to_le_bytes().to_vec(),
                     Value::Uint(n) | Value::Float(n) => n.to_le_bytes().to_vec(),
-                    Value::String(s) | Value::Char(s) => s.into_bytes(),
+                    Value::String(s) => s.concat().into_bytes(),
+                    Value::Char(s) => s.into_bytes(),
                     Value::Array(values) => return Some(Value::Array(values)),
                     _ => return None,
                 };
@@ -887,18 +931,7 @@ impl Evaluator<'_> {
             if **inner == Type::Named("char".into(), vec![])
                 && let Value::String(s) = value
             {
-                let starts = crate::unicode::boundaries(&s);
-                return Some(Value::Array(
-                    starts
-                        .iter()
-                        .enumerate()
-                        .map(|(i, start)| {
-                            Value::Char(
-                                s[*start..starts.get(i + 1).copied().unwrap_or(s.len())].into(),
-                            )
-                        })
-                        .collect(),
-                ));
+                return Some(Value::Array(s.into_iter().map(Value::Char).collect()));
             }
             return if let Value::Array(_) = value {
                 Some(value)
@@ -1126,7 +1159,7 @@ impl Evaluator<'_> {
                 let Value::String(path) = self.evaluate(path, env)? else {
                     return None;
                 };
-                match embedded_bytes(&path, source_path) {
+                match embedded_bytes(&path.concat(), source_path) {
                     Ok(bytes) => Some(Value::Array(bytes.into_iter().map(Value::Byte).collect())),
                     Err(error) => {
                         self.embed_error = Some(
@@ -1137,7 +1170,7 @@ impl Evaluator<'_> {
                     }
                 }
             }
-            Expr::String(s) => Some(Value::String(s.clone())),
+            Expr::String(s) => Some(Value::String(string_parts(s))),
             Expr::Char(s) => Some(Value::Char(s.clone())),
             Expr::Array(values) => {
                 let value = Value::Array(
@@ -1195,9 +1228,7 @@ impl Evaluator<'_> {
                         .map(|(_, value)| value),
                     Value::Array(values) if name == "len" => Some(Value::Uint(values.len() as u64)),
                     Value::Map(values) if name == "len" => Some(Value::Uint(values.len() as u64)),
-                    Value::String(value) if name == "len" => {
-                        Some(Value::Uint(crate::unicode::boundaries(&value).len() as u64))
-                    }
+                    Value::String(value) if name == "len" => Some(Value::Uint(value.len() as u64)),
                     _ => None,
                 }
             }
@@ -1217,17 +1248,7 @@ impl Evaluator<'_> {
                 };
                 match object {
                     Value::Array(values) | Value::Tuple(values) => values.get(n).cloned(),
-                    Value::String(value) => {
-                        let bounds = crate::unicode::boundaries(&value);
-                        Some(Value::Char(
-                            value
-                                .get(
-                                    *bounds.get(n)?
-                                        ..bounds.get(n + 1).copied().unwrap_or(value.len()),
-                                )?
-                                .into(),
-                        ))
-                    }
+                    Value::String(value) => value.get(n).cloned().map(Value::Char),
                     _ => None,
                 }
             }
@@ -1377,12 +1398,21 @@ impl Evaluator<'_> {
                         _ => None,
                     },
                     (Value::String(a), Value::String(b)) => match op {
-                        BinaryOp::Concat => Some(Value::String(a + &b)),
+                        BinaryOp::Concat => {
+                            let mut a = a;
+                            a.extend(b);
+                            Some(Value::String(a))
+                        }
                         BinaryOp::Eq => Some(Value::Bool(a == b)),
                         BinaryOp::Ne => Some(Value::Bool(a != b)),
-                        BinaryOp::In => Some(Value::Bool(b.contains(&a))),
+                        BinaryOp::In => Some(Value::Bool(
+                            a.is_empty() || b.windows(a.len()).any(|part| part == a),
+                        )),
                         _ => None,
                     },
+                    (Value::Char(a), Value::String(b)) if *op == BinaryOp::In => {
+                        Some(Value::Bool(b.contains(&a)))
+                    }
                     (Value::Char(a), Value::Char(b)) => match op {
                         BinaryOp::Eq => Some(Value::Bool(a == b)),
                         BinaryOp::Ne => Some(Value::Bool(a != b)),
@@ -1394,8 +1424,8 @@ impl Evaluator<'_> {
             Expr::Call { callee, args, .. } => {
                 if matches!(callee.unlocated(), Expr::Name(name) if name == "@target") {
                     return Some(Value::Tuple(vec![
-                        Value::String(crate::target::OS.into()),
-                        Value::String(crate::target::ARCH.into()),
+                        Value::String(string_parts(crate::target::OS)),
+                        Value::String(string_parts(crate::target::ARCH)),
                     ]));
                 }
                 if let Expr::Member { object, name } = callee.unlocated()
@@ -1516,7 +1546,7 @@ impl Evaluator<'_> {
 enum Flow {
     Next,
     Return(Value),
-    Throw(String),
+    Throw(Vec<String>),
     Value(Value),
     Break(Option<String>),
     Continue(Option<String>),
@@ -1556,10 +1586,7 @@ fn assign(value: &mut Value, path: &[Access], replacement: Value) -> Option<()> 
                 return None;
             };
             let n = index_number(index)?;
-            let bounds = crate::unicode::boundaries(text);
-            let start = *bounds.get(n)?;
-            let end = bounds.get(n + 1).copied().unwrap_or(text.len());
-            text.replace_range(start..end, &replacement);
+            *text.get_mut(n)? = replacement;
             Some(())
         }
         _ => None,
@@ -1805,9 +1832,9 @@ impl Evaluator<'_> {
                             .map(|i| Value::Uint(i as u64))
                             .collect::<Vec<_>>(),
                         Value::Map(entries) => entries.into_iter().map(|(key, _)| key).collect(),
-                        Value::String(text) => (0..crate::unicode::boundaries(&text).len())
-                            .map(|i| Value::Uint(i as u64))
-                            .collect(),
+                        Value::String(text) => {
+                            (0..text.len()).map(|i| Value::Uint(i as u64)).collect()
+                        }
                         _ => return None,
                     };
                     let previous = env.remove(name);

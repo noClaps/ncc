@@ -1,6 +1,52 @@
 use std::{fs, process::Command};
 
 #[test]
+fn c_extern_strings_preserve_explicit_character_boundaries() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let input = directory.path().join("main.nc");
+    fs::write(
+        directory.path().join("native.c"),
+        r#"
+nc_abi_roundtrip_result roundtrip(nc_abi_roundtrip_arg0 value) { return value; }
+nc_abi_raw_result raw(void) { return NC_STRING("a\xcc\x81"); }
+nc_abi_separate_result separate(void) {
+    static const size_t ends[] = {1, 3};
+    return (nc_string){3, "a\xcc\x81", 2, ends};
+}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        &input,
+        r#"
+extern "native.c" as native {
+    fn roundtrip(str value) str = "roundtrip"
+    fn raw() str = "raw"
+    fn separate() str = "separate"
+}
+test "string ABI" {
+    str separate = "a" <> "\u{301}"
+    str result = native.roundtrip(separate)
+    assert result.len == 2
+    assert result == separate
+    assert result != "a\u{301}"
+    assert native.raw().len == 1
+    assert native.raw() == "a\u{301}"
+    assert native.separate().len == 2
+    assert native.separate() == separate
+    assert @as(char[], result) == ['a', '\u{301}']
+    mut str copy = result
+    copy[0] = 'b'
+    assert separate[0] == 'a'
+    assert result[0] == 'a'
+}
+"#,
+    )
+    .unwrap();
+    run_both(&input, b"");
+}
+
+#[test]
 fn c_extern_nonfinite_floats_keep_ieee_values_and_canonical_formatting() {
     let directory = ncc::temp::Directory::new().unwrap();
     let input = directory.path().join("main.nc");

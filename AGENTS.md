@@ -48,6 +48,10 @@
     and must acquire their own lock before accessing its value.
   - Reject equality and string conversion for functions and unawaited futures,
     including when nested in containers.
+  - Strings behave as `char[]`: indexed replacement and concatenation preserve
+    separate character elements even when their joined UTF-8 bytes would form a
+    single Unicode grapheme. Preserve those boundaries in string operations and
+    constant evaluation; printing and byte conversion flatten the elements.
   - Map concatenation overwrites duplicate keys with the right-hand value.
   - IEEE-754 NaN and infinities are valid floats, including arithmetic results
     and values returned by C externs. Printing, interpolation, and string
