@@ -495,6 +495,86 @@ int! stored = checked(0)
 }
 
 #[test]
+fn optional_else_and_error_catch_fold_lazy_fallbacks_and_local_control_flow() {
+    folded(
+        r#"
+fn checked(bool fail) int! {
+    if fail { true -> { throw "bad" } false -> { return 5 } }
+}
+fn optional_case(int? input, bool early) int {
+    int base, int bonus = (7, 2)
+    fn fallback = fn() int { return base + bonus }
+    mut int changes = 1
+    int value = input else {
+        changes = changes + 10
+        if early { true -> { return 100 + changes + fallback() } false -> {} }
+        break fallback()
+    }
+    return changes + value
+}
+fn error_case(int! input, bool early) int {
+    int base, int bonus = (7, 2)
+    fn fallback = fn() int { return base + bonus }
+    mut int changes = 1
+    int value = input catch message {
+        changes = changes + 10
+        int recovered = fallback() + @as(int, @as(str, message).len)
+        if early { true -> { return 100 + changes + recovered } false -> {} }
+        break recovered
+    }
+    return changes + value
+}
+fn lazy_optional(int? input) int { return input else (1 / 0) }
+fn lazy_error(int! input) int { return input catch _ { break 1 / 0 } }
+@println(optional_case(5, false), ":", optional_case(5, true))
+@println(optional_case(none, false), ":", optional_case(none, true))
+@println(error_case(checked(false), false), ":", error_case(checked(false), true))
+@println(error_case(checked(true), false), ":", error_case(checked(true), true))
+@println(lazy_optional(5), ":", lazy_error(checked(false)))
+"#,
+        &[
+            "checked",
+            "optional_case",
+            "error_case",
+            "lazy_optional",
+            "lazy_error",
+        ],
+        "6:6\n20:120\n6:6\n23:123\n5:5\n",
+    );
+}
+
+#[test]
+fn optional_else_and_error_catch_fold_independent_extracted_array_copies() {
+    folded(
+        r#"
+fn checked(bool fail) int[]! {
+    if fail { true -> { throw "bad" } false -> { return [1, 2] } }
+}
+fn optional_copies(int[]? input) (int[], int[], int[]) {
+    int[] original = input else { break [3, 4] }
+    mut int[] copy = original
+    copy[0] = 99
+    int[] again = input else { break [3, 4] }
+    return original, copy, again
+}
+fn error_copies(int[]! input) (int[], int[], int[]) {
+    int[] original = input catch _ { break [3, 4] }
+    mut int[] copy = original
+    copy[0] = 99
+    int[] again = input catch _ { break [3, 4] }
+    return original, copy, again
+}
+@println(optional_copies([1, 2]))
+@println(optional_copies(none))
+@println(error_copies(checked(false)))
+@println(error_copies(checked(true)))
+"#,
+        &["checked", "optional_copies", "error_copies"],
+        "([1, 2], [99, 2], [1, 2])\n([3, 4], [99, 4], [3, 4])\n([1, 2], [99, 2], [1, 2])\n([3, 4], [99, 4], [3, 4])\n",
+    );
+}
+
+#[test]
 fn value_branches_preserve_mutations_of_surrounding_locals() {
     folded(
         r#"

@@ -1365,6 +1365,134 @@ test "imported types" {
 }
 
 #[test]
+fn optional_and_error_fallbacks_evaluate_only_the_active_branch_once() {
+    success(
+        r#"
+fn optional(bool present) int? {
+    @print("optional ")
+    if present { true -> { return 7 } false -> { return none } }
+}
+fn checked(bool succeeds) int! {
+    @print("checked ")
+    if succeeds { true -> { return 8 } false -> { throw "failure" } }
+}
+fn fallback() int { @print("fallback ") return 9 }
+@println(optional(true) else fallback())
+@println(optional(false) else fallback())
+@println(optional(true) else { @print("wrong ") break fallback() })
+@println(optional(false) else { @print("block ") break fallback() })
+@println(checked(true) catch message { @print(message, " ") break fallback() })
+@println(checked(false) catch message { @print(message, " ") break fallback() })
+fn forward(bool succeeds) int! {
+    int value = try checked(succeeds)
+    @print("after ")
+    return value + 1
+}
+@println(forward(true) catch message { @print("wrong ") break 0 })
+@println(forward(false) catch message { @print(message, " ") break 0 })
+"#,
+        "optional 7\noptional fallback 9\noptional 7\noptional block fallback 9\nchecked 8\nchecked failure fallback 9\nchecked after 9\nchecked failure 0\n",
+    );
+}
+
+#[test]
+fn optional_and_error_payload_extraction_preserves_value_copies() {
+    success(
+        r#"
+fn failed() int[]! { throw "failure" }
+test "payload copies" {
+    mut int[] original = [1, 2]
+    int[]? present = original
+    int[]? absent = none
+    int[]! successful = original
+    int[]! failure = failed()
+    mut int[] from_present = present else [0]
+    mut int[] from_success = successful catch message { break [0] }
+    mut int[] from_none = absent else original
+    mut int[] from_error = failure catch message { break original }
+    from_present[0] = 3
+    from_success[0] = 4
+    from_none[0] = 5
+    from_error[0] = 6
+    assert original == [1, 2]
+    assert (present else [0]) == [1, 2]
+    assert (successful catch message { break [0] }) == [1, 2]
+    original[1] = 9
+    assert from_present == [3, 2]
+    assert from_success == [4, 2]
+    assert from_none == [5, 2]
+    assert from_error == [6, 2]
+    assert (present else [0]) == [1, 2]
+    assert (successful catch message { break [0] }) == [1, 2]
+}
+"#,
+        "",
+    );
+}
+
+#[test]
+fn top_level_error_propagation_preserves_messages_and_skips_later_effects() {
+    for handler in ["try fail()", "fail() catch message { throw message }"] {
+        let source = format!(
+            r#"
+fn fail() int! {{ @println("before") throw "bad\u{{0}}🍪" }}
+int value = {handler}
+@println("unreachable", value)
+"#
+        );
+        for release in [false, true] {
+            ncc::compile_source_with_options(&source, Path::new("propagation.nc"), release)
+                .unwrap();
+            let output = run_mode(&source, release);
+            assert_eq!(output.status.code(), Some(1), "release={release}");
+            assert_eq!(output.stdout, b"before\n", "release={release}");
+            assert_eq!(output.stderr, "bad\0🍪\n".as_bytes(), "release={release}");
+        }
+    }
+}
+
+#[test]
+fn optional_and_error_operations_require_explicit_unwrapping() {
+    for source in [
+        "int? value = 1 int result = value",
+        "fn take(int value) {} int? value = 1 take(value)",
+        "fn result() int { int? value = 1 return value }",
+        "int? value = 1 _ = value + 1",
+        "int? value = 1 _ = value else false",
+        "int? value = 1 _ = value else { break false }",
+        "int! value = 1 int result = value",
+        "fn take(int value) {} int! value = 1 take(value)",
+        "fn result() int { int! value = 1 return value }",
+        "int! value = 1 _ = value + 1",
+        "int! value = 1 _ = value catch message { break false }",
+    ] {
+        rejects(
+            source,
+            if source.starts_with("int? ") && source.contains(" + ") {
+                "arithmetic requires numeric operands"
+            } else {
+                "expected `"
+            },
+        );
+    }
+    rejects("_ = 1 else 2", "else requires an optional value");
+    rejects(
+        "_ = 1 catch message { break 2 }",
+        "catch requires an error union",
+    );
+    rejects("_ = try 1", "try requires an error union");
+    rejects(
+        "fn failure() int! { throw \"failure\" } fn invalid() int { return try failure() }",
+        "try requires a throwing function",
+    );
+    rejects("int! value = 1 _ = message", "unknown name");
+    rejects(
+        "int! value = 1 _ = value catch message { break 0 } _ = message",
+        "unknown name",
+    );
+}
+
+#[test]
 fn error_unions_catch_and_propagation() {
     success(
         r#"
