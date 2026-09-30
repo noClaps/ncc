@@ -487,51 +487,10 @@ impl Parser {
             Ok(Stmt::Located(Box::new(statement), self.location(start)))
         }
     }
-    #[allow(clippy::too_many_lines)] // Keep statement grammar alternatives in one dispatch.
+
     fn stmt_inner(&mut self) -> Result<Stmt, Diagnostics> {
         if self.keyword(Keyword::Fn) {
-            if matches!(
-                self.tokens.get(self.pos + 1).map(|t| &t.kind),
-                Some(TokenKind::LParen)
-            ) {
-                let function = self.function(false)?;
-                let ty = Type::Function(
-                    function.params.iter().map(|p| p.ty.clone()).collect(),
-                    Box::new(function.return_type.clone()),
-                );
-                return Ok(Stmt::Var(VarDecl {
-                    source_path: self.path.clone(),
-                    span: function.span.clone(),
-                    public: false,
-                    mutable: false,
-                    mutex: false,
-                    pattern: Pattern::Name(function.name.clone()),
-                    ty,
-                    value: Expr::Lambda(Box::new(function)),
-                }));
-            }
-            let start = self.tokens[self.pos - 1].span.start;
-            let name = self.ident()?;
-            self.expect(&TokenKind::Assign)?;
-            let value = self.expr(0)?;
-            let Expr::Lambda(f) = value.unlocated() else {
-                return self.error("inferred `fn` declarations require an anonymous function");
-            };
-            let ty = Type::Function(
-                f.params.iter().map(|p| p.ty.clone()).collect(),
-                Box::new(f.return_type.clone()),
-            );
-
-            return Ok(Stmt::Var(VarDecl {
-                source_path: self.path.clone(),
-                span: start..self.tokens[self.pos - 1].span.end,
-                public: false,
-                mutable: false,
-                mutex: false,
-                pattern: Pattern::Name(name),
-                ty,
-                value,
-            }));
+            return self.function_stmt();
         }
         if self.at(&TokenKind::LBrace) {
             return self.block().map(Stmt::Block);
@@ -560,21 +519,7 @@ impl Parser {
             return self.error("labels may only be applied to if, for, while, or lock blocks");
         }
         if self.keyword(Keyword::Break) {
-            let label_target = if self.at(&TokenKind::Colon) {
-                self.bump();
-                Some(self.ident()?)
-            } else {
-                None
-            };
-            let value = if label_target.is_some()
-                || self.at(&TokenKind::RBrace)
-                || self.current().newline_before
-            {
-                None
-            } else {
-                Some(self.expr(0)?)
-            };
-            return Ok(Stmt::Break(value, label_target));
+            return self.break_stmt();
         }
         if self.keyword(Keyword::Continue) {
             let label_target = if self.at(&TokenKind::Colon) {
@@ -586,19 +531,7 @@ impl Parser {
             return Ok(Stmt::Continue(label_target));
         }
         if self.keyword(Keyword::Return) {
-            if self.at(&TokenKind::RBrace) || self.current().newline_before {
-                return Ok(Stmt::Return(None));
-            }
-            let mut value = self.expr(0)?;
-            if self.at(&TokenKind::Comma) {
-                let mut values = vec![value];
-                while self.at(&TokenKind::Comma) {
-                    self.bump();
-                    values.push(self.expr(0)?);
-                }
-                value = Expr::Tuple(values);
-            }
-            return Ok(Stmt::Return(Some(value)));
+            return self.return_stmt();
         }
         if self.keyword(Keyword::Throw) {
             return Ok(Stmt::Throw(self.expr(0)?));
@@ -643,6 +576,88 @@ impl Parser {
                 value: self.expr(0)?,
             });
         }
+        self.assignment_or_decl()
+    }
+    fn function_stmt(&mut self) -> Result<Stmt, Diagnostics> {
+        if matches!(
+            self.tokens.get(self.pos + 1).map(|t| &t.kind),
+            Some(TokenKind::LParen)
+        ) {
+            let function = self.function(false)?;
+            let ty = Type::Function(
+                function.params.iter().map(|p| p.ty.clone()).collect(),
+                Box::new(function.return_type.clone()),
+            );
+            return Ok(Stmt::Var(VarDecl {
+                source_path: self.path.clone(),
+                span: function.span.clone(),
+                public: false,
+                mutable: false,
+                mutex: false,
+                pattern: Pattern::Name(function.name.clone()),
+                ty,
+                value: Expr::Lambda(Box::new(function)),
+            }));
+        }
+        let start = self.tokens[self.pos - 1].span.start;
+        let name = self.ident()?;
+        self.expect(&TokenKind::Assign)?;
+        let value = self.expr(0)?;
+        let Expr::Lambda(f) = value.unlocated() else {
+            return self.error("inferred `fn` declarations require an anonymous function");
+        };
+        let ty = Type::Function(
+            f.params.iter().map(|p| p.ty.clone()).collect(),
+            Box::new(f.return_type.clone()),
+        );
+
+        Ok(Stmt::Var(VarDecl {
+            source_path: self.path.clone(),
+            span: start..self.tokens[self.pos - 1].span.end,
+            public: false,
+            mutable: false,
+            mutex: false,
+            pattern: Pattern::Name(name),
+            ty,
+            value,
+        }))
+    }
+
+    fn break_stmt(&mut self) -> Result<Stmt, Diagnostics> {
+        let label_target = if self.at(&TokenKind::Colon) {
+            self.bump();
+            Some(self.ident()?)
+        } else {
+            None
+        };
+        let value = if label_target.is_some()
+            || self.at(&TokenKind::RBrace)
+            || self.current().newline_before
+        {
+            None
+        } else {
+            Some(self.expr(0)?)
+        };
+        Ok(Stmt::Break(value, label_target))
+    }
+
+    fn return_stmt(&mut self) -> Result<Stmt, Diagnostics> {
+        if self.at(&TokenKind::RBrace) || self.current().newline_before {
+            return Ok(Stmt::Return(None));
+        }
+        let mut value = self.expr(0)?;
+        if self.at(&TokenKind::Comma) {
+            let mut values = vec![value];
+            while self.at(&TokenKind::Comma) {
+                self.bump();
+                values.push(self.expr(0)?);
+            }
+            value = Expr::Tuple(values);
+        }
+        Ok(Stmt::Return(Some(value)))
+    }
+
+    fn assignment_or_decl(&mut self) -> Result<Stmt, Diagnostics> {
         let saved = self.pos;
         let saved_tokens = self.tokens.clone();
         self.keyword(Keyword::Mut);
@@ -665,7 +680,7 @@ impl Parser {
         }
         Ok(Stmt::Expr(target))
     }
-    #[allow(clippy::too_many_lines)] // Keep precedence and postfix parsing in one ordered loop.
+
     fn expr(&mut self, min: u8) -> Result<Expr, Diagnostics> {
         let start = self.current().span.start;
         let mut left = self.prefix()?;
@@ -674,51 +689,11 @@ impl Parser {
             if self.at(&TokenKind::Lt)
                 && matches!(left.unlocated(), Expr::Name(_) | Expr::Member { .. })
             {
-                let position = self.pos;
-                let tokens = self.tokens.clone();
-                if let Ok(generics) = self.type_args() {
-                    if let Some(name) = expression_path(&left)
-                        && self.at(&TokenKind::LBrace)
-                    {
-                        self.bump();
-                        let mut fields = vec![];
-                        while !self.at(&TokenKind::RBrace) {
-                            self.expect(&TokenKind::Dot)?;
-                            let field = self.ident()?;
-                            self.expect(&TokenKind::Assign)?;
-                            fields.push((field, self.expr(0)?));
-                            if !self.at(&TokenKind::RBrace) {
-                                self.expect(&TokenKind::Comma)?;
-                            }
-                        }
-                        self.bump();
-                        left = Expr::Cast {
-                            implicit: false,
-                            ty: Type::Named(name.clone(), generics),
-                            value: Box::new(Expr::StructInit { name, fields }),
-                        };
-                        continue;
-                    }
-                    if self.at(&TokenKind::LParen) {
-                        self.bump();
-                        let mut args = vec![];
-                        while !self.at(&TokenKind::RParen) {
-                            args.push(self.expr(0)?);
-                            if !self.at(&TokenKind::RParen) {
-                                self.expect(&TokenKind::Comma)?;
-                            }
-                        }
-                        self.bump();
-                        left = Expr::Call {
-                            callee: Box::new(left),
-                            args,
-                            generics,
-                        };
-                        continue;
-                    }
+                let (value, parsed) = self.generic_suffix(left)?;
+                left = value;
+                if parsed {
+                    continue;
                 }
-                self.pos = position;
-                self.tokens = tokens;
             }
             if min == 0 && self.keyword(Keyword::Else) {
                 let fallback = if self.at(&TokenKind::LBrace) {
@@ -736,9 +711,7 @@ impl Parser {
             }
             if min == 0 && self.keyword(Keyword::Catch) {
                 let name = self.ident()?;
-
                 let body = self.block()?;
-
                 left = Expr::Catch {
                     value: Box::new(left),
                     name,
@@ -761,54 +734,14 @@ impl Parser {
                     .is_some_and(|t| t.kind == TokenKind::Dot)
                 && let Some(name) = expression_path(&left)
             {
-                self.bump();
-                let mut fields = vec![];
-                while !self.at(&TokenKind::RBrace) {
-                    self.expect(&TokenKind::Dot)?;
-                    let field = self.ident()?;
-                    self.expect(&TokenKind::Assign)?;
-                    fields.push((field, self.expr(0)?));
-                    if !self.at(&TokenKind::RBrace) {
-                        self.expect(&TokenKind::Comma)?;
-                    }
-                }
-                self.bump();
-                left = Expr::StructInit { name, fields };
+                left = self.struct_init(name)?;
                 continue;
             }
-            if self.at(&TokenKind::LParen) {
-                self.bump();
-                let mut args = vec![];
-                while !self.at(&TokenKind::RParen) {
-                    args.push(self.expr(0)?);
-                    if !self.at(&TokenKind::RParen) {
-                        self.expect(&TokenKind::Comma)?;
-                    }
-                }
-                self.bump();
-                left = Expr::Call {
-                    callee: Box::new(left),
-                    args,
-                    generics: vec![],
-                };
-                continue;
-            }
-            if self.at(&TokenKind::LBracket) {
-                self.bump();
-                let index = self.expr(0)?;
-                self.expect(&TokenKind::RBracket)?;
-                left = Expr::Index {
-                    object: Box::new(left),
-                    index: Box::new(index),
-                };
-                continue;
-            }
-            if self.at(&TokenKind::Dot) {
-                self.bump();
-                left = Expr::Member {
-                    object: Box::new(left),
-                    name: self.ident()?,
-                };
+            if matches!(
+                self.current().kind,
+                TokenKind::LParen | TokenKind::LBracket | TokenKind::Dot
+            ) {
+                left = self.postfix(left)?;
                 continue;
             }
             let Some((op, p)) = self.binop() else { break };
@@ -825,33 +758,100 @@ impl Parser {
         }
         Ok(left.located(self.location(start)))
     }
+    fn generic_suffix(&mut self, left: Expr) -> Result<(Expr, bool), Diagnostics> {
+        let position = self.pos;
+        let tokens = self.tokens.clone();
+        if let Ok(generics) = self.type_args() {
+            if let Some(name) = expression_path(&left)
+                && self.at(&TokenKind::LBrace)
+            {
+                let ty = Type::Named(name.clone(), generics);
+                let value = Box::new(self.struct_init(name)?);
+                return Ok((
+                    Expr::Cast {
+                        implicit: false,
+                        ty,
+                        value,
+                    },
+                    true,
+                ));
+            }
+            if self.at(&TokenKind::LParen) {
+                let args = self.call_args()?;
+                return Ok((
+                    Expr::Call {
+                        callee: Box::new(left),
+                        args,
+                        generics,
+                    },
+                    true,
+                ));
+            }
+        }
+        self.pos = position;
+        self.tokens = tokens;
+        Ok((left, false))
+    }
+    fn struct_init(&mut self, name: String) -> Result<Expr, Diagnostics> {
+        self.bump();
+        let mut fields = vec![];
+        while !self.at(&TokenKind::RBrace) {
+            self.expect(&TokenKind::Dot)?;
+            let field = self.ident()?;
+            self.expect(&TokenKind::Assign)?;
+            fields.push((field, self.expr(0)?));
+            if !self.at(&TokenKind::RBrace) {
+                self.expect(&TokenKind::Comma)?;
+            }
+        }
+        self.bump();
+        Ok(Expr::StructInit { name, fields })
+    }
+    fn call_args(&mut self) -> Result<Vec<Expr>, Diagnostics> {
+        self.bump();
+        let mut args = vec![];
+        while !self.at(&TokenKind::RParen) {
+            args.push(self.expr(0)?);
+            if !self.at(&TokenKind::RParen) {
+                self.expect(&TokenKind::Comma)?;
+            }
+        }
+        self.bump();
+        Ok(args)
+    }
+    fn postfix(&mut self, left: Expr) -> Result<Expr, Diagnostics> {
+        if self.at(&TokenKind::LParen) {
+            return Ok(Expr::Call {
+                callee: Box::new(left),
+                args: self.call_args()?,
+                generics: vec![],
+            });
+        }
+        if self.at(&TokenKind::LBracket) {
+            self.bump();
+            let index = self.expr(0)?;
+            self.expect(&TokenKind::RBracket)?;
+            return Ok(Expr::Index {
+                object: Box::new(left),
+                index: Box::new(index),
+            });
+        }
+        self.bump();
+        Ok(Expr::Member {
+            object: Box::new(left),
+            name: self.ident()?,
+        })
+    }
     fn prefix(&mut self) -> Result<Expr, Diagnostics> {
         let start = self.current().span.start;
         let value = self.prefix_inner()?;
         Ok(value.located(self.location(start)))
     }
-    #[allow(clippy::too_many_lines)] // Keep prefix grammar alternatives in one dispatch.
+
     fn prefix_inner(&mut self) -> Result<Expr, Diagnostics> {
         let start = self.current().span.start;
         if self.keyword(Keyword::Fn) {
-            let params = self.params()?;
-            let return_type = if self.at(&TokenKind::LBrace) {
-                Type::void()
-            } else {
-                self.ty()?
-            };
-            let body = self.block()?;
-
-            return Ok(Expr::Lambda(Box::new(Function {
-                source_path: self.path.clone(),
-                span: start..self.tokens[self.pos - 1].span.end,
-                public: false,
-                name: "anonymous".into(),
-                generics: vec![],
-                params,
-                return_type,
-                body,
-            })));
+            return self.lambda(start);
         }
         let t = self.bump();
         match t.kind {
@@ -859,35 +859,7 @@ impl Parser {
             TokenKind::Keyword(Keyword::Await) => Ok(Expr::Await(Box::new(self.expr(12)?))),
             TokenKind::Keyword(Keyword::Async) => Ok(Expr::Async(Box::new(self.expr(12)?))),
             TokenKind::Dollar => Ok(Expr::Name("$".into())),
-            TokenKind::At => {
-                if self.keyword(Keyword::As) {
-                    self.expect(&TokenKind::LParen)?;
-                    let ty = self.ty()?;
-                    self.expect(&TokenKind::Comma)?;
-                    let value = Box::new(self.expr(0)?);
-                    self.expect(&TokenKind::RParen)?;
-                    Ok(Expr::Cast {
-                        ty,
-                        value,
-                        implicit: false,
-                    })
-                } else {
-                    let start = self.tokens[self.pos - 1].span.start;
-                    let name = self.ident()?;
-                    if name == "embed" {
-                        self.expect(&TokenKind::LParen)?;
-                        let path = Box::new(self.expr(0)?);
-                        self.expect(&TokenKind::RParen)?;
-                        Ok(Expr::Embed {
-                            path,
-                            source_path: self.path.clone(),
-                            span: self.location(start).span,
-                        })
-                    } else {
-                        Ok(Expr::Name(format!("@{name}")))
-                    }
-                }
-            }
+            TokenKind::At => self.builtin_expr(),
             TokenKind::Int(x) => Ok(Expr::Int(x)),
             TokenKind::Float(x) => Ok(Expr::Float(x)),
             TokenKind::String(x) => self.string_expression(&x, t.span),
@@ -909,54 +881,106 @@ impl Parser {
                 value: Box::new(self.expr(12)?),
             }),
             TokenKind::Keyword(Keyword::If) => self.if_expr(),
-            TokenKind::LParen => {
-                let first = self.expr(0)?;
-                if self.at(&TokenKind::Comma) {
-                    let mut x = vec![first];
-                    while self.at(&TokenKind::Comma) {
-                        self.bump();
-                        x.push(self.expr(0)?);
-                    }
-                    self.expect(&TokenKind::RParen)?;
-                    Ok(Expr::Tuple(x))
-                } else {
-                    self.expect(&TokenKind::RParen)?;
-                    Ok(first)
-                }
-            }
-            TokenKind::LBracket => {
-                let mut x = vec![];
-                let mut entries = vec![];
-                let mut is_map = false;
-                while !self.at(&TokenKind::RBracket) {
-                    let value = self.expr(0)?;
-                    if self.at(&TokenKind::Colon) {
-                        if !x.is_empty() {
-                            return self.error("cannot mix map entries and array elements");
-                        }
-                        self.bump();
-                        is_map = true;
-                        entries.push((value, self.expr(0)?));
-                    } else {
-                        if is_map {
-                            return self.error("expected `:` after map key");
-                        }
-                        x.push(value);
-                    }
-                    if !self.at(&TokenKind::RBracket) {
-                        self.expect(&TokenKind::Comma)?;
-                    }
-                }
-                self.bump();
-                Ok(if is_map {
-                    Expr::Map(entries)
-                } else {
-                    Expr::Array(x)
-                })
-            }
+            TokenKind::LParen => self.tuple_or_group(),
+            TokenKind::LBracket => self.array_or_map(),
             x => self.error(format!("expected expression, found {x:?}")),
         }
     }
+    fn lambda(&mut self, start: usize) -> Result<Expr, Diagnostics> {
+        let params = self.params()?;
+        let return_type = if self.at(&TokenKind::LBrace) {
+            Type::void()
+        } else {
+            self.ty()?
+        };
+        let body = self.block()?;
+
+        Ok(Expr::Lambda(Box::new(Function {
+            source_path: self.path.clone(),
+            span: start..self.tokens[self.pos - 1].span.end,
+            public: false,
+            name: "anonymous".into(),
+            generics: vec![],
+            params,
+            return_type,
+            body,
+        })))
+    }
+    fn builtin_expr(&mut self) -> Result<Expr, Diagnostics> {
+        if self.keyword(Keyword::As) {
+            self.expect(&TokenKind::LParen)?;
+            let ty = self.ty()?;
+            self.expect(&TokenKind::Comma)?;
+            let value = Box::new(self.expr(0)?);
+            self.expect(&TokenKind::RParen)?;
+            Ok(Expr::Cast {
+                ty,
+                value,
+                implicit: false,
+            })
+        } else {
+            let start = self.tokens[self.pos - 1].span.start;
+            let name = self.ident()?;
+            if name == "embed" {
+                self.expect(&TokenKind::LParen)?;
+                let path = Box::new(self.expr(0)?);
+                self.expect(&TokenKind::RParen)?;
+                Ok(Expr::Embed {
+                    path,
+                    source_path: self.path.clone(),
+                    span: self.location(start).span,
+                })
+            } else {
+                Ok(Expr::Name(format!("@{name}")))
+            }
+        }
+    }
+    fn tuple_or_group(&mut self) -> Result<Expr, Diagnostics> {
+        let first = self.expr(0)?;
+        if self.at(&TokenKind::Comma) {
+            let mut x = vec![first];
+            while self.at(&TokenKind::Comma) {
+                self.bump();
+                x.push(self.expr(0)?);
+            }
+            self.expect(&TokenKind::RParen)?;
+            Ok(Expr::Tuple(x))
+        } else {
+            self.expect(&TokenKind::RParen)?;
+            Ok(first)
+        }
+    }
+    fn array_or_map(&mut self) -> Result<Expr, Diagnostics> {
+        let mut x = vec![];
+        let mut entries = vec![];
+        let mut is_map = false;
+        while !self.at(&TokenKind::RBracket) {
+            let value = self.expr(0)?;
+            if self.at(&TokenKind::Colon) {
+                if !x.is_empty() {
+                    return self.error("cannot mix map entries and array elements");
+                }
+                self.bump();
+                is_map = true;
+                entries.push((value, self.expr(0)?));
+            } else {
+                if is_map {
+                    return self.error("expected `:` after map key");
+                }
+                x.push(value);
+            }
+            if !self.at(&TokenKind::RBracket) {
+                self.expect(&TokenKind::Comma)?;
+            }
+        }
+        self.bump();
+        Ok(if is_map {
+            Expr::Map(entries)
+        } else {
+            Expr::Array(x)
+        })
+    }
+
     fn if_expr(&mut self) -> Result<Expr, Diagnostics> {
         let subject = if self.at(&TokenKind::LBrace) {
             None
@@ -1144,5 +1168,174 @@ fn expression_pattern(expr: Expr) -> Pattern {
             }
         }
         expr => Pattern::Literal(Box::new(expr)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parser(source: &str) -> Parser {
+        Parser {
+            tokens: crate::lexer::lex(source).unwrap(),
+            pos: 0,
+            path: "grammar.nc".into(),
+            type_lookahead: false,
+        }
+    }
+
+    fn expression(source: &str) -> Expr {
+        let mut parser = parser(source);
+        let value = parser.expr(0).unwrap();
+        parser.expect(&TokenKind::Eof).unwrap();
+        let Expr::Located(_, location) = &value else {
+            panic!()
+        };
+        assert_eq!(location.span, 0..source.len());
+        assert_eq!(location.path, std::path::Path::new("grammar.nc"));
+        value
+    }
+
+    #[test]
+    fn generic_calls_keep_postfix_order_and_nested_types() {
+        let value = expression("module.make<Box<int>>(x)[0].field(y)");
+        let Expr::Call {
+            callee,
+            args,
+            generics,
+        } = value.unlocated()
+        else {
+            panic!()
+        };
+        assert_eq!(args.len(), 1);
+        assert!(generics.is_empty());
+        let Expr::Member { object, name } = callee.unlocated() else {
+            panic!()
+        };
+        assert_eq!(name, "field");
+        let Expr::Index { object, index } = object.unlocated() else {
+            panic!()
+        };
+        assert!(matches!(index.unlocated(), Expr::Int(n) if n == "0"));
+        let Expr::Call {
+            callee,
+            args,
+            generics,
+        } = object.unlocated()
+        else {
+            panic!()
+        };
+        assert_eq!(expression_path(callee).as_deref(), Some("module.make"));
+        assert_eq!(args.len(), 1);
+        assert_eq!(
+            generics,
+            &[Type::Named(
+                "Box".into(),
+                vec![Type::Named("int".into(), vec![])]
+            )]
+        );
+    }
+
+    #[test]
+    fn generic_lookahead_restores_shift_tokens_and_precedence() {
+        let value = expression("a < b >> c");
+        let Expr::Binary { op, right, .. } = value.unlocated() else {
+            panic!()
+        };
+        assert_eq!(*op, BinaryOp::Lt);
+        assert!(matches!(
+            right.unlocated(),
+            Expr::Binary {
+                op: BinaryOp::Shr,
+                ..
+            }
+        ));
+        let value = expression("a - b - c ** d ** e * f");
+        let Expr::Binary { left, op, right } = value.unlocated() else {
+            panic!()
+        };
+        assert_eq!(*op, BinaryOp::Sub);
+        assert!(matches!(
+            left.unlocated(),
+            Expr::Binary {
+                op: BinaryOp::Sub,
+                ..
+            }
+        ));
+        let Expr::Binary { left, op, .. } = right.unlocated() else {
+            panic!()
+        };
+        assert_eq!(*op, BinaryOp::Mul);
+        let Expr::Binary { op, right, .. } = left.unlocated() else {
+            panic!()
+        };
+        assert_eq!(*op, BinaryOp::Pow);
+        assert!(matches!(
+            right.unlocated(),
+            Expr::Binary {
+                op: BinaryOp::Pow,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn generic_struct_initializers_keep_cast_shape() {
+        let value = expression("module.Box<int>{.value = (1, 2)}.value[0]");
+        let Expr::Index { object, .. } = value.unlocated() else {
+            panic!()
+        };
+        let Expr::Member { object, .. } = object.unlocated() else {
+            panic!()
+        };
+        let Expr::Cast {
+            implicit,
+            ty,
+            value,
+        } = object.unlocated()
+        else {
+            panic!()
+        };
+        assert!(!implicit);
+        assert_eq!(
+            ty,
+            &Type::Named("module.Box".into(), vec![Type::Named("int".into(), vec![])])
+        );
+        let Expr::StructInit { name, fields } = value.unlocated() else {
+            panic!()
+        };
+        assert_eq!(name, "module.Box");
+        assert_eq!(fields[0].0, "value");
+        assert!(matches!(fields[0].1.unlocated(), Expr::Tuple(values) if values.len() == 2));
+    }
+
+    #[test]
+    fn statement_helpers_preserve_newline_and_function_forms() {
+        let mut parser = parser(
+            "{ fn named() int { return 1 } fn inferred = fn() int { return 2 } return\n(1, 2) break :outer\nbreak 3 }",
+        );
+        let block = parser.block().unwrap();
+        assert_eq!(block.statements.len(), 6);
+        for (statement, name) in block.statements[..2].iter().zip(["named", "inferred"]) {
+            let Stmt::Var(declaration) = statement else {
+                panic!()
+            };
+            assert!(matches!(&declaration.pattern, Pattern::Name(n) if n == name));
+            assert!(matches!(declaration.value.unlocated(), Expr::Lambda(_)));
+        }
+        assert!(matches!(
+            block.statements[2].unlocated(),
+            Stmt::Return(None)
+        ));
+        assert!(
+            matches!(block.statements[3].unlocated(), Stmt::Expr(value) if matches!(value.unlocated(), Expr::Tuple(_)))
+        );
+        assert!(
+            matches!(block.statements[4].unlocated(), Stmt::Break(None, Some(label)) if label == "outer")
+        );
+        assert!(matches!(
+            block.statements[5].unlocated(),
+            Stmt::Break(Some(_), None)
+        ));
     }
 }
