@@ -885,6 +885,17 @@ You can also use the concatenation operator between maps, provided that they are
 months_to_num <> different_type // error: cannot concatenate maps of different types
 ```
 
+If a key exists in both the left and right hand sides of a concatenation between maps, the value of that key on the right hand side will win.
+
+```nc
+test "concatenation of maps with common key" {
+  [str]int left = ["key": 1]
+  [str]int right = ["key": 2]
+  [str]int joined = left <> right
+  assert joined["key"] == 2
+}
+```
+
 ### Arithmetic
 
 ```nc
