@@ -191,6 +191,13 @@ uint my_num = 1 // cannot be negative
 uint my_num = 1u // can also use the `u` suffix
 ```
 
+When converting a `float` or `int` to `uint`, if the value isn't non-negative, the conversion will panic.
+
+```nc
+@as(uint, -5) // error: cannot convert negative int to uint
+@as(uint, -0.75) // error: cannot convert negative float to uint
+```
+
 ##### Binary, Hexadecimal and Octal
 
 Binary numbers need to be prefixed with `0b`, for example, `0b1011`.
