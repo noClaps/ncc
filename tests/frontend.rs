@@ -263,6 +263,85 @@ fn imported_errors_retain_source_paths_and_declaration_locations() {
 }
 
 #[test]
+fn imported_generic_type_errors_retain_nested_helper_expression_locations() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let root = directory.path().join("main.nc");
+    let nested = directory.path().join("nested");
+    std::fs::create_dir(&nested).unwrap();
+    let helper = nested.join("helper.nc");
+    let library = nested.join("library.nc");
+    let helper_source =
+        "// helper header\n\npub fn double<T>(T value) T {\n  return value + value\n}\n";
+    std::fs::write(&helper, helper_source).unwrap();
+    std::fs::write(
+        &library,
+        "import { \"helper\" as helper }\npub fn double<T>(T value) T {\n  return helper.double<T>(value)\n}\n",
+    )
+    .unwrap();
+    let source = "import { \"nested/library\" as lib } _ = lib.double<str>(\"text\")";
+    for release in [false, true] {
+        let error = ncc::compile_source_with_options(source, &root, release).unwrap_err();
+        let diagnostic = &error.0[0];
+        assert_eq!(
+            diagnostic.path.as_deref(),
+            Some(helper.as_path()),
+            "{error}"
+        );
+        let start = helper_source.find("value + value").unwrap();
+        assert_eq!(
+            diagnostic.span,
+            start..start + "value + value".len(),
+            "{error}"
+        );
+        let rendered = error.render(source, &root);
+        assert!(
+            rendered.contains(&format!("{}:4:10:", helper.display())),
+            "{rendered}"
+        );
+        assert!(rendered.contains("return value + value"), "{rendered}");
+    }
+}
+
+#[test]
+fn unused_generic_bodies_are_typechecked_only_when_specialized() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let root = directory.path().join("main.nc");
+    let imported = directory.path().join("library.nc");
+    let library =
+        "// library header\npub fn get_field<T>(T value) int {\n  return value.field\n}\n";
+    std::fs::write(&imported, library).unwrap();
+    for release in [false, true] {
+        for source in [
+            "import { \"library\" as lib }",
+            "import { \"library\" as lib } struct Record { int field } _ = lib.get_field<Record>(Record{.field = 7})",
+        ] {
+            ncc::compile_source_with_options(source, &root, release)
+                .unwrap_or_else(|error| panic!("release={release}, source={source}: {error}"));
+        }
+        let source = "import { \"library\" as lib } _ = lib.get_field<int>(7)";
+        let error = ncc::compile_source_with_options(source, &root, release).unwrap_err();
+        let diagnostic = &error.0[0];
+        assert_eq!(
+            diagnostic.path.as_deref(),
+            Some(imported.as_path()),
+            "{error}"
+        );
+        let start = library.find("value.field").unwrap();
+        assert_eq!(
+            diagnostic.span,
+            start..start + "value.field".len(),
+            "{error}"
+        );
+        let rendered = error.render(source, &root);
+        assert!(
+            rendered.contains(&format!("{}:3:10:", imported.display())),
+            "{rendered}"
+        );
+        assert!(rendered.contains("return value.field"), "{rendered}");
+    }
+}
+
+#[test]
 fn imported_generic_mutex_reads_report_the_original_expression() {
     let directory = ncc::temp::Directory::new().unwrap();
     let root = directory.path().join("main.nc");

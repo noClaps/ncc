@@ -1833,6 +1833,53 @@ test "strings" {
 }
 
 #[test]
+fn generic_declarations_require_explicit_correct_type_arguments() {
+    let function = "fn identity<T>(T value) T { return value } ";
+    rejects(
+        &format!("{function}_ = identity(1)"),
+        "requires explicit type arguments",
+    );
+    for use_site in [
+        "_ = identity<int, str>(1)",
+        "_ = identity<int, int, int>(1)",
+    ] {
+        rejects(
+            &format!("{function}{use_site}"),
+            "incorrect number of type arguments",
+        );
+    }
+    for use_site in [
+        "Box value = Box{.value = 1}",
+        "Box<int, str> value = Box<int, str>{.value = 1}",
+        "fn accept(Box value) {}",
+        "fn result() Box<int, str> {}",
+    ] {
+        rejects(
+            &format!("struct Box<T> {{ T value }} {use_site}"),
+            "incorrect number of type arguments",
+        );
+    }
+    for use_site in [
+        "Choice value = Choice.Value(1)",
+        "Choice<int, str> value = Choice.Value(1)",
+        "fn accept(Choice value) {}",
+        "fn result() Choice<int, str> {}",
+    ] {
+        rejects(
+            &format!("enum Choice<T> {{ Value(T) Empty }} {use_site}"),
+            "incorrect number of type arguments",
+        );
+    }
+    for source in [
+        format!("{function}_ = identity<int>(\"wrong\")"),
+        "struct Box<T> { T value } Box<int> value = Box<int>{.value = \"wrong\"}".into(),
+        "enum Choice<T> { Value(T) Empty } Choice<int> value = Choice.Value(\"wrong\")".into(),
+    ] {
+        rejects(&source, "expected `int`, found `str`");
+    }
+}
+
+#[test]
 fn generic_function_specialization() {
     success(
         r#"
@@ -1854,6 +1901,168 @@ test "generic" {
         "fn bad<type T>(T x) int { return x.missing } int x = bad<int>(1)",
         "member",
     );
+}
+
+#[test]
+fn module_namespaces_keep_identical_type_and_generic_names_distinct() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let main = directory.path().join("main.nc");
+    for (module, bias) in [("left", 10), ("right", 20)] {
+        fs::write(
+            directory.path().join(format!("{module}.nc")),
+            format!(
+                r#"
+pub type Count = int
+pub struct Point {{ int x }}
+pub struct Box<T> {{ T value }}
+pub enum Choice<T> {{ Empty Value(T) }}
+int bias = {bias}
+fn private_add(int value) int {{ return value + bias }}
+pub fn calculate(int value) int {{ return private_add(value) }}
+pub fn wrap<T>(T value) Box<T> {{ return Box<T>{{.value = value}} }}
+pub fn choose<T>(T value) Choice<T> {{ return Choice.Value(value) }}
+"#
+            ),
+        )
+        .unwrap();
+    }
+    let source = r#"
+import { "left" as left "right" as right }
+fn calculate(int value) int { return value + 100 }
+struct Point { int x }
+test "namespaces" {
+    left.Point a = left.Point{.x = 1}
+    right.Point b = right.Point{.x = 2}
+    Point local = Point{.x = 3}
+    left.Box<left.Point> first = left.wrap<left.Point>(a)
+    right.Box<right.Point> second = right.wrap<right.Point>(b)
+    assert first.value.x == 1
+    assert second.value.x == 2
+    assert local.x == 3
+    left.Choice<left.Point> variant = left.choose<left.Point>(a)
+    if variant {
+        left.Choice.Value(p) -> { assert p.x == 1 }
+        left.Choice.Empty -> { assert false }
+    }
+    (fn(int) int) callback = right.calculate
+    assert callback(1) == 21
+    assert left.calculate(1) == 11
+    assert calculate(1) == 101
+}
+"#;
+    fs::write(&main, source).unwrap();
+    for release in [false, true] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ncc"));
+        command.arg("run");
+        if release {
+            command.arg("-r");
+        }
+        let output = command.arg(&main).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stdout.is_empty());
+        for invalid in [
+            "right.Point value = left.Point{.x = 1}",
+            "right.Box<int> value = left.wrap<int>(1)",
+            "right.Choice<int> value = left.choose<int>(1)",
+            "fn accept(right.Point value) {} accept(left.Point{.x = 1})",
+        ] {
+            let error = ncc::compile_source_with_options(
+                &format!("import {{ \"left\" as left \"right\" as right }} {invalid}"),
+                &main,
+                release,
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("expected `"),
+                "{invalid}: {error}"
+            );
+        }
+        for private in [
+            "left.bias",
+            "left.private_add(1)",
+            "right.bias",
+            "right.private_add(1)",
+        ] {
+            let error = ncc::compile_source_with_options(
+                &format!("import {{ \"left\" as left \"right\" as right }} _ = {private}"),
+                &main,
+                release,
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("does not export"),
+                "{private}: {error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn nested_imports_resolve_relative_helpers_and_preserve_exported_generic_types() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let library = directory.path().join("library");
+    fs::create_dir(&library).unwrap();
+    fs::write(
+        library.join("helper.nc"),
+        r#"
+pub struct Box<T> { T value }
+int bias = 2
+fn adjust(int value) int { return value + bias }
+pub fn answer(int value) int { return adjust(value) }
+pub fn wrap<T>(T value) Box<T> { return Box<T>{.value = value} }
+"#,
+    )
+    .unwrap();
+    fs::write(
+        library.join("facade.nc"),
+        r#"
+import { "helper" as helper }
+pub fn number() int { return helper.answer(40) }
+pub fn boxed() helper.Box<str> { return helper.wrap<str>("a" <> "\u{301}") }
+"#,
+    )
+    .unwrap();
+    let main = directory.path().join("main.nc");
+    fs::write(
+        &main,
+        r#"
+import { "library/facade" as facade "library/helper" as helper }
+test "nested imports" {
+    assert facade.number() == 42
+    helper.Box<str> result = facade.boxed()
+    assert result.value.len == 2
+    assert result.value[0] == 'a'
+    assert result.value[1] == '\u{301}'
+    assert result.value == "a" <> "\u{301}"
+}
+"#,
+    )
+    .unwrap();
+    for release in [false, true] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ncc"));
+        command.arg("run");
+        if release {
+            command.arg("-r");
+        }
+        let output = command.arg(&main).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stdout.is_empty());
+        let error = ncc::compile_source_with_options(
+            "import { \"library/facade\" as facade } _ = facade.helper.answer(1)",
+            &main,
+            release,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("does not export"), "{error}");
+    }
 }
 
 #[test]

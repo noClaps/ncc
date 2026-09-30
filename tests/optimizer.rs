@@ -744,6 +744,34 @@ fn copies() (int, int, int[], (int[], int)) {
 }
 
 #[test]
+fn generic_first_element_length_folds_across_unrelated_types() {
+    folded(
+        r#"
+fn get_len_of_first<T>(T[] arr) uint { return arr[0].len }
+struct Rectangle {
+    uint len
+    uint wid
+}
+@println(get_len_of_first<str>(["a" <> "\u{301}", ""]))
+@println(get_len_of_first<str>(["", "hello"]))
+@println(get_len_of_first<int[]>([[1, 2, 3], []]))
+@println(get_len_of_first<int[]>([[], [4, 5]]))
+@println(get_len_of_first<[char]int>([['a': 1, 'b': 2], []]))
+@println(get_len_of_first<[char]int>([[], ['c': 3]]))
+@println(get_len_of_first<Rectangle>([Rectangle{.len = 7, .wid = 4}]))
+@println(get_len_of_first<Rectangle>([Rectangle{.len = 0, .wid = 9}]))
+"#,
+        &[
+            "specialized_0_get_len_of_first",
+            "specialized_1_get_len_of_first",
+            "specialized_2_get_len_of_first",
+            "specialized_3_get_len_of_first",
+        ],
+        "2\n0\n3\n0\n2\n0\n7\n0\n",
+    );
+}
+
+#[test]
 fn returned_callbacks_and_specialized_generic_function_types_fold() {
     folded(
         r#"
