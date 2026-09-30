@@ -207,6 +207,8 @@ The `float` type is a 64-bit floating point number, following the [IEEE 754](htt
 float my_float = 1.0
 ```
 
+`NaN`, `inf` and `-inf` are valid floating point values and will not panic.
+
 ### String
 
 Strings are defined as an array of characters:
@@ -2359,6 +2361,14 @@ fn throwing(int val) int! {
 ```
 
 The container types (error union, enum, struct, arrays, etc.) can only be converted to `str` if their constituent types can be converted to `str`. For custom types, they must first be converted to their underlying base types before being converted to `str`.
+
+For `float`, the `NaN`, `inf` and `-inf` values are converted as-is to `str`. However, converting these values to `int` or `uint` will panic.
+
+```nc
+@println(NaN)  // output: NaN
+@println(inf)  // output: inf
+@println(-inf) // output: -inf
+```
 
 #### `@args`
 
