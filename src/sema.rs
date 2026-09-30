@@ -1454,6 +1454,7 @@ impl Checker {
                 }
                 let mut wildcard = false;
                 let mut booleans = HashSet::new();
+                let mut bytes = HashSet::new();
                 let mut variants = HashSet::new();
                 let target = self
                     .expression_types
@@ -1481,6 +1482,11 @@ impl Checker {
                             Pattern::Literal(value) => {
                                 if let Expr::Bool(b) = value.unlocated() {
                                     booleans.insert(*b);
+                                }
+                                if subject_type == named("byte")
+                                    && let Expr::Int(text) = value.unlocated()
+                                {
+                                    bytes.insert(integer(text)?);
                                 }
                                 if let Expr::Member { name, .. } = value.unlocated() {
                                     variants.insert(name.clone());
@@ -1511,6 +1517,7 @@ impl Checker {
                 if !wildcard
                     && !enum_complete
                     && !(subject_type == named("bool") && booleans.len() == 2)
+                    && !(subject_type == named("byte") && bytes.len() == 256)
                 {
                     return self.fail("conditional is not exhaustive; add a `_` fallback branch");
                 }

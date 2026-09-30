@@ -1218,6 +1218,161 @@ fn pattern() int {
 }
 
 #[test]
+fn exhaustive_byte_patterns_fold_every_value_without_a_wildcard() {
+    let mut source = String::from("fn classify(byte value) int { if value {\n");
+    for value in 0..=255 {
+        let literal = match value % 3 {
+            0 => format!("0x{value:02X}"),
+            1 => format!("0b{value:08b}"),
+            _ => value.to_string(),
+        };
+        source.push_str(&format!("{literal} -> {{ return {} }}\n", 255 - value));
+    }
+    source.push_str("} }\n");
+    let mut expected = String::new();
+    for value in 0..=255 {
+        source.push_str(&format!("@println(classify({value}))\n"));
+        expected.push_str(&format!("{}\n", 255 - value));
+    }
+    folded(&source, &["classify"], &expected);
+}
+
+#[test]
+fn exact_array_patterns_fold_empty_fixed_and_dynamic_lengths() {
+    folded(
+        r#"
+fn empty(int[0] values) int {
+    if values { [] -> { return 7 } }
+}
+fn dynamic(int[] values) int {
+    if values {
+        [] -> { return 0 }
+        [1] -> { return 1 }
+        [1, 2] -> { return 2 }
+        [1, a, b] -> { return a * 10 + b }
+        _ -> { return -1 }
+    }
+}
+fn fixed(int[2] values) int {
+    if values {
+        [1, 2] -> { return 12 }
+        [1, n] -> { return n }
+        [a, b] -> { return a * 10 + b }
+    }
+}
+@println(empty([]))
+@println(dynamic([]))
+@println(dynamic([1]))
+@println(dynamic([2]))
+@println(dynamic([1, 2]))
+@println(dynamic([1, 3]))
+@println(dynamic([1, 2, 3]))
+@println(dynamic([1, 2, 3, 4]))
+@println(fixed([1, 2]))
+@println(fixed([1, 9]))
+@println(fixed([4, 5]))
+"#,
+        &["empty", "dynamic", "fixed"],
+        "7\n0\n1\n-1\n2\n-1\n23\n-1\n12\n9\n45\n",
+    );
+}
+
+#[test]
+fn exact_string_and_composite_patterns_fold_with_nuls_and_unicode() {
+    folded(
+        r#"
+struct Record { str name int count }
+fn text(str value) int {
+    if value {
+        "" -> { return 0 }
+        "a" -> { return 1 }
+        "a\u{0}🍪" -> { return 2 }
+        "界🍪" -> { return 3 }
+        _ -> { return -1 }
+    }
+}
+fn tuple((str, int) value) int {
+    if value {
+        ("a\u{0}🍪", 2) -> { return 20 }
+        ("a\u{0}🍪", n) -> { return n }
+        (_, _) -> { return -1 }
+    }
+}
+fn record(Record value) int {
+    if value {
+        Record{.name = "界🍪", .count = 2} -> { return 20 }
+        Record{.name = "界🍪", .count = n} -> { return n }
+        Record{.name = _, .count = _} -> { return -1 }
+    }
+}
+@println(text(""))
+@println(text("a"))
+@println(text("a\u{0}🍪"))
+@println(text("a\u{0}界"))
+@println(text("a\u{0}🍪z"))
+@println(text("a\u{0}"))
+@println(text("界🍪"))
+@println(text("🍪界"))
+@println(tuple(("a\u{0}🍪", 2)))
+@println(tuple(("a\u{0}🍪", 7)))
+@println(tuple(("a\u{0}界", 2)))
+@println(record(Record{.name = "界🍪", .count = 2}))
+@println(record(Record{.name = "界🍪", .count = 7}))
+@println(record(Record{.name = "🍪界", .count = 2}))
+"#,
+        &["text", "tuple", "record"],
+        "0\n1\n2\n-1\n-1\n-1\n3\n-1\n20\n7\n-1\n20\n7\n-1\n",
+    );
+}
+
+#[test]
+fn float_patterns_fold_with_ieee_equality() {
+    folded(
+        r#"
+fn classify(float value) str {
+    return if value {
+        NaN -> { "unreachable" }
+        inf -> { "positive" }
+        -inf -> { "negative" }
+        0.0 -> { "zero" }
+        _ -> { "other" }
+    }
+}
+@println(classify(NaN))
+@println(classify(inf))
+@println(classify(-inf))
+@println(classify(0.0))
+@println(classify(-0.0))
+@println(classify(1.0))
+"#,
+        &["classify"],
+        "other\npositive\nnegative\nzero\nzero\nother\n",
+    );
+}
+
+#[test]
+fn enum_payload_patterns_fold_specific_before_irrefutable_branches() {
+    folded(
+        r#"
+enum Choice { Number(int) Empty }
+fn choose(Choice value) int {
+    if value {
+        Choice.Number(0) -> { return 100 }
+        Choice.Number(n) -> { return n }
+        Choice.Empty -> { return -1 }
+    }
+}
+@println(choose(Choice.Number(0)))
+@println(choose(Choice.Number(7)))
+@println(choose(Choice.Number(-3)))
+@println(choose(Choice.Empty))
+"#,
+        &["choose"],
+        "100\n7\n-3\n-1\n",
+    );
+}
+
+#[test]
 fn pattern_only_captures_fold_with_current_values_and_lexical_bindings() {
     folded(
         r#"

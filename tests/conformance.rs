@@ -1131,6 +1131,157 @@ fn release_evaluates_pure_functions_and_preserves_effects() {
 }
 
 #[test]
+fn byte_patterns_cover_the_entire_domain_without_a_wildcard() {
+    let arms = (0..=255)
+        .map(|value| format!("0x{value:02x} -> {{ {value} }}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    success(
+        &format!(
+            r#"
+fn identify(byte value) int {{ return if value {{ {arms} }} }}
+test "all bytes" {{
+    mut uint value = @args().len - 1
+    mut int total = 0
+    while value < 256 {{
+        int result = identify(@as(byte, value))
+        assert result == @as(int, value)
+        total = total + result
+        value = value + 1
+    }}
+    assert total == 32640
+}}
+"#
+        ),
+        "",
+    );
+    let alternatives = (0..=255)
+        .map(|value| format!("0b{value:b}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    success(
+        &format!(
+            "fn covered(byte value) bool {{ return if value {{ {alternatives} -> {{ true }} }} }} @println(covered(0), covered(255))"
+        ),
+        "truetrue\n",
+    );
+    let incomplete = (0..255)
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    for patterns in [
+        incomplete.clone(),
+        format!("{incomplete}, 0"),
+        format!("{incomplete}, 0x00, 0b0, 0o0"),
+    ] {
+        rejects(
+            &format!("fn missing(byte value) {{ if value {{ {patterns} -> {{}} }} }}"),
+            "not exhaustive",
+        );
+    }
+}
+
+#[test]
+fn array_and_string_patterns_require_exact_values_and_lengths() {
+    success(
+        r#"
+fn array(int[] value) int {
+    return if value {
+        [] -> { 0 }
+        [1] -> { 1 }
+        [1, n] -> { n }
+        _ -> { -1 }
+    }
+}
+fn string(str value) int {
+    return if value {
+        "" -> { 0 }
+        "café" -> { 1 }
+        "a\u{0}🍪" -> { 2 }
+        _ -> { -1 }
+    }
+}
+fn fixed(int[2] value) int { return if value { [a, b] -> { a + b } } }
+fn empty(int[0] value) bool { return if value { [] -> { true } } }
+test "exact patterns" {
+    assert array([]) == 0
+    assert array([1]) == 1
+    assert array([1, 7]) == 7
+    assert array([1, 7, 8]) == -1
+    assert array([2, 7]) == -1
+    assert string("") == 0
+    assert string("café") == 1
+    assert string("café!") == -1
+    assert string("cafe") == -1
+    assert string("a\u{0}🍪") == 2
+    assert string("a\u{0}other") == -1
+    assert fixed([2, 3]) == 5
+    assert empty([])
+}
+"#,
+        "",
+    );
+    rejects(
+        "fn missing(int[] value) { if value { [] -> {} [x] -> {} } }",
+        "not exhaustive",
+    );
+    rejects(
+        "fn missing(str value) { if value { \"\" -> {} \"hello\" -> {} } }",
+        "not exhaustive",
+    );
+}
+
+#[test]
+fn float_patterns_use_ieee_equality_for_nonfinite_values_and_signed_zero() {
+    success(
+        r#"
+fn runtime(float value) float { @print("") return value }
+fn classify(float value) str {
+    return if value {
+        NaN -> { "unreachable" }
+        inf -> { "positive" }
+        -inf -> { "negative" }
+        0.0 -> { "zero" }
+        _ -> { "other" }
+    }
+}
+@println(classify(runtime(NaN)))
+@println(classify(runtime(inf)))
+@println(classify(runtime(-inf)))
+@println(classify(runtime(0.0)))
+@println(classify(runtime(-0.0)))
+@println(classify(runtime(1.0)))
+"#,
+        "other\npositive\nnegative\nzero\nzero\nother\n",
+    );
+}
+
+#[test]
+fn enum_patterns_with_partial_payload_coverage_are_not_exhaustive() {
+    for source in [
+        "enum Choice { Empty Number(int) } fn missing(Choice value) { if value { Choice.Empty -> {} Choice.Number(0) -> {} } }",
+        "enum Choice { Empty Number(int) } fn missing(Choice value, int expected) { if value { Choice.Empty -> {} Choice.Number(expected) -> {} } }",
+        "enum Choice { Empty Numbers(int[]) } fn missing(Choice value) { if value { Choice.Empty -> {} Choice.Numbers([]) -> {} Choice.Numbers([x]) -> {} } }",
+    ] {
+        rejects(source, "not exhaustive");
+    }
+    success(
+        r#"
+enum Choice { Empty Number(int) }
+fn number(Choice value) int {
+    return if value {
+        Choice.Number(0) -> { 10 }
+        Choice.Number(n) -> { n }
+        Choice.Empty -> { -1 }
+    }
+}
+@println(number(Choice.Number(0)), ":", number(Choice.Number(7)), ":", number(Choice.Empty))
+"#,
+        "10:7:-1\n",
+    );
+}
+
+#[test]
 fn enum_payloads_and_binding_patterns() {
     rejects(
         "enum E { A B } E value = E.A E bad = value.B",
