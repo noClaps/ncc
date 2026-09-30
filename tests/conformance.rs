@@ -561,6 +561,130 @@ test "recursive values" {
 }
 
 #[test]
+fn for_traversal_retains_original_indices_when_bindings_change_size() {
+    success(
+        r#"
+fn runtime(int value) int { @print("") return value }
+test "original indices" {
+    mut int[] values = [runtime(1), 2, 3, 4, 5]
+    for i in values {
+        assert i < 5
+        values = values <> [values[i] * 10]
+    }
+    assert values == [1, 2, 3, 4, 5, 10, 20, 30, 40, 50]
+    mut int[] replaced = [10, 20]
+    mut uint[] visited = []
+    for i in replaced {
+        assert i < 2
+        visited = visited <> [i]
+        if i { 0 -> { replaced = [100, 200, 300] } _ -> {} }
+        @println(replaced[i])
+    }
+    assert visited == [0u, 1u]
+    assert replaced == [100, 200, 300]
+    mut int[] shortened = [10, 20, 30]
+    visited = []
+    for i in shortened {
+        shortened = []
+        visited = visited <> [i]
+    }
+    assert visited == [0u, 1u, 2u]
+    assert shortened.len == 0
+
+    mut str text = "x"
+    visited = []
+    for i in text {
+        assert i == 0
+        text = text <> "y"
+        visited = visited <> [i]
+    }
+    assert text == "xy"
+    assert visited == [0u]
+    text = "a🍪界"
+    visited = []
+    for i in text {
+        text = "x"
+        visited = visited <> [i]
+    }
+    assert visited == [0u, 1u, 2u]
+    assert text == "x"
+}
+"#,
+        "100\n200\n",
+    );
+}
+
+#[test]
+fn for_traversal_retains_original_map_keys_under_insertion_and_replacement() {
+    success(
+        r#"
+fn runtime(int value) int { @print("") return value }
+test "original keys" {
+    mut [str]int values = ["a": runtime(1), "b": 2]
+    mut uint visits = 0
+    mut int total = 0
+    for key in values {
+        assert key == "a" or key == "b"
+        values["new"] = 99
+        visits = visits + 1
+        total = total + values[key]
+    }
+    assert visits == 2
+    assert total == 3
+    assert values.len == 3
+    mut [str]int replaced = ["a": 1, "b": 2]
+    mut [str]bool seen = []
+    for key in replaced {
+        replaced = ["new": 9]
+        seen[key] = true
+    }
+    assert seen.len == 2
+    assert "a" in seen and "b" in seen
+    assert replaced == ["new": 9]
+}
+"#,
+        "",
+    );
+}
+
+#[test]
+fn original_traversal_does_not_hide_invalid_current_binding_lookups() {
+    runtime_failure(
+        r#"
+fn runtime() int { @print("") return 1 }
+mut int[] values = [runtime(), 2]
+for i in values {
+    if i { 0 -> { values = [9] } _ -> {} }
+    @println(values[i])
+}
+"#,
+        "out of bounds",
+    );
+    runtime_failure(
+        r#"
+fn runtime() int { @print("") return 1 }
+mut [str]int values = ["original": runtime()]
+for key in values {
+    values = ["new": 9]
+    @println(values[key])
+}
+"#,
+        "map key not found",
+    );
+    runtime_failure(
+        r#"
+fn runtime() str { @print("") return "a🍪" }
+mut str text = runtime()
+for i in text {
+    if i { 0 -> { text = "x" } _ -> {} }
+    @println(text[i])
+}
+"#,
+        "out of bounds",
+    );
+}
+
+#[test]
 fn for_loops_use_indices_and_map_keys_and_skip_empty_containers() {
     success(
         r#"
@@ -1207,6 +1331,104 @@ test "closures" {
         "",
     );
     rejects("int a = 1 fn f = fn() { a = 2 }", "immutable");
+}
+
+#[test]
+fn indirect_calls_evaluate_callable_then_arguments_once_in_order() {
+    success(
+        r#"
+fn mark(int value) int { @print(value, " ") return value }
+fn add(int left, int right) int { @print("call ") return left + right }
+fn choose() (fn(int, int) int) { @print("choose ") return add }
+fn index() uint { @print("index ") return 0 }
+struct Holder { (fn(int, int) int) operation }
+fn holder() Holder { @print("holder ") return Holder{.operation = add} }
+(fn(int, int) int)[] operations = [add]
+@println(choose()(mark(1), mark(2)))
+@println(operations[index()](mark(3), mark(4)))
+@println(holder().operation(mark(5), mark(6)))
+fn apply<T, U>(T left, T right, (fn(T, T) U) operation) U {
+    return operation(left, right)
+}
+@println(apply<int, int>(mark(7), mark(8), choose()))
+"#,
+        "choose 1 2 call 3\nindex 3 4 call 7\nholder 5 6 call 11\n7 8 choose call 15\n",
+    );
+}
+
+#[test]
+fn mutable_parameter_shadows_keep_caller_composites_independent() {
+    success(
+        r#"
+struct Payload { int[] numbers [str]int[] table str text }
+fn changed(Payload input) Payload {
+    mut Payload input = input
+    input.numbers[0] = 3
+    input.table["key"][0] = 4
+    input.text[1] = '\u{301}'
+    return input
+}
+fn changed_tuple((int[], str) input) (int[], str) {
+    mut (int[], str) input = input
+    input[0][0] = 5
+    input[1][0] = 'b'
+    return input
+}
+fn runtime(int value) int { @print("") return value }
+test "parameter copies" {
+    Payload original = Payload{.numbers = [runtime(1)], .table = ["key": [2]], .text = "aX"}
+    mut Payload result = changed(original)
+    assert original.numbers == [1]
+    assert original.table["key"] == [2]
+    assert original.text == "aX"
+    assert result.numbers == [3]
+    assert result.table["key"] == [4]
+    assert result.text.len == 2
+    assert result.text[0] == 'a'
+    assert result.text[1] == '\u{301}'
+    result.numbers[0] = 9
+    assert changed(original).numbers == [3]
+    (int[], str) tuple = ([1], "aX")
+    (int[], str) copy = changed_tuple(tuple)
+    assert tuple[0] == [1] and tuple[1] == "aX"
+    assert copy[0] == [5] and copy[1] == "bX"
+}
+"#,
+        "",
+    );
+}
+
+#[test]
+fn function_parameters_and_callback_signatures_are_strict() {
+    for source in [
+        "fn bad(int value) { value = 2 }",
+        "fn bad(int[] values) { values[0] = 2 }",
+        "fn bad([str]int values) { values[\"key\"] = 2 }",
+        "fn bad(str value) { value[0] = 'a' }",
+        "fn bad((int, int) value) { value[0] = 2 }",
+        "struct Item { int value } fn bad(Item item) { item.value = 2 }",
+        "fn bad(int[] values) { fn mutate() { values[0] = 2 } }",
+    ] {
+        rejects(source, "cannot mutate immutable");
+    }
+    for source in [
+        "fn bad(uint value) int { return @as(int, value) } (fn(int) int) callback = bad",
+        "fn bad(int value) uint { return @as(uint, value) } (fn(int) int) callback = bad",
+        "fn bad(int left, int right) int { return left + right } (fn(int) int) callback = bad",
+        "fn bad(int value) {} (fn(int) int) callback = bad",
+        "fn apply((fn(int) int) callback) int { return callback(1) } fn bad(str value) int { return 1 } _ = apply(bad)",
+        "(fn(int) int) callback = fn(int value) int { return value } _ = callback(true)",
+    ] {
+        rejects(source, "expected `");
+    }
+    for source in [
+        "fn value() int { return 1 } value()",
+        "fn value() int { return 1 } (fn() int) callback = value callback()",
+        "fn value() int { return 1 } (fn() int)[] callbacks = [value] callbacks[0]()",
+    ] {
+        rejects(source, "not used");
+    }
+    rejects("fn value(int input) {} _ = input", "unknown name");
 }
 
 #[test]

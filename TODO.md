@@ -3,8 +3,6 @@
 1. Expand tests to cover every part of the language and as many edge cases as
    possible. Ask the user how features should behave wherever the specification
    is unclear, then capture the agreed behavior in tests.
-   - Document the agreed original-index/key traversal rule for `for` when its
-     array/map is replaced or grows during the loop, then add mutation coverage.
 2. Attempt to eliminate all undefined behavior from the language. Identify
    potentially undefined cases, clarify the intended behavior with the user, and
    let the user document those decisions before implementing them and adding

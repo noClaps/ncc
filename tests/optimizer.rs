@@ -717,6 +717,70 @@ fn collection() int {
 }
 
 #[test]
+fn composite_parameter_shadow_copies_fold_without_changing_callers() {
+    folded(
+        r#"
+struct Record { int[] values }
+fn edit(Record record, (int[], int) pair) int {
+    mut Record record = record
+    mut (int[], int) pair = pair
+    record.values[0] = record.values[0] + 10
+    pair[0][0] = pair[0][0] + 20
+    pair[1] = pair[1] + 30
+    return record.values[0] + pair[0][0] + pair[1]
+}
+fn copies() (int, int, int[], (int[], int)) {
+    Record record = Record{.values = [1, 2]}
+    (int[], int) pair = ([3, 4], 5)
+    int first = edit(record, pair)
+    int second = edit(record, pair)
+    return (first, second, record.values, pair)
+}
+@println(copies())
+"#,
+        &["copies", "edit"],
+        "(69, 69, [1, 2], ([3, 4], 5))\n",
+    );
+}
+
+#[test]
+fn returned_callbacks_and_specialized_generic_function_types_fold() {
+    folded(
+        r#"
+fn identity<type T>(T value) T { return value }
+fn apply<type T, type U>((fn(T) U) callback, T value) U { return callback(value) }
+fn make((int, int) pair) (fn(int) int) {
+    return fn(int value) int { return pair[0] * value + pair[1] }
+}
+fn suffix(str ending) (fn(str) str) {
+    return fn(str value) str { return value <> ending }
+}
+struct Callbacks { (fn(int) int)[] operations }
+fn callbacks() int {
+    (int, int) pair = (2, 3)
+    (fn(int) int) first = apply<(int, int), (fn(int) int)>(make, pair)
+    Callbacks stored = Callbacks{.operations = [
+        identity<(fn(int) int)>(first),
+        identity<(fn(int) int)>(make((4, 5)))
+    ]}
+    int a = apply<int, int>(stored.operations[0], 6)
+    int b = apply<int, int>(stored.operations[1], 6)
+    int c = stored.operations[0](7)
+    return a + b + c
+}
+fn text_callback() str {
+    (fn(str) str) callback = identity<(fn(str) str)>(suffix("!"))
+    return apply<str, str>(callback, "done")
+}
+@println(callbacks())
+@println(text_callback())
+"#,
+        &["callbacks", "text_callback", "make", "suffix"],
+        "61\ndone!\n",
+    );
+}
+
+#[test]
 fn optional_and_error_equality_compares_only_active_payloads() {
     folded(
         r#"
@@ -1004,6 +1068,142 @@ fn iteration() str {
 "#,
         &["iteration"],
         "(3, 20, 3, a🍪z, 7, 30, 3, 15, 0)\n",
+    );
+}
+
+#[test]
+fn original_array_indices_fold_across_append_and_length_changing_replacement() {
+    folded(
+        r#"
+fn append_values() int[] {
+    mut int[] values = [1, 2, 3, 4, 5]
+    uint initial_count = values.len
+    for i in values {
+        if i >= initial_count { true -> { return [-1] } false -> {} }
+        values = values <> [values[i] * 10]
+    }
+    return values
+}
+fn grow_values() (uint, uint, int, uint) {
+    mut int[] values = [1, 2, 3]
+    uint initial_count = values.len
+    mut uint visits = 0
+    mut uint indices = 0
+    mut int total = 0
+    for i in values {
+        if i >= initial_count { true -> { return (0, 0, -1, 0) } false -> {} }
+        values = [10, 20, 30] <> values
+        visits = visits + 1
+        indices = indices + i
+        total = total + values[i]
+    }
+    return (visits, indices, total, values.len)
+}
+fn shrink_values() (uint, uint, int) {
+    mut int[] values = [1, 2, 3, 4]
+    uint initial_count = values.len
+    mut uint visits = 0
+    mut uint indices = 0
+    mut int total = 0
+    for i in values {
+        if i >= initial_count { true -> { return (0, 0, -1) } false -> {} }
+        values = [9]
+        visits = visits + 1
+        indices = indices + i
+        if i < values.len { true -> { total = total + values[i] } false -> {} }
+    }
+    return (visits, indices, total)
+}
+@println(append_values())
+@println(grow_values())
+@println(shrink_values())
+"#,
+        &["append_values", "grow_values", "shrink_values"],
+        "[1, 2, 3, 4, 5, 10, 20, 30, 40, 50]\n(3, 3, 60, 12)\n(4, 6, 9)\n",
+    );
+}
+
+#[test]
+fn original_map_keys_and_string_indices_fold_across_binding_mutation() {
+    folded(
+        r#"
+fn insert_entries() (uint, int) {
+    mut [str]int entries = ["a": 1, "b": 2]
+    mut uint visits = 0
+    mut int total = 0
+    for key in entries {
+        if key != "a" and key != "b" { true -> { return (0, -1) } false -> {} }
+        entries["a"] = 10
+        entries["b"] = 20
+        entries["new"] = 30
+        visits = visits + 1
+        total = total + entries[key]
+    }
+    return (visits, total)
+}
+fn replace_entries() (uint, int) {
+    mut [str]int entries = ["a": 1, "b": 2, "c": 3]
+    mut uint visits = 0
+    mut int total = 0
+    for key in entries {
+        if key != "a" and key != "b" and key != "c" {
+            true -> { return (0, -1) } false -> {}
+        }
+        entries = ["a": 10, "b": 20, "c": 30, "new": 40]
+        visits = visits + 1
+        total = total + entries[key]
+    }
+    return (visits, total)
+}
+fn append_text() str {
+    mut str text = "a🍪z"
+    uint initial_count = text.len
+    for i in text {
+        if i >= initial_count { true -> { return "bad" } false -> {} }
+        text = text <> @as(str, text[i])
+    }
+    return text
+}
+fn replace_text() str {
+    mut str text = "abc"
+    uint initial_count = text.len
+    mut str read = ""
+    for i in text {
+        if i >= initial_count { true -> { return "bad" } false -> {} }
+        text = "X界Z" <> text
+        read = read <> @as(str, text[i])
+    }
+    return "{read}:{text.len}"
+}
+fn shrink_text() (uint, uint, str) {
+    mut str text = "abc"
+    uint initial_count = text.len
+    mut uint visits = 0
+    mut uint indices = 0
+    mut str read = ""
+    for i in text {
+        if i >= initial_count { true -> { return (0, 0, "bad") } false -> {} }
+        text = "Q"
+        visits = visits + 1
+        indices = indices + i
+        if i < text.len { true -> { read = read <> @as(str, text[i]) } false -> {} }
+    }
+    return (visits, indices, read)
+}
+@println(insert_entries())
+@println(replace_entries())
+@println(append_text())
+@println(replace_text())
+@println(shrink_text())
+"#,
+        &[
+            "insert_entries",
+            "replace_entries",
+            "append_text",
+            "replace_text",
+            "shrink_text",
+        ],
+        "(2, 30)\n(3, 60)\na🍪za🍪z\nX界Z:12\n(3, 3, Q)\n",
     );
 }
 

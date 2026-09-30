@@ -52,6 +52,9 @@
     separate character elements even when their joined UTF-8 bytes would form a
     single Unicode grapheme. Preserve those boundaries in string operations and
     constant evaluation; printing and byte conversion flatten the elements.
+  - `for` retains the original array/string indices or map keys even when the
+    iterable binding changes size. Explicit body lookups use the current binding
+    and retain ordinary bounds/key failures. Do not assume stable map order.
   - Map concatenation overwrites duplicate keys with the right-hand value.
   - IEEE-754 NaN and infinities are valid floats, including arithmetic results
     and values returned by C externs. Printing, interpolation, and string
