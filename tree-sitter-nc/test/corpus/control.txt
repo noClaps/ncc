@@ -322,7 +322,7 @@ fn fail() int! {
 ==================
 Async futures mutex locks and test blocks
 ==================
-mutex mut int counter = 0
+mutex int counter = 0
 fn increment() int {
   lock counter {
     counter = counter + 1

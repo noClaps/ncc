@@ -1,0 +1,832 @@
+==================
+Declaration parity empty import extern struct enum and test bodies
+==================
+import {}
+extern "native.c" as native {}
+struct Empty< > {}
+enum EmptyEnum< > {}
+test "empty" {}
+
+---
+
+(source_file
+  (import_declaration)
+  (extern_declaration
+    (string
+      (quoted_string
+        (string_content)))
+    (identifier))
+  (struct_declaration
+    (identifier)
+    (type_parameters))
+  (enum_declaration
+    (identifier)
+    (type_parameters))
+  (test_declaration
+    (string
+      (quoted_string
+        (string_content)))
+    (block)))
+
+==================
+Declaration parity literal imports and extern signatures
+==================
+import { "a.nc" as a "b.nc" as b }
+extern "native.c" as native {
+ fn emit(str text,) = "emit"
+ fn read(byte[0x10u] data, (fn(int,) void) callback,) int! = "read"
+ fn finish() void! = "finish"
+}
+
+---
+
+(source_file
+  (import_declaration
+    (import_entry
+      (string
+        (quoted_string
+          (string_content)))
+      (identifier))
+    (import_entry
+      (string
+        (quoted_string
+          (string_content)))
+      (identifier)))
+  (extern_declaration
+    (string
+      (quoted_string
+        (string_content)))
+    (identifier)
+    (extern_function
+      (identifier)
+      (parameters
+        (parameter
+          (named_type
+            (identifier))
+          (identifier)))
+      (string
+        (quoted_string
+          (string_content))))
+    (extern_function
+      (identifier)
+      (parameters
+        (parameter
+          (array_type
+            (named_type
+              (identifier))
+            (integer))
+          (identifier))
+        (parameter
+          (function_type
+            (named_type
+              (identifier))
+            (named_type
+              (identifier)))
+          (identifier)))
+      (error_type
+        (named_type
+          (identifier)))
+      (string
+        (quoted_string
+          (string_content))))
+    (extern_function
+      (identifier)
+      (parameters)
+      (error_type
+        (named_type
+          (identifier)))
+      (string
+        (quoted_string
+          (string_content))))))
+
+==================
+Declaration parity multiline paths symbols and test names
+==================
+import { """module.nc""" as module }
+extern """native.c""" as native { fn emit() = """emit""" }
+test """multiline
+name""" {}
+
+---
+
+(source_file
+  (import_declaration
+    (import_entry
+      (string
+        (multiline_string
+          (multiline_string_content)))
+      (identifier)))
+  (extern_declaration
+    (string
+      (multiline_string
+        (multiline_string_content)))
+    (identifier)
+    (extern_function
+      (identifier)
+      (parameters)
+      (string
+        (multiline_string
+          (multiline_string_content)))))
+  (test_declaration
+    (string
+      (multiline_string
+        (multiline_string_content)))
+    (block)))
+
+==================
+Declaration parity generic parameters and enum payload separators
+==================
+pub struct Pair<type T, U,> { T first U second }
+pub enum Result<T, type U,> { Empty EmptyCall() Value(T,) Pair(T, U,) }
+pub fn identity<type T, U,>(T value,) T {}
+fn empty< >() {}
+
+---
+
+(source_file
+  (struct_declaration
+    (identifier)
+    (type_parameters
+      (type_parameter
+        (identifier))
+      (type_parameter
+        (identifier)))
+    (field_declaration
+      (named_type
+        (identifier))
+      (identifier))
+    (field_declaration
+      (named_type
+        (identifier))
+      (identifier)))
+  (enum_declaration
+    (identifier)
+    (type_parameters
+      (type_parameter
+        (identifier))
+      (type_parameter
+        (identifier)))
+    (enum_variant
+      (identifier))
+    (enum_variant
+      (identifier))
+    (enum_variant
+      (identifier)
+      (named_type
+        (identifier)))
+    (enum_variant
+      (identifier)
+      (named_type
+        (identifier))
+      (named_type
+        (identifier))))
+  (function_declaration
+    (identifier)
+    (type_parameters
+      (type_parameter
+        (identifier))
+      (type_parameter
+        (identifier)))
+    (parameters
+      (parameter
+        (named_type
+          (identifier))
+        (identifier)))
+    (named_type
+      (identifier))
+    (block))
+  (function_declaration
+    (identifier)
+    (type_parameters)
+    (parameters)
+    (block)))
+
+==================
+Declaration parity qualified nested and empty type applications
+==================
+pub type Nested = pkg.outer.Box<pkg.inner.Box<int>>
+type Triple = Box<Box<Box<int>>>
+type Empty = Box< >
+type Trailing = Pair<int, str,>
+
+---
+
+(source_file
+  (type_declaration
+    (identifier)
+    (named_type
+      (identifier)
+      (identifier)
+      (identifier)
+      (type_arguments
+        (named_type
+          (identifier)
+          (identifier)
+          (identifier)
+          (type_arguments
+            (named_type
+              (identifier)))))))
+  (type_declaration
+    (identifier)
+    (named_type
+      (identifier)
+      (type_arguments
+        (named_type
+          (identifier)
+          (type_arguments
+            (named_type
+              (identifier)
+              (type_arguments
+                (named_type
+                  (identifier)))))))))
+  (type_declaration
+    (identifier)
+    (named_type
+      (identifier)
+      (type_arguments)))
+  (type_declaration
+    (identifier)
+    (named_type
+      (identifier)
+      (type_arguments
+        (named_type
+          (identifier))
+        (named_type
+          (identifier))))))
+
+==================
+Declaration parity one element and nested tuple types
+==================
+type Single = (int)
+type NestedTuple = ((int), (str, bool))
+type TupleArray = (int, str)[]
+
+---
+
+(source_file
+  (type_declaration
+    (identifier)
+    (tuple_type
+      (named_type
+        (identifier))))
+  (type_declaration
+    (identifier)
+    (tuple_type
+      (tuple_type
+        (named_type
+          (identifier)))
+      (tuple_type
+        (named_type
+          (identifier))
+        (named_type
+          (identifier)))))
+  (type_declaration
+    (identifier)
+    (array_type
+      (tuple_type
+        (named_type
+          (identifier))
+        (named_type
+          (identifier))))))
+
+==================
+Declaration parity required function type returns and type list commas
+==================
+type Callback = (fn() void)
+type Transform = (fn(int, str,) (int, str))
+type Factory = (fn((fn(int) int),) (fn() void))
+type OptionalCallback = (fn() int!)?[]
+
+---
+
+(source_file
+  (type_declaration
+    (identifier)
+    (function_type
+      (named_type
+        (identifier))))
+  (type_declaration
+    (identifier)
+    (function_type
+      (named_type
+        (identifier))
+      (named_type
+        (identifier))
+      (tuple_type
+        (named_type
+          (identifier))
+        (named_type
+          (identifier)))))
+  (type_declaration
+    (identifier)
+    (function_type
+      (function_type
+        (named_type
+          (identifier))
+        (named_type
+          (identifier)))
+      (function_type
+        (named_type
+          (identifier)))))
+  (type_declaration
+    (identifier)
+    (array_type
+      (optional_type
+        (function_type
+          (error_type
+            (named_type
+              (identifier))))))))
+
+==================
+Declaration parity left to right postfix type nesting
+==================
+type ArrayOptional = int[]?
+type OptionalArray = int?[]
+type Mixed = int?[]![2]?
+type Repeated = int??!!
+
+---
+
+(source_file
+  (type_declaration
+    (identifier)
+    (optional_type
+      (array_type
+        (named_type
+          (identifier)))))
+  (type_declaration
+    (identifier)
+    (array_type
+      (optional_type
+        (named_type
+          (identifier)))))
+  (type_declaration
+    (identifier)
+    (optional_type
+      (array_type
+        (error_type
+          (array_type
+            (optional_type
+              (named_type
+                (identifier)))))
+        (integer))))
+  (type_declaration
+    (identifier)
+    (error_type
+      (error_type
+        (optional_type
+          (optional_type
+            (named_type
+              (identifier))))))))
+
+==================
+Declaration parity map and future consume full value type
+==================
+type Future = fut int[]?!
+type Map = [str]int[]?!
+type Nested = [int?][str]fut int[3]!
+type FutureMap = fut [str]int?[]
+
+---
+
+(source_file
+  (type_declaration
+    (identifier)
+    (future_type
+      (error_type
+        (optional_type
+          (array_type
+            (named_type
+              (identifier)))))))
+  (type_declaration
+    (identifier)
+    (map_type
+      (named_type
+        (identifier))
+      (error_type
+        (optional_type
+          (array_type
+            (named_type
+              (identifier)))))))
+  (type_declaration
+    (identifier)
+    (map_type
+      (optional_type
+        (named_type
+          (identifier)))
+      (map_type
+        (named_type
+          (identifier))
+        (future_type
+          (error_type
+            (array_type
+              (named_type
+                (identifier))
+              (integer)))))))
+  (type_declaration
+    (identifier)
+    (future_type
+      (map_type
+        (named_type
+          (identifier))
+        (array_type
+          (optional_type
+            (named_type
+              (identifier))))))))
+
+==================
+Declaration parity fixed array radix unsigned and zero bounds
+==================
+type Zero = int[0]
+type Decimal = int[2u]
+type Binary = int[0b10]
+type Octal = int[0o2u]
+type Hex = int[0x2]
+type Matrix = int[2][3]
+
+---
+
+(source_file
+  (type_declaration
+    (identifier)
+    (array_type
+      (named_type
+        (identifier))
+      (integer)))
+  (type_declaration
+    (identifier)
+    (array_type
+      (named_type
+        (identifier))
+      (integer)))
+  (type_declaration
+    (identifier)
+    (array_type
+      (named_type
+        (identifier))
+      (integer)))
+  (type_declaration
+    (identifier)
+    (array_type
+      (named_type
+        (identifier))
+      (integer)))
+  (type_declaration
+    (identifier)
+    (array_type
+      (named_type
+        (identifier))
+      (integer)))
+  (type_declaration
+    (identifier)
+    (array_type
+      (array_type
+        (named_type
+          (identifier))
+        (integer))
+      (integer))))
+
+==================
+Declaration parity public mutex mutable and destructured bindings
+==================
+pub int constant = 1
+pub mut int mutable = 2
+pub mutex int guarded = 3
+mut int left, str right = (1, "one")
+mutex int a, int b = (2, 3)
+
+---
+
+(source_file
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (integer))
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (integer))
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (integer))
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (tuple_expression
+      (integer)
+      (string
+        (quoted_string
+          (string_content)))))
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (tuple_expression
+      (integer)
+      (integer))))
+
+==================
+Declaration parity named anonymous and nested function return forms
+==================
+fn omitted() {}
+fn throwing() ! {}
+fn explicit() void! {}
+fn body() { fn local() ! {} fn inferred = fn() void! {} }
+pub fn exported = fn(int value,) int {}
+
+---
+
+(source_file
+  (function_declaration
+    (identifier)
+    (parameters)
+    (block))
+  (function_declaration
+    (identifier)
+    (parameters)
+    (block))
+  (function_declaration
+    (identifier)
+    (parameters)
+    (error_type
+      (named_type
+        (identifier)))
+    (block))
+  (function_declaration
+    (identifier)
+    (parameters)
+    (block
+      (function_declaration
+        (identifier)
+        (parameters)
+        (block))
+      (function_binding
+        (identifier)
+        (function_expression
+          (parameters)
+          (error_type
+            (named_type
+              (identifier)))
+          (block)))))
+  (function_binding
+    (identifier)
+    (function_expression
+      (parameters
+        (parameter
+          (named_type
+            (identifier))
+          (identifier)))
+      (named_type
+        (identifier))
+      (block))))
+
+==================
+Declaration parity parenthesized inferred anonymous functions
+==================
+fn single = (fn() {})
+pub fn nested = ((fn(int value,) int {}))
+test "local parentheses" { fn local = (
+ (fn() void! {})
+) }
+
+---
+
+(source_file
+  (function_binding
+    (identifier)
+    (parenthesized_expression
+      (function_expression
+        (parameters)
+        (block))))
+  (function_binding
+    (identifier)
+    (parenthesized_expression
+      (parenthesized_expression
+        (function_expression
+          (parameters
+            (parameter
+              (named_type
+                (identifier))
+              (identifier)))
+          (named_type
+            (identifier))
+          (block)))))
+  (test_declaration
+    (string
+      (quoted_string
+        (string_content)))
+    (block
+      (function_binding
+        (identifier)
+        (parenthesized_expression
+          (parenthesized_expression
+            (function_expression
+              (parameters)
+              (error_type
+                (named_type
+                  (identifier)))
+              (block))))))))
+
+==================
+Declaration parity empty generic lists separated by comments
+==================
+struct Empty<// parameter comment
+> {}
+type EmptyApplication = Box< // argument comment
+>
+
+---
+
+(source_file
+  (struct_declaration
+    (identifier)
+    (type_parameters
+      (comment)))
+  (type_declaration
+    (identifier)
+    (named_type
+      (identifier)
+      (type_arguments
+        (comment)))))
+
+==================
+Declaration parity rejects tuple type trailing comma
+==================
+type Invalid = (int,)
+
+---
+
+(source_file
+  (type_declaration
+    (identifier)
+    (tuple_type
+      (named_type
+        (identifier))
+      (ERROR))))
+
+==================
+Declaration parity rejects empty tuple type
+==================
+type Invalid = ()
+
+---
+
+(source_file
+  (type_declaration
+    (identifier)
+    (tuple_type
+      (named_type
+        (MISSING identifier)))))
+
+==================
+Declaration parity rejects omitted function type return
+==================
+type Invalid = (fn())
+
+---
+
+(source_file
+  (type_declaration
+    (identifier)
+    (function_type
+      (named_type
+        (MISSING identifier)))))
+
+==================
+Declaration parity rejects bare error function type return
+==================
+type Invalid = (fn() !)
+
+---
+
+(source_file
+  (type_declaration
+    (identifier)
+    (function_type
+      (error_type
+        (named_type
+          (MISSING identifier))))))
+
+==================
+Declaration parity rejects bare error extern return
+==================
+extern "native.c" as native { fn invalid() ! = "invalid" }
+
+---
+
+(source_file
+  (extern_declaration
+    (string
+      (quoted_string
+        (string_content)))
+    (identifier)
+    (extern_function
+      (identifier)
+      (parameters)
+      (ERROR)
+      (string
+        (quoted_string
+          (string_content))))))
+
+==================
+Declaration parity rejects bare error anonymous return
+==================
+fn invalid = (fn() ! {})
+
+---
+
+(source_file
+  (function_binding
+    (identifier)
+    (parenthesized_expression
+      (function_expression
+        (parameters)
+        (ERROR)
+        (block)))))
+
+==================
+Declaration parity rejects nonlambda inferred function initializer
+==================
+fn invalid = (42)
+
+---
+
+(source_file
+  (ERROR
+    (identifier)
+    (integer)))
+
+==================
+Declaration parity rejects commas between import entries
+==================
+import { "a.nc" as a, "b.nc" as b }
+
+---
+
+(source_file
+  (import_declaration
+    (import_entry
+      (string
+        (quoted_string
+          (string_content)))
+      (identifier))
+    (ERROR)
+    (import_entry
+      (string
+        (quoted_string
+          (string_content)))
+      (identifier))))
+
+==================
+Declaration parity rejects commas between struct fields
+==================
+struct Invalid { int a, int b }
+
+---
+
+(source_file
+  (struct_declaration
+    (identifier)
+    (field_declaration
+      (named_type
+        (identifier))
+      (identifier))
+    (ERROR)
+    (field_declaration
+      (named_type
+        (identifier))
+      (identifier))))
+
+==================
+Declaration parity rejects commas between enum variants
+==================
+enum Invalid { A, B }
+
+---
+
+(source_file
+  (enum_declaration
+    (identifier)
+    (enum_variant
+      (identifier))
+    (ERROR)
+    (enum_variant
+      (identifier))))

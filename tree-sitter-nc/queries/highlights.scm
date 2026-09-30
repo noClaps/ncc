@@ -1,7 +1,11 @@
 (comment) @comment
+((comment) @comment.documentation
+ (#match? @comment.documentation "^///"))
 
 (identifier) @variable
 (named_type) @type
+((named_type name: (identifier) @type.builtin)
+ (#match? @type.builtin "^(bool|char|int|uint|byte|float|str|void)$"))
 (type_parameter name: (identifier) @type.parameter)
 (struct_declaration name: (identifier) @type)
 (enum_declaration name: (identifier) @type)
@@ -16,6 +20,7 @@
 (field_initializer name: (identifier) @property)
 (member_expression member: (identifier) @property)
 (call_expression function: (identifier) @function.call)
+(call_expression function: (parenthesized_expression) @function.call)
 (call_expression function: (member_expression member: (identifier) @function.call))
 (builtin) @function.builtin
 (cast_expression "as" @function.builtin)

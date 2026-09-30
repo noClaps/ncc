@@ -95,6 +95,57 @@ def parse_tree(path, edits=()):
 # exercise reuse of already edited (including recovered) trees, not just the base.
 edit_cases = [
     (
+        "metadata strings versus interpolation",
+        'test "茶 {not code ???}" {}\n',
+        [
+            ("{not code ???}", '{outer {inner} "quotes"}', False),
+            ('test "茶', 'test """\n茶', True),
+            ('quotes"}"', 'quotes"}\n"""', False),
+            ('"quotes"', "'letters'", False),
+        ],
+    ),
+    (
+        "generic angle operators",
+        'extern "native.c" as native { fn read() Box<int> = "read" }\n',
+        [
+            ("> =", ">=", True),
+            (">=", "> =", False),
+            ("<int>", "<Box<int>>", False),
+            ("<Box<int>>", "< // 茶\n Box<int>\n>", False),
+        ],
+    ),
+    (
+        "comparison and shift operators",
+        "while index < 26 { index = index + 1 }\nint bits = value >> 2\n",
+        [
+            ("index < 26", "index <= 26", False),
+            ("index <= 26", "index > 26", False),
+            ("value >> 2", "value > 2", False),
+            ("value > 2", "value >> 2", False),
+            ("index > 26", "index < // comment\n26", False),
+        ],
+    ),
+    (
+        "local declaration restrictions",
+        "fn outer() { fn local() {} }\n",
+        [
+            ("fn local", "pub fn local", True),
+            ("pub fn local", "fn local", False),
+            ("local()", "local<T>()", True),
+            ("local<T>()", "local()", False),
+        ],
+    ),
+    (
+        "parenthesized function paths",
+        "int value = (helpers.identity)<int>(1)\n",
+        [
+            ("(helpers.identity)", "((helpers.identity))", False),
+            ("((helpers.identity))", "factory().identity", False),
+            ("factory().identity", "helpers.identity", False),
+            ("helpers.identity", "(helpers.identity)", False),
+        ],
+    ),
+    (
         "return/comment boundary",
         'fn stop() {\n  return 1\n  @println("🍪")\n}\n',
         [
@@ -403,6 +454,37 @@ highlight_count += highlight_case(
     ],
 )
 highlight_count += highlight_case(
+    "metadata doc comments and parenthesized calls",
+    """/// API documentation
+// Ordinary comment
+import { "{not code ???}" as metadata }
+extern "native{junk}.c" as native { fn emit() = "{raw symbol}" }
+test "{not code ???}" {}
+int result = ((helpers.identity))<int>(1)
+fn outer() { fn local() {} }
+""",
+    [
+        ("comment.documentation", "/// API documentation"),
+        ("comment", "// Ordinary comment"),
+        ("string", '"{not code ???}"'),
+        ("string", '"native{junk}.c"'),
+        ("string", '"{raw symbol}"'),
+        ("function.call", "((helpers.identity))"),
+        ("type.builtin", "int", 0),
+        ("type.builtin", "int", 1),
+        ("function", "outer"),
+        ("function", "local"),
+    ],
+    [
+        ("comment.documentation", "// Ordinary comment"),
+        ("variable", "not"),
+        ("variable", "junk"),
+        ("variable", "raw"),
+        ("punctuation.special", "{", 1),
+        ("punctuation.special", "{", 2),
+    ],
+)
+highlight_count += highlight_case(
     "recovered call and following binding",
     "@println(1\nint after = 2\n",
     [
@@ -414,6 +496,89 @@ highlight_count += highlight_case(
     ],
     incomplete=True,
 )
+if "--compiler-parity" in sys.argv:
+    # Build a syntax-only oracle separately from the standalone grammar tests.
+    # Imports, @embed, externs, tests, and examples are never executed or loaded.
+    compiler_target = build / "compiler"
+    subprocess.run(
+        ["cargo", "build", "--offline", "--lib", "--target-dir", str(compiler_target)],
+        cwd=ROOT,
+        env=environment,
+        check=True,
+        timeout=120,
+    )
+    oracle = build / ("parser-check.exe" if os.name == "nt" else "parser-check")
+    subprocess.run(
+        [
+            "rustc",
+            "--edition=2024",
+            str(GRAMMAR / "scripts" / "parser-check.rs"),
+            "--extern",
+            f"ncc={compiler_target / 'debug' / 'libncc.rlib'}",
+            "-L",
+            f"dependency={compiler_target / 'debug' / 'deps'}",
+            "-o",
+            str(oracle),
+        ],
+        cwd=ROOT,
+        env=environment,
+        check=True,
+        timeout=120,
+    )
+    cases = []
+    for corpus in sorted((GRAMMAR / "test" / "corpus").glob("*.txt")):
+        for match in re.finditer(
+            r"^={3,}\n(.*?)\n={3,}\n(.*?)\n-{3,}\n(.*?)(?=^={3,}|\Z)",
+            corpus.read_text(),
+            re.MULTILINE | re.DOTALL,
+        ):
+            name, source, expected = match.groups()
+            invalid = bool(re.search(r"\((?:ERROR|MISSING|UNEXPECTED)\b", expected))
+            cases.append((f"{corpus.name}: {name}", source, not invalid))
+    design = (ROOT / "docs" / "design.md").read_text()
+    for match in re.finditer(r"^```nc\n(.*?)^```", design, re.MULTILINE | re.DOTALL):
+        line = design[: match.start()].count("\n") + 1
+        cases.append((f"design.md:{line}", match.group(1), None))
+    paths = []
+    for index, (_, source, _) in enumerate(cases):
+        path = build / f"parity-{index}.nc"
+        path.write_bytes(source.encode("utf-8"))
+        paths.append(path)
+    result = subprocess.run(
+        [str(oracle)],
+        input="".join(f"{path}\n" for path in paths),
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=120,
+    )
+    statuses = result.stdout.splitlines()
+    assert len(statuses) == len(cases), result.stdout
+    accepted_design = rejected_design = 0
+    parity_failures = []
+    for path, (name, _, expected), status in zip(paths, cases, statuses):
+        assert status in ("ok", "error"), status
+        accepted = status == "ok"
+        if expected is not None:
+            if accepted != expected:
+                parity_failures.append(f"Compiler/corpus acceptance mismatch: {name}")
+        elif not accepted:
+            # Design snippets also include templates and intentionally invalid
+            # examples. They are not valid-program fixtures for either parser.
+            rejected_design += 1
+            continue
+        else:
+            accepted_design += 1
+        _, grammar_status = parse_tree(path)
+        if (grammar_status == 0) != accepted:
+            parity_failures.append(f"Compiler/grammar mismatch: {name}")
+    assert not parity_failures, "\n".join(parity_failures)
+    print(
+        f"Compiler parity: {len(cases) - accepted_design - rejected_design} corpus cases, "
+        f"{accepted_design} accepted design snippets; "
+        f"{rejected_design} compiler-rejected design snippets excluded."
+    )
+
 print(
     f"Corpus, {len(examples)} NC examples, queries, {highlight_count} highlight "
     f"assertions, and {edit_count} incremental edits passed."

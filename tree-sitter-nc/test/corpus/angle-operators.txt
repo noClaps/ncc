@@ -1,0 +1,116 @@
+==================
+Type angles coexist with comparisons shifts and concatenation
+==================
+while index < 26 { index = index + 1 }
+bool upper = value > limit
+bool lower = value < limit
+int shifted = value >> 2 << 1
+int generic = helpers.identity<int>(1) >> 2
+str joined = left <> right
+bool inclusive = left <= right and left >= right
+Box<Box<int>> nested = Box<Box<int>>{.value = Box<int>{.value = 1}}
+
+---
+
+(source_file
+  (while_statement
+    (binary_expression
+      (identifier)
+      (integer))
+    (block
+      (assignment_statement
+        (identifier)
+        (binary_expression
+          (identifier)
+          (integer)))))
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (binary_expression
+      (identifier)
+      (identifier)))
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (binary_expression
+      (identifier)
+      (identifier)))
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (binary_expression
+      (binary_expression
+        (identifier)
+        (integer))
+      (integer)))
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (binary_expression
+      (call_expression
+        (member_expression
+          (identifier)
+          (identifier))
+        (type_arguments
+          (named_type
+            (identifier)))
+        (arguments
+          (integer)))
+      (integer)))
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (binary_expression
+      (identifier)
+      (identifier)))
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (binary_expression
+      (binary_expression
+        (identifier)
+        (identifier))
+      (binary_expression
+        (identifier)
+        (identifier))))
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier)
+        (type_arguments
+          (named_type
+            (identifier)
+            (type_arguments
+              (named_type
+                (identifier))))))
+      (identifier))
+    (struct_expression
+      (identifier)
+      (type_arguments
+        (named_type
+          (identifier)
+          (type_arguments
+            (named_type
+              (identifier)))))
+      (field_initializer
+        (identifier)
+        (struct_expression
+          (identifier)
+          (type_arguments
+            (named_type
+              (identifier)))
+          (field_initializer
+            (identifier)
+            (integer)))))))

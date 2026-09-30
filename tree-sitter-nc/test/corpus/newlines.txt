@@ -53,7 +53,7 @@ Calls and indices stop at a newline but members may continue
 ==================
 value
 (1)
-values
+@values
 [2]
 record
 .field
@@ -67,7 +67,8 @@ record
     (parenthesized_expression
       (integer)))
   (expression_statement
-    (identifier))
+    (builtin
+      (identifier)))
   (expression_statement
     (array_expression
       (integer)))

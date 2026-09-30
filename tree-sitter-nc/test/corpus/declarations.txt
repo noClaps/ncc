@@ -123,7 +123,7 @@ pub type Qualified = models.Record<int>
 Public bindings sigils and composite types
 ==================
 pub int version = 1
-pub mutex mut int counter = 0
+pub mutex int counter = 0
 mut int left, int right = (1, 2)
 (int, str) pair = (3, "three")
 int[3] fixed = [1, 2, 3]

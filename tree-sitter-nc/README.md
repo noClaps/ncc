@@ -15,13 +15,24 @@ From the repository root:
 python3 tree-sitter-nc/scripts/test.py
 # Or:
 make grammar-test
+
+# Also compare syntax acceptance with the Rust compiler and design examples:
+python3 tree-sitter-nc/scripts/test.py --compiler-parity
 ```
 
 The script regenerates the ABI-15 parser, builds a dynamic library under
 `target/tree-sitter-nc`, runs the corpus tests, parses the existing NC examples,
 and checks exact highlighting capture spans and incremental-edit parity with
-fresh parses. Tree-sitter's build cache also stays under
-`target`. Examples are only parsed, never executed—including `builtins.nc`.
+fresh parses. Tree-sitter's build cache also stays under `target`. Examples are
+only parsed, never executed—including `builtins.nc`.
+
+The optional `--compiler-parity` check additionally requires Rust/Cargo. It builds
+`scripts/parser-check.rs` under `target`, compares every corpus case with the
+compiler lexer/parser, and parses every compiler-accepted `nc` code fence in
+`docs/design.md`. It does not load imports, evaluate `@embed`, type-check, generate
+C, or execute programs. Currently 142 design snippets are checked; 18 rejected
+snippets are excluded because they contain templates, intentional errors, or
+malformed documentation examples. This is a syntax check, not semantic conformance.
 
 To regenerate only, from this directory:
 
@@ -49,8 +60,8 @@ No editor plugins, setup files, language-server bindings, or formatter are inclu
   a stateless scanner. Binary expressions, member access, and explicit generic
   continuation follow the compiler's different multiline rules.
 
-The suite contains 32 structural corpus cases, 54 incremental edit steps, and
-65 highlighting assertions. Recovery cases check missing delimiters, incomplete
+The suite contains 70 structural corpus cases, 75 incremental edit steps, and
+81 highlighting assertions. Recovery cases check missing delimiters, incomplete
 generics and postfix expressions, unterminated strings, and invalid tokens.
 Incremental checks compare node kinds, fields, token text, and ranges with fresh
 parses, including UTF-8 edits and damage/repair sequences. Highlighting assertions
@@ -70,3 +81,18 @@ and single-grapheme validation, and other semantic checks.
   compiler; explicit generic initializers such as `Empty<int>{}` can be empty.
 - Named functions accept bare `!` returns. Anonymous functions require an explicit
   type, such as `fn() void! { ... }`; bare `!` is recovered as invalid syntax.
+  Inferred function bindings may parenthesize their anonymous function.
+- Import paths, extern paths/symbols, and test names retain balanced brace text
+  as literal content, including nested quoted substrings. They are not interpolated.
+- Local declarations retain the same public node shapes as module declarations,
+  but reject `pub` and local generic function syntax, matching the compiler.
+- `mut` and `mutex` are independently supported binding modifiers. The grammar
+  does not combine them: neither combined ordering parses in the current compiler,
+  and the specification describes mutex access as mutable inside lock scopes.
+- Type angles respect the lexer's adjacent operators: `< >` is an empty type list,
+  whereas `<>` is concatenation, and `>=` cannot be split into a closer and `=`.
+  Nested type `>>` closers remain supported without splitting ordinary shifts.
+- Generic calls and struct initializers require name paths, which may be
+  parenthesized, rather than computed members such as `factory().Type`.
+- Labels on `if` retain postfix, operator, and fallback continuations in the
+  labeled expression; wildcard patterns cannot absorb such continuations.

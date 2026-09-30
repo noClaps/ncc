@@ -41,6 +41,14 @@ const KEYWORDS = [
 
 const commaSep1 = (rule) => seq(rule, repeat(seq(",", rule)));
 const commaSep = (rule) => optional(seq(commaSep1(rule), optional(",")));
+// The scanner may select an angle while both comparison and type-application
+// branches are live. Keep that token usable by either interpretation.
+const operatorToken = ($, op) =>
+  op === "<"
+    ? choice("<", alias($._type_lt, "<"))
+    : op === ">"
+      ? choice(">", alias($._comparison_gt, ">"))
+      : op;
 
 module.exports = grammar({
   name: "nc",
@@ -54,6 +62,10 @@ module.exports = grammar({
     $._call_lparen,
     $._index_lbracket,
     $._struct_lbrace,
+    $._type_lt,
+    $._type_gt,
+    $._comparison_gt,
+    $._metadata_braces,
     $._error_sentinel,
   ],
 
@@ -61,6 +73,12 @@ module.exports = grammar({
   // Keep both interpretations until the return clause/body disambiguates them.
   conflicts: ($) => [
     [$.parameters, $.function_type],
+    [$.named_type, $._expression, $._parenthesized_path],
+
+    [$._expression, $._parenthesized_path],
+    [$.named_type, $._expression, $._qualified_path],
+    [$._expression, $._qualified_path],
+    [$.named_type, $._qualified_path],
     // A path before `{` may be a control-flow subject or a struct initializer.
     [$._expression, $.struct_expression],
     // A leading name can start a typed binding or an indexed assignment/call.
@@ -98,11 +116,15 @@ module.exports = grammar({
     import_declaration: ($) =>
       seq("import", $._lbrace, repeat($.import_entry), "}"),
     import_entry: ($) =>
-      seq(field("path", $.string), "as", field("alias", $.identifier)),
+      seq(
+        field("path", alias($._metadata_string, $.string)),
+        "as",
+        field("alias", $.identifier),
+      ),
     extern_declaration: ($) =>
       seq(
         "extern",
-        field("path", $.string),
+        field("path", alias($._metadata_string, $.string)),
         "as",
         field("alias", $.identifier),
         $._lbrace,
@@ -116,7 +138,7 @@ module.exports = grammar({
         $.parameters,
         optional(field("return_type", $._type)),
         "=",
-        field("symbol", $.string),
+        field("symbol", alias($._metadata_string, $.string)),
       ),
 
     struct_declaration: ($) =>
@@ -154,9 +176,15 @@ module.exports = grammar({
         "=",
         field("type", $._type),
       ),
-    type_parameters: ($) => seq("<", commaSep($.type_parameter), ">"),
+    type_parameters: ($) =>
+      seq(
+        alias($._type_lt, "<"),
+        commaSep($.type_parameter),
+        alias($._type_gt, ">"),
+      ),
     type_parameter: ($) => seq(optional("type"), field("name", $.identifier)),
-    type_arguments: ($) => seq("<", commaSep($._type), ">"),
+    type_arguments: ($) =>
+      seq(alias($._type_lt, "<"), commaSep($._type), alias($._type_gt, ">")),
 
     function_declaration: ($) =>
       seq(
@@ -183,8 +211,15 @@ module.exports = grammar({
         "fn",
         field("name", $.identifier),
         "=",
-        field("value", $.function_expression),
+        field("value", $._inferred_function),
       ),
+    // Parentheses preserve the lambda accepted by stmt_inner's inferred binding.
+    _inferred_function: ($) =>
+      choice(
+        $.function_expression,
+        alias($._parenthesized_function, $.parenthesized_expression),
+      ),
+    _parenthesized_function: ($) => seq($._lparen, $._inferred_function, ")"),
     binding_declaration: ($) =>
       // Prefer a complete typed binding over a name statement followed by an
       // assignment, without committing to a type before its binding name exists.
@@ -192,8 +227,7 @@ module.exports = grammar({
         1,
         seq(
           optional("pub"),
-          optional("mutex"),
-          optional("mut"),
+          optional(choice("mutex", "mut")),
           commaSep1($.typed_binding),
           "=",
           field("value", $._expression),
@@ -237,14 +271,43 @@ module.exports = grammar({
     error_type: ($) => prec.left(2, seq($._type, "!")),
 
     test_declaration: ($) =>
-      seq("test", field("name", $.string), field("body", $.block)),
+      seq(
+        "test",
+        field("name", alias($._metadata_string, $.string)),
+        field("body", $.block),
+      ),
     block: ($) => seq($._lbrace, repeat($._statement), "}"),
     _statement: ($) =>
       choice(
-        $.binding_declaration,
-        $.function_declaration,
-        $.function_binding,
+        alias($._local_binding, $.binding_declaration),
+        alias($._local_function, $.function_declaration),
+        alias($._local_function_binding, $.function_binding),
         $._non_declaration_statement,
+      ),
+    _local_binding: ($) =>
+      prec.dynamic(
+        1,
+        seq(
+          optional(choice("mutex", "mut")),
+          commaSep1($.typed_binding),
+          "=",
+          field("value", $._expression),
+        ),
+      ),
+    _local_function: ($) =>
+      seq(
+        "fn",
+        field("name", $.identifier),
+        $.parameters,
+        optional(field("return_type", choice($._type, "!"))),
+        field("body", $.block),
+      ),
+    _local_function_binding: ($) =>
+      seq(
+        "fn",
+        field("name", $.identifier),
+        "=",
+        field("value", $._inferred_function),
       ),
     _non_declaration_statement: ($) =>
       choice(
@@ -298,7 +361,92 @@ module.exports = grammar({
           $.for_statement,
           $.while_statement,
           $.lock_statement,
-          $.if_expression,
+          $._labeled_if_expression,
+        ),
+      ),
+    // stmt_inner parses the entire expression after a label, but its first
+    // token must be `if`. Keep postfix/fallback/operator continuations inside it.
+    _labeled_if_expression: ($) =>
+      choice(
+        $.if_expression,
+        alias($._labeled_if_call, $.call_expression),
+        alias($._labeled_if_index, $.index_expression),
+        alias($._labeled_if_member, $.member_expression),
+        alias($._labeled_if_binary, $.binary_expression),
+        alias($._labeled_if_else, $.else_expression),
+        alias($._labeled_if_catch, $.catch_expression),
+      ),
+    _labeled_if_call: ($) =>
+      prec.left(
+        13,
+        seq(field("function", $._labeled_if_expression), $.arguments),
+      ),
+    _labeled_if_index: ($) =>
+      prec.left(
+        13,
+        seq(
+          field("object", $._labeled_if_expression),
+          alias($._index_lbracket, "["),
+          field("index", $._expression),
+          "]",
+        ),
+      ),
+    _labeled_if_member: ($) =>
+      prec.left(
+        13,
+        seq(
+          field("object", $._labeled_if_expression),
+          ".",
+          field("member", $.identifier),
+        ),
+      ),
+    _labeled_if_binary: ($) =>
+      choice(
+        ...[
+          [1, ["or"]],
+          [2, ["and"]],
+          [3, ["==", "!="]],
+          [4, ["<", "<=", ">", ">=", "in"]],
+          [5, ["|"]],
+          [6, ["^"]],
+          [7, ["&"]],
+          [8, ["<<", ">>"]],
+          [9, ["+", "-", "<>"]],
+          [10, ["*", "/", "%"]],
+          [11, ["**"]],
+        ].map(([precedence, operators]) =>
+          (precedence === 11 ? prec.right : prec.left)(
+            precedence,
+            seq(
+              field("left", $._labeled_if_expression),
+              field(
+                "operator",
+                operators.length === 1
+                  ? operators[0]
+                  : choice(...operators.map((op) => operatorToken($, op))),
+              ),
+              field("right", $._expression),
+            ),
+          ),
+        ),
+      ),
+    _labeled_if_else: ($) =>
+      prec.right(
+        0,
+        seq(
+          field("value", $._labeled_if_expression),
+          "else",
+          field("fallback", choice($.block, $._expression)),
+        ),
+      ),
+    _labeled_if_catch: ($) =>
+      prec.left(
+        0,
+        seq(
+          field("value", $._labeled_if_expression),
+          "catch",
+          field("name", $.identifier),
+          field("body", $.block),
         ),
       ),
 
@@ -367,7 +515,17 @@ module.exports = grammar({
           seq($.type_arguments, $._lbrace, commaSep($.field_initializer), "}"),
         ),
       ),
-    _path: ($) => choice($.identifier, $.member_expression),
+    _path: ($) =>
+      choice(
+        $.identifier,
+        $.builtin,
+        $.index_placeholder,
+        alias($._qualified_path, $.member_expression),
+        alias($._parenthesized_path, $.parenthesized_expression),
+      ),
+    _qualified_path: ($) =>
+      seq(field("object", $._path), ".", field("member", $.identifier)),
+    _parenthesized_path: ($) => seq($._lparen, $._path, ")"),
     field_initializer: ($) =>
       seq(".", field("name", $.identifier), "=", field("value", $._expression)),
     call_expression: ($) =>
@@ -427,7 +585,9 @@ module.exports = grammar({
               field("left", $._expression),
               field(
                 "operator",
-                operators.length === 1 ? operators[0] : choice(...operators),
+                operators.length === 1
+                  ? operators[0]
+                  : choice(...operators.map((op) => operatorToken($, op))),
               ),
               field("right", $._expression),
             ),
@@ -464,8 +624,38 @@ module.exports = grammar({
     if_arm: ($) => seq(commaSep1($.pattern), "->", field("body", $.block)),
     // Like expression_pattern in the compiler, patterns retain all expression
     // forms, including tuple/array/struct shapes and qualified enum calls.
-    pattern: ($) => $._expression,
+    pattern: ($) => choice(alias("_", $.identifier), $._expression),
 
+    // Declaration metadata consumes a lexer string, not a format expression.
+    _metadata_string: ($) =>
+      choice(
+        alias($._metadata_quoted_string, $.quoted_string),
+        alias($._metadata_multiline_string, $.multiline_string),
+      ),
+    _metadata_quoted_string: ($) =>
+      seq(
+        '"',
+        repeat(
+          choice(
+            $.string_content,
+            $.escape_sequence,
+            alias($._metadata_braces, $.string_content),
+          ),
+        ),
+        token.immediate('"'),
+      ),
+    _metadata_multiline_string: ($) =>
+      seq(
+        '"""',
+        repeat(
+          choice(
+            $.multiline_string_content,
+            $.escape_sequence,
+            alias($._metadata_braces, $.multiline_string_content),
+          ),
+        ),
+        token.immediate('"""'),
+      ),
     string: ($) => choice($.quoted_string, $.multiline_string),
     quoted_string: ($) =>
       seq(

@@ -1,0 +1,519 @@
+==================
+Metadata strings retain brace text and nested quoted substrings
+==================
+import { "{not an expression ???}" as literal }
+extern "native{not code}.c" as native {
+  fn emit() = "symbol{nested {text} "quotes"}"
+}
+test "{not + valid ???}" {}
+test """
+  {metadata {with "nested quotes"} and 'characters'}
+  """ {}
+
+---
+
+(source_file
+  (import_declaration
+    (import_entry
+      (string
+        (quoted_string
+          (string_content)))
+      (identifier)))
+  (extern_declaration
+    (string
+      (quoted_string
+        (string_content)
+        (string_content)
+        (string_content)))
+    (identifier)
+    (extern_function
+      (identifier)
+      (parameters)
+      (string
+        (quoted_string
+          (string_content)
+          (string_content)))))
+  (test_declaration
+    (string
+      (quoted_string
+        (string_content)))
+    (block))
+  (test_declaration
+    (string
+      (multiline_string
+        (multiline_string_content)
+        (multiline_string_content)
+        (multiline_string_content)))
+    (block)))
+
+==================
+Local bindings and functions keep declaration nodes
+==================
+fn outer() {
+  mutex int shared = 0
+  mut int value = 1
+  int first, str second = (1, "two")
+  fn local(int input) int { return input }
+  fn callback = ((fn() { return }))
+}
+
+---
+
+(source_file
+  (function_declaration
+    (identifier)
+    (parameters)
+    (block
+      (binding_declaration
+        (typed_binding
+          (named_type
+            (identifier))
+          (identifier))
+        (integer))
+      (binding_declaration
+        (typed_binding
+          (named_type
+            (identifier))
+          (identifier))
+        (integer))
+      (binding_declaration
+        (typed_binding
+          (named_type
+            (identifier))
+          (identifier))
+        (typed_binding
+          (named_type
+            (identifier))
+          (identifier))
+        (tuple_expression
+          (integer)
+          (string
+            (quoted_string
+              (string_content)))))
+      (function_declaration
+        (identifier)
+        (parameters
+          (parameter
+            (named_type
+              (identifier))
+            (identifier)))
+        (named_type
+          (identifier))
+        (block
+          (return_statement
+            (identifier))))
+      (function_binding
+        (identifier)
+        (parenthesized_expression
+          (parenthesized_expression
+            (function_expression
+              (parameters)
+              (block
+                (return_statement)))))))))
+
+==================
+Parenthesized paths explicit builtin generics and struct initializers
+==================
+int result = ((helpers.identity))<int>(1)
+Box<int> value = (models.Box)<int>{.value = 1}
+Box plain = ((models.Box)){.value = 1}
+int built = @custom<int>(1)
+int index = $<int>(1)
+
+---
+
+(source_file
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (call_expression
+      (parenthesized_expression
+        (parenthesized_expression
+          (member_expression
+            (identifier)
+            (identifier))))
+      (type_arguments
+        (named_type
+          (identifier)))
+      (arguments
+        (integer))))
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier)
+        (type_arguments
+          (named_type
+            (identifier))))
+      (identifier))
+    (struct_expression
+      (parenthesized_expression
+        (member_expression
+          (identifier)
+          (identifier)))
+      (type_arguments
+        (named_type
+          (identifier)))
+      (field_initializer
+        (identifier)
+        (integer))))
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (struct_expression
+      (parenthesized_expression
+        (parenthesized_expression
+          (member_expression
+            (identifier)
+            (identifier))))
+      (field_initializer
+        (identifier)
+        (integer))))
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (call_expression
+      (builtin
+        (identifier))
+      (type_arguments
+        (named_type
+          (identifier)))
+      (arguments
+        (integer))))
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (call_expression
+      (index_placeholder)
+      (type_arguments
+        (named_type
+          (identifier)))
+      (arguments
+        (integer)))))
+
+==================
+Labels retain full if expression continuations
+==================
+choice: if value { _ -> { break 1 } } + 2 * 3
+fallback: if value { _ -> { break none } } else 1
+handled: if value { _ -> { break result } } catch message { @println(message) }
+postfix: if value { _ -> { break factory } }(1)[0].field
+
+---
+
+(source_file
+  (labeled_statement
+    (identifier)
+    (binary_expression
+      (if_expression
+        (identifier)
+        (if_arm
+          (pattern
+            (identifier))
+          (block
+            (break_statement
+              (integer)))))
+      (binary_expression
+        (integer)
+        (integer))))
+  (labeled_statement
+    (identifier)
+    (else_expression
+      (if_expression
+        (identifier)
+        (if_arm
+          (pattern
+            (identifier))
+          (block
+            (break_statement
+              (none)))))
+      (integer)))
+  (labeled_statement
+    (identifier)
+    (catch_expression
+      (if_expression
+        (identifier)
+        (if_arm
+          (pattern
+            (identifier))
+          (block
+            (break_statement
+              (identifier)))))
+      (identifier)
+      (block
+        (expression_statement
+          (call_expression
+            (builtin
+              (identifier))
+            (arguments
+              (identifier)))))))
+  (labeled_statement
+    (identifier)
+    (member_expression
+      (index_expression
+        (call_expression
+          (if_expression
+            (identifier)
+            (if_arm
+              (pattern
+                (identifier))
+              (block
+                (break_statement
+                  (identifier)))))
+          (arguments
+            (integer)))
+        (integer))
+      (identifier))))
+
+==================
+Wildcard patterns have priority over expression continuations
+==================
+if value { _ -> {} (_ + 1) -> {} [_, name] -> {} }
+
+---
+
+(source_file
+  (expression_statement
+    (if_expression
+      (identifier)
+      (if_arm
+        (pattern
+          (identifier))
+        (block))
+      (if_arm
+        (pattern
+          (parenthesized_expression
+            (binary_expression
+              (identifier)
+              (integer))))
+        (block))
+      (if_arm
+        (pattern
+          (array_expression
+            (identifier)
+            (identifier)))
+        (block)))))
+
+==================
+Separated angle tokens preserve multiline and comment generics
+==================
+struct Empty< > {}
+type EmptyType = Box< // opener
+ >
+fn identity<
+ type T
+>(T value) T { return value }
+int value = identity< // argument
+ int
+>(1)
+extern "native.c" as native { fn read() Box<int> = "read" }
+
+---
+
+(source_file
+  (struct_declaration
+    (identifier)
+    (type_parameters))
+  (type_declaration
+    (identifier)
+    (named_type
+      (identifier)
+      (type_arguments
+        (comment))))
+  (function_declaration
+    (identifier)
+    (type_parameters
+      (type_parameter
+        (identifier)))
+    (parameters
+      (parameter
+        (named_type
+          (identifier))
+        (identifier)))
+    (named_type
+      (identifier))
+    (block
+      (return_statement
+        (identifier))))
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (call_expression
+      (identifier)
+      (type_arguments
+        (comment)
+        (named_type
+          (identifier)))
+      (arguments
+        (integer))))
+  (extern_declaration
+    (string
+      (quoted_string
+        (string_content)))
+    (identifier)
+    (extern_function
+      (identifier)
+      (parameters)
+      (named_type
+        (identifier)
+        (type_arguments
+          (named_type
+            (identifier))))
+      (string
+        (quoted_string
+          (string_content))))))
+
+==================
+Adjacent empty generic delimiters are concatenation not a type application
+==================
+struct Invalid<> {}
+
+---
+
+(source_file
+  (struct_declaration
+    (identifier)
+    (ERROR)))
+
+==================
+Adjacent generic closer and equals cannot split comparison operator
+==================
+extern "native.c" as native { fn read() Box<int>= "read" }
+
+---
+
+(source_file
+  (extern_declaration
+    (string
+      (quoted_string
+        (string_content)))
+    (identifier)
+    (ERROR
+      (identifier)
+      (parameters)
+      (identifier)
+      (ERROR
+        (identifier))
+      (identifier))))
+
+==================
+Public bindings are not allowed inside a block
+==================
+fn outer() { pub int value = 1 }
+
+---
+
+(source_file
+  (function_declaration
+    (identifier)
+    (parameters)
+    (block
+      (ERROR)
+      (binding_declaration
+        (typed_binding
+          (named_type
+            (identifier))
+          (identifier))
+        (integer)))))
+
+==================
+Public local functions are not allowed inside a block
+==================
+fn outer() { pub fn local() {} }
+
+---
+
+(source_file
+  (function_declaration
+    (identifier)
+    (parameters)
+    (block
+      (ERROR)
+      (function_declaration
+        (identifier)
+        (parameters)
+        (block)))))
+
+==================
+Generic local functions are not allowed inside a block
+==================
+fn outer() { fn local<type T>(T value) T { return value } }
+
+---
+
+(source_file
+  (function_declaration
+    (identifier)
+    (parameters)
+    (block
+      (function_declaration
+        (identifier)
+        (ERROR
+          (identifier))
+        (parameters
+          (parameter
+            (named_type
+              (identifier))
+            (identifier)))
+        (named_type
+          (identifier))
+        (block
+          (return_statement
+            (identifier)))))))
+
+==================
+Struct initializers require a name path not a computed member
+==================
+Box value = factory().Box{.value = 1}
+
+---
+
+(source_file
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (member_expression
+      (call_expression
+        (identifier)
+        (arguments))
+      (identifier)))
+  (block
+    (ERROR)
+    (assignment_statement
+      (identifier)
+      (integer))))
+
+==================
+Generic calls require a name path not a computed member
+==================
+int value = factory().identity<int>(1)
+
+---
+
+(source_file
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (binary_expression
+      (binary_expression
+        (member_expression
+          (call_expression
+            (identifier)
+            (arguments))
+          (identifier))
+        (identifier))
+      (parenthesized_expression
+        (integer)))))

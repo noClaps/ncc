@@ -2515,6 +2515,10 @@
           {
             "type": "function_expression",
             "named": true
+          },
+          {
+            "type": "parenthesized_expression",
+            "named": true
           }
         ]
       }
@@ -3290,6 +3294,22 @@
       "required": true,
       "types": [
         {
+          "type": "binary_expression",
+          "named": true
+        },
+        {
+          "type": "call_expression",
+          "named": true
+        },
+        {
+          "type": "catch_expression",
+          "named": true
+        },
+        {
+          "type": "else_expression",
+          "named": true
+        },
+        {
           "type": "for_statement",
           "named": true
         },
@@ -3298,7 +3318,15 @@
           "named": true
         },
         {
+          "type": "index_expression",
+          "named": true
+        },
+        {
           "type": "lock_statement",
+          "named": true
+        },
+        {
+          "type": "member_expression",
           "named": true
         },
         {
@@ -4418,11 +4446,23 @@
         "required": true,
         "types": [
           {
+            "type": "builtin",
+            "named": true
+          },
+          {
             "type": "identifier",
             "named": true
           },
           {
+            "type": "index_placeholder",
+            "named": true
+          },
+          {
             "type": "member_expression",
+            "named": true
+          },
+          {
+            "type": "parenthesized_expression",
             "named": true
           }
         ]
