@@ -130,7 +130,7 @@ Box<int> boxed = Box<int>
 Nested generic brackets and throwing anonymous functions
 ==================
 Box<Box<int>> value = Box<Box<int>>{.value = Box<int>{.value = 1}}
-fn fail = fn() ! { throw "failed" }
+fn fail = fn() void! { throw "failed" }
 
 ---
 
@@ -168,6 +168,9 @@ fn fail = fn() ! { throw "failed" }
     (identifier)
     (function_expression
       (parameters)
+      (error_type
+        (named_type
+          (identifier)))
       (block
         (throw_statement
           (string

@@ -2621,10 +2621,6 @@
         "required": false,
         "types": [
           {
-            "type": "!",
-            "named": false
-          },
-          {
             "type": "array_type",
             "named": true
           },
@@ -4434,7 +4430,7 @@
     },
     "children": {
       "multiple": true,
-      "required": false,
+      "required": true,
       "types": [
         {
           "type": "field_initializer",

@@ -19,7 +19,8 @@ make grammar-test
 
 The script regenerates the ABI-15 parser, builds a dynamic library under
 `target/tree-sitter-nc`, runs the corpus tests, parses the existing NC examples,
-and validates highlighting queries. Tree-sitter's build cache also stays under
+and checks exact highlighting capture spans and incremental-edit parity with
+fresh parses. Tree-sitter's build cache also stays under
 `target`. Examples are only parsed, never executed—including `builtins.nc`.
 
 To regenerate only, from this directory:
@@ -42,22 +43,30 @@ No editor plugins, setup files, language-server bindings, or formatter are inclu
   optional/error fallbacks, interpolation, Unicode characters, and multiline strings.
 - Conditional shape patterns, loops, labels, return/break/continue, async/await,
   lock scopes, assertions, and test blocks.
+- Escape-decoded literal braces and backslashes in quoted, multiline, and nested
+  strings, including mixed literal text and interpolation.
 - Newline-sensitive optional return/break values and ordinary postfix forms via
   a stateless scanner. Binary expressions, member access, and explicit generic
   continuation follow the compiler's different multiline rules.
 
-Corpus trees assert structure, not just the absence of parse errors. The recovery
-case checks that a declaration remains available after an invalid token. The
-compiler remains responsible for types, exhaustive matching, Unicode scalar and
-single-grapheme validation, and other semantic checks.
+The suite contains 32 structural corpus cases, 54 incremental edit steps, and
+65 highlighting assertions. Recovery cases check missing delimiters, incomplete
+generics and postfix expressions, unterminated strings, and invalid tokens.
+Incremental checks compare node kinds, fields, token text, and ranges with fresh
+parses, including UTF-8 edits and damage/repair sequences. Highlighting assertions
+check exact byte spans and exclude code-like text in comments and literal strings.
+These tests are regression coverage, not proof of exhaustive language conformance.
+The compiler remains responsible for types, exhaustive matching, Unicode scalar
+and single-grapheme validation, and other semantic checks.
 
-## Remaining parity work
+## Compiler syntax parity
 
-- Interpolation is recognized from source braces. The compiler decodes escapes
-  first, so interpolation delimiters formed by Unicode escapes need additional
-  grammar/scanner coverage.
-- The grammar accepts empty struct initializers and anonymous bare-`!` return
-  shorthand; the current compiler parser rejects these spellings. For anonymous
-  void/error functions, the compiler accepts the explicit `void!` spelling.
-- Expand incremental-edit, invalid/incomplete-source, highlighting, and full-spec
-  coverage before treating this as an exhaustive grammar conformance suite.
+- `\u{7b}` produces a literal brace: the compiler explicitly protects it against
+  interpolation. A decoded backslash also protects a following source brace,
+  as in `\\{literal}` or `\u{5c}{literal}`. The grammar keeps these out of
+  interpolation nodes and includes the protected brace in the escape node.
+- Ordinary struct initializers require at least one `.field = value`. `Empty{}`
+  parses as a name expression followed by a separate block, just as in the
+  compiler; explicit generic initializers such as `Empty<int>{}` can be empty.
+- Named functions accept bare `!` returns. Anonymous functions require an explicit
+  type, such as `fn() void! { ... }`; bare `!` is recovered as invalid syntax.

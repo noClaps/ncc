@@ -174,7 +174,7 @@ module.exports = grammar({
       seq(
         "fn",
         $.parameters,
-        optional(field("return_type", choice($._type, "!"))),
+        optional(field("return_type", $._type)),
         field("body", $.block),
       ),
     function_binding: ($) =>
@@ -358,7 +358,12 @@ module.exports = grammar({
       seq(
         field("type", $._path),
         choice(
-          seq(alias($._struct_lbrace, "{"), commaSep($.field_initializer), "}"),
+          seq(
+            alias($._struct_lbrace, "{"),
+            commaSep1($.field_initializer),
+            optional(","),
+            "}",
+          ),
           seq($.type_arguments, $._lbrace, commaSep($.field_initializer), "}"),
         ),
       ),
@@ -484,7 +489,18 @@ module.exports = grammar({
     multiline_string_content: (_) =>
       token.immediate(choice(/[^"\\{]+/, /"{1,2}[^"\\{]/, /"{1,2}/)),
     escape_sequence: (_) =>
-      token.immediate(seq("\\", choice(/[nrte\\"{]/, /u\{[0-9a-fA-F]{1,6}\}/))),
+      // The compiler decodes backslashes before finding interpolation. Consume
+      // a following source brace when that decoded backslash escapes it.
+      token.immediate(
+        seq(
+          "\\",
+          choice(
+            seq(choice("\\", /u\{0{0,4}5[cC]\}/), optional("{")),
+            /[nrte"{]/,
+            /u\{[0-9a-fA-F]{1,6}\}/,
+          ),
+        ),
+      ),
     interpolation: ($) => seq(token.immediate("{"), $._expression, "}"),
     // Grapheme count and Unicode scalar validity are semantic lexer checks.
     character: ($) =>

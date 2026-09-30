@@ -1,0 +1,215 @@
+==================
+Unicode braces remain literal after decoding
+==================
+str literal = "\u{7b}value\u{7d} \u{00007B}1 + 2}"
+str mixed = "\u{7b}literal} {1 + 2}"
+
+---
+
+(source_file
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (string
+      (quoted_string
+        (escape_sequence)
+        (string_content)
+        (escape_sequence)
+        (string_content)
+        (escape_sequence)
+        (string_content))))
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (string
+      (quoted_string
+        (escape_sequence)
+        (string_content)
+        (interpolation
+          (binary_expression
+            (integer)
+            (integer)))))))
+
+==================
+Decoded backslashes suppress interpolation
+==================
+str slash = "\\{literal}"
+str unicode = "\u{5c}{literal} \u{00005C}{also literal}"
+str multiple = "\\\\{literal}"
+str mixed = "\\{literal} {compute(1)}"
+str multiline = """
+  \u{5C}{literal}
+  \\{literal} {compute(2)}
+  """
+
+---
+
+(source_file
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (string
+      (quoted_string
+        (escape_sequence)
+        (string_content))))
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (string
+      (quoted_string
+        (escape_sequence)
+        (string_content)
+        (escape_sequence)
+        (string_content))))
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (string
+      (quoted_string
+        (escape_sequence)
+        (escape_sequence)
+        (string_content))))
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (string
+      (quoted_string
+        (escape_sequence)
+        (string_content)
+        (interpolation
+          (call_expression
+            (identifier)
+            (arguments
+              (integer)))))))
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (string
+      (multiline_string
+        (multiline_string_content)
+        (escape_sequence)
+        (multiline_string_content)
+        (escape_sequence)
+        (multiline_string_content)
+        (interpolation
+          (call_expression
+            (identifier)
+            (arguments
+              (integer))))
+        (multiline_string_content)))))
+
+==================
+Raw interpolation preserves escapes within nested strings
+==================
+str nested = "{render("\u{7b}literal}", "\\{literal}", '\u{7b}')}"
+
+---
+
+(source_file
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (string
+      (quoted_string
+        (interpolation
+          (call_expression
+            (identifier)
+            (arguments
+              (string
+                (quoted_string
+                  (escape_sequence)
+                  (string_content)))
+              (string
+                (quoted_string
+                  (escape_sequence)
+                  (string_content)))
+              (character
+                (character_escape)))))))))
+
+==================
+Explicit anonymous error returns and generic empty initializers
+==================
+fn named() ! { return }
+fn anonymous = fn() void! { return }
+Empty<int> empty = Empty<int>{}
+Empty populated = Empty{.value = 1,}
+
+---
+
+(source_file
+  (function_declaration
+    (identifier)
+    (parameters)
+    (block
+      (return_statement)))
+  (function_binding
+    (identifier)
+    (function_expression
+      (parameters)
+      (error_type
+        (named_type
+          (identifier)))
+      (block
+        (return_statement))))
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier)
+        (type_arguments
+          (named_type
+            (identifier))))
+      (identifier))
+    (struct_expression
+      (identifier)
+      (type_arguments
+        (named_type
+          (identifier)))))
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (struct_expression
+      (identifier)
+      (field_initializer
+        (identifier)
+        (integer)))))
+
+==================
+Ordinary empty braces are a separate block not an initializer
+==================
+Empty empty = Empty{}
+int after = 1
+
+---
+
+(source_file
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (identifier))
+  (block)
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (integer)))

@@ -1,0 +1,177 @@
+==================
+Missing call closer preserves following binding
+==================
+@println(1
+int after = 2
+
+---
+
+(source_file
+  (expression_statement
+    (call_expression
+      (builtin
+        (identifier))
+      (arguments
+        (integer)
+        (MISSING ")"))))
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (integer)))
+
+==================
+Missing array closer preserves following binding
+==================
+int[] values = [1, 2
+int after = 3
+
+---
+
+(source_file
+  (binding_declaration
+    (typed_binding
+      (array_type
+        (named_type
+          (identifier)))
+      (identifier))
+    (array_expression
+      (integer)
+      (integer)
+      (MISSING "]")))
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (integer)))
+
+==================
+Missing block closer at EOF retains body
+==================
+fn work() int {
+  int value = 1
+  return value
+
+---
+
+(ERROR
+  (identifier)
+  (parameters)
+  (named_type
+    (identifier))
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (integer))
+  (return_statement
+    (identifier)))
+
+==================
+Incomplete generic declaration at EOF
+==================
+struct Box<type T
+
+---
+
+(source_file
+  (ERROR
+    (identifier)
+    (type_parameter
+      (identifier))))
+
+==================
+Incomplete postfix at EOF retains object
+==================
+int value = items[0].
+
+---
+
+(source_file
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (member_expression
+      (index_expression
+        (identifier)
+        (integer))
+      (MISSING identifier))))
+
+==================
+Unterminated quoted string retains UTF-8 content
+==================
+str text = "café 🍪
+
+---
+
+(source_file
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (string
+      (quoted_string
+        (string_content)
+        (MISSING """)))))
+
+==================
+Unterminated multiline string retains interpolation
+==================
+str text = """
+茶 {compute(1)}
+
+---
+
+(source_file
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (string
+      (multiline_string
+        (multiline_string_content)
+        (interpolation
+          (call_expression
+            (identifier)
+            (arguments
+              (integer))))
+        (multiline_string_content)
+        (MISSING """"")))))
+
+==================
+Invalid call argument preserves surrounding statements
+==================
+fn work() {
+  @println(1, `, 2)
+  int after = 3
+}
+
+---
+
+(source_file
+  (function_declaration
+    (identifier)
+    (parameters)
+    (block
+      (expression_statement
+        (call_expression
+          (builtin
+            (identifier))
+          (arguments
+            (integer)
+            (ERROR
+              (UNEXPECTED '`'))
+            (integer))))
+      (binding_declaration
+        (typed_binding
+          (named_type
+            (identifier))
+          (identifier))
+        (integer)))))
