@@ -1,12 +1,25 @@
 use crate::{
-    ast::*,
+    ast::{
+        BinaryOp, Block, EnumDecl, Expr, Field, Function, FunctionDecl, Item, Module, Param,
+        Pattern, SourceLocation, Span, Stmt, StructDecl, Type, UnaryOp, VarDecl, Variant,
+    },
     diagnostic::Diagnostics,
     lexer::{Keyword, Token, TokenKind},
 };
 
+/// Parse tokens into an NC module using the synthetic `<source>` path.
+///
+/// # Errors
+/// Returns diagnostics for tokens that do not form valid NC syntax, including
+/// invalid integer literals used as fixed-array lengths.
 pub fn parse(tokens: Vec<Token>) -> Result<Module, Diagnostics> {
     parse_at(tokens, std::path::Path::new("<source>"))
 }
+/// Parse tokens into an NC module with locations associated with `path`.
+///
+/// # Errors
+/// Returns diagnostics for tokens that do not form valid NC syntax, including
+/// invalid integer literals used as fixed-array lengths.
 pub fn parse_at(tokens: Vec<Token>, path: &std::path::Path) -> Result<Module, Diagnostics> {
     Parser {
         tokens,
@@ -39,8 +52,8 @@ impl Parser {
     fn bump(&mut self) -> Token {
         let t = self.current().clone();
         if !matches!(t.kind, TokenKind::Eof) {
-            self.pos += 1
-        };
+            self.pos += 1;
+        }
         t
     }
     fn error<T>(&self, s: impl Into<String>) -> Result<T, Diagnostics> {
@@ -54,12 +67,12 @@ impl Parser {
             false
         }
     }
-    fn expect(&mut self, k: TokenKind) -> Result<(), Diagnostics> {
-        if self.at(&k) {
+    fn expect(&mut self, k: &TokenKind) -> Result<(), Diagnostics> {
+        if self.at(k) {
             self.bump();
             Ok(())
         } else {
-            self.error(format!("expected {:?}", k))
+            self.error(format!("expected {k:?}"))
         }
     }
     fn ident(&mut self) -> Result<String, Diagnostics> {
@@ -67,7 +80,7 @@ impl Parser {
         match token.kind {
             TokenKind::Ident(s) => Ok(s),
             x => Err(Diagnostics::one(
-                format!("expected identifier, found {:?}", x),
+                format!("expected identifier, found {x:?}"),
                 token.span,
             )),
         }
@@ -76,11 +89,10 @@ impl Parser {
         let mut items = vec![];
         while !self.at(&TokenKind::Eof) {
             if self.keyword(Keyword::Import) {
-                self.expect(TokenKind::LBrace)?;
+                self.expect(&TokenKind::LBrace)?;
                 while !self.at(&TokenKind::RBrace) {
-                    let path = match self.bump().kind {
-                        TokenKind::String(path) => path,
-                        _ => return self.error("expected import path"),
+                    let TokenKind::String(path) = self.bump().kind else {
+                        return self.error("expected import path");
                     };
                     if !self.keyword(Keyword::As) {
                         return self.error("expected `as` after import path");
@@ -98,15 +110,14 @@ impl Parser {
     fn item(&mut self) -> Result<Item, Diagnostics> {
         if self.keyword(Keyword::Extern) {
             let start = self.tokens[self.pos - 1].span.start;
-            let path = match self.bump().kind {
-                TokenKind::String(path) => path,
-                _ => return self.error("expected external implementation path"),
+            let TokenKind::String(path) = self.bump().kind else {
+                return self.error("expected external implementation path");
             };
             if !self.keyword(Keyword::As) {
                 return self.error("expected `as` in extern declaration");
             }
             let alias = self.ident()?;
-            self.expect(TokenKind::LBrace)?;
+            self.expect(&TokenKind::LBrace)?;
             let mut functions = Vec::new();
             while !self.at(&TokenKind::RBrace) {
                 if !self.keyword(Keyword::Fn) {
@@ -119,10 +130,9 @@ impl Parser {
                 } else {
                     self.ty()?
                 };
-                self.expect(TokenKind::Assign)?;
-                let symbol = match self.bump().kind {
-                    TokenKind::String(symbol) => symbol,
-                    _ => return self.error("expected external symbol string"),
+                self.expect(&TokenKind::Assign)?;
+                let TokenKind::String(symbol) = self.bump().kind else {
+                    return self.error("expected external symbol string");
                 };
                 functions.push(FunctionDecl {
                     name,
@@ -150,7 +160,7 @@ impl Parser {
         if self.keyword(Keyword::Type) {
             let start = self.tokens[self.pos - 1].span.start;
             let name = self.ident()?;
-            self.expect(TokenKind::Assign)?;
+            self.expect(&TokenKind::Assign)?;
             let ty = self.ty()?;
 
             return Ok(Item::TypeAlias {
@@ -170,9 +180,8 @@ impl Parser {
             return self.function(public).map(Item::Function);
         }
         if !public && self.keyword(Keyword::Test) {
-            let name = match self.bump().kind {
-                TokenKind::String(s) => s,
-                _ => return self.error("expected test name"),
+            let TokenKind::String(name) = self.bump().kind else {
+                return self.error("expected test name");
             };
             return Ok(Item::Test {
                 name,
@@ -207,7 +216,7 @@ impl Parser {
             }
             result.push(name);
             if !self.at(&TokenKind::Gt) {
-                self.expect(TokenKind::Comma)?
+                self.expect(&TokenKind::Comma)?;
             }
         }
         self.bump();
@@ -217,7 +226,7 @@ impl Parser {
         let start = self.tokens[self.pos - 1].span.start;
         let name = self.ident()?;
         let generics = self.generics()?;
-        self.expect(TokenKind::LBrace)?;
+        self.expect(&TokenKind::LBrace)?;
         let mut fields = vec![];
         while !self.at(&TokenKind::RBrace) {
             let ty = self.ty()?;
@@ -241,7 +250,7 @@ impl Parser {
         let start = self.tokens[self.pos - 1].span.start;
         let name = self.ident()?;
         let generics = self.generics()?;
-        self.expect(TokenKind::LBrace)?;
+        self.expect(&TokenKind::LBrace)?;
         let mut variants = vec![];
         while !self.at(&TokenKind::RBrace) {
             let name = self.ident()?;
@@ -257,7 +266,7 @@ impl Parser {
                 while !self.at(&TokenKind::RParen) {
                     values.push(self.ty()?);
                     if !self.at(&TokenKind::RParen) {
-                        self.expect(TokenKind::Comma)?
+                        self.expect(&TokenKind::Comma)?;
                     }
                 }
                 let _ = self.bump();
@@ -302,7 +311,7 @@ impl Parser {
         })
     }
     fn params(&mut self) -> Result<Vec<Param>, Diagnostics> {
-        self.expect(TokenKind::LParen)?;
+        self.expect(&TokenKind::LParen)?;
         let mut out = vec![];
         while !self.at(&TokenKind::RParen) {
             let ty = self.ty()?;
@@ -310,7 +319,7 @@ impl Parser {
 
             out.push(Param { name, ty });
             if !self.at(&TokenKind::RParen) {
-                self.expect(TokenKind::Comma)?
+                self.expect(&TokenKind::Comma)?;
             }
         }
         self.bump();
@@ -323,22 +332,22 @@ impl Parser {
         let mut ty = if self.at(&TokenKind::LBracket) {
             self.bump();
             let key = self.ty()?;
-            self.expect(TokenKind::RBracket)?;
+            self.expect(&TokenKind::RBracket)?;
             Type::Map(Box::new(key), Box::new(self.ty()?))
         } else if self.at(&TokenKind::LParen) {
             self.bump();
             if self.keyword(Keyword::Fn) {
                 let args = self.params_types()?;
                 let ret = self.ty()?;
-                self.expect(TokenKind::RParen)?;
+                self.expect(&TokenKind::RParen)?;
                 Type::Function(args, Box::new(ret))
             } else {
                 let mut xs = vec![self.ty()?];
                 while self.at(&TokenKind::Comma) {
                     self.bump();
-                    xs.push(self.ty()?)
+                    xs.push(self.ty()?);
                 }
-                self.expect(TokenKind::RParen)?;
+                self.expect(&TokenKind::RParen)?;
                 Type::Tuple(xs)
             }
         } else {
@@ -383,11 +392,11 @@ impl Parser {
                         }
                     }
                 };
-                self.expect(TokenKind::RBracket)?;
-                ty = Type::Array(Box::new(ty), n)
+                self.expect(&TokenKind::RBracket)?;
+                ty = Type::Array(Box::new(ty), n);
             } else if self.at(&TokenKind::Question) {
                 self.bump();
-                ty = Type::Optional(Box::new(ty))
+                ty = Type::Optional(Box::new(ty));
             } else if self.at(&TokenKind::Bang) {
                 self.bump();
                 ty = Type::ErrorUnion(Box::new(ty));
@@ -406,7 +415,7 @@ impl Parser {
         while !self.at(&TokenKind::Gt) && !self.at(&TokenKind::Shr) {
             out.push(self.ty()?);
             if !self.at(&TokenKind::Gt) && !self.at(&TokenKind::Shr) {
-                self.expect(TokenKind::Comma)?
+                self.expect(&TokenKind::Comma)?;
             }
         }
         if self.at(&TokenKind::Shr) {
@@ -419,12 +428,12 @@ impl Parser {
         Ok(out)
     }
     fn params_types(&mut self) -> Result<Vec<Type>, Diagnostics> {
-        self.expect(TokenKind::LParen)?;
+        self.expect(&TokenKind::LParen)?;
         let mut x = vec![];
         while !self.at(&TokenKind::RParen) {
             x.push(self.ty()?);
             if !self.at(&TokenKind::RParen) {
-                self.expect(TokenKind::Comma)?
+                self.expect(&TokenKind::Comma)?;
             }
         }
         self.bump();
@@ -447,7 +456,7 @@ impl Parser {
             ty = Type::Tuple(types);
             pattern = Pattern::Tuple(patterns);
         }
-        self.expect(TokenKind::Assign)?;
+        self.expect(&TokenKind::Assign)?;
         let value = self.expr(0)?;
         Ok(VarDecl {
             source_path: self.path.clone(),
@@ -461,7 +470,7 @@ impl Parser {
         })
     }
     fn block(&mut self) -> Result<Block, Diagnostics> {
-        self.expect(TokenKind::LBrace)?;
+        self.expect(&TokenKind::LBrace)?;
         let mut statements = vec![];
         while !self.at(&TokenKind::RBrace) {
             statements.push(self.stmt()?);
@@ -478,6 +487,7 @@ impl Parser {
             Ok(Stmt::Located(Box::new(statement), self.location(start)))
         }
     }
+    #[allow(clippy::too_many_lines)] // Keep statement grammar alternatives in one dispatch.
     fn stmt_inner(&mut self) -> Result<Stmt, Diagnostics> {
         if self.keyword(Keyword::Fn) {
             if matches!(
@@ -502,7 +512,7 @@ impl Parser {
             }
             let start = self.tokens[self.pos - 1].span.start;
             let name = self.ident()?;
-            self.expect(TokenKind::Assign)?;
+            self.expect(&TokenKind::Assign)?;
             let value = self.expr(0)?;
             let Expr::Lambda(f) = value.unlocated() else {
                 return self.error("inferred `fn` declarations require an anonymous function");
@@ -600,7 +610,7 @@ impl Parser {
             let name = self.ident()?;
             if !self.keyword(Keyword::In) {
                 return self.error("expected `in`");
-            };
+            }
             let iterable = self.expr(0)?;
             let body = self.block()?;
 
@@ -655,6 +665,7 @@ impl Parser {
         }
         Ok(Stmt::Expr(target))
     }
+    #[allow(clippy::too_many_lines)] // Keep precedence and postfix parsing in one ordered loop.
     fn expr(&mut self, min: u8) -> Result<Expr, Diagnostics> {
         let start = self.current().span.start;
         let mut left = self.prefix()?;
@@ -672,12 +683,12 @@ impl Parser {
                         self.bump();
                         let mut fields = vec![];
                         while !self.at(&TokenKind::RBrace) {
-                            self.expect(TokenKind::Dot)?;
+                            self.expect(&TokenKind::Dot)?;
                             let field = self.ident()?;
-                            self.expect(TokenKind::Assign)?;
+                            self.expect(&TokenKind::Assign)?;
                             fields.push((field, self.expr(0)?));
                             if !self.at(&TokenKind::RBrace) {
-                                self.expect(TokenKind::Comma)?;
+                                self.expect(&TokenKind::Comma)?;
                             }
                         }
                         self.bump();
@@ -694,7 +705,7 @@ impl Parser {
                         while !self.at(&TokenKind::RParen) {
                             args.push(self.expr(0)?);
                             if !self.at(&TokenKind::RParen) {
-                                self.expect(TokenKind::Comma)?;
+                                self.expect(&TokenKind::Comma)?;
                             }
                         }
                         self.bump();
@@ -753,12 +764,12 @@ impl Parser {
                 self.bump();
                 let mut fields = vec![];
                 while !self.at(&TokenKind::RBrace) {
-                    self.expect(TokenKind::Dot)?;
+                    self.expect(&TokenKind::Dot)?;
                     let field = self.ident()?;
-                    self.expect(TokenKind::Assign)?;
+                    self.expect(&TokenKind::Assign)?;
                     fields.push((field, self.expr(0)?));
                     if !self.at(&TokenKind::RBrace) {
-                        self.expect(TokenKind::Comma)?;
+                        self.expect(&TokenKind::Comma)?;
                     }
                 }
                 self.bump();
@@ -771,7 +782,7 @@ impl Parser {
                 while !self.at(&TokenKind::RParen) {
                     args.push(self.expr(0)?);
                     if !self.at(&TokenKind::RParen) {
-                        self.expect(TokenKind::Comma)?
+                        self.expect(&TokenKind::Comma)?;
                     }
                 }
                 self.bump();
@@ -785,7 +796,7 @@ impl Parser {
             if self.at(&TokenKind::LBracket) {
                 self.bump();
                 let index = self.expr(0)?;
-                self.expect(TokenKind::RBracket)?;
+                self.expect(&TokenKind::RBracket)?;
                 left = Expr::Index {
                     object: Box::new(left),
                     index: Box::new(index),
@@ -819,6 +830,7 @@ impl Parser {
         let value = self.prefix_inner()?;
         Ok(value.located(self.location(start)))
     }
+    #[allow(clippy::too_many_lines)] // Keep prefix grammar alternatives in one dispatch.
     fn prefix_inner(&mut self) -> Result<Expr, Diagnostics> {
         let start = self.current().span.start;
         if self.keyword(Keyword::Fn) {
@@ -849,11 +861,11 @@ impl Parser {
             TokenKind::Dollar => Ok(Expr::Name("$".into())),
             TokenKind::At => {
                 if self.keyword(Keyword::As) {
-                    self.expect(TokenKind::LParen)?;
+                    self.expect(&TokenKind::LParen)?;
                     let ty = self.ty()?;
-                    self.expect(TokenKind::Comma)?;
+                    self.expect(&TokenKind::Comma)?;
                     let value = Box::new(self.expr(0)?);
-                    self.expect(TokenKind::RParen)?;
+                    self.expect(&TokenKind::RParen)?;
                     Ok(Expr::Cast {
                         ty,
                         value,
@@ -863,9 +875,9 @@ impl Parser {
                     let start = self.tokens[self.pos - 1].span.start;
                     let name = self.ident()?;
                     if name == "embed" {
-                        self.expect(TokenKind::LParen)?;
+                        self.expect(&TokenKind::LParen)?;
                         let path = Box::new(self.expr(0)?);
-                        self.expect(TokenKind::RParen)?;
+                        self.expect(&TokenKind::RParen)?;
                         Ok(Expr::Embed {
                             path,
                             source_path: self.path.clone(),
@@ -903,12 +915,12 @@ impl Parser {
                     let mut x = vec![first];
                     while self.at(&TokenKind::Comma) {
                         self.bump();
-                        x.push(self.expr(0)?)
+                        x.push(self.expr(0)?);
                     }
-                    self.expect(TokenKind::RParen)?;
+                    self.expect(&TokenKind::RParen)?;
                     Ok(Expr::Tuple(x))
                 } else {
-                    self.expect(TokenKind::RParen)?;
+                    self.expect(&TokenKind::RParen)?;
                     Ok(first)
                 }
             }
@@ -932,7 +944,7 @@ impl Parser {
                         x.push(value);
                     }
                     if !self.at(&TokenKind::RBracket) {
-                        self.expect(TokenKind::Comma)?
+                        self.expect(&TokenKind::Comma)?;
                     }
                 }
                 self.bump();
@@ -942,7 +954,7 @@ impl Parser {
                     Expr::Array(x)
                 })
             }
-            x => self.error(format!("expected expression, found {:?}", x)),
+            x => self.error(format!("expected expression, found {x:?}")),
         }
     }
     fn if_expr(&mut self) -> Result<Expr, Diagnostics> {
@@ -951,7 +963,7 @@ impl Parser {
         } else {
             Some(Box::new(self.expr(0)?))
         };
-        self.expect(TokenKind::LBrace)?;
+        self.expect(&TokenKind::LBrace)?;
         let mut arms = vec![];
         while !self.at(&TokenKind::RBrace) {
             let mut patterns = vec![self.pattern()?];
@@ -1040,7 +1052,7 @@ impl Parser {
                 type_lookahead: false,
             };
             let value = parser.expr(0)?;
-            parser.expect(TokenKind::Eof)?;
+            parser.expect(&TokenKind::Eof)?;
             parts.push(Expr::Cast {
                 implicit: true,
                 ty: Type::Named("str".into(), vec![]),

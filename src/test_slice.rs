@@ -1,9 +1,11 @@
 //! Conservative, source-order dependency slicing before test-mode semantic checks.
-use crate::ast::*;
+use crate::ast::{Block, Expr, Function, Item, Pattern, Stmt, Type};
 use std::collections::{HashMap, HashSet};
 
 type Names = HashSet<String>;
 
+// Effect properties are independent and can all hold simultaneously.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Default, PartialEq, Eq)]
 struct Effects {
     uses: Names,
@@ -39,6 +41,8 @@ fn definitions(item: &Item) -> Vec<String> {
 }
 
 /// Return selected item identities; callers retain the original AST and locations.
+// Keep the declaration/effect fixed points and source-order selection together.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn select(
     items: &[Item],
     errors: &[Option<crate::diagnostic::Diagnostics>],
@@ -249,7 +253,7 @@ impl Scan<'_> {
                 }
             }
             Type::Array(t, _) | Type::Optional(t) | Type::ErrorUnion(t) | Type::Future(t) => {
-                self.ty(t)
+                self.ty(t);
             }
             Type::Map(k, v) => {
                 self.ty(k);
@@ -414,7 +418,7 @@ impl Scan<'_> {
                 self.target(target);
             }
             Stmt::Expr(e) | Stmt::Throw(e) | Stmt::Assert(e) | Stmt::LabeledIf { value: e, .. } => {
-                self.expr(e)
+                self.expr(e);
             }
             Stmt::Return(e) | Stmt::Break(e, _) => {
                 if let Some(e) = e {

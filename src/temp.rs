@@ -8,9 +8,19 @@ use std::{
 static NEXT: AtomicU64 = AtomicU64::new(0);
 pub struct Directory(PathBuf);
 impl Directory {
+    /// Create a private directory in the system temporary directory.
+    ///
+    /// # Errors
+    /// Returns an I/O error if directory creation fails or all 100 candidate names
+    /// already exist.
     pub fn new() -> io::Result<Self> {
         Self::new_in(&std::env::temp_dir())
     }
+    /// Create a private directory under `parent`.
+    ///
+    /// # Errors
+    /// Returns an I/O error if directory creation fails (for example, if the parent
+    /// is missing or not writable), or all 100 candidate names already exist.
     pub fn new_in(parent: &Path) -> io::Result<Self> {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -30,7 +40,7 @@ impl Directory {
             }
             match builder.create(&path) {
                 Ok(()) => return Ok(Self(path)),
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(e) => return Err(e),
             }
         }
@@ -39,6 +49,7 @@ impl Directory {
             "cannot allocate unique temporary directory",
         ))
     }
+    #[must_use]
     pub fn path(&self) -> &Path {
         &self.0
     }

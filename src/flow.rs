@@ -1,6 +1,6 @@
 //! Conservative control-flow analysis shared by return checking and warnings.
 use crate::{
-    ast::*,
+    ast::{BinaryOp, Block, Expr, Item, Module, Pattern, Span, Stmt, Type, UnaryOp},
     diagnostic::{Diagnostic, Diagnostics},
 };
 use std::{
@@ -26,11 +26,11 @@ fn then(mut paths: Paths, next: impl FnOnce() -> Paths) -> Paths {
     }
     paths
 }
-fn replace(paths: Paths, from: Exit, to: Exit) -> Paths {
+fn replace(mut paths: Paths, from: &Exit, to: Exit) -> Paths {
+    if paths.remove(from) {
+        paths.insert(to);
+    }
     paths
-        .into_iter()
-        .map(|exit| if exit == from { to.clone() } else { exit })
-        .collect()
 }
 
 pub fn returns(block: &Block, types: &HashMap<usize, Type>) -> bool {
@@ -64,7 +64,7 @@ pub fn block_reaches_next(block: &Block, types: &HashMap<usize, Type>) -> bool {
 pub fn infinite_loop(
     condition: &Expr,
     body: &Block,
-    label: &Option<String>,
+    label: Option<&str>,
     types: &HashMap<usize, Type>,
 ) -> bool {
     Analysis::new(types).infinite_loop(condition, body, label)
@@ -152,13 +152,13 @@ impl Analysis<'_> {
             warnings: None,
         }
     }
-    fn infinite_loop(&self, condition: &Expr, body: &Block, label: &Option<String>) -> bool {
+    fn infinite_loop(&self, condition: &Expr, body: &Block, label: Option<&str>) -> bool {
         let analysis = Analysis::new(self.types);
         constant_bool(condition) == Some(true)
             && analysis.expression(condition) == one(Exit::Next)
             && analysis.block(body).iter().all(|exit| {
                 matches!(exit, Exit::Next)
-                    || matches!(exit, Exit::Jump(target, true) if target.is_none() || target == label)
+                    || matches!(exit, Exit::Jump(target, true) if target.is_none() || target.as_deref() == label)
             })
     }
     fn warn(&self, message: &str, source: Option<(&std::path::Path, &Span)>) {
@@ -204,18 +204,13 @@ impl Analysis<'_> {
                 then(paths, || self.statement(statement))
             })
     }
-    fn target(
-        &self,
-        paths: Paths,
-        label: &Option<String>,
-        unlabelled: bool,
-        continuing: bool,
-    ) -> Paths {
+    fn target(paths: Paths, label: Option<&str>, unlabelled: bool, continuing: bool) -> Paths {
         paths
             .into_iter()
             .map(|exit| match exit {
                 Exit::Jump(ref target, is_continue)
-                    if (target.is_none() && unlabelled || target.is_some() && target == label)
+                    if (target.is_none() && unlabelled
+                        || target.is_some() && target.as_deref() == label)
                         && (!is_continue || continuing) =>
                 {
                     Exit::Next
@@ -234,21 +229,25 @@ impl Analysis<'_> {
             Stmt::Expr(value) | Stmt::Assert(value) => self.expression(value),
             Stmt::Return(None) => one(Exit::Return),
             Stmt::Return(Some(value)) | Stmt::Throw(value) => {
-                replace(self.expression(value), Exit::Next, Exit::Return)
+                replace(self.expression(value), &Exit::Next, Exit::Return)
             }
-            Stmt::Break(Some(value), _) => replace(self.expression(value), Exit::Next, Exit::Value),
+            Stmt::Break(Some(value), _) => {
+                replace(self.expression(value), &Exit::Next, Exit::Value)
+            }
             Stmt::Break(None, label) => one(Exit::Jump(label.clone(), false)),
             Stmt::Continue(label) => one(Exit::Jump(label.clone(), true)),
             Stmt::LabeledIf { label, value } => {
-                self.target(self.expression(value), &Some(label.clone()), false, false)
+                Self::target(self.expression(value), Some(label.as_str()), false, false)
             }
-            Stmt::Lock { label, body, .. } => self.target(self.block(body), label, true, false),
+            Stmt::Lock { label, body, .. } => {
+                Self::target(self.block(body), label.as_deref(), true, false)
+            }
             Stmt::While {
                 label,
                 condition: input,
                 body,
             } => {
-                if self.warnings.is_some() && self.infinite_loop(input, body, label) {
+                if self.warnings.is_some() && self.infinite_loop(input, body, label.as_deref()) {
                     self.warn(
                         "infinite loop: constant true condition has no reachable exit",
                         statement.source(),
@@ -264,7 +263,7 @@ impl Analysis<'_> {
                     // the statement after a constant-true loop.
                     paths.retain(|exit| !matches!(exit, Exit::Next)
                         && !matches!(exit, Exit::Jump(target, true) if target.is_none() || target == label));
-                    paths = self.target(paths, label, true, false);
+                    paths = Self::target(paths, label.as_deref(), true, false);
                     if constant_bool(input) != Some(true) {
                         paths.insert(Exit::Next);
                     }
@@ -278,7 +277,7 @@ impl Analysis<'_> {
                 ..
             } => {
                 then(self.expression(input), || {
-                    let mut paths = self.target(self.block(body), label, true, true);
+                    let mut paths = Self::target(self.block(body), label.as_deref(), true, true);
                     // A loop may execute zero times; do not require proving its condition.
                     paths.insert(Exit::Next);
                     paths
@@ -295,7 +294,7 @@ impl Analysis<'_> {
     fn expression(&self, expression: &Expr) -> Paths {
         match expression.unlocated() {
             Expr::If { subject, arms } => then(
-                self.expressions(subject.iter().map(|value| value.as_ref())),
+                self.expressions(subject.iter().map(std::convert::AsRef::as_ref)),
                 || {
                     let mut paths = Paths::new();
                     let mut unmatched = true;
@@ -338,7 +337,7 @@ impl Analysis<'_> {
                         .get(&expression.id())
                         .is_some_and(|ty| *ty != Type::void())
                     {
-                        replace(paths, Exit::Value, Exit::Next)
+                        replace(paths, &Exit::Value, Exit::Next)
                     } else {
                         paths
                     }
@@ -349,7 +348,7 @@ impl Analysis<'_> {
                 fallback: body,
             }
             | Expr::Catch { value, body, .. } => then(self.expression(value), || {
-                let mut paths = replace(self.block(body), Exit::Value, Exit::Next);
+                let mut paths = replace(self.block(body), &Exit::Value, Exit::Next);
                 paths.insert(Exit::Next);
                 paths
             }),
@@ -429,7 +428,7 @@ mod tests {
             panic!()
         };
         let types = &checked.expression_types;
-        assert!(infinite_loop(condition, body, label, types));
+        assert!(infinite_loop(condition, body, label.as_deref(), types));
         assert!(block_reaches_next(body, types));
         assert!(!statement_reaches_next(statement, types));
         let Stmt::Var(value) = body.statements[0].unlocated() else {
@@ -485,14 +484,19 @@ mod tests {
         let condition = Expr::Bool(true);
         let label = Some("outer".into());
         let types = HashMap::new();
-        assert!(infinite_loop(&condition, &body(vec![]), &label, &types));
+        assert!(infinite_loop(
+            &condition,
+            &body(vec![]),
+            label.as_deref(),
+            &types
+        ));
         assert!(infinite_loop(
             &condition,
             &body(vec![
                 Stmt::Continue(label.clone()),
                 Stmt::Break(None, label.clone())
             ]),
-            &label,
+            label.as_deref(),
             &types
         ));
         for exit in [
@@ -506,14 +510,14 @@ mod tests {
             assert!(!infinite_loop(
                 &condition,
                 &body(vec![exit]),
-                &label,
+                label.as_deref(),
                 &types
             ));
         }
         assert!(!infinite_loop(
             &Expr::Name("unknown".into()),
             &body(vec![]),
-            &label,
+            label.as_deref(),
             &types
         ));
     }
@@ -540,7 +544,7 @@ mod tests {
                 infinite_loop(
                     &Expr::Bool(true),
                     &body(vec![Stmt::Expr(expression)]),
-                    &None,
+                    None,
                     &types
                 ),
                 infinite
@@ -554,7 +558,7 @@ mod tests {
         assert!(infinite_loop(
             &Expr::Bool(true),
             &body(vec![inner]),
-            &Some("outer".into()),
+            Some("outer"),
             &types
         ));
     }

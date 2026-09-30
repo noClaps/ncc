@@ -1,13 +1,20 @@
 //! Fuel-bounded, type-aware evaluation of pure expressions, functions and loops.
 //! Failed/impure evaluation leaves the original program in place.
 use crate::{
-    ast::*,
+    ast::{
+        BinaryOp, Block, Expr, Function, Item, Module, Pattern, SourceLocation, Stmt, Type,
+        UnaryOp, VarDecl,
+    },
     diagnostic::Diagnostics,
     sema::{CheckedModule, TypeInfo},
 };
 use std::collections::{HashMap, HashSet};
 
 /// Embedding is mandatory compile-time evaluation, including in debug builds.
+///
+/// # Errors
+/// Returns diagnostics for unevaluatable paths, unreadable files, invalid embedded
+/// values, or a failure to start or complete the evaluator thread.
 pub fn resolve_embeds(
     checked: CheckedModule,
     source: &std::path::Path,
@@ -191,7 +198,7 @@ fn float_string(value: f64) -> Option<String> {
             mantissa.trim_end_matches('0').trim_end_matches('.')
         ));
     }
-    let precision = (16 - exponent) as usize;
+    let precision = usize::try_from(16 - exponent).ok()?;
     let fixed = format!("{value:.precision$}");
     let mut result = if fixed.contains('.') {
         fixed.trim_end_matches('0').trim_end_matches('.').to_owned()
@@ -237,6 +244,8 @@ impl Value {
             _ => true,
         }
     }
+    // NC equality uses exact IEEE-754 comparisons, including NaN semantics.
+    #[allow(clippy::float_cmp)]
     fn equals(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Float(a), Self::Float(b)) => f64::from_bits(*a) == f64::from_bits(*b),
@@ -350,6 +359,11 @@ impl Value {
         }
     }
 }
+/// Fold safely computable expressions while preserving runtime effects.
+///
+/// # Errors
+/// Returns diagnostics for reached arithmetic failures, embedding failures, or
+/// a failure to start or complete the evaluator thread.
 pub fn optimize(checked: CheckedModule) -> Result<Module, Diagnostics> {
     // The evaluator has an explicit depth limit. Give it a consistent stack
     // budget instead of inheriting a small editor or test-runner thread stack.
@@ -365,6 +379,8 @@ pub fn optimize(checked: CheckedModule) -> Result<Module, Diagnostics> {
             .map_err(|_| Diagnostics::one("constant evaluator panicked", 0..0))?
     })
 }
+// Keep folding, AST rewrites, and reachability pruning in their evaluation order.
+#[allow(clippy::too_many_lines)]
 fn optimize_module(checked: CheckedModule) -> Result<Module, Diagnostics> {
     let mut functions: HashMap<String, &Function> = checked
         .module
@@ -410,7 +426,7 @@ fn optimize_module(checked: CheckedModule) -> Result<Module, Diagnostics> {
                 reaches_next =
                     crate::flow::statement_reaches_next(statement, &checked.expression_types);
                 if let Stmt::Expr(e) = statement.unlocated() {
-                    replacements.push((index, fold(e, &env, &functions, &checked)?))
+                    replacements.push((index, fold(e, &env, &functions, &checked)?));
                 }
             }
             Item::Test { body, .. } => {
@@ -1030,6 +1046,9 @@ impl<'module> Evaluator<'module> {
             _ => return None,
         })
     }
+    // NC float/integer casts intentionally round or truncate. Float-to-integer
+    // conversion is guarded by finite/range checks before the Rust cast.
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
     fn cast(&mut self, ty: &Type, from: &Type, value: Value) -> Option<Value> {
         if *self.base_type(ty) == Type::Named("str".into(), vec![]) {
             return self.string(&value, from).map(Value::String);
@@ -1061,16 +1080,16 @@ impl<'module> Evaluator<'module> {
             return None;
         };
         let integer = match &value {
-            Value::Int(n) => Some(*n as i128),
-            Value::Uint(n) => Some(*n as i128),
-            Value::Byte(n) => Some(*n as i128),
+            Value::Int(n) => Some(i128::from(*n)),
+            Value::Uint(n) => Some(i128::from(*n)),
+            Value::Byte(n) => Some(i128::from(*n)),
             Value::Bool(b) => Some(i128::from(*b)),
             Value::Float(bits) => {
                 let n = f64::from_bits(*bits);
                 let fits = match name.as_str() {
                     "byte" => (0.0..=255.0).contains(&n),
-                    "uint" => (0.0..18446744073709551616.0).contains(&n),
-                    _ => (-9223372036854775808.0..9223372036854775808.0).contains(&n),
+                    "uint" => (0.0..18_446_744_073_709_551_616.0).contains(&n),
+                    _ => (-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&n),
                 };
                 (n.is_finite() && fits).then(|| n.trunc() as i128)
             }
@@ -1084,7 +1103,7 @@ impl<'module> Evaluator<'module> {
                 Value::Float(_) => Some(value),
                 Value::Int(n) => Some(Value::Float((n as f64).to_bits())),
                 Value::Uint(n) => Some(Value::Float((n as f64).to_bits())),
-                Value::Byte(n) => Some(Value::Float((n as f64).to_bits())),
+                Value::Byte(n) => Some(Value::Float(f64::from(n).to_bits())),
                 _ => None,
             },
             "char" if matches!(value, Value::Char(_)) => Some(value),
@@ -1103,7 +1122,9 @@ impl<'module> Evaluator<'module> {
         result
     }
     fn unsigned(&mut self, a: u64, b: u64, op: BinaryOp, byte: bool) -> Option<Value> {
-        use BinaryOp::*;
+        use BinaryOp::{
+            Add, BitAnd, BitOr, BitXor, Div, Eq, Ge, Gt, Le, Lt, Mod, Mul, Ne, Pow, Shl, Shr, Sub,
+        };
         let comparison = match op {
             Eq => Some(a == b),
             Ne => Some(a != b),
@@ -1135,27 +1156,29 @@ impl<'module> Evaluator<'module> {
             Shl => u32::try_from(b)
                 .ok()
                 .filter(|b| *b < if byte { 8 } else { 64 })
-                .and_then(|b| u64::try_from((a as u128) << b).ok()),
+                .and_then(|b| u64::try_from(u128::from(a) << b).ok()),
             Shr => u32::try_from(b)
                 .ok()
                 .filter(|b| *b < if byte { 8 } else { 64 })
                 .and_then(|b| a.checked_shr(b)),
             _ => return None,
         }
-        .filter(|n| !byte || *n <= u8::MAX as u64);
+        .filter(|n| !byte || u8::try_from(*n).is_ok());
         if result.is_none() {
             self.arithmetic_failure = true;
         }
-        result.map(|n| {
+        result.and_then(|n| {
             if byte {
-                Value::Byte(n as u8)
+                u8::try_from(n).ok().map(Value::Byte)
             } else {
-                Value::Uint(n)
+                Some(Value::Uint(n))
             }
         })
     }
-    fn float(&mut self, a: f64, b: f64, op: BinaryOp) -> Option<Value> {
-        use BinaryOp::*;
+    // Match NC's exact IEEE-754 equality rather than approximate comparisons.
+    #[allow(clippy::float_cmp)]
+    fn float(a: f64, b: f64, op: BinaryOp) -> Option<Value> {
+        use BinaryOp::{Add, Div, Eq, Ge, Gt, Le, Lt, Mod, Mul, Ne, Pow, Sub};
         let comparison = match op {
             Eq => Some(a == b),
             Ne => Some(a != b),
@@ -1212,6 +1235,8 @@ impl<'module> Evaluator<'module> {
         }
         result
     }
+    // Exhaustive language evaluation keeps each expression variant together.
+    #[allow(clippy::too_many_lines)]
     fn expression(&mut self, e: &Expr, env: &mut HashMap<String, Value>) -> Option<Value> {
         let e = e.unlocated();
         let fuel = &mut *self.fuel;
@@ -1456,7 +1481,10 @@ impl<'module> Evaluator<'module> {
                         values.iter().any(|(key, _)| key.equals(&value)),
                     )),
                     (Value::Int(a), Value::Int(b)) => {
-                        use BinaryOp::*;
+                        use BinaryOp::{
+                            Add, BitAnd, BitOr, BitXor, Div, Eq, Ge, Gt, Le, Lt, Mod, Mul, Ne, Pow,
+                            Shl, Shr, Sub,
+                        };
                         let result = match op {
                             Add => a.checked_add(b).map(Value::Int),
                             Sub => a.checked_sub(b).map(Value::Int),
@@ -1480,7 +1508,7 @@ impl<'module> Evaluator<'module> {
                             Shl => u32::try_from(b)
                                 .ok()
                                 .filter(|b| *b < 64)
-                                .and_then(|b| i64::try_from((a as i128) << b).ok())
+                                .and_then(|b| i64::try_from(i128::from(a) << b).ok())
                                 .map(Value::Int),
                             Shr => u32::try_from(b)
                                 .ok()
@@ -1506,7 +1534,7 @@ impl<'module> Evaluator<'module> {
                         self.unsigned(a.into(), b.into(), *op, true)
                     }
                     (Value::Float(a), Value::Float(b)) => {
-                        self.float(f64::from_bits(a), f64::from_bits(b), *op)
+                        Self::float(f64::from_bits(a), f64::from_bits(b), *op)
                     }
                     (Value::Bool(a), Value::Bool(b)) => match op {
                         BinaryOp::And => Some(Value::Bool(a && b)),
@@ -1888,6 +1916,8 @@ impl Evaluator<'_> {
     ) -> Option<Flow> {
         self.statements(&b.statements, env, valued)
     }
+    // Statement dispatch shares flow and scope restoration across all variants.
+    #[allow(clippy::too_many_lines)]
     fn statements(
         &mut self,
         statements: &[Stmt],
@@ -1951,7 +1981,7 @@ impl Evaluator<'_> {
                     if crate::flow::infinite_loop(
                         condition,
                         body,
-                        label,
+                        label.as_deref(),
                         &self.checked.expression_types,
                     ) {
                         return None;
@@ -1976,8 +2006,8 @@ impl Evaluator<'_> {
                     body,
                     label,
                 } => {
-                    let keys = match self.evaluate(iterable, env)? {
-                        Value::Array(values) => (0..values.len())
+                    let traversal = match self.evaluate(iterable, env)? {
+                        Value::Array(elements) => (0..elements.len())
                             .map(|i| Value::Uint(i as u64))
                             .collect::<Vec<_>>(),
                         Value::Map(entries) => entries.into_iter().map(|(key, _)| key).collect(),
@@ -1988,7 +2018,7 @@ impl Evaluator<'_> {
                     };
                     let previous = env.remove(name);
                     let mut flow = Flow::Next;
-                    for key in keys {
+                    for key in traversal {
                         *self.fuel = self.fuel.checked_sub(1)?;
                         env.insert(name.clone(), key);
                         match self.block(body, env)? {

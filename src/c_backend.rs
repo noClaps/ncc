@@ -1,13 +1,24 @@
 //! C emission uses the types recorded during semantic checking. Expressions
 //! are evaluated into temporaries to preserve NC's left-to-right evaluation.
 use crate::{
-    ast::*,
+    ast::{BinaryOp, Block, EnumDecl, Expr, Function, Item, Pattern, Stmt, Type, UnaryOp, VarDecl},
     diagnostic::Diagnostics,
     lexer::integer,
     sema::{Capture, CheckedModule, TypeInfo},
 };
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::{
+    collections::{BTreeSet, HashMap, HashSet},
+    fmt::Write as _,
+};
 
+/// Emits a C translation unit for a semantically checked module.
+///
+/// # Errors
+///
+/// Returns diagnostics when the module contains unsupported or unresolved
+/// constructs, required type metadata is missing, or C type layouts are cyclic.
+// Keep declaration, runtime-support, and entry-point emission in output order.
+#[allow(clippy::too_many_lines)]
 pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
     let mut e = Emitter {
         checked,
@@ -48,15 +59,17 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
                     .iter()
                     .map(|p| e.c_type(&p.ty))
                     .collect::<Result<Vec<_>, _>>()?;
-                declarations.push_str(&format!(
-                    "{ret} nc_fn_{}({});\n",
+                writeln!(
+                    declarations,
+                    "{ret} nc_fn_{}({});",
                     f.name,
                     if params.is_empty() {
                         "void".into()
                     } else {
                         params.join(", ")
                     }
-                ));
+                )
+                .unwrap();
             }
             Item::Global(v) => {
                 let mut slots = Vec::new();
@@ -67,10 +80,10 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
                         e.c_type(ty)?
                     };
                     let name = e.bind(binding);
-                    declarations.push_str(&format!("static {ct} {name};\n"));
+                    writeln!(declarations, "static {ct} {name};").unwrap();
                     slots.push(name);
                 }
-                global_slots.insert(v as *const VarDecl as usize, slots);
+                global_slots.insert(std::ptr::from_ref::<VarDecl>(v) as usize, slots);
             }
             Item::Import { .. } => return unsupported("unresolved import"),
             Item::Extern {
@@ -83,31 +96,31 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
                         .iter()
                         .map(|p| e.c_type(&p.ty))
                         .collect::<Result<Vec<_>, _>>()?;
-                    declarations.push_str(&format!("typedef {ret} nc_abi_{}_result;\n", f.symbol));
+                    writeln!(declarations, "typedef {ret} nc_abi_{}_result;", f.symbol).unwrap();
                     for (index, ty) in params.iter().enumerate() {
-                        declarations
-                            .push_str(&format!("typedef {ty} nc_abi_{}_arg{index};\n", f.symbol));
+                        writeln!(declarations, "typedef {ty} nc_abi_{}_arg{index};", f.symbol)
+                            .unwrap();
                     }
-                    declarations.push_str(&format!(
-                        "extern {ret} {}({});\n",
+                    writeln!(
+                        declarations,
+                        "extern {ret} {}({});",
                         f.symbol,
                         if params.is_empty() {
                             "void".into()
                         } else {
                             params.join(", ")
                         }
-                    ));
+                    )
+                    .unwrap();
                 }
                 external_files.insert(path);
             }
-            Item::Struct(_) | Item::Enum(_) => {}
-            Item::TypeAlias { .. } => {}
             _ => {}
         }
     }
     // Expose all ABI aliases before including shared C implementations once.
     for path in external_files {
-        declarations.push_str(&format!("#include {}\n", c_string(path)));
+        writeln!(declarations, "#include {}", c_string(path)).unwrap();
     }
     for item in &checked.module.items {
         if let Item::Function(f) = item {
@@ -143,7 +156,7 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
             Item::Global(v) => {
                 let value = e.declaration_value(v)?;
                 let value = e.copy(&v.ty, &value)?;
-                let slots = &global_slots[&(v as *const VarDecl as usize)];
+                let slots = &global_slots[&(std::ptr::from_ref::<VarDecl>(v) as usize)];
                 for ((binding, ty, value), name) in binding_values(&v.pattern, &v.ty, &value)?
                     .into_iter()
                     .zip(slots)
@@ -168,7 +181,7 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
     e.line("return 0;\n}");
     let mut output = String::from("/* Generated by ncc. */\n");
     for header in &e.headers {
-        output.push_str(&format!("#include <{header}>\n"));
+        writeln!(output, "#include <{header}>").unwrap();
     }
     if e.helpers.contains("/* string type */") {
         output.push_str("typedef struct { size_t bytes; const char *data; size_t len; const size_t *ends; } nc_string;\n#define NC_STRING(s) ((nc_string){sizeof(s)-1, s, 0, NULL})\n");
@@ -181,7 +194,7 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
         output.push_str(include_str!("runtime_unicode.h"));
     }
     for (_, name, _) in &e.record_types {
-        output.push_str(&format!("typedef struct {name} {name};\n"));
+        writeln!(output, "typedef struct {name} {name};").unwrap();
     }
     let mut emitted = HashSet::new();
     while emitted.len() < e.type_definitions.len() {
@@ -422,6 +435,8 @@ impl Emitter<'_> {
         self.line("}");
         Ok(())
     }
+    // Keep the complete type-layout dispatch together.
+    #[allow(clippy::too_many_lines)]
     fn c_type(&mut self, ty: &Type) -> Result<String, Diagnostics> {
         if matches!(ty, Type::Future(_)) {
             self.async_support();
@@ -562,6 +577,9 @@ impl Emitter<'_> {
         }
         .into())
     }
+    // Consume emitted expressions consistently with `expr` and `line`; callers
+    // hand off owned strings that are no longer needed after materialization.
+    #[allow(clippy::needless_pass_by_value)]
     fn temp(&mut self, expr: &Expr, value: String) -> Result<String, Diagnostics> {
         let ty = self.ty(expr)?;
         if ty == Type::void() {
@@ -658,6 +676,8 @@ impl Emitter<'_> {
         self.scopes.pop();
         Ok(())
     }
+    // Keep the comprehensive statement dispatch and its control-flow emission together.
+    #[allow(clippy::too_many_lines)]
     fn statement(&mut self, statement: &Stmt) -> Result<(), Diagnostics> {
         match statement {
             Stmt::Located(inner, location) => self
@@ -735,7 +755,7 @@ impl Emitter<'_> {
                     Expr::Name(n) if n == "_" => {}
                     Expr::Name(n) => self.line(format!("{} = {value};", self.name(n))),
                     Expr::Index { .. } | Expr::Member { .. } => {
-                        self.line(format!("{} = {value};", target_code.unwrap()))
+                        self.line(format!("{} = {value};", target_code.unwrap()));
                     }
                     _ => return unsupported("composite assignment"),
                 }
@@ -744,7 +764,7 @@ impl Emitter<'_> {
                 let Expr::If { subject, arms } = value.unlocated() else {
                     unreachable!()
                 };
-                self.conditional(subject.as_deref(), arms, false)?
+                self.conditional(subject.as_deref(), arms, false)?;
             }
             Stmt::Expr(value) => {
                 self.expr(value)?;
@@ -803,11 +823,11 @@ impl Emitter<'_> {
                     self.line(format!("{result} = {value}; goto {end};"));
                     return Ok(());
                 }
-                let end = self.loop_target(label, false)?;
+                let end = self.loop_target(label.as_deref(), false)?;
                 self.line(format!("goto {end};"));
             }
             Stmt::Continue(label) => {
-                let start = self.loop_target(label, true)?;
+                let start = self.loop_target(label.as_deref(), true)?;
                 self.line(format!("goto {start};"));
             }
             Stmt::For {
@@ -870,12 +890,12 @@ impl Emitter<'_> {
         }
         Ok(())
     }
-    fn loop_target(&self, label: &Option<String>, continuing: bool) -> Result<String, Diagnostics> {
+    fn loop_target(&self, label: Option<&str>, continuing: bool) -> Result<String, Diagnostics> {
         self.loops
             .iter()
             .rev()
             .find(|(name, start, _, can_break)| {
-                (label.is_none() || name == label)
+                (label.is_none() || name.as_deref() == label)
                     && (!continuing || start.is_some())
                     && (label.is_some() || continuing || *can_break)
             })
@@ -927,6 +947,8 @@ impl Emitter<'_> {
         }
         self.equality_body(left, right, ty)
     }
+    // Keep equality generation for all value types in one dispatch.
+    #[allow(clippy::too_many_lines)]
     fn equality_body(&mut self, left: &str, right: &str, ty: &Type) -> Result<String, Diagnostics> {
         if let Type::Named(n, _) = ty
             && let Some(TypeInfo::Alias(base)) = self.checked.types.get(n)
@@ -1057,6 +1079,8 @@ impl Emitter<'_> {
             Ok(format!("{left} == {right}"))
         }
     }
+    // Keep the comprehensive expression dispatch and evaluation-order logic together.
+    #[allow(clippy::too_many_lines)]
     fn expr(&mut self, e: &Expr) -> Result<String, Diagnostics> {
         let e = e.unlocated();
         if let Some(value) = self.expression_values.get(&e.id()) {
@@ -1491,8 +1515,8 @@ impl Emitter<'_> {
                                 self.line(format!(
                                     "for (uint64_t {i} = 0; {i} < {src}.len; ++{i}) {{"
                                 ));
-                                let v = self.copy(element, &format!("{src}.vals[{i}]"))?;
-                                self.line(format!("{result}.vals[{offset} + {i}] = {v};\n}}"));
+                                let copied = self.copy(element, &format!("{src}.vals[{i}]"))?;
+                                self.line(format!("{result}.vals[{offset} + {i}] = {copied};\n}}"));
                             }
                             return Ok(result);
                         }
@@ -1751,9 +1775,10 @@ impl Emitter<'_> {
         let job_type = self.fresh();
         self.define_type(&job_type, vec![payload_type.clone(), result_type.clone()], format!("typedef struct {{ nc_future future; {payload_type} args; {result_type} result; }} {job_type};"));
         let worker = self.fresh();
-        let call_args = (0..params.len())
-            .map(|i| format!(", job->args.f_{}", i + 1))
-            .collect::<String>();
+        let mut call_args = String::new();
+        for i in 0..params.len() {
+            write!(call_args, ", job->args.f_{}", i + 1).unwrap();
+        }
         self.runtime_prototypes
             .push(format!("static void *{worker}(void *raw);"));
         let body = if builtin {
@@ -1840,6 +1865,8 @@ impl Emitter<'_> {
         ));
         self.temp(e, format!("({ct}){{{wrapper},0}}"))
     }
+    // Keep capture layout and closure-function emission together.
+    #[allow(clippy::too_many_lines)]
     fn lambda(&mut self, e: &Expr, f: &Function) -> Result<String, Diagnostics> {
         let captures = self.checked.captures[&e.id()].clone();
         let env_ct = if captures.is_empty() {
@@ -2143,6 +2170,8 @@ impl Emitter<'_> {
         }
         self.string_body(value, ty)
     }
+    // Keep string conversion for all value types in one dispatch.
+    #[allow(clippy::too_many_lines)]
     fn string_body(&mut self, value: &str, ty: &Type) -> Result<String, Diagnostics> {
         if let Type::Named(n, _) = ty
             && let Some(TypeInfo::Alias(base)) = self.checked.types.get(n)
@@ -2172,23 +2201,23 @@ impl Emitter<'_> {
                 ));
                 if !variant.values.is_empty() {
                     let ct = self.c_type(&Type::Tuple(variant.values.clone()))?;
-                    self.append_string(&result, "\"(\"")?;
+                    self.append_string(&result, "\"(\"");
                     for (i, ty) in variant.values.iter().enumerate() {
                         if i > 0 {
-                            self.append_string(&result, "\", \"")?;
+                            self.append_string(&result, "\", \"");
                         }
                         let s =
                             self.string_value(&format!("(({ct}*)({value}).payload)->f_{i}"), ty)?;
                         let quoted = matches!(ty,Type::Named(n,_) if n == "str");
                         if quoted {
-                            self.append_string(&result, "\"\\\"\"")?;
+                            self.append_string(&result, "\"\\\"\"");
                         }
-                        self.append_string(&result, &s)?;
+                        self.append_string(&result, &s);
                         if quoted {
-                            self.append_string(&result, "\"\\\"\"")?;
+                            self.append_string(&result, "\"\\\"\"");
                         }
                     }
-                    self.append_string(&result, "\")\"")?;
+                    self.append_string(&result, "\")\"");
                 }
                 self.line("break; }");
             }
@@ -2212,7 +2241,7 @@ impl Emitter<'_> {
             self.line(format!(
                 "nc_string {result} = NC_STRING(\"error: \"); if (({value}).failed) {{"
             ));
-            self.append_string(&result, &format!("({value}).error"))?;
+            self.append_string(&result, &format!("({value}).error"));
             self.line("} else {");
             let success = self.string_value(&format!("({value}).value"), inner)?;
             self.line(format!("{result} = {success};"));
@@ -2223,31 +2252,31 @@ impl Emitter<'_> {
             let result = self.fresh();
             let i = self.fresh();
             self.line(format!("nc_string {result} = NC_STRING(\"[\"); for (uint64_t {i} = 0; {i} < ({value}).len; ++{i}) {{\nif ({i}) {{"));
-            self.append_string(&result, "\", \"")?;
+            self.append_string(&result, "\", \"");
             self.line("}");
             match ty {
                 Type::Array(element, _) => {
                     let s = self.string_value(&format!("({value}).vals[{i}]"), element)?;
                     let quoted = matches!(&**element, Type::Named(n, _) if n == "str");
                     if quoted {
-                        self.append_string(&result, "\"\\\"\"")?;
+                        self.append_string(&result, "\"\\\"\"");
                     }
-                    self.append_string(&result, &s)?;
+                    self.append_string(&result, &s);
                     if quoted {
-                        self.append_string(&result, "\"\\\"\"")?;
+                        self.append_string(&result, "\"\\\"\"");
                     }
                 }
                 Type::Map(key, val) => {
                     let k = self.string_value(&format!("({value}).vals[{i}].f_0"), key)?;
-                    self.append_string(&result, &k)?;
-                    self.append_string(&result, "\": \"")?;
+                    self.append_string(&result, &k);
+                    self.append_string(&result, "\": \"");
                     let v = self.string_value(&format!("({value}).vals[{i}].f_1"), val)?;
-                    self.append_string(&result, &v)?;
+                    self.append_string(&result, &v);
                 }
                 _ => unreachable!(),
             }
             self.line("}");
-            self.append_string(&result, "\"]\"")?;
+            self.append_string(&result, "\"]\"");
             return Ok(result);
         }
         if let Some(fields) = self.fields(ty) {
@@ -2260,18 +2289,18 @@ impl Emitter<'_> {
             self.line(format!("nc_string {result} = {};", nc_string(&open)));
             for (i, (field, ty_field)) in fields.iter().enumerate() {
                 if i > 0 {
-                    self.append_string(&result, "\", \"")?;
+                    self.append_string(&result, "\", \"");
                 }
                 if matches!(ty, Type::Named(_, _)) {
                     self.append_string(
                         &result,
                         &c_string(&format!(".{} = ", field.trim_start_matches("f_"))),
-                    )?;
+                    );
                 }
                 let s = self.string_value(&format!("({value}).{field}"), ty_field)?;
-                self.append_string(&result, &s)?;
+                self.append_string(&result, &s);
             }
-            self.append_string(&result, &c_string(close))?;
+            self.append_string(&result, &c_string(close));
             return Ok(result);
         }
         let Type::Named(name, _) = ty else {
@@ -2307,7 +2336,7 @@ impl Emitter<'_> {
         self.headers.insert("string.h");
         Ok(format!("((nc_string){{strlen({result}), {result}}})"))
     }
-    fn append_string(&mut self, result: &str, suffix: &str) -> Result<(), Diagnostics> {
+    fn append_string(&mut self, result: &str, suffix: &str) {
         self.unicode_support();
         let suffix = if suffix.starts_with('"') {
             format!("NC_STRING({suffix})")
@@ -2318,7 +2347,6 @@ impl Emitter<'_> {
         self.line(format!(
             "nc_string {value} = {suffix}; {result} = nc_str_concat({result}, {value});"
         ));
-        Ok(())
     }
     fn enum_decl(&self, ty: &Type) -> Option<EnumDecl> {
         if let Type::Named(n, _) = ty
@@ -2623,7 +2651,7 @@ fn c_string_bytes(value: &[u8]) -> String {
             b'"' => s.push_str("\\\""),
             b'\\' => s.push_str("\\\\"),
             32..=126 => s.push(b as char),
-            _ => s.push_str(&format!("\\{b:03o}")),
+            _ => write!(s, "\\{b:03o}").unwrap(),
         }
     }
     s.push('"');

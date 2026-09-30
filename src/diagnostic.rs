@@ -1,4 +1,7 @@
-use std::{fmt, ops::Range};
+use std::{
+    fmt::{self, Write as _},
+    ops::Range,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Diagnostic {
@@ -11,6 +14,7 @@ pub struct Diagnostic {
 pub struct Diagnostics(pub Vec<Diagnostic>);
 
 impl Diagnostics {
+    #[must_use]
     pub fn at_source(mut self, path: &std::path::Path, fallback: Range<usize>) -> Self {
         for diagnostic in &mut self.0 {
             if diagnostic.path.is_none() {
@@ -22,9 +26,11 @@ impl Diagnostics {
         }
         self
     }
+    #[must_use]
     pub fn render(&self, source: &str, path: &std::path::Path) -> String {
         self.render_level(source, path, "error")
     }
+    #[must_use]
     pub fn render_warnings(&self, source: &str, path: &std::path::Path) -> String {
         self.render_level(source, path, "warning")
     }
@@ -46,13 +52,15 @@ impl Diagnostics {
                 .map_or(source.len(), |x| start + x);
             let line = source[..start].bytes().filter(|b| *b == b'\n').count() + 1;
             let column = source[line_start..start].chars().count() + 1;
-            out.push_str(&format!(
-                "{}:{line}:{column}: {level}: {}\n  |\n{line:>2} | {}\n  | {}^\n",
+            writeln!(
+                out,
+                "{}:{line}:{column}: {level}: {}\n  |\n{line:>2} | {}\n  | {}^",
                 actual_path.display(),
                 diagnostic.message,
                 &source[line_start..line_end],
                 " ".repeat(column - 1)
-            ));
+            )
+            .unwrap();
         }
         out
     }

@@ -3,6 +3,9 @@ use std::ops::Range;
 use crate::diagnostic::Diagnostics;
 
 /// Shared integer decoding for values, fixed-array lengths, and tooling.
+///
+/// # Errors
+/// Returns diagnostics if the literal is invalid for its base or overflows `u64`.
 pub fn integer(text: &str) -> Result<u64, Diagnostics> {
     let text = text.strip_suffix('u').unwrap_or(text);
     let (digits, base) = if let Some(x) = text.strip_prefix("0x") {
@@ -145,6 +148,12 @@ fn keyword(s: &str) -> Option<Keyword> {
     })
 }
 
+/// Tokenize NC source, preserving source spans.
+///
+/// # Errors
+/// Returns diagnostics for unexpected characters, malformed or unterminated quoted
+/// literals, invalid escapes, or char literals that are not one grapheme cluster.
+#[allow(clippy::too_many_lines)] // Keep token recognition and span advancement in one dispatch.
 pub fn lex(source: &str) -> Result<Vec<Token>, Diagnostics> {
     let mut out = Vec::new();
     let mut i = 0;
@@ -227,9 +236,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, Diagnostics> {
                 kind: if matches!(s, "NaN" | "inf") {
                     TokenKind::Float(s.into())
                 } else {
-                    keyword(s)
-                        .map(TokenKind::Keyword)
-                        .unwrap_or_else(|| TokenKind::Ident(s.into()))
+                    keyword(s).map_or_else(|| TokenKind::Ident(s.into()), TokenKind::Keyword)
                 },
                 span: start..i,
             });
@@ -298,6 +305,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, Diagnostics> {
     Ok(out)
 }
 
+#[allow(clippy::too_many_lines)] // Quote, escape, and interpolation states share one scan cursor.
 fn quoted(source: &str, start: usize, quote: char) -> Result<(String, usize), Diagnostics> {
     let multiline = quote == '"' && source[start..].starts_with("\"\"\"");
     let mut braces = 0usize;

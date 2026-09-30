@@ -96,7 +96,7 @@ fn parse(args: Vec<String>) -> Result<Option<Options>, String> {
                     options.target = Some(target);
                 }
                 "-r" | "--release" | "-d" | "--debug" if inline.is_none() => {
-                    options.release = matches!(flag, "-r" | "--release")
+                    options.release = matches!(flag, "-r" | "--release");
                 }
                 "-o" | "--output" | "-f" | "--format" if options.command == "build" => {
                     let value = inline
@@ -136,7 +136,7 @@ fn parse(args: Vec<String>) -> Result<Option<Options>, String> {
 }
 fn main() -> ExitCode {
     let result = parse(env::args().skip(1).collect())
-        .and_then(|options| options.map_or(Ok(ExitCode::SUCCESS), execute));
+        .and_then(|options| options.as_ref().map_or(Ok(ExitCode::SUCCESS), execute));
     match result {
         Ok(code) => code,
         Err(error) => {
@@ -145,10 +145,12 @@ fn main() -> ExitCode {
         }
     }
 }
-fn execute(o: Options) -> Result<ExitCode, String> {
+fn execute(o: &Options) -> Result<ExitCode, String> {
     let source = fs::read_to_string(&o.input).map_err(|e| format!("{}: {e}", o.input.display()))?;
-    build(&o, &source)
+    build(o, &source)
 }
+// Keep compilation, execution, and temporary-artifact cleanup in one scope.
+#[allow(clippy::too_many_lines)]
 fn build(o: &Options, source: &str) -> Result<ExitCode, String> {
     let run = matches!(o.command.as_str(), "run" | "test");
     let target = if run {
@@ -208,23 +210,23 @@ fn build(o: &Options, source: &str) -> Result<ExitCode, String> {
     let c_path = temporary.path().join("program.c");
     let binary = temporary.path().join("program");
     fs::write(&c_path, &c).map_err(|e| e.to_string())?;
-    let mut compiler = Command::new("cc");
-    compiler.arg(&c_path).arg("-std=c11");
-    compiler.args(["-arch", ncc::target::ARCH]);
+    let mut native_compiler = Command::new("cc");
+    native_compiler.arg(&c_path).arg("-std=c11");
+    native_compiler.args(["-arch", ncc::target::ARCH]);
     if o.release {
-        compiler.arg("-O3");
+        native_compiler.arg("-O3");
     } else {
-        compiler.args(["-O0", "-g"]);
+        native_compiler.args(["-O0", "-g"]);
     }
     if c.contains("#include <pthread.h>") {
-        compiler.arg("-pthread");
+        native_compiler.arg("-pthread");
     }
     if format == Format::Object {
-        compiler.arg("-c");
+        native_compiler.arg("-c");
     } else if c.contains("#include <math.h>") {
-        compiler.arg("-lm");
+        native_compiler.arg("-lm");
     }
-    let status = compiler
+    let status = native_compiler
         .arg("-o")
         .arg(&binary)
         .status()

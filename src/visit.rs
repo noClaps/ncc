@@ -1,5 +1,5 @@
 //! Shared expression traversal for compile-time evaluation and reachability.
-use crate::ast::*;
+use crate::ast::{Block, Expr, Item, Pattern, Stmt};
 
 pub fn item<'a>(item: &'a Item, f: &mut impl FnMut(&'a Expr)) {
     match item {
@@ -25,7 +25,7 @@ fn stmt<'a>(s: &'a Stmt, f: &mut impl FnMut(&'a Expr)) {
             expr(value, f);
         }
         Stmt::Expr(e) | Stmt::Throw(e) | Stmt::Assert(e) | Stmt::LabeledIf { value: e, .. } => {
-            expr(e, f)
+            expr(e, f);
         }
         Stmt::Return(e) | Stmt::Break(e, _) => {
             if let Some(e) = e {
@@ -174,7 +174,7 @@ fn rewrite_stmt(s: &mut Stmt, f: &mut impl FnMut(&mut Expr)) {
             rewrite_expr(value, f);
         }
         Stmt::Expr(e) | Stmt::Throw(e) | Stmt::Assert(e) | Stmt::LabeledIf { value: e, .. } => {
-            rewrite_expr(e, f)
+            rewrite_expr(e, f);
         }
         Stmt::Return(e) | Stmt::Break(e, _) => {
             if let Some(e) = e {

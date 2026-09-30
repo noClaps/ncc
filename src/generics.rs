@@ -1,7 +1,16 @@
 //! Monomorphize generic applications before checking bodies.
-use crate::{ast::*, diagnostic::Diagnostics};
+use crate::{
+    ast::{BUILTIN_TYPES, Block, Expr, Function, Item, Module, Pattern, Stmt, Type, VarDecl},
+    diagnostic::Diagnostics,
+};
 use std::collections::{HashMap, HashSet};
 
+/// Specialize generic functions and types in a module.
+///
+/// # Errors
+/// Returns diagnostics for duplicate declarations, invalid generic applications,
+/// or exceeded function/type specialization limits.
+#[allow(clippy::too_many_lines)] // Keep the ordered specialization phases together.
 pub fn specialize(mut module: Module) -> Result<Module, Diagnostics> {
     // Check before removing templates: collection into a map would otherwise
     // silently overwrite duplicate generic declarations, even unused ones.
@@ -31,10 +40,10 @@ pub fn specialize(mut module: Module) -> Result<Module, Diagnostics> {
         .iter()
         .filter_map(|item| {
             if let Item::Function(f) = item {
-                if !f.generics.is_empty() {
-                    Some((f.name.clone(), f.clone()))
-                } else {
+                if f.generics.is_empty() {
                     None
+                } else {
+                    Some((f.name.clone(), f.clone()))
                 }
             } else {
                 None
@@ -139,7 +148,7 @@ pub(crate) fn substitute(ty: &mut Type, bindings: &HashMap<String, Type>) {
             }
         }
         Type::Array(t, _) | Type::Optional(t) | Type::ErrorUnion(t) | Type::Future(t) => {
-            substitute(t, bindings)
+            substitute(t, bindings);
         }
         Type::Map(k, v) => {
             substitute(k, bindings);
@@ -200,7 +209,9 @@ impl Pass {
                 Type::Array(ty, _) | Type::Map(_, ty) => Some(*ty),
                 Type::Tuple(types) => {
                     if let Expr::Int(n) = index.unlocated() {
-                        types.get(crate::lexer::integer(n).ok()? as usize).cloned()
+                        types
+                            .get(usize::try_from(crate::lexer::integer(n).ok()?).ok()?)
+                            .cloned()
                     } else {
                         None
                     }
@@ -244,8 +255,8 @@ impl Pass {
                     self.hint_block(body, ty);
                 }
             }
-            (Expr::Else { fallback, .. }, ty) | (Expr::Catch { body: fallback, .. }, ty) => {
-                self.hint_block(fallback, ty)
+            (Expr::Else { fallback, .. } | Expr::Catch { body: fallback, .. }, ty) => {
+                self.hint_block(fallback, ty);
             }
             (Expr::Map(entries), Type::Map(key, value)) => {
                 for (k, v) in entries {
@@ -259,7 +270,7 @@ impl Pass {
                     .iter()
                     .any(|((base, _), n)| base == name && n == instance)
                 {
-                    *name = instance.clone();
+                    name.clone_from(instance);
                 }
                 if let Some(Item::Struct(decl)) = self.declaration(name) {
                     for (name, value) in fields {
@@ -278,7 +289,7 @@ impl Pass {
                         .iter()
                         .any(|((base, _), n)| base == owner && n == instance)
                     {
-                        *owner = instance.clone();
+                        owner.clone_from(instance);
                     }
                     if owner == instance
                         && let Some(Item::Enum(decl)) = self.declaration(instance)
@@ -297,7 +308,7 @@ impl Pass {
                         .iter()
                         .any(|((base, _), n)| base == owner && n == instance)
                 {
-                    *owner = instance.clone();
+                    owner.clone_from(instance);
                 }
             }
             (Expr::Array(xs), Type::Array(t, _)) => {
@@ -377,11 +388,11 @@ impl Pass {
                     self.type_instances.insert(key, instance.clone());
                     match &mut item {
                         Item::Struct(s) => {
-                            s.name = instance.clone();
+                            s.name.clone_from(&instance);
                             s.generics.clear();
                         }
                         Item::Enum(e) => {
-                            e.name = instance.clone();
+                            e.name.clone_from(&instance);
                             e.generics.clear();
                         }
                         _ => unreachable!(),
@@ -392,7 +403,7 @@ impl Pass {
                 }
             }
             Type::Array(t, _) | Type::Optional(t) | Type::ErrorUnion(t) | Type::Future(t) => {
-                self.ty(t, bindings)?
+                self.ty(t, bindings)?;
             }
             Type::Map(k, v) => {
                 self.ty(k, bindings)?;
@@ -494,7 +505,7 @@ impl Pass {
             .cloned()
             .zip(arguments.iter().cloned())
             .collect();
-        f.name = instance.clone();
+        f.name.clone_from(&instance);
         f.generics.clear();
         for p in &mut f.params {
             self.ty(&mut p.ty, &bindings)?;
@@ -533,7 +544,7 @@ impl Pass {
             }
             Stmt::Block(body) | Stmt::Lock { body, .. } => self.block(body, b)?,
             Stmt::Expr(e) | Stmt::Assert(e) | Stmt::Throw(e) | Stmt::LabeledIf { value: e, .. } => {
-                self.expr(e, b)?
+                self.expr(e, b)?;
             }
             Stmt::Return(Some(e)) => {
                 if let Some(t) = &self.return_type {
@@ -563,6 +574,7 @@ impl Pass {
         }
         Ok(())
     }
+    #[allow(clippy::too_many_lines)] // Keep expression variants in one specialization dispatch.
     fn expr(&mut self, e: &mut Expr, b: &HashMap<String, Type>) -> Result<(), Diagnostics> {
         if let Expr::Located(value, location) = e {
             return self
@@ -621,7 +633,7 @@ impl Pass {
                         unreachable!()
                     };
                     if let Expr::StructInit { name, .. } = value.unlocated_mut() {
-                        *name = instance.clone();
+                        name.clone_from(instance);
                     }
                 }
                 self.expr(value, b)?;

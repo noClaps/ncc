@@ -140,7 +140,7 @@ fn build_format_flag_overrides_the_output_extension() {
 
 #[test]
 fn supports_multiple_conditional_patterns() {
-    let source = r#"
+    let source = r"
         fn fibonacci(int n) int {
           if n {
             0, 1 -> { return n }
@@ -148,7 +148,7 @@ fn supports_multiple_conditional_patterns() {
           }
         }
         @println(fibonacci(10))
-    "#;
+    ";
     let directory = std::env::temp_dir().join(format!("ncc-fibonacci-test-{}", std::process::id()));
     let _ = fs::create_dir_all(&directory);
     let source_path = directory.join("fibonacci.nc");

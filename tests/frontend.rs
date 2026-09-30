@@ -29,15 +29,15 @@ fn unicode_escape_validation_is_strict() {
         r#""\u{41""#,
         r#""\'""#,
         r#"'\"'"#,
-        r#"'\{'"#,
+        r"'\{'",
     ] {
         assert!(ncc::lexer::lex(source).is_err(), "{source}");
     }
     for source in [
-        r#"'\u{0}'"#,
-        r#"'\u{10FFFF}'"#,
-        r#"'\u{1f36a}'"#,
-        r#"'o\u{308}'"#,
+        r"'\u{0}'",
+        r"'\u{10FFFF}'",
+        r"'\u{1f36a}'",
+        r"'o\u{308}'",
         r#""\e\n\r\t\\\"\{""#,
     ] {
         assert!(ncc::lexer::lex(source).is_ok(), "{source}");

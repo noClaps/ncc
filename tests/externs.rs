@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::{fs, process::Command};
 
 #[test]
@@ -52,13 +53,13 @@ fn c_extern_nonfinite_floats_keep_ieee_values_and_canonical_formatting() {
     let input = directory.path().join("main.nc");
     fs::write(
         directory.path().join("native.c"),
-        r#"
+        r"
 #include <math.h>
 nc_abi_invalid_result invalid(void) { return -NAN; }
 nc_abi_positive_result positive(void) { return INFINITY; }
 nc_abi_negative_result negative(void) { return -INFINITY; }
 nc_abi_roundtrip_result roundtrip(nc_abi_roundtrip_arg0 value) { return value; }
-"#,
+",
     )
     .unwrap();
     let declarations = r#"
@@ -165,18 +166,22 @@ fn c_abi_roundtrips_scalar_nominal_and_composite_values() {
     );
     let mut c = String::new();
     for (name, ty, _) in cases {
-        source.push_str(&format!("fn {name}({ty} value) {ty} = \"{name}\"\n"));
-        c.push_str(&format!(
-            "nc_abi_{name}_result {name}(nc_abi_{name}_arg0 value) {{ return value; }}\n"
-        ));
+        writeln!(source, "fn {name}({ty} value) {ty} = \"{name}\"").unwrap();
+        writeln!(
+            c,
+            "nc_abi_{name}_result {name}(nc_abi_{name}_arg0 value) {{ return value; }}"
+        )
+        .unwrap();
     }
     source.push_str("fn callback((fn(int) int) value) (fn(int) int) = \"callback\"\nfn invoke((fn(int) int) callback, int n) int = \"invoke\"\nfn observe(fut int value) bool = \"observe\"\n}\nfn increment(int n) int { return n + 1 }\ntest \"ABI\" {\n");
     c.push_str("nc_abi_callback_result callback(nc_abi_callback_arg0 value) { return value; }\n");
     c.push_str("nc_abi_invoke_result invoke(nc_abi_invoke_arg0 callback, nc_abi_invoke_arg1 n) { return callback.call(callback.env, n); }\nnc_abi_observe_result observe(nc_abi_observe_arg0 value) { return value != 0; }\n");
     for (name, ty, value) in cases {
-        source.push_str(&format!(
+        write!(
+            source,
             "{ty} {name} = {value}\nassert native.{name}({name}) == {name}\n"
-        ));
+        )
+        .unwrap();
     }
     source.push_str(
         "(fn(int) int) callback = native.callback(increment)\nassert callback(41) == 42\nint extra = 2\nassert native.invoke(fn(int n) int { return n + extra }, 40) == 42\nfut int future = async increment(41)\nassert native.observe(future)\nassert await future == 42\n}\n",
@@ -192,12 +197,12 @@ fn void_storage_and_native_void_returns_have_distinct_abi_types() {
     let input = directory.path().join("main.nc");
     fs::write(
         directory.path().join("native.c"),
-        r#"
+        r"
 static int calls;
 nc_abi_touch_result touch(nc_abi_touch_arg0 value) { calls += value == 0; }
 nc_abi_count_result count(void) { return calls; }
 nc_abi_roundtrip_result roundtrip(nc_abi_roundtrip_arg0 values) { return values; }
-"#,
+",
     )
     .unwrap();
     fs::write(
@@ -286,10 +291,10 @@ fn shared_c_sources_see_all_abi_declarations_and_are_included_once() {
     let input = directory.path().join("main.nc");
     fs::write(
         directory.path().join("native.c"),
-        r#"
+        r"
 nc_abi_first_result first(nc_abi_first_arg0 value) { return value + second(2); }
 nc_abi_second_result second(nc_abi_second_arg0 value) { return value * 2; }
-"#,
+",
     )
     .unwrap();
     fs::write(

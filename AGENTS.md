@@ -122,6 +122,10 @@
   `cargo test --offline`, `cargo test --offline --no-default-features`,
   `cargo clippy --offline --all-targets -- -D warnings`, `cargo fmt --check`,
   and `cargo build --offline --release`.
+- Keep Clippy's configured pedantic lints passing with warnings denied. Prefer
+  fixes over exemptions; intentional semantics or comprehensive AST dispatch may
+  use narrowly scoped, explained allowances. Preserve decomposed Unicode fixtures
+  rather than normalizing their bytes to satisfy a lint.
 - Never run `nc-tests/builtins.nc` with uncensored output: it prints environment
   variables. Run the large Fibonacci example only in release mode.
 - Preserve user changes and examples. Commit small, coherent changes often.

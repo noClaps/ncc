@@ -1,6 +1,6 @@
 //! Conservative, non-fatal diagnostics for control flow and async shared state.
 use crate::{
-    ast::*,
+    ast::{Block, Expr, Function, Item},
     diagnostic::{Diagnostic, Diagnostics},
     sema::{CheckedModule, TypeInfo},
     visit,

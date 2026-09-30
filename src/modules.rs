@@ -1,15 +1,30 @@
 //! Resolve source modules once, enforce exports, and qualify their symbols.
-use crate::{ast::*, diagnostic::Diagnostics, lexer, parser};
+use crate::{
+    ast::{Block, Expr, Item, Module, Pattern, Stmt, Type},
+    diagnostic::Diagnostics,
+    lexer, parser,
+};
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
 };
 type Names = HashMap<String, String>;
 
+/// Resolve imports and external paths, excluding test blocks.
+///
+/// # Errors
+/// Returns diagnostics for unreadable or invalid imports, import cycles, duplicate
+/// module aliases, inaccessible exports, or unresolved external implementation paths.
 pub fn load(module: Module, path: &Path) -> Result<Module, Diagnostics> {
     load_with_tests(module, path, false)
 }
 
+/// Resolve modules, optionally retaining tests and their dependencies in source order.
+///
+/// # Errors
+/// Returns diagnostics for unreadable or invalid imports, import cycles, or duplicate
+/// module aliases. Export and external-path errors are reported only for retained
+/// items in test mode, and for all non-test items otherwise.
 pub fn load_with_tests(module: Module, path: &Path, tests: bool) -> Result<Module, Diagnostics> {
     let mut loader = Loader {
         tests,
@@ -47,6 +62,7 @@ struct Loader {
     next: usize,
 }
 impl Loader {
+    #[allow(clippy::too_many_lines)] // Keep import resolution and ordered item/error collection together.
     fn visit(&mut self, mut module: Module, path: &Path, root: bool) -> Result<Names, Diagnostics> {
         if !self.tests {
             module
@@ -174,6 +190,7 @@ impl Loader {
         Ok(exports)
     }
 }
+#[must_use]
 pub fn source_key(path: &Path) -> PathBuf {
     if let Ok(path) = path.canonicalize() {
         return path;
@@ -217,7 +234,7 @@ fn qualify_type(ty: &mut Type, names: &Names) {
             }
         }
         Type::Array(t, _) | Type::Optional(t) | Type::ErrorUnion(t) | Type::Future(t) => {
-            qualify_type(t, names)
+            qualify_type(t, names);
         }
         Type::Map(k, v) => {
             qualify_type(k, names);
@@ -298,7 +315,7 @@ fn qualify_item(
                 qualify_type(&mut f.return_type, names);
             }
         }
-        _ => {}
+        Item::Import { .. } => {}
     }
     Ok(())
 }
@@ -361,7 +378,7 @@ fn statement(
         }
         Stmt::Block(b) => block(b, names, aliases)?,
         Stmt::Expr(e) | Stmt::Assert(e) | Stmt::Throw(e) | Stmt::LabeledIf { value: e, .. } => {
-            expr(e, names, aliases)?
+            expr(e, names, aliases)?;
         }
         Stmt::Return(e) | Stmt::Break(e, _) => {
             if let Some(e) = e {
@@ -399,6 +416,7 @@ fn statement(
     }
     Ok(())
 }
+#[allow(clippy::too_many_lines)] // Keep all expression qualification variants in one dispatch.
 fn expr(e: &mut Expr, names: &Names, aliases: &HashMap<String, Names>) -> Result<(), Diagnostics> {
     if let Expr::Located(value, location) = e {
         return expr(value, names, aliases)
@@ -437,7 +455,7 @@ fn expr(e: &mut Expr, names: &Names, aliases: &HashMap<String, Names>) -> Result
             expr(value, names, aliases)?;
         }
         Expr::Unary { value, .. } | Expr::Async(value) | Expr::Await(value) | Expr::Try(value) => {
-            expr(value, names, aliases)?
+            expr(value, names, aliases)?;
         }
         Expr::Binary { left, right, .. } => {
             expr(left, names, aliases)?;

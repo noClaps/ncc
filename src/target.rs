@@ -3,6 +3,10 @@ pub const NAME: &str = "macos-arm64";
 pub const OS: &str = "macos";
 pub const ARCH: &str = "arm64";
 
+/// Validate a compilation target name.
+///
+/// # Errors
+/// Returns an error if `name` is not the supported target [`NAME`].
 pub fn validate(name: &str) -> Result<(), String> {
     if name == NAME {
         Ok(())

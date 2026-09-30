@@ -52,6 +52,7 @@ pub struct StructDecl {
     pub fields: Vec<Field>,
 }
 impl Item {
+    #[must_use]
     pub fn source(&self) -> Option<(&std::path::Path, &Span)> {
         match self {
             Self::Function(f) => Some((&f.source_path, &f.span)),
@@ -119,6 +120,7 @@ pub struct VarDecl {
     pub value: Expr,
 }
 impl VarDecl {
+    #[must_use]
     pub fn binding_names(&self) -> Vec<&str> {
         fn collect<'a>(pattern: &'a Pattern, names: &mut Vec<&'a str>) {
             match pattern {
@@ -177,6 +179,7 @@ pub enum Stmt {
     },
 }
 impl Stmt {
+    #[must_use]
     pub fn unlocated(&self) -> &Self {
         match self {
             Self::Located(statement, _) => statement.unlocated(),
@@ -189,6 +192,7 @@ impl Stmt {
             _ => self,
         }
     }
+    #[must_use]
     pub fn source(&self) -> Option<(&std::path::Path, &Span)> {
         match self {
             Self::Located(_, location) => Some((&location.path, &location.span)),
@@ -268,6 +272,7 @@ pub enum Expr {
     },
 }
 impl Expr {
+    #[must_use]
     pub fn unlocated(&self) -> &Self {
         match self {
             Self::Located(value, _) => value.unlocated(),
@@ -280,18 +285,22 @@ impl Expr {
             _ => self,
         }
     }
+    #[must_use]
     pub fn into_unlocated(self) -> Self {
         match self {
             Self::Located(value, _) => value.into_unlocated(),
             value => value,
         }
     }
+    #[must_use]
     pub fn located(self, location: SourceLocation) -> Self {
         Self::Located(Box::new(self.into_unlocated()), location)
     }
+    #[must_use]
     pub fn id(&self) -> usize {
-        self.unlocated() as *const Self as usize
+        std::ptr::from_ref::<Self>(self.unlocated()) as usize
     }
+    #[must_use]
     pub fn location(&self) -> Option<&SourceLocation> {
         match self {
             Self::Located(_, location) => Some(location),
@@ -357,6 +366,7 @@ pub enum Type {
     Future(Box<Type>),
 }
 impl Type {
+    #[must_use]
     pub fn void() -> Self {
         Self::Named("void".into(), vec![])
     }

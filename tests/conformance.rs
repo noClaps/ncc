@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::{fs, path::Path, process::Command};
 
 #[test]
@@ -107,14 +108,16 @@ fn numeric_byte_encodings_preserve_boundaries_and_ieee_bits() {
     }
     for (index, (value, bytes)) in cases.into_iter().enumerate() {
         let expected = bytes.map(|byte| byte.to_string()).join(", ");
-        source.push_str(&format!(
+        write!(
+            source,
             "byte[8] expected_{index} = [{expected}]\n\
              mut byte[] encoded_{index} = @as(byte[], {value})\n\
              assert encoded_{index} == expected_{index}\n\
              assert encoded_{index}.len == 8\n\
              encoded_{index}[0] = 99\n\
-             assert @as(byte[], {value}) == expected_{index}\n",
-        ));
+             assert @as(byte[], {value}) == expected_{index}\n"
+        )
+        .unwrap();
     }
     source.push_str("}\n@println(\"numeric bytes\")\n");
     success(&source, "numeric bytes\n");
@@ -1073,6 +1076,8 @@ fn invalid_labels_value_breaks_and_pattern_comparisons_are_rejected() {
     );
 }
 
+// Preserve decomposed literals: NC stores UTF-8 bytes without normalization.
+#[allow(clippy::unicode_not_nfc)]
 #[test]
 fn string_char_elements_remain_separate_after_replacement_and_concatenation() {
     success(
@@ -1169,6 +1174,8 @@ test "iteration elements" {
     );
 }
 
+// These raw decomposed graphemes intentionally exercise lexer and string handling.
+#[allow(clippy::unicode_not_nfc)]
 #[test]
 fn unicode_string_length_indexing_and_iteration() {
     success(
@@ -1872,7 +1879,7 @@ fn release_evaluates_pure_functions_and_preserves_effects() {
     let c = compile_fixture(scoped, Path::new("scope.nc"), true).unwrap();
     assert!(c.contains("2LL"));
     assert!(!c.contains("nc_fn_scoped"));
-    let source = r#"fn fib(int n) int { if n { 0,1 -> { return n } _ -> { return fib(n-1)+fib(n-2) } } } @println(fib(10))"#;
+    let source = r"fn fib(int n) int { if n { 0,1 -> { return n } _ -> { return fib(n-1)+fib(n-2) } } } @println(fib(10))";
     let c = compile_fixture(source, Path::new("fib.nc"), true).unwrap();
     let main = c.split("int main(void)").last().unwrap();
     assert!(main.contains("55LL"));
@@ -2205,7 +2212,7 @@ fn module_namespaces_keep_identical_type_and_generic_names_distinct() {
         fs::write(
             directory.path().join(format!("{module}.nc")),
             format!(
-                r#"
+                r"
 pub type Count = int
 pub struct Point {{ int x }}
 pub struct Box<T> {{ T value }}
@@ -2215,7 +2222,7 @@ fn private_add(int value) int {{ return value + bias }}
 pub fn calculate(int value) int {{ return private_add(value) }}
 pub fn wrap<T>(T value) Box<T> {{ return Box<T>{{.value = value}} }}
 pub fn choose<T>(T value) Choice<T> {{ return Choice.Value(value) }}
-"#
+"
             ),
         )
         .unwrap();
@@ -2302,13 +2309,13 @@ fn nested_imports_resolve_relative_helpers_and_preserve_exported_generic_types()
     fs::create_dir(&library).unwrap();
     fs::write(
         library.join("helper.nc"),
-        r#"
+        r"
 pub struct Box<T> { T value }
 int bias = 2
 fn adjust(int value) int { return value + bias }
 pub fn answer(int value) int { return adjust(value) }
 pub fn wrap<T>(T value) Box<T> { return Box<T>{.value = value} }
-"#,
+",
     )
     .unwrap();
     fs::write(
@@ -2439,14 +2446,14 @@ fn imported_types_and_patterns() {
     let dir = ncc::temp::Directory::new().unwrap();
     fs::write(
         dir.path().join("data.nc"),
-        r#"
+        r"
 pub struct Point { int x }
 pub struct Box<type T> { T value }
 pub enum Choice { Point(Point) Empty }
 pub fn number(Choice choice) int {
     return if choice { Choice.Point(p) -> { p.x } Choice.Empty -> { 0 } }
 }
-"#,
+",
     )
     .unwrap();
     let main = dir.path().join("main.nc");
@@ -3405,12 +3412,14 @@ fn arithmetic_shifts_match_floor_division_for_every_valid_count() {
             .map(|count| (i128::from(value).div_euclid(2_i128.pow(count))).to_string())
             .collect::<Vec<_>>()
             .join(",");
-        source.push_str(&format!(
+        write!(
+            source,
             "int[] expected = [{expected}]\n\
              for count in expected {{\n\
              assert shift({value}, @as(int, count) + zero) == expected[count]\n\
              }}\n"
-        ));
+        )
+        .unwrap();
     }
     source.push_str("}\n");
     success(&source, "");

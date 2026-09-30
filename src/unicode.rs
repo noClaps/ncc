@@ -1,5 +1,6 @@
 //! Extended grapheme boundaries (Unicode 16 / UAX #29), in a forward scan.
 use crate::unicode_data::RANGES;
+#[must_use]
 pub fn property(c: u32) -> u8 {
     if (0xac00..=0xd7a3).contains(&c) {
         return if (c - 0xac00).is_multiple_of(28) {
@@ -14,6 +15,8 @@ pub fn property(c: u32) -> u8 {
         .filter(|(lo, _, _)| *lo <= c)
         .map_or(0, |(_, _, v)| *v)
 }
+// UAX #29 rules require independent, overlapping state for these properties.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Default)]
 struct State {
     previous: u8,
@@ -61,12 +64,14 @@ impl State {
         boundary
     }
 }
+#[must_use]
 pub fn boundaries(text: &str) -> Vec<usize> {
     let mut state = State::default();
     text.char_indices()
         .filter_map(|(i, c)| state.push(c as u32).then_some(i))
         .collect()
 }
+#[must_use]
 pub fn c_tables() -> String {
     use std::fmt::Write;
     let mut result = String::from("/* Unicode 16.0.0; Rust Project Developers, MIT. */\n");
@@ -85,6 +90,8 @@ pub fn c_tables() -> String {
 mod tests {
     use super::*;
     use unicode_segmentation::UnicodeSegmentation;
+    // Decomposed text must remain unnormalized to test grapheme boundaries.
+    #[allow(clippy::unicode_not_nfc)]
     #[test]
     fn matches_reference_boundaries() {
         let contexts = [

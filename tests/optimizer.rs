@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::{fs, path::Path, process::Command};
 
 fn fixture_has_tests(source: &str) -> bool {
@@ -91,6 +92,8 @@ fn folded(source: &str, names: &[&str], expected: &str) {
     }
 }
 
+// Decomposed literals must keep their original bytes during folding.
+#[allow(clippy::unicode_not_nfc)]
 #[test]
 fn string_char_array_boundaries_survive_mutation_and_concatenation() {
     folded(
@@ -346,13 +349,13 @@ count = count + 1
 
 #[test]
 fn top_level_evaluation_tracks_immutable_closure_and_tuple_bindings() {
-    let source = r#"
+    let source = r"
 (int, int) captured = (2, 3)
 fn operation = fn() int { return captured[0] + captured[1] }
 mut int value = 0
 value = operation()
 value = value / (value - 5)
-"#;
+";
     let path = Path::new("captured-top-level.nc");
     compile_fixture(source, path, false).unwrap();
     let error = compile_fixture(source, path, true).unwrap_err();
@@ -426,12 +429,12 @@ fn output_with_unknown_arguments_does_not_assume_later_execution() {
 
 #[test]
 fn infinite_loops_remain_runtime_but_their_contents_can_fold() {
-    let source = r#"
+    let source = r"
 fn sum(int n) int { return n + 1 }
 while true { @println(sum(2)) }
 @println(1 / 0)
 int unreachable = 1 / 0
-"#;
+";
     for release in [false, true] {
         let output =
             ncc::compile_source_with_diagnostics(source, Path::new("forever.nc"), release).unwrap();
@@ -527,7 +530,7 @@ fn float_string_folding_matches_c_for_boundaries_and_sampled_bit_patterns() {
     }
     let mut source = String::from("fn render(float n) str { return @as(str, n) }\n");
     for value in values {
-        source.push_str(&format!("@println(render({value:.340}))\n"));
+        writeln!(source, "@println(render({value:.340}))").unwrap();
     }
     let c = compile_fixture(&source, Path::new("floats.nc"), true).unwrap();
     assert!(
@@ -557,7 +560,7 @@ fn float_string_folding_matches_c_for_boundaries_and_sampled_bit_patterns() {
 #[test]
 fn fixed_and_dynamic_array_concatenations_fold_without_aliasing_values() {
     folded(
-        r#"
+        r"
 fn fixed() int[3] {
     int[0] empty = []
     int[1] first = [1]
@@ -589,7 +592,7 @@ fn empty() int[0] {
 @println(dynamic())
 @println(converted())
 @println(empty())
-"#,
+",
         &["fixed", "dynamic", "converted", "empty"],
         "[1, 2, 3]\n[1, 2, 3, 4]\n[[6, 2], [3, 4], [1, 2], [7, 4], [8, 2], [9, 4]]\n[]\n",
     );
@@ -598,7 +601,7 @@ fn empty() int[0] {
 #[test]
 fn nonfinite_float_arithmetic_folds_and_materializes() {
     folded(
-        r#"
+        r"
 fn values() float[] {
     float positive = 1.0 / 0.0
     float negative = -1.0 / 0.0
@@ -611,7 +614,7 @@ fn values() float[] {
         0.0 ** -1.0, nan + 1.0, -nan]
 }
 @println(values())
-"#,
+",
         &["values"],
         "[inf, -inf, NaN, inf, -inf, inf, NaN, NaN, NaN, NaN, NaN, NaN, inf, NaN, inf, NaN, NaN]\n",
     );
@@ -646,7 +649,7 @@ fn render() str {
 #[test]
 fn nonfinite_float_comparisons_and_membership_fold_with_ieee_equality() {
     folded(
-        r#"
+        r"
 struct Record { float value }
 enum Choice { Value(float) }
 fn scalar(float nan, float positive, float negative) bool[] {
@@ -674,7 +677,7 @@ fn membership(float nan, float positive) bool[] {
 @println(scalar(0.0 / 0.0, 1.0 / 0.0, -1.0 / 0.0))
 @println(containers(0.0 / 0.0, 1.0 / 0.0))
 @println(membership(0.0 / 0.0, 1.0 / 0.0))
-"#,
+",
         &["scalar", "containers", "membership"],
         "[false, true, false, false, false, false, true, true, true, true, false, true]\n[false, false, false, false, false, false, false, false, false, false, true, true, true, true]\n[false, false, false, false, true, true, true, true]\n",
     );
@@ -683,7 +686,7 @@ fn membership(float nan, float positive) bool[] {
 #[test]
 fn numeric_byte_encodings_fold_without_losing_ieee_bits_or_capture_values() {
     let mut source = String::from(
-        r#"
+        r"
 fn encode_signed(int value) byte[] { return @as(byte[], value) }
 fn encode_unsigned(uint value) byte[] { return @as(byte[], value) }
 fn captured_bytes(float value) byte[] {
@@ -691,7 +694,7 @@ fn captured_bytes(float value) byte[] {
     fn callback = fn() byte[] { return @as(byte[], pair[0]) }
     return callback()
 }
-"#,
+",
     );
     let mut expected = String::new();
     let mut cases = Vec::new();
@@ -727,11 +730,13 @@ fn captured_bytes(float value) byte[] {
         cases.push((format!("captured_bytes({literal})"), value.to_le_bytes()));
     }
     for (call, bytes) in cases {
-        source.push_str(&format!("@println({call})\n"));
-        expected.push_str(&format!(
-            "[{}]\n",
-            bytes.map(|byte| byte.to_string()).join(", "),
-        ));
+        writeln!(source, "@println({call})").unwrap();
+        writeln!(
+            expected,
+            "[{}]",
+            bytes.map(|byte| byte.to_string()).join(", ")
+        )
+        .unwrap();
     }
     folded(
         &source,
@@ -743,17 +748,17 @@ fn captured_bytes(float value) byte[] {
 #[test]
 fn every_byte_char_conversion_folds_to_matching_utf8_bytes() {
     let mut source = String::from(
-        r#"
+        r"
 fn utf8_bytes(byte value) byte[] {
     (byte, bool) captured = (value, true)
     fn convert = fn() byte[] { return @as(byte[], @as(char, captured[0])) }
     return convert()
 }
-"#,
+",
     );
     let mut expected = String::new();
     for value in 0u8..=255 {
-        source.push_str(&format!("@println(utf8_bytes({value}))\n"));
+        writeln!(source, "@println(utf8_bytes({value}))").unwrap();
         let mut buffer = [0; 4];
         let encoded = char::from(value).encode_utf8(&mut buffer);
         let bytes = encoded
@@ -762,7 +767,7 @@ fn utf8_bytes(byte value) byte[] {
             .map(u8::to_string)
             .collect::<Vec<_>>()
             .join(", ");
-        expected.push_str(&format!("[{bytes}]\n"));
+        writeln!(expected, "[{bytes}]").unwrap();
     }
     folded(&source, &["utf8_bytes"], &expected);
 }
@@ -796,11 +801,11 @@ fn negative_fractional_float_to_uint_is_rejected_before_constant_truncation() {
         for (body, failing_expression) in [
             ("return @as(uint, value)", "@as(uint, value)"),
             (
-                r#"
+                r"
 (float, bool) captured = (value, true)
 fn convert = fn() uint { return @as(uint, captured[0]) }
 return convert()
-"#,
+",
                 "@as(uint, captured[0])",
             ),
         ] {
@@ -896,7 +901,7 @@ fn empty() str { return @as(str, Choice.Empty) }
 #[test]
 fn nominal_void_constants_keep_alias_chains_in_containers_and_errors() {
     folded(
-        r#"
+        r"
 type Unit = void
 type Second = Unit
 fn unit() {}
@@ -910,7 +915,7 @@ Second? present = optional()
 Second unwrapped = present else { wrapped() }
 Second success = try checked()
 @println(array.len)
-"#,
+",
         &["unit", "wrapped", "values", "optional", "checked"],
         "2\n",
     );
@@ -1104,7 +1109,7 @@ fn error_copies(int[]! input) (int[], int[], int[]) {
 #[test]
 fn value_branches_preserve_mutations_of_surrounding_locals() {
     folded(
-        r#"
+        r"
 fn branch() int {
     mut int n = 0
     int value = if true { true -> { n = 5 break 1 } false -> { break 0 } }
@@ -1118,7 +1123,7 @@ fn fallback() int {
 }
 @println(branch())
 @println(fallback())
-"#,
+",
         &["branch", "fallback"],
         "6\n9\n",
     );
@@ -1127,7 +1132,7 @@ fn fallback() int {
 #[test]
 fn pure_by_value_closures_fold_without_conflating_captured_environments() {
     folded(
-        r#"
+        r"
 fn make(int n) (fn(int) int) { return fn(int x) int { return n + x } }
 fn apply((fn(int) int) f, int n) int { return f(n) }
 fn compute() int {
@@ -1142,7 +1147,7 @@ fn collection() int {
 }
 @println(compute())
 @println(collection())
-"#,
+",
         &["compute", "collection", "make", "apply"],
         "46\n6\n",
     );
@@ -1156,7 +1161,7 @@ fn collection() int {
 #[test]
 fn composite_parameter_shadow_copies_fold_without_changing_callers() {
     folded(
-        r#"
+        r"
 struct Record { int[] values }
 fn edit(Record record, (int[], int) pair) int {
     mut Record record = record
@@ -1174,7 +1179,7 @@ fn copies() (int, int, int[], (int[], int)) {
     return (first, second, record.values, pair)
 }
 @println(copies())
-"#,
+",
         &["copies", "edit"],
         "(69, 69, [1, 2], ([3, 4], 5))\n",
     );
@@ -1307,7 +1312,7 @@ fn specified_cast_table_matches_in_debug_and_release() {
     .iter()
     .enumerate()
     {
-        source.push_str(&format!("fn cast_{i}({from} value) {to} {{ return @as({to}, value) }}\n@println(cast_{i}({value}))\n"));
+        write!(source, "fn cast_{i}({from} value) {to} {{ return @as({to}, value) }}\n@println(cast_{i}({value}))\n").unwrap();
         expected.push_str(output);
         expected.push('\n');
     }
@@ -1317,7 +1322,7 @@ fn specified_cast_table_matches_in_debug_and_release() {
 #[test]
 fn enum_constructors_are_first_class_and_async_callable() {
     folded(
-        r#"
+        r"
 enum Data { Value(int[]) Empty }
 (fn(int[]) Data) construct = Data.Value
 fn apply((fn(int[]) Data) f) Data { return f([3]) }
@@ -1327,7 +1332,7 @@ values[0] = 99
 @println(stored, apply(construct))
 fut Data work = async construct([4])
 @println(await work)
-"#,
+",
         &[],
         "Data.Value([1, 2])Data.Value([3])\nData.Value([4])\n",
     );
@@ -1343,7 +1348,7 @@ fut Data work = async construct([4])
 #[test]
 fn async_builtins_evaluate_arguments_once_and_keep_runtime_process_state() {
     folded(
-        r#"
+        r"
 mut int calls = 0
 fn next() int { calls = calls + 1 return calls }
 fut void printed = async @println(next(), next())
@@ -1361,7 +1366,7 @@ str[] args = await arguments
 fut [str]str environment = async @env()
 [str]str env = await environment
 @println(env == @env())
-"#,
+",
         &[],
         "12\n2\n[1, 2]\n(macos, arm64)\ntrue\ntrue\n",
     );
@@ -1448,7 +1453,7 @@ fn target_is_a_compile_time_value() {
 #[test]
 fn nested_assignment_indices_are_evaluated_once_during_folding() {
     folded(
-        r#"
+        r"
 fn nested_places() (int, int) {
     mut int calls = 0
     fn index() int { calls = calls + 1 return 0 }
@@ -1457,7 +1462,7 @@ fn nested_places() (int, int) {
     return calls, grid[0][0]
 }
 @println(nested_places())
-"#,
+",
         &["nested_places"],
         "(2, 7)\n",
     );
@@ -1666,7 +1671,7 @@ fn iteration() str {
 #[test]
 fn original_array_indices_fold_across_append_and_length_changing_replacement() {
     folded(
-        r#"
+        r"
 fn append_values() int[] {
     mut int[] values = [1, 2, 3, 4, 5]
     uint initial_count = values.len
@@ -1709,7 +1714,7 @@ fn shrink_values() (uint, uint, int) {
 @println(append_values())
 @println(grow_values())
 @println(shrink_values())
-"#,
+",
         &["append_values", "grow_values", "shrink_values"],
         "[1, 2, 3, 4, 5, 10, 20, 30, 40, 50]\n(3, 3, 60, 12)\n(4, 6, 9)\n",
     );
@@ -1802,7 +1807,7 @@ fn shrink_text() (uint, uint, str) {
 #[test]
 fn specified_nested_loop_jumps_returns_and_condition_effects_fold() {
     folded(
-        r#"
+        r"
 fn for_labels() int {
     mut int total = 0
     rows: for i in [10, 20, 30, 40] {
@@ -1867,12 +1872,14 @@ fn reevaluate() (int, int, int) {
 @println(find(true))
 @println(find(false))
 @println(reevaluate())
-"#,
+",
         &["for_labels", "while_labels", "find", "reevaluate"],
         "127\n152\n12\n-1\n(3, 4, 60)\n",
     );
 }
 
+// Raw decomposed Unicode must match runtime bytes without normalization.
+#[allow(clippy::unicode_not_nfc)]
 #[test]
 fn typed_operations_match_runtime_semantics() {
     folded(
@@ -1958,7 +1965,7 @@ int? global = 5
 #[test]
 fn partial_tuple_destructuring_preserves_context_and_values() {
     folded(
-        r#"
+        r"
 int first, (uint, byte) rest = (1, 2, 3)
 int _, (int?, uint[]) optional = (0, none, [])
 fn sum((int, int, int) values) int {
@@ -1974,7 +1981,7 @@ fn nested() int {
 @println(sum((4, 5, 6)))
 @println(nested())
 @println(optional)
-"#,
+",
         &["sum", "nested"],
         "1\n(2, 3)\n15\n10\n(none, [])\n",
     );
@@ -2001,7 +2008,7 @@ int _, int last = (3, 4)
 #[test]
 fn fibonacci_uses_each_numeric_types_range() {
     folded(
-        r#"
+        r"
 fn signed(int n) int { if n { 0, 1 -> { return n } _ -> { return signed(n-1) + signed(n-2) } } }
 fn unsigned(uint n) uint { if n { 0, 1 -> { return n } _ -> { return unsigned(n-1) + unsigned(n-2) } } }
 fn octet(byte n) byte { if n { 0, 1 -> { return n } _ -> { return octet(n-1) + octet(n-2) } } }
@@ -2010,7 +2017,7 @@ fn real(float n) float { if n { 0.0, 1.0 -> { return n } _ -> { return real(n-1.
 @println(unsigned(93))
 @println(octet(13))
 @println(real(20.0))
-"#,
+",
         &["signed", "unsigned", "octet", "real"],
         "7540113804746346429\n12200160415121876738\n233\n6765.0\n",
     );
@@ -2089,7 +2096,7 @@ int value = try okay(9)
 #[test]
 fn arithmetic_shifts_fold_with_signed_boundary_semantics() {
     folded(
-        r#"
+        r"
 fn right(int value, int count) int { return value >> count }
 fn left(int value, int count) int { return value << count }
 @println(right(-3, 1))
@@ -2102,7 +2109,7 @@ fn left(int value, int count) int { return value << count }
 @println(right(9223372036854775807, 63))
 @println(left(-3, 1))
 @println(left(-1, 63))
-"#,
+",
         &["right", "left"],
         "-2\n-2\n-9223372036854775808\n-4611686018427387904\n-4611686018427387904\n-1\n-1\n0\n-6\n-9223372036854775808\n",
     );
@@ -2111,7 +2118,7 @@ fn left(int value, int count) int { return value << count }
 #[test]
 fn shared_mutable_closures_fold_without_reusing_stateful_calls() {
     folded(
-        r#"
+        r"
 struct Counter { (fn() int) read (fn(int) void) write (fn() int) next }
 fn counter(int initial) Counter {
     mut int n = initial
@@ -2155,7 +2162,7 @@ fn composites() int {
 @println(compute())
 @println(branches())
 @println(composites())
-"#,
+",
         &["compute", "branches", "composites", "counter", "apply"],
         "12130\n11\n12\n",
     );
@@ -2235,13 +2242,13 @@ fn exhaustive_byte_patterns_fold_every_value_without_a_wildcard() {
             1 => format!("0b{value:08b}"),
             _ => value.to_string(),
         };
-        source.push_str(&format!("{literal} -> {{ return {} }}\n", 255 - value));
+        writeln!(source, "{literal} -> {{ return {} }}", 255 - value).unwrap();
     }
     source.push_str("} }\n");
     let mut expected = String::new();
     for value in 0..=255 {
-        source.push_str(&format!("@println(classify({value}))\n"));
-        expected.push_str(&format!("{}\n", 255 - value));
+        writeln!(source, "@println(classify({value}))").unwrap();
+        writeln!(expected, "{}", 255 - value).unwrap();
     }
     folded(&source, &["classify"], &expected);
 }
@@ -2249,7 +2256,7 @@ fn exhaustive_byte_patterns_fold_every_value_without_a_wildcard() {
 #[test]
 fn exact_array_patterns_fold_empty_fixed_and_dynamic_lengths() {
     folded(
-        r#"
+        r"
 fn empty(int[0] values) int {
     if values { [] -> { return 7 } }
 }
@@ -2280,7 +2287,7 @@ fn fixed(int[2] values) int {
 @println(fixed([1, 2]))
 @println(fixed([1, 9]))
 @println(fixed([4, 5]))
-"#,
+",
         &["empty", "dynamic", "fixed"],
         "7\n0\n1\n-1\n2\n-1\n23\n-1\n12\n9\n45\n",
     );
@@ -2362,7 +2369,7 @@ fn classify(float value) str {
 #[test]
 fn enum_payload_patterns_fold_specific_before_irrefutable_branches() {
     folded(
-        r#"
+        r"
 enum Choice { Number(int) Empty }
 fn choose(Choice value) int {
     if value {
@@ -2375,7 +2382,7 @@ fn choose(Choice value) int {
 @println(choose(Choice.Number(7)))
 @println(choose(Choice.Number(-3)))
 @println(choose(Choice.Empty))
-"#,
+",
         &["choose"],
         "100\n7\n-3\n-1\n",
     );
@@ -2384,7 +2391,7 @@ fn choose(Choice value) int {
 #[test]
 fn pattern_only_captures_fold_with_current_values_and_lexical_bindings() {
     folded(
-        r#"
+        r"
 int expected = 2
 fn global(int value) bool {
     return if value { expected -> { true } _ -> { false } }
@@ -2402,7 +2409,7 @@ fn local() int {
 @println(global(1))
 @println(global(2))
 @println(local())
-"#,
+",
         &["global", "local"],
         "false\ntrue\n11\n",
     );
