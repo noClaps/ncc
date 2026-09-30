@@ -561,6 +561,151 @@ test "recursive values" {
 }
 
 #[test]
+fn for_loops_use_indices_and_map_keys_and_skip_empty_containers() {
+    success(
+        r#"
+fn array_source() int[] { @print("array ") return [10, 20, 30] }
+fn string_source() str { @print("string ") return "a🍪界" }
+fn map_source() [int]str { @print("map ") return [7: "seven", 11: "eleven"] }
+for index in array_source() { @print(index, " ") }
+@println("")
+for index in string_source() { @print(index, " ") }
+@println("")
+mut int sum = 0
+for key in map_source() { sum = sum + key }
+@println(sum)
+test "indices and keys" {
+    str index = "outer"
+    int[3] values = [10, 20, 30]
+    mut uint count = 0
+    for index in values {
+        uint typed = index
+        assert typed == count
+        assert values[index] == (@as(int, index) + 1) * 10
+        count = count + 1
+    }
+    assert index == "outer"
+    assert count == 3
+    str text = "a\u{0}👩‍👩‍👧‍👦"
+    char[3] expected = ['a', '\u{0}', '👩‍👩‍👧‍👦']
+    count = 0
+    for index in text {
+        uint typed = index
+        assert text[typed] == expected[index]
+        count = count + 1
+    }
+    assert count == 3
+    [str]int mapping = ["one": 1, "two": 2, "three": 3]
+    mut int total = 0
+    for key in mapping {
+        str typed = key
+        assert typed in mapping
+        total = total + mapping[key]
+    }
+    assert total == 6
+    int[] empty = []
+    int[0] fixed_empty = []
+    [str]int empty_map = []
+    for index in empty { assert false }
+    for index in fixed_empty { assert false }
+    for index in "" { assert false }
+    for key in empty_map { assert false }
+    while false { assert false }
+}
+"#,
+        "array 0 1 2 \nstring 0 1 2 \nmap 18\n",
+    );
+}
+
+#[test]
+fn nested_loop_jumps_and_while_conditions_preserve_effect_order() {
+    success(
+        r#"
+int[][] table = [[1, 2, 4, 3, 99], [5, 99], [6, 7, 10, 99], [100]]
+rows: for row in table {
+    @print("r", row, " ")
+    for col in table[row] {
+        int value = table[row][col]
+        if value {
+            2 -> { continue }
+            3 -> { break }
+            5 -> { continue :rows }
+            10 -> { break :rows }
+            _ -> {}
+        }
+        @print(value, " ")
+    }
+    @print("done ")
+}
+@println("end")
+mut int checks = 0
+mut int bodies = 0
+fn condition() bool { checks = checks + 1 @print("c", checks, " ") return checks < 4 }
+while condition() {
+    bodies = bodies + 1
+    if bodies { 2 -> { continue } _ -> {} }
+    @print("b", bodies, " ")
+}
+@println(checks, ":", bodies)
+fn find(int[][] values) int {
+    for row in values {
+        for col in values[row] {
+            if values[row][col] > 0 { true -> { return values[row][col] } false -> {} }
+        }
+    }
+    return -1
+}
+@println(find([[], [-2, 0], [0, 7, 8]]), ":", find([[], [-2, 0]]))
+"#,
+        "r0 1 4 done r1 r2 6 7 end\nc1 b1 c2 c3 b3 c4 4:3\n7:-1\n",
+    );
+}
+
+#[test]
+fn loop_bindings_types_scopes_and_jump_targets_are_checked() {
+    for source in [
+        "for index in [1] { index = 1 }",
+        "for index in \"a\" { index = 1 }",
+        "[str]int values = [\"a\": 1] for key in values { key = \"b\" }",
+    ] {
+        rejects(source, "cannot mutate immutable");
+    }
+    for source in [
+        "for index in [1] { int signed = index }",
+        "for index in \"a\" { int signed = index }",
+        "[str]int values = [\"a\": 1] for key in values { uint index = key }",
+    ] {
+        rejects(source, "expected `");
+    }
+    for source in [
+        "for index in [1] {} _ = index",
+        "[str]int values = [] for key in values {} _ = key",
+        "while false { int local = 1 } _ = local",
+    ] {
+        rejects(source, "unknown name");
+    }
+    for source in [
+        "for index in 1 {}",
+        "for index in true {}",
+        "for index in (1, 2) {}",
+    ] {
+        rejects(source, "for loop expects an array, map, or str");
+    }
+    for source in ["while 1 {}", "while \"true\" {}"] {
+        rejects(source, "expected `bool`");
+    }
+    for source in [
+        "while false { break :missing }",
+        "for index in [1] { continue :missing }",
+        "done: while false {} break :done",
+        "outer: while false { fn nested() { break :outer } }",
+        "outer: for index in [1] { fn nested = fn() { continue :outer } }",
+    ] {
+        rejects(source, "no valid target");
+    }
+}
+
+#[test]
 fn labelled_conditionals_and_value_breaks() {
     success(
         r#"

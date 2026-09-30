@@ -863,6 +863,135 @@ fn text() str {
 }
 
 #[test]
+fn specified_for_indices_keys_and_empty_containers_fold() {
+    folded(
+        r#"
+fn iteration() str {
+    (int[], str, [str]int) inputs = ([9, 4, 7], "a🍪z", ["red": 10, "blue": 20])
+    fn collect() str {
+        int[] values, str text, [str]int entries = inputs
+        mut uint array_indices = 0
+        mut int array_values = 0
+        for i in values {
+            uint index = i
+            array_indices = array_indices + index
+            array_values = array_values + values[index]
+        }
+        mut uint string_indices = 0
+        mut str characters = ""
+        for i in text {
+            uint index = i
+            string_indices = string_indices + index
+            characters = characters <> @as(str, text[index])
+        }
+        mut uint key_lengths = 0
+        mut int map_values = 0
+        for key in entries {
+            str typed_key = key
+            key_lengths = key_lengths + typed_key.len
+            map_values = map_values + entries[typed_key]
+        }
+        [int]int numbers = [-2: 6, 5: 9]
+        mut int numeric_keys = 0
+        mut int numeric_values = 0
+        for key in numbers {
+            int typed_key = key
+            numeric_keys = numeric_keys + typed_key
+            numeric_values = numeric_values + numbers[typed_key]
+        }
+        int[] empty_array = []
+        str empty_string = ""
+        [str]int empty_map = []
+        mut uint empty_visits = 0
+        for i in empty_array { empty_visits = empty_visits + 1 }
+        for i in empty_string { empty_visits = empty_visits + 1 }
+        for key in empty_map { empty_visits = empty_visits + 1 }
+        return "{(array_indices, array_values, string_indices, characters, key_lengths, map_values, numeric_keys, numeric_values, empty_visits)}"
+    }
+    return collect()
+}
+@println(iteration())
+"#,
+        &["iteration"],
+        "(3, 20, 3, a🍪z, 7, 30, 3, 15, 0)\n",
+    );
+}
+
+#[test]
+fn specified_nested_loop_jumps_returns_and_condition_effects_fold() {
+    folded(
+        r#"
+fn for_labels() int {
+    mut int total = 0
+    rows: for i in [10, 20, 30, 40] {
+        mut int j = 0
+        while j < 4 {
+            j = j + 1
+            if j == 1 { true -> { continue } false -> {} }
+            if i == 1 { true -> { continue :rows } false -> {} }
+            if i == 2 and j == 3 { true -> { break :rows } false -> {} }
+            if j == 4 { true -> { break } false -> {} }
+            total = total + @as(int, i) * 10 + j
+        }
+        total = total + 100
+    }
+    return total
+}
+fn while_labels() int {
+    mut int round = 0
+    mut int total = 0
+    rounds: while round < 4 {
+        round = round + 1
+        for j in [10, 20, 30, 40] {
+            if j == 0 { true -> { continue } false -> {} }
+            if round == 1 { true -> { continue :rounds } false -> {} }
+            if round == 3 and j == 2 { true -> { break :rounds } false -> {} }
+            if j == 2 { true -> { break } false -> {} }
+            total = total + round * 10 + @as(int, j)
+        }
+        total = total + 100
+    }
+    return total
+}
+fn find(bool found) int {
+    for i in [10, 20, 30] {
+        mut int j = 0
+        while j < 3 {
+            j = j + 1
+            if found and i == 1 and j == 2 {
+                true -> { return @as(int, i) * 10 + j }
+                false -> {}
+            }
+        }
+    }
+    return -1
+}
+fn reevaluate() (int, int, int) {
+    mut int step = 0
+    mut int checks = 0
+    mut int total = 0
+    fn condition() bool {
+        checks = checks + 1
+        return step < 3
+    }
+    while condition() {
+        step = step + 1
+        total = total + step * 10
+    }
+    return (step, checks, total)
+}
+@println(for_labels())
+@println(while_labels())
+@println(find(true))
+@println(find(false))
+@println(reevaluate())
+"#,
+        &["for_labels", "while_labels", "find", "reevaluate"],
+        "127\n152\n12\n-1\n(3, 4, 60)\n",
+    );
+}
+
+#[test]
 fn typed_operations_match_runtime_semantics() {
     folded(
         r#"
