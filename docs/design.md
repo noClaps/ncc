@@ -54,6 +54,26 @@ mut int b = 2
 b = 3 // Works!
 ```
 
+When values are assigned, the right-hand side is evaluated first before the left-hand side. This means that code like this:
+
+```nc
+mut int[] values = [1]
+values[2] = 1 / 0
+```
+
+will panic due to the division by zero first before the out-of-bounds write. Similarly,
+
+```nc
+mut int[] values = [1, 2]
+fn replace() int {
+  values = []
+  return 7
+}
+values[1] = replace()
+```
+
+will panic with an out-of-bounds write since `replace()` runs first and empties the `values` array.
+
 ### Shadowing
 
 You can redefine variables with the same name within the same or lower scopes using shadowing, including changing the mutability of the variable.
