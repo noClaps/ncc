@@ -227,6 +227,113 @@ test "constant expressions" {
 }
 
 #[test]
+fn top_level_assignments_and_control_flow_evaluate_reached_failures() {
+    for (source, failing_expression) in [
+        ("mut int[] values = [1]\nvalues[0] = 1 / 0", "1 / 0"),
+        ("mut int[] values = [1]\nvalues[2] = 1 / 0", "1 / 0"),
+        ("mut int[][] values = [[1]]\nvalues[2][0] = 1 / 0", "1 / 0"),
+        ("mut [str]int values = []\nvalues[\"new\"] = 1 / 0", "1 / 0"),
+        ("mut int value = 0\nvalue = 1 / 0", "1 / 0"),
+        ("mut int[][] values = [[1]]\nvalues[0][0] = 1 / 0", "1 / 0"),
+        (
+            "mut int[] values = [1]\nvalues = [1, 2]\nvalues[1] = 1 / 0",
+            "1 / 0",
+        ),
+        ("mut int[] values = [1]\n{ values[0] = 1 / 0 }", "1 / 0"),
+        (
+            "mut int value = 0\nif true { true -> { value = 1 / 0 } false -> { value = 2 } }",
+            "1 / 0",
+        ),
+        (
+            "mut int counter = 1\nwhile counter < 3 { counter = counter + 1 }\ncounter = counter / (counter - 3)",
+            "counter / (counter - 3)",
+        ),
+    ] {
+        let path = Path::new("top-level.nc");
+        ncc::compile_source(source, path).unwrap();
+        let error = ncc::compile_source_with_options(source, path, true).unwrap_err();
+        assert!(
+            error.to_string().contains("constant evaluation failed"),
+            "{source}: {error}"
+        );
+        let diagnostic = &error.0[0];
+        assert_eq!(diagnostic.path.as_deref(), Some(path), "{source}: {error}");
+        assert_eq!(
+            &source[diagnostic.span.clone()],
+            failing_expression,
+            "{source}: {error}"
+        );
+    }
+}
+
+#[test]
+fn top_level_evaluation_preserves_scopes_copies_and_unreachable_branches() {
+    folded(
+        r#"
+(int, int) seed = (1, 2)
+mut int[] values = [seed[0]]
+int[] original = values
+if false {
+    true -> { values[0] = 1 / 0 }
+    false -> { values[0] = seed[1] }
+}
+mut int sum = 0
+for i in [1, 2] { sum = sum + values[0] }
+{
+    mut int[] values = [3]
+    values[0] = 4
+}
+values[0] = sum
+mut int count = 1
+count = 2
+mut int count = count + 1
+count = count + 1
+@println(values, ":", original, ":", count)
+"#,
+        &[],
+        "[4]:[1]:4\n",
+    );
+}
+
+#[test]
+fn top_level_evaluation_tracks_immutable_closure_and_tuple_bindings() {
+    let source = r#"
+(int, int) captured = (2, 3)
+fn operation = fn() int { return captured[0] + captured[1] }
+mut int value = 0
+value = operation()
+value = value / (value - 5)
+"#;
+    let path = Path::new("captured-top-level.nc");
+    ncc::compile_source(source, path).unwrap();
+    let error = ncc::compile_source_with_options(source, path, true).unwrap_err();
+    assert!(
+        error.to_string().contains("constant evaluation failed"),
+        "{error}"
+    );
+    assert_eq!(error.0[0].path.as_deref(), Some(path));
+    assert_eq!(&source[error.0[0].span.clone()], "value / (value - 5)");
+}
+
+#[test]
+fn top_level_evaluation_does_not_execute_effects_or_assume_runtime_state() {
+    folded(
+        r#"
+mut int value = 1
+fn change() int { @print("effect:") value = 4 return 3 }
+value = change()
+@println(value)
+fn runtime() int[] { @print("array:") return [7] }
+mut int[] values = runtime()
+values[0] = value
+@println(values)
+"#,
+        &[],
+        "effect:3\narray:[3]\n",
+    );
+}
+
+#[test]
 fn float_string_folding_matches_c_for_boundaries_and_sampled_bit_patterns() {
     let mut values = vec![
         0.0,
@@ -1224,12 +1331,12 @@ fn deep_places() (int, int, int, int) {
 @println(deep_places())
 "#,
         &["mixed_places", "deep_places"],
-        "(123145, 9, Z, 8)\n(5, 9, 8, 1)\n",
+        "(312145, 9, Z, 8)\n(5, 9, 8, 1)\n",
     );
 }
 
 #[test]
-fn nested_map_insertions_still_fold_and_evaluate_target_before_rhs() {
+fn nested_map_insertions_still_fold_and_evaluate_rhs_before_target() {
     folded(
         r#"
 struct Holder { [str]int entries }
@@ -1244,8 +1351,64 @@ fn insert() (int, int) {
 @println(insert())
 "#,
         &["insert"],
-        "(12, 7)\n",
+        "(21, 7)\n",
     );
+}
+
+#[test]
+fn assignment_binding_replacements_fold_without_stale_storage() {
+    folded(
+        r#"
+struct Bucket { int[] values }
+fn replacements() (int[], int[][], str, int) {
+    mut int[] values = [1]
+    fn replace() int { values = [2, 3] return 7 }
+    values[1] = replace()
+    mut int[][] rows = [[1]]
+    fn index() int { rows = [[2, 3]] return 1 }
+    rows[0][index()] = 8
+    mut str text = "x"
+    fn character() char { text = "ab" return 'Z' }
+    text[$] = character()
+    mut [str]Bucket buckets = ["item": Bucket{.values = [1]}]
+    fn insert() int { buckets = ["item": Bucket{.values = [2]}, "new": Bucket{.values = [3]}] return 0 }
+    buckets["item"].values[insert()] = 9
+    return values, rows, text, buckets["item"].values[0]
+}
+@println(replacements())
+"#,
+        &["replacements"],
+        "([2, 7], [[2, 8]], aZ, 9)\n",
+    );
+}
+
+#[test]
+fn later_assignment_indices_can_repair_missing_ancestors() {
+    folded(
+        r#"
+struct Bucket { int[] values }
+fn repairs() (int[][], int[]) {
+    mut int[][] rows = []
+    fn repair() int { rows = [[1]] return 0 }
+    rows[0][repair()] = 7
+    int[][] original = rows
+    rows = []
+    rows[0][[repair()][$]] = 8
+    mut [str]Bucket buckets = []
+    fn restore() int { buckets = ["item": Bucket{.values = [1]}] return 0 }
+    buckets["item"].values[restore()] = 9
+    return original <> rows, buckets["item"].values
+}
+@println(repairs())
+"#,
+        &["repairs"],
+        "([[7], [8]], [9])\n",
+    );
+    let source = "mut int[][] rows = [] fn fail() int { return 1 / 0 } rows[0][fail()] = 7";
+    let error =
+        ncc::compile_source_with_options(source, Path::new("index-failure.nc"), true).unwrap_err();
+    assert!(error.to_string().contains("constant evaluation failed"));
+    assert_eq!(&source[error.0[0].span.clone()], "1 / 0");
 }
 
 #[test]

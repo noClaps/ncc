@@ -56,6 +56,9 @@
     iterable binding changes size. Explicit body lookups use the current binding
     and retain ordinary bounds/key failures. Do not assume stable map order.
   - Map concatenation overwrites duplicate keys with the right-hand value.
+  - Assignments evaluate and copy the RHS before evaluating the target. Evaluate
+    target indices/keys once, then resolve and validate the entire path against
+    current bindings before writing; RHS and index effects may replace ancestors.
   - IEEE-754 NaN and infinities are valid floats, including arithmetic results
     and values returned by C externs. Printing, interpolation, and string
     conversion use `NaN`, `inf`, and `-inf`. Converting nonfinite floats to `int`
@@ -91,6 +94,9 @@
 - Compile-time mutable captures share evaluator-local storage. Do not memoize
   calls whose callable or arguments contain shared cells, or reuse stateful
   closure results. Persistent outer mutable state must retain runtime evaluation.
+  Release evaluation also analyses safely evaluatable top-level statements in
+  source order to diagnose reached arithmetic failures, without removing effects
+  or materializing persistent mutable state.
 - Compile-time string conversion must match runtime formatting, including field
   order, quoting, embedded NULs, Unicode, and nominal types. Keep a safe runtime
   fallback for operations that cannot yet be reproduced exactly.

@@ -699,33 +699,6 @@ impl Emitter<'_> {
             }
             Stmt::Assign { target, value } => {
                 let target = target.unlocated();
-                if let Expr::Index { object, index } = target
-                    && self.ty(object)? == Type::Named("str".into(), vec![])
-                {
-                    self.unicode_support();
-                    let location = self.place(object)?;
-                    self.index_context.push(format!("nc_str_len({location})"));
-                    let index = self.expr(index)?;
-                    self.index_context.pop();
-                    let value = self.expr(value)?;
-                    self.line(format!(
-                        "{location} = nc_str_replace({location},(uint64_t){index},{value});"
-                    ));
-                    return Ok(());
-                }
-                if let Expr::Index { object, index } = target
-                    && let Type::Map(key, val) = self.ty(object)?
-                {
-                    let map = self.place(object)?;
-                    let k = self.expr(index)?;
-                    let v = self.expr_as(value, &val)?;
-                    self.map_set(&map, &k, &v, &key, &val)?;
-                    return Ok(());
-                }
-                let target_code = match target {
-                    Expr::Index { .. } | Expr::Member { .. } => Some(self.place(target)?),
-                    _ => None,
-                };
                 let value_type = if matches!(target, Expr::Name(n) if n == "_") {
                     self.ty(value)?
                 } else {
@@ -733,6 +706,31 @@ impl Emitter<'_> {
                 };
                 let value = self.expr_as(value, &value_type)?;
                 let value = self.copy(&value_type, &value)?;
+                let mut indices = HashMap::new();
+                self.assignment_indices(target, &mut indices)?;
+                if let Expr::Index { object, .. } = target
+                    && self.ty(object)? == Type::Named("str".into(), vec![])
+                {
+                    self.unicode_support();
+                    let location = self.place(object, &indices)?;
+                    let index = &indices[&target.id()];
+                    self.line(format!(
+                        "{location} = nc_str_replace({location},(uint64_t){index},{value});"
+                    ));
+                    return Ok(());
+                }
+                if let Expr::Index { object, .. } = target
+                    && let Type::Map(key, val) = self.ty(object)?
+                {
+                    let map = self.place(object, &indices)?;
+                    let k = &indices[&target.id()];
+                    self.map_set(&map, k, &value, &key, &val)?;
+                    return Ok(());
+                }
+                let target_code = match target {
+                    Expr::Index { .. } | Expr::Member { .. } => Some(self.place(target, &indices)?),
+                    _ => None,
+                };
                 match target {
                     Expr::Name(n) if n == "_" => {}
                     Expr::Name(n) => self.line(format!("{} = {value};", self.name(n))),
@@ -1953,13 +1951,61 @@ impl Emitter<'_> {
         };
         self.temp(e, format!("({ct}){{{function},{environment}}}"))
     }
-    // A writable place must retain the original storage, not an expression copy.
-    fn place(&mut self, e: &Expr) -> Result<String, Diagnostics> {
+    // Save indices, not storage: evaluating a later index can replace any ancestor.
+    fn assignment_indices(
+        &mut self,
+        e: &Expr,
+        indices: &mut HashMap<usize, String>,
+    ) -> Result<(), Diagnostics> {
+        match e.unlocated() {
+            Expr::Name(_) => {}
+            Expr::Member { object, .. } => self.assignment_indices(object, indices)?,
+            Expr::Index { object, index } => {
+                self.assignment_indices(object, indices)?;
+                let ty = self.ty(object)?;
+                if matches!(ty, Type::Tuple(_)) {
+                    return Ok(());
+                }
+                let needs_length = crate::visit::uses_index_length(index);
+                if needs_length {
+                    let storage = self.place(object, indices)?;
+                    let string = ty == Type::Named("str".into(), vec![]);
+                    if string {
+                        self.unicode_support();
+                    }
+                    // Capture `$`'s length without retaining storage across effects.
+                    self.headers.insert("stdint.h");
+                    let length = self.fresh();
+                    let size = if string {
+                        format!("nc_str_len({storage})")
+                    } else {
+                        format!("({storage}).len")
+                    };
+                    self.line(format!("uint64_t {length} = {size};"));
+                    self.index_context.push(length);
+                }
+                let value = self.expr(index);
+                if needs_length {
+                    self.index_context.pop();
+                }
+                let value = value?;
+                let value = self.copy(&self.ty(index)?, &value)?;
+                indices.insert(e.unlocated().id(), value);
+            }
+            _ => return unsupported("assignment target"),
+        }
+        Ok(())
+    }
+    // Re-resolve and validate the entire path after all index effects. No user code
+    // runs between this resolution and the write, so map slots cannot go stale.
+    fn place(&mut self, e: &Expr, indices: &HashMap<usize, String>) -> Result<String, Diagnostics> {
         match e.unlocated() {
             Expr::Name(name) => Ok(self.name(name)),
-            Expr::Member { object, name } => Ok(format!("({}).f_{name}", self.place(object)?)),
+            Expr::Member { object, name } => {
+                Ok(format!("({}).f_{name}", self.place(object, indices)?))
+            }
             Expr::Index { object, index } => {
-                let storage = self.place(object)?;
+                let storage = self.place(object, indices)?;
                 let ty = self.ty(object)?;
                 if let Type::Tuple(_) = ty {
                     let Expr::Int(i) = index.unlocated() else {
@@ -1967,12 +2013,10 @@ impl Emitter<'_> {
                     };
                     return Ok(format!("({storage}).f_{}", integer(i)?));
                 }
-                self.index_context.push(format!("({storage}).len"));
-                let i = self.expr(index)?;
-                self.index_context.pop();
+                let i = &indices[&e.unlocated().id()];
                 self.panic_support();
                 if let Type::Map(key, _) = ty {
-                    let found = self.map_find(&storage, &i, &key)?;
+                    let found = self.map_find(&storage, i, &key)?;
                     self.line(format!(
                         "if ({found} == ({storage}).len) nc_panic(\"map key not found\");"
                     ));

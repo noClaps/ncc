@@ -5,13 +5,14 @@
    is unclear, then capture the agreed behavior in tests. Review malformed design
    examples excluded by Tree-sitter/compiler syntax parity checks: parenthesized
    struct field patterns, `uint len ==` declarations, an unterminated test name,
-   and assignment in an assertion.
+   and assignment in an assertion. Expand top-level constant evaluation beyond
+   its safely evaluatable execution prefix while preserving effects and unknown
+   runtime state; it currently stops at effects, runtime-dependent inputs, tests,
+   and evaluator limits.
 2. Attempt to eliminate all undefined behavior from the language. Identify
    potentially undefined cases, clarify the intended behavior with the user, and
    let the user document those decisions before implementing them and adding
-   regression tests. Clarify assignment-target storage when the right-hand side
-   replaces or shrinks the target binding or an ancestor container: generated C
-   currently checks bounds before the RHS, then may write through changed storage.
+   regression tests.
 3. Once the entire language has been captured in tests, remove as much unnecessary
    compiler code as possible while keeping all tests passing. Preserve a fully
    functional general-purpose compiler; do not overfit implementations to the

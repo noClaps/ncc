@@ -1635,7 +1635,7 @@ fn nested_places() (int, int, str, int, int) {
 }
 @println(nested_places())
 "#,
-        "(123145, 9, Z, 8, 1)\n",
+        "(312145, 9, Z, 8, 1)\n",
     );
 }
 
@@ -1660,30 +1660,91 @@ fn nested_assignment_failures_are_preserved_in_release() {
 }
 
 #[test]
-fn invalid_assignment_targets_do_not_evaluate_failing_rhs() {
-    for (source, message) in [
-        (
-            "fn invalid() int { mut int[] values = [1] values[-1] = 1 / 0 return 9 } @println(invalid())",
-            "out of bounds",
-        ),
-        (
-            "fn invalid() int { mut int[][] rows = [[1]] rows[1][0] = 1 / 0 return 9 } @println(invalid())",
-            "out of bounds",
-        ),
-        (
-            "fn invalid() int { mut int[][] rows = [[1]] rows[0][1] = 1 / 0 return 9 } @println(invalid())",
-            "out of bounds",
-        ),
-        (
-            "struct Entry { int value } fn invalid() int { mut [str]Entry entries = [\"present\": Entry{.value = 1}] entries[\"missing\"].value = 1 / 0 return 9 } @println(invalid())",
-            "map key not found",
-        ),
-        (
-            "fn invalid() uint { mut uint[][] rows = [[1]] rows[0][1] = @as(uint, -0.75) return 9 } @println(invalid())",
-            "out of bounds",
-        ),
+fn assignment_rhs_failures_precede_invalid_targets() {
+    for source in [
+        "mut int[] values = [1]\nvalues[1] = 1 / 0",
+        "mut int[][] rows = [[1]]\nrows[0][1] = 1 / 0",
+        "struct Entry { int value } mut [str]Entry entries = [\"present\": Entry{.value = 1}] entries[\"missing\"].value = 1 / 0",
+        "fn runtime() int[] { @print(\"\") return [1] } mut int[] values = runtime() values[1] = 1 / 0",
+        "mut int[] values = [1] fn shrink() { @print(\"\") values = [] } shrink() values[0] = 1 / 0",
+        "fn invalid() int { mut int[] values = [1] values[-1] = 1 / 0 return 9 } @println(invalid())",
+        "fn invalid() int { mut int[][] rows = [[1]] rows[1][0] = 1 / 0 return 9 } @println(invalid())",
+        "fn invalid() int { mut int[][] rows = [[1]] rows[0][1] = 1 / 0 return 9 } @println(invalid())",
+        "struct Entry { int value } fn invalid() int { mut [str]Entry entries = [\"present\": Entry{.value = 1}] entries[\"missing\"].value = 1 / 0 return 9 } @println(invalid())",
+        "fn invalid() uint { mut uint[][] rows = [[1]] rows[0][1] = @as(uint, -0.75) return 9 } @println(invalid())",
     ] {
-        runtime_failure(source, message);
+        let source = source
+            .replace("1 / 0", "fail()")
+            .replace("@as(uint, -0.75)", "@as(uint, fail())");
+        let source = format!("fn fail() int {{ @print(\"\") return 1 / 0 }}\n{source}");
+        runtime_failure(&source, "division by zero");
+    }
+}
+
+#[test]
+fn assignment_targets_use_bindings_after_rhs_and_index_effects() {
+    success(
+        r#"
+struct Bucket { int[] values str text }
+fn assignments() (int[], int[][], str, int, int) {
+    mut int[] values = [1]
+    fn replace() int { @print("") values = [2, 3] return 7 }
+    values[1] = replace()
+    mut int[][] rows = [[1]]
+    fn resize() int { @print("") rows = [[2, 3]] return 1 }
+    rows[0][resize()] = 8
+    mut str text = "x"
+    fn character() char { @print("") text = "ab" return 'Z' }
+    text[$] = character()
+    mut [str]Bucket buckets = ["item": Bucket{.values = [1], .text = "x"}]
+    fn insert() int { @print("") buckets = ["item": Bucket{.values = [2], .text = "y"}, "new": Bucket{.values = [3], .text = "z"}] return 0 }
+    buckets["item"].values[insert()] = 9
+    mut int trace = 0
+    fn index() int { @print("") trace = trace * 10 + 1 return 0 }
+    fn replacement() int { @print("") trace = trace * 10 + 2 return 4 }
+    values[index()] = replacement()
+    return values, rows, text, buckets["item"].values[0], trace
+}
+@println(assignments())
+"#,
+        "([4, 7], [[2, 8]], aZ, 9, 21)\n",
+    );
+    success(
+        r#"
+struct Bucket { int[] values }
+mut int[][] rows = []
+fn repair() int { @print("repair:") rows = [[1]] return 0 }
+rows[0][repair()] = 7
+@println(rows)
+rows = []
+rows[0][[repair()][$]] = 8
+@println(rows)
+mut [str]Bucket buckets = []
+fn restore() int { @print("restore:") buckets = ["item": Bucket{.values = [1]}] return 0 }
+buckets["item"].values[restore()] = 9
+@println(buckets["item"].values)
+"#,
+        "repair:[[7]]\nrepair:[[8]]\nrestore:[9]\n",
+    );
+    runtime_failure(
+        "mut int[][] rows = [] fn fail() int { @print(\"\") return 1 / 0 } rows[0][fail()] = 7",
+        "division by zero",
+    );
+    for source in [
+        "mut int[] values = [1, 2] fn replace() int { @print(\"\") values = [] return 7 } values[1] = replace()",
+        "mut int[][] rows = [[1]] fn index() int { @print(\"\") rows = [] return 0 } rows[0][index()] = 7",
+        "mut int[][] rows = [[1]] fn index() int { @print(\"\") rows = [[]] return 0 } rows[0][index()] = 7",
+        "struct Bucket { int[] values } mut [str]Bucket buckets = [\"item\": Bucket{.values = [1]}] fn index() int { @print(\"\") buckets = [] return 0 } buckets[\"item\"].values[index()] = 7",
+        "mut str text = \"ab\" fn replace() char { @print(\"\") text = \"\" return 'Z' } text[1] = replace()",
+    ] {
+        runtime_failure(
+            source,
+            if source.contains("buckets") {
+                "map key not found"
+            } else {
+                "out of bounds"
+            },
+        );
     }
 }
 

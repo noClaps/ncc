@@ -378,6 +378,7 @@ fn optimize_module(checked: CheckedModule) -> Result<Module, Diagnostics> {
             }
         })
         .collect();
+    evaluate_top_level(&checked, &functions)?;
     let mut env = HashMap::new();
     let mut replacements = Vec::new();
     for (index, item) in checked.module.items.iter().enumerate() {
@@ -459,6 +460,55 @@ fn optimize_module(checked: CheckedModule) -> Result<Module, Diagnostics> {
         .retain(|item| !matches!(item, Item::Function(f) if !reachable.contains(&f.name)));
     Ok(module)
 }
+// Analyse the safely evaluatable top-level execution prefix without replacing
+// persistent state or executing effects. Unknown execution keeps runtime code.
+fn evaluate_top_level(
+    checked: &CheckedModule,
+    functions: &HashMap<String, &Function>,
+) -> Result<(), Diagnostics> {
+    let mut functions = functions.clone();
+    let mut env = HashMap::new();
+    let mut cells = Vec::new();
+    for item in &checked.module.items {
+        if !matches!(
+            item,
+            Item::Global(_) | Item::Statement(_) | Item::Test { .. }
+        ) {
+            continue;
+        }
+        let mut fuel = 100_000;
+        let continued = {
+            let mut evaluator = Evaluator::new(&functions, checked, &mut fuel);
+            evaluator.cells = std::mem::take(&mut cells);
+            let flow = match item {
+                Item::Global(v) => evaluator
+                    .declaration(v, &mut env, &mut Vec::new())
+                    .map(|()| Flow::Next),
+                Item::Statement(statement) => {
+                    evaluator.statements(std::slice::from_ref(statement), &mut env, false)
+                }
+                // Tests may mutate globals; do not carry assumed state past them.
+                Item::Test { .. } => None,
+                _ => Some(Flow::Next),
+            };
+            if let Some(error) = evaluator.failure() {
+                return Err(error);
+            }
+            cells = evaluator.cells;
+            matches!(flow, Some(Flow::Next))
+        };
+        if let Item::Global(v) = item {
+            for name in v.binding_names() {
+                functions.remove(name);
+            }
+        }
+        if !continued {
+            break;
+        }
+    }
+    Ok(())
+}
+
 fn expression_constants(
     checked: &CheckedModule,
     functions: &HashMap<String, &Function>,
@@ -611,44 +661,10 @@ fn evaluate(
     checked: &CheckedModule,
     fuel: &mut usize,
 ) -> Result<Option<Value>, Diagnostics> {
-    let mut lambdas = HashMap::new();
-    let mut expressions = HashMap::new();
-    for item in &checked.module.items {
-        crate::visit::item(item, &mut |e| {
-            expressions.insert(e.id(), e);
-            if let Expr::Lambda(f) = e {
-                lambdas.insert(e.id(), &**f);
-            }
-        });
-    }
-    let mut evaluator = Evaluator {
-        functions,
-        lambdas,
-        expressions,
-        embed_error: None,
-        checked,
-        fuel,
-        memo: HashMap::new(),
-        cells: Vec::new(),
-        depth: 0,
-        arithmetic_failure: false,
-        arithmetic_location: None,
-        flow: None,
-        indices: vec![],
-    };
+    let mut evaluator = Evaluator::new(functions, checked, fuel);
     let value = evaluator.evaluate(e, &mut env.clone());
-    if let Some(error) = evaluator.embed_error {
+    if let Some(error) = evaluator.failure() {
         Err(error)
-    } else if evaluator.arithmetic_failure {
-        let error = Diagnostics::one(
-            "constant evaluation failed: integer overflow, division by zero, invalid shift/exponent, or numeric cast out of range",
-            0..0,
-        );
-        Err(if let Some(location) = evaluator.arithmetic_location {
-            error.at_source(&location.path, location.span)
-        } else {
-            error
-        })
     } else {
         // Cell identities are private to this evaluation, never reusable constants.
         Ok(value.filter(|value| !value.contains_cell()))
@@ -670,7 +686,77 @@ struct Evaluator<'a> {
     flow: Option<Flow>,
     indices: Vec<u64>,
 }
-impl Evaluator<'_> {
+impl<'module> Evaluator<'module> {
+    fn new(
+        functions: &'module HashMap<String, &'module Function>,
+        checked: &'module CheckedModule,
+        fuel: &'module mut usize,
+    ) -> Self {
+        let mut lambdas = HashMap::new();
+        let mut expressions = HashMap::new();
+        for item in &checked.module.items {
+            crate::visit::item(item, &mut |e| {
+                expressions.insert(e.id(), e);
+                if let Expr::Lambda(f) = e {
+                    lambdas.insert(e.id(), &**f);
+                }
+            });
+        }
+        Self {
+            functions,
+            checked,
+            fuel,
+            lambdas,
+            expressions,
+            embed_error: None,
+            memo: HashMap::new(),
+            cells: Vec::new(),
+            depth: 0,
+            arithmetic_failure: false,
+            arithmetic_location: None,
+            flow: None,
+            indices: vec![],
+        }
+    }
+    fn failure(&mut self) -> Option<Diagnostics> {
+        if let Some(error) = self.embed_error.take() {
+            return Some(error);
+        }
+        if !self.arithmetic_failure {
+            return None;
+        }
+        let error = Diagnostics::one(
+            "constant evaluation failed: integer overflow, division by zero, invalid shift/exponent, or numeric cast out of range",
+            0..0,
+        );
+        Some(if let Some(location) = self.arithmetic_location.take() {
+            error.at_source(&location.path, location.span)
+        } else {
+            error
+        })
+    }
+    fn declaration(
+        &mut self,
+        v: &VarDecl,
+        env: &mut HashMap<String, Value>,
+        declared: &mut Vec<(String, Option<Value>)>,
+    ) -> Option<()> {
+        if v.mutex {
+            return None;
+        }
+        let value = self.evaluate(&v.value, env)?;
+        let value = self.coerce(declaration_value(&v.pattern, &v.ty, value)?, &v.ty)?;
+        bind_declaration(&v.pattern, value, env, declared)?;
+        if v.mutable {
+            for name in v.binding_names() {
+                let value = env.get_mut(name)?;
+                let index = self.cells.len();
+                self.cells
+                    .push(std::mem::replace(value, Value::Cell(index)));
+            }
+        }
+        Some(())
+    }
     fn constant_binding(&mut self, key: usize, name: &str) -> Option<Value> {
         let initializer = *self.expressions.get(&key)?;
         let value = self.evaluate(initializer, &mut HashMap::new())?;
@@ -713,19 +799,17 @@ impl Evaluator<'_> {
             Expr::Name(name) => Some(name.clone()),
             Expr::Member { object, name } => {
                 let root = self.place(object, env, path)?;
-                self.read_place(&root, env, path)?;
                 path.push(Access::Field(name.clone()));
                 Some(root)
             }
             Expr::Index { object, index } => {
                 let root = self.place(object, env, path)?;
-                let object = self.read_place(&root, env, path)?.clone();
-                let index = self.index(index, &object, env)?;
-                // Array target checks run before the RHS in generated C. Stop
-                // folding here rather than evaluating an unreachable RHS.
-                if let Value::Array(values) | Value::Tuple(values) = &object {
-                    values.get(index_number(&index)?)?;
-                }
+                let index = if crate::visit::uses_index_length(index) {
+                    let object = self.read_place(&root, env, path)?.clone();
+                    self.index(index, &object, env)?
+                } else {
+                    self.evaluate(index, env)?
+                };
                 path.push(Access::Index(index));
                 Some(root)
             }
@@ -1781,32 +1865,27 @@ impl Evaluator<'_> {
         env: &mut HashMap<String, Value>,
         valued: bool,
     ) -> Option<Flow> {
+        self.statements(&b.statements, env, valued)
+    }
+    fn statements(
+        &mut self,
+        statements: &[Stmt],
+        env: &mut HashMap<String, Value>,
+        valued: bool,
+    ) -> Option<Flow> {
         let mut declared = vec![];
         let mut result = Flow::Next;
-        for (index, s) in b.statements.iter().enumerate() {
+        for (index, s) in statements.iter().enumerate() {
             *self.fuel = self.fuel.checked_sub(1)?;
             let flow = match s.unlocated() {
                 Stmt::Var(v) => {
-                    if v.mutex {
-                        return None;
-                    }
-                    let value = self.evaluate(&v.value, env)?;
-                    let value = self.coerce(declaration_value(&v.pattern, &v.ty, value)?, &v.ty)?;
-                    bind_declaration(&v.pattern, value, env, &mut declared)?;
-                    if v.mutable {
-                        for name in v.binding_names() {
-                            let value = env.get_mut(name)?;
-                            let index = self.cells.len();
-                            self.cells
-                                .push(std::mem::replace(value, Value::Cell(index)));
-                        }
-                    }
+                    self.declaration(v, env, &mut declared)?;
                     Flow::Next
                 }
                 Stmt::Assign { target, value } => {
+                    let v = self.evaluate(value, env)?;
                     let mut path = Vec::new();
                     let name = self.place(target, env, &mut path)?;
-                    let v = self.evaluate(value, env)?;
                     if name != "_" {
                         let ty = self.checked.expression_types.get(&target.id())?;
                         let v = self.coerce(v, ty)?;
@@ -1833,10 +1912,10 @@ impl Evaluator<'_> {
                         subject.as_deref(),
                         arms,
                         env,
-                        valued && index + 1 == b.statements.len(),
+                        valued && index + 1 == statements.len(),
                     )?
                 }
-                Stmt::Expr(e) if valued && index + 1 == b.statements.len() => {
+                Stmt::Expr(e) if valued && index + 1 == statements.len() => {
                     Flow::Value(self.evaluate(e, env)?)
                 }
                 Stmt::Expr(e) => {

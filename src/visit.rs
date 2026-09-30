@@ -61,6 +61,29 @@ pub(crate) fn pattern<'a>(p: &'a Pattern, f: &mut impl FnMut(&'a Expr)) {
         _ => {}
     }
 }
+/// Whether an index expression uses its enclosing container's length. Nested
+/// indexing establishes its own `$` context; function bodies do not inherit it.
+pub(crate) fn uses_index_length(e: &Expr) -> bool {
+    let mut nested = std::collections::HashSet::new();
+    let mut found = false;
+    expr(e, &mut |e| {
+        if nested.contains(&e.id()) {
+            return;
+        }
+        match e {
+            Expr::Index { index, .. } => expr(index, &mut |e| {
+                nested.insert(e.id());
+            }),
+            Expr::Lambda(fun) => block(&fun.body, &mut |e| {
+                nested.insert(e.id());
+            }),
+            Expr::Name(name) if name == "$" => found = true,
+            _ => {}
+        }
+    });
+    found
+}
+
 fn expr<'a>(e: &'a Expr, f: &mut impl FnMut(&'a Expr)) {
     let e = e.unlocated();
     f(e);
