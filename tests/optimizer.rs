@@ -194,6 +194,47 @@ fn float_string_folding_matches_c_for_boundaries_and_sampled_bit_patterns() {
 }
 
 #[test]
+fn fixed_and_dynamic_array_concatenations_fold_without_aliasing_values() {
+    folded(
+        r#"
+fn fixed() int[3] {
+    int[0] empty = []
+    int[1] first = [1]
+    int[2] second = [2, 3]
+    return empty <> first <> second <> empty
+}
+fn dynamic() int[] {
+    int[2] first = [1, 2]
+    int[] second = [3, 4]
+    int[] empty = []
+    return empty <> first <> second <> empty
+}
+fn converted() int[][] {
+    mut int[][1] left = [[1, 2]]
+    mut int[][1] right = [[3, 4]]
+    mut int[][2] joined = left <> right
+    mut int[][] copy = @as(int[][], joined)
+    left[0][0] = 8
+    right[0][0] = 9
+    joined[0][0] = 6
+    copy[1][0] = 7
+    return joined <> copy <> left <> right
+}
+fn empty() int[0] {
+    int[0] first = []
+    return first <> first
+}
+@println(fixed())
+@println(dynamic())
+@println(converted())
+@println(empty())
+"#,
+        &["fixed", "dynamic", "converted", "empty"],
+        "[1, 2, 3]\n[1, 2, 3, 4]\n[[6, 2], [3, 4], [1, 2], [7, 4], [8, 2], [9, 4]]\n[]\n",
+    );
+}
+
+#[test]
 fn nonfinite_float_arithmetic_folds_and_materializes() {
     folded(
         r#"

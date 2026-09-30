@@ -1702,6 +1702,77 @@ Unit[2] values = [value, wrapped()]
 }
 
 #[test]
+fn fixed_and_dynamic_array_concatenation_preserves_sizes_and_value_copies() {
+    success(
+        r#"
+fn fixed() int[2] { @print("fixed ") return [1, 2] }
+fn dynamic() int[] { @print("dynamic ") return [3, 4] }
+fn nothing() int[0] { @print("empty ") return [] }
+@println(fixed() <> dynamic())
+@println(dynamic() <> fixed())
+@println(nothing() <> fixed() <> nothing())
+test "array concatenation" {
+    int[0] zero = []
+    int[1] one = [1]
+    int[2] two = [2, 3]
+    int[3] three = one <> two
+    int[3] with_empty = zero <> three <> zero
+    int[0] still_empty = zero <> zero
+    int[] empty = []
+    int[] dynamic_left = empty <> three
+    int[] dynamic_right = three <> empty
+    int[] both_dynamic = dynamic_left <> dynamic_right
+    assert with_empty == [1, 2, 3]
+    assert still_empty.len == 0
+    assert dynamic_left == three
+    assert dynamic_right == three
+    assert both_dynamic == [1, 2, 3, 1, 2, 3]
+
+    mut int[][1] left = [[1, 2]]
+    mut int[][1] right = [[3, 4]]
+    mut int[][2] joined = left <> right
+    joined[0][0] = 9
+    assert left[0] == [1, 2]
+    right[0][0] = 8
+    assert joined[1] == [3, 4]
+    mut int[][] converted = @as(int[][], joined)
+    converted[1][0] = 7
+    assert joined[1] == [3, 4]
+    assert converted == [[9, 2], [7, 4]]
+}
+"#,
+        "fixed dynamic [1, 2, 3, 4]\ndynamic fixed [3, 4, 1, 2]\nempty fixed empty [1, 2]\n",
+    );
+}
+
+#[test]
+fn fixed_array_conversions_and_concatenations_reject_incompatible_sizes() {
+    for source in [
+        "int[] values = [1, 2] int[2] fixed = values",
+        "int[] values = [1, 2] int[2] fixed = @as(int[2], values)",
+        "int[] values = [] int[0] fixed = values",
+        "int[] values = [] int[0] fixed = @as(int[0], values)",
+        "int[1] a = [1] int[] b = [2] int[2] joined = a <> b",
+        "int[] a = [1] int[1] b = [2] int[2] joined = a <> b",
+        "int[] a = [1] int[] b = [2] int[2] joined = a <> b",
+        "int[0] a = [] int[] b = [] int[0] joined = a <> b",
+        "int[1] a = [1] int[2] b = [2, 3] int[2] joined = a <> b",
+        "fn take(int[2] values) {} int[] values = [1, 2] take(values)",
+        "fn wrong() int[2] { int[] values = [1, 2] return values }",
+        "int[]? values = [1, 2] int[2] fixed = values else [0, 0]",
+    ] {
+        rejects(
+            source,
+            if source.contains("@as") {
+                "this cast is not implemented"
+            } else {
+                "expected `int["
+            },
+        );
+    }
+}
+
+#[test]
 fn fixed_array_lengths_use_integer_literal_syntax() {
     success(
         r#"
