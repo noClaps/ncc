@@ -1229,6 +1229,26 @@ fn deep_places() (int, int, int, int) {
 }
 
 #[test]
+fn nested_map_insertions_still_fold_and_evaluate_target_before_rhs() {
+    folded(
+        r#"
+struct Holder { [str]int entries }
+fn insert() (int, int) {
+    mut int trace = 0
+    fn index() int { trace = trace * 10 + 1 return 0 }
+    fn replacement() int { trace = trace * 10 + 2 return 7 }
+    mut Holder[] holders = [Holder{.entries = []}]
+    holders[index()].entries["new"] = replacement()
+    return trace, holders[0].entries["new"]
+}
+@println(insert())
+"#,
+        &["insert"],
+        "(12, 7)\n",
+    );
+}
+
+#[test]
 fn loops_labels_and_local_places_are_evaluated() {
     folded(
         r#"

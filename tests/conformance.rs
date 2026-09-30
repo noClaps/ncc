@@ -1660,6 +1660,34 @@ fn nested_assignment_failures_are_preserved_in_release() {
 }
 
 #[test]
+fn invalid_assignment_targets_do_not_evaluate_failing_rhs() {
+    for (source, message) in [
+        (
+            "fn invalid() int { mut int[] values = [1] values[-1] = 1 / 0 return 9 } @println(invalid())",
+            "out of bounds",
+        ),
+        (
+            "fn invalid() int { mut int[][] rows = [[1]] rows[1][0] = 1 / 0 return 9 } @println(invalid())",
+            "out of bounds",
+        ),
+        (
+            "fn invalid() int { mut int[][] rows = [[1]] rows[0][1] = 1 / 0 return 9 } @println(invalid())",
+            "out of bounds",
+        ),
+        (
+            "struct Entry { int value } fn invalid() int { mut [str]Entry entries = [\"present\": Entry{.value = 1}] entries[\"missing\"].value = 1 / 0 return 9 } @println(invalid())",
+            "map key not found",
+        ),
+        (
+            "fn invalid() uint { mut uint[][] rows = [[1]] rows[0][1] = @as(uint, -0.75) return 9 } @println(invalid())",
+            "out of bounds",
+        ),
+    ] {
+        runtime_failure(source, message);
+    }
+}
+
+#[test]
 fn writable_places_and_evaluation_order() {
     success(
         r#"

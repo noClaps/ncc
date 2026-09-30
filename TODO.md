@@ -9,7 +9,9 @@
 2. Attempt to eliminate all undefined behavior from the language. Identify
    potentially undefined cases, clarify the intended behavior with the user, and
    let the user document those decisions before implementing them and adding
-   regression tests.
+   regression tests. Clarify assignment-target storage when the right-hand side
+   replaces or shrinks the target binding or an ancestor container: generated C
+   currently checks bounds before the RHS, then may write through changed storage.
 3. Once the entire language has been captured in tests, remove as much unnecessary
    compiler code as possible while keeping all tests passing. Preserve a fully
    functional general-purpose compiler; do not overfit implementations to the

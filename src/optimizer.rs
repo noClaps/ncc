@@ -713,24 +713,38 @@ impl Evaluator<'_> {
             Expr::Name(name) => Some(name.clone()),
             Expr::Member { object, name } => {
                 let root = self.place(object, env, path)?;
+                self.read_place(&root, env, path)?;
                 path.push(Access::Field(name.clone()));
                 Some(root)
             }
             Expr::Index { object, index } => {
                 let root = self.place(object, env, path)?;
-                let binding = env.get(&root)?;
-                let storage = match binding {
-                    Value::Cell(index) => self.cells.get(*index)?,
-                    value => value,
-                };
-                // Reuse evaluated keys/indices instead of executing the parent
-                // expression again while resolving a nested assignment target.
-                let object = place_value(storage, path)?.clone();
-                path.push(Access::Index(self.index(index, &object, env)?));
+                let object = self.read_place(&root, env, path)?.clone();
+                let index = self.index(index, &object, env)?;
+                // Array target checks run before the RHS in generated C. Stop
+                // folding here rather than evaluating an unreachable RHS.
+                if let Value::Array(values) | Value::Tuple(values) = &object {
+                    values.get(index_number(&index)?)?;
+                }
+                path.push(Access::Index(index));
                 Some(root)
             }
             _ => None,
         }
+    }
+    // Resolve storage using previously evaluated keys/indices, never by
+    // executing the assignment's parent expression a second time.
+    fn read_place<'b>(
+        &'b self,
+        root: &str,
+        env: &'b HashMap<String, Value>,
+        path: &[Access],
+    ) -> Option<&'b Value> {
+        let storage = match env.get(root)? {
+            Value::Cell(index) => self.cells.get(*index)?,
+            value => value,
+        };
+        place_value(storage, path)
     }
     fn coerce(&self, value: Value, ty: &Type) -> Option<Value> {
         if matches!(value, Value::Void(_)) && self.base_type(ty) == &Type::void() {
