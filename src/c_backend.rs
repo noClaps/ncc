@@ -1265,7 +1265,19 @@ impl Emitter<'_> {
                     format!("{n}LL")
                 }
             }
-            Expr::Float(n) => n.clone(),
+            Expr::Float(n) => match n.parse::<f64>() {
+                Ok(value) if !value.is_finite() => {
+                    self.headers.insert("math.h");
+                    if value.is_nan() {
+                        "((double)NAN)".into()
+                    } else if value.is_sign_negative() {
+                        "(-((double)INFINITY))".into()
+                    } else {
+                        "((double)INFINITY)".into()
+                    }
+                }
+                _ => n.clone(),
+            },
             Expr::String(s) | Expr::Char(s) => nc_string(s),
             Expr::Bool(b) => {
                 self.headers.insert("stdbool.h");
@@ -1381,6 +1393,12 @@ impl Emitter<'_> {
                             self.line(format!(
                                 "if ({value} < 0 || {value} > 255) nc_panic(\"cast out of range\");"
                             ));
+                            if matches!(&from, Type::Named(n, _) if n == "float") {
+                                self.headers.insert("math.h");
+                                self.line(format!(
+                                    "if (!isfinite({value})) nc_panic(\"cast out of range\");"
+                                ));
+                            }
                         }
                         "uint" => {
                             self.panic_support();
@@ -2244,14 +2262,15 @@ impl Emitter<'_> {
             "float" => ("%.17g", value.into()),
             _ => return unsupported("conversion of this type to str"),
         };
-        self.line(format!(
-            "char *{result} = nc_alloc(128, 1); snprintf({result}, 128, \"{fmt}\", {value});"
-        ));
+        self.line(format!("char *{result} = nc_alloc(128, 1);"));
         if name == "float" {
+            self.headers.insert("math.h");
             self.headers.insert("string.h");
             self.line(format!(
-                "if (!strpbrk({result}, \".eE\")) strcat({result}, \".0\");"
+                "if (isnan({value})) strcpy({result}, \"NaN\"); else if (isinf({value})) strcpy({result}, {value} < 0 ? \"-inf\" : \"inf\"); else {{ snprintf({result}, 128, \"{fmt}\", {value}); if (!strpbrk({result}, \".eE\")) strcat({result}, \".0\"); }}"
             ));
+        } else {
+            self.line(format!("snprintf({result}, 128, \"{fmt}\", {value});"));
         }
         self.headers.insert("string.h");
         Ok(format!("((nc_string){{strlen({result}), {result}}})"))
@@ -2441,19 +2460,21 @@ impl Emitter<'_> {
     ) -> Result<String, Diagnostics> {
         let ty = self.ty(expr)?;
         let ct = self.c_type(&ty)?;
-        self.panic_support();
         let result = self.fresh();
         self.line(format!("{ct} {result};"));
         if matches!(&ty, Type::Named(n, _) if n == "float") {
-            self.headers.insert("math.h");
+            if matches!(op, BinaryOp::Pow | BinaryOp::Mod) {
+                self.headers.insert("math.h");
+            }
             let operation = match op {
                 BinaryOp::Pow => format!("pow({left}, {right})"),
                 BinaryOp::Mod => format!("fmod({left}, {right})"),
                 _ => format!("{left} {} {right}", operator(op)),
             };
-            self.line(format!("{result} = {operation};\nif (!isfinite({result})) nc_panic(\"floating-point overflow or invalid arithmetic\");"));
+            self.line(format!("{result} = {operation};"));
             return Ok(result);
         }
+        self.panic_support();
         match op {
             BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul => {
                 let operation = match op {

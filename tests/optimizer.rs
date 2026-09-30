@@ -1,9 +1,14 @@
 use std::{fs, path::Path, process::Command};
 
 fn folded(source: &str, names: &[&str], expected: &str) {
-    ncc::compile_source(source, Path::new("constant.nc")).expect("unoptimised source is valid");
+    let unoptimised =
+        ncc::compile_source(source, Path::new("constant.nc")).expect("unoptimised source is valid");
     let c = ncc::compile_source_with_options(source, Path::new("constant.nc"), true).unwrap();
     for name in names {
+        assert!(
+            unoptimised.contains(&format!("nc_fn_{name}(")),
+            "{name} was not present before optimisation"
+        );
         assert!(
             !c.contains(&format!("nc_fn_{name}(")),
             "{name} was not evaluated"
@@ -186,6 +191,107 @@ fn float_string_folding_matches_c_for_boundaries_and_sampled_bit_patterns() {
         output.stdout
     });
     assert_eq!(outputs[0], outputs[1]);
+}
+
+#[test]
+fn nonfinite_float_arithmetic_folds_and_materializes() {
+    folded(
+        r#"
+fn values() float[] {
+    float positive = 1.0 / 0.0
+    float negative = -1.0 / 0.0
+    float nan = 0.0 / 0.0
+    float large = 2.0 ** 1023.0
+    return [positive, negative, nan, large * 2.0,
+        -large * 2.0, positive + 1.0, positive + negative,
+        positive - positive, positive * 0.0, positive / positive,
+        1.0 % 0.0, positive % 2.0, 2.0 ** 1024.0, (-1.0) ** 0.5,
+        0.0 ** -1.0, nan + 1.0, -nan]
+}
+@println(values())
+"#,
+        &["values"],
+        "[inf, -inf, NaN, inf, -inf, inf, NaN, NaN, NaN, NaN, NaN, NaN, inf, NaN, inf, NaN, NaN]\n",
+    );
+}
+
+#[test]
+fn nonfinite_float_container_formatting_folds() {
+    folded(
+        r#"
+struct Record { float value }
+enum Choice { Value(float) }
+fn convert(float value) str { return @as(str, value) }
+fn render() str {
+    float nan = 0.0 / 0.0
+    float positive = 1.0 / 0.0
+    float negative = -1.0 / 0.0
+    float? optional = nan
+    float! success = positive
+    float?[3] values = [nan, none, negative]
+    return "{nan}|{positive}|{negative}|{[nan, positive, negative]}|{(nan, positive, negative)}|{[positive: nan]}|{Record{.value = negative}}|{Choice.Value(nan)}|{optional}|{success}|{values}"
+}
+@println(render())
+@println(convert(0.0 / 0.0))
+@println(convert(1.0 / 0.0))
+@println(convert(-1.0 / 0.0))
+"#,
+        &["render", "convert"],
+        "NaN|inf|-inf|[NaN, inf, -inf]|(NaN, inf, -inf)|[inf: NaN]|Record{.value = -inf}|Choice.Value(NaN)|NaN|inf|[NaN, none, -inf]\nNaN\ninf\n-inf\n",
+    );
+}
+
+#[test]
+fn nonfinite_float_comparisons_and_membership_fold_with_ieee_equality() {
+    folded(
+        r#"
+struct Record { float value }
+enum Choice { Value(float) }
+fn scalar(float nan, float positive, float negative) bool[] {
+    return [nan == nan, nan != nan, nan < 0.0, nan <= nan, nan > 0.0,
+        nan >= nan, positive == positive, negative == negative,
+        negative < positive, positive > 1.0, positive == negative, 0.0 == -0.0]
+}
+fn containers(float nan, float positive) bool[] {
+    float? optional = nan
+    float! success = nan
+    float? absent = none
+    return [[nan] == [nan], (nan, 1) == (nan, 1),
+        [nan: 1] == [nan: 1], [1: nan] == [1: nan],
+        Record{.value = nan} == Record{.value = nan},
+        Choice.Value(nan) == Choice.Value(nan), optional == optional,
+        success == success, [optional] == [optional], [success] == [success],
+        absent == absent, [positive] == [positive], [0.0] == [-0.0],
+        [nan] != [nan]]
+}
+fn membership(float nan, float positive) bool[] {
+    return [nan in [nan], nan in [nan: 1], [nan] in [[nan]],
+        (nan, 1) in [(nan, 1)], positive in [nan, positive],
+        positive in [positive: 1], -0.0 in [0.0], -0.0 in [0.0: 1]]
+}
+@println(scalar(0.0 / 0.0, 1.0 / 0.0, -1.0 / 0.0))
+@println(containers(0.0 / 0.0, 1.0 / 0.0))
+@println(membership(0.0 / 0.0, 1.0 / 0.0))
+"#,
+        &["scalar", "containers", "membership"],
+        "[false, true, false, false, false, false, true, true, true, true, false, true]\n[false, false, false, false, false, false, false, false, false, false, true, true, true, true]\n[false, false, false, false, true, true, true, true]\n",
+    );
+}
+
+#[test]
+fn nonfinite_float_integer_casts_remain_rejected_during_folding() {
+    for value in ["0.0 / 0.0", "1.0 / 0.0", "-1.0 / 0.0"] {
+        for ty in ["int", "uint"] {
+            let source =
+                format!("fn cast(float n) {ty} {{ return @as({ty}, n) }} @println(cast({value}))");
+            let error =
+                ncc::compile_source_with_options(&source, Path::new("bad.nc"), true).unwrap_err();
+            assert!(
+                error.to_string().contains("constant evaluation failed"),
+                "{ty} cast of {value}: {error}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -682,7 +788,6 @@ fn nominal_power(int n) int { return 1 ** n }
     for source in [
         "fn f(uint n) uint { return n - 1 } @println(f(0))",
         "fn f(byte n) byte { return n << 8 } @println(f(1))",
-        "fn f(float n) float { return n / 0.0 } @println(f(1.0))",
         "fn f(float n) byte { return @as(byte, n) } @println(f(-0.5))",
         "fn f(int n) int { return -n } @println(f(-9223372036854775808))",
     ] {

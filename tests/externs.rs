@@ -1,6 +1,94 @@
 use std::{fs, process::Command};
 
 #[test]
+fn c_extern_nonfinite_floats_keep_ieee_values_and_canonical_formatting() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let input = directory.path().join("main.nc");
+    fs::write(
+        directory.path().join("native.c"),
+        r#"
+#include <math.h>
+nc_abi_invalid_result invalid(void) { return -NAN; }
+nc_abi_positive_result positive(void) { return INFINITY; }
+nc_abi_negative_result negative(void) { return -INFINITY; }
+nc_abi_roundtrip_result roundtrip(nc_abi_roundtrip_arg0 value) { return value; }
+"#,
+    )
+    .unwrap();
+    let declarations = r#"
+extern "native.c" as native {
+    fn invalid() float = "invalid"
+    fn positive() float = "positive"
+    fn negative() float = "negative"
+    fn roundtrip(float value) float = "roundtrip"
+}
+"#;
+    fs::write(
+        &input,
+        declarations.to_owned()
+            + r#"
+float invalid = native.invalid()
+float positive = native.positive()
+float negative = native.negative()
+test "nonfinite ABI" {
+    assert invalid != invalid
+    assert positive == inf
+    assert negative == -inf
+    assert native.roundtrip(inf) == inf
+    assert native.roundtrip(-inf) == -inf
+}
+@println(invalid, ":", positive, ":", negative)
+@println("{invalid}:{positive}:{negative}")
+@println(@as(str, invalid), ":", @as(str, positive), ":", @as(str, negative))
+@eprintln(invalid, ":", positive, ":", negative)
+@println(native.roundtrip(NaN))
+"#,
+    )
+    .unwrap();
+    for release in [false, true] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ncc"));
+        command.arg("run");
+        if release {
+            command.arg("-r");
+        }
+        let output = command.arg(&input).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            output.stdout,
+            b"NaN:inf:-inf\nNaN:inf:-inf\nNaN:inf:-inf\nNaN\n"
+        );
+        assert_eq!(output.stderr, b"NaN:inf:-inf\n");
+    }
+    for function in ["invalid", "positive", "negative"] {
+        for ty in ["int", "uint"] {
+            fs::write(
+                &input,
+                format!("{declarations}\n_ = @as({ty}, native.{function}())"),
+            )
+            .unwrap();
+            for release in [false, true] {
+                let mut command = Command::new(env!("CARGO_BIN_EXE_ncc"));
+                command.arg("run");
+                if release {
+                    command.arg("-r");
+                }
+                let output = command.arg(&input).output().unwrap();
+                assert_eq!(output.status.code(), Some(1));
+                assert!(
+                    String::from_utf8_lossy(&output.stderr).contains("cast out of range"),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn c_abi_roundtrips_scalar_nominal_and_composite_values() {
     let directory = ncc::temp::Directory::new().unwrap();
     let input = directory.path().join("main.nc");

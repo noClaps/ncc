@@ -48,6 +48,11 @@
     and must acquire their own lock before accessing its value.
   - Reject equality and string conversion for functions and unawaited futures,
     including when nested in containers.
+  - Map concatenation overwrites duplicate keys with the right-hand value.
+  - IEEE-754 NaN and infinities are valid floats, including arithmetic results
+    and values returned by C externs. Printing, interpolation, and string
+    conversion use `NaN`, `inf`, and `-inf`. Converting nonfinite floats to `int`
+    or `uint` must panic; never emit an unchecked nonfinite-to-integer C cast.
   - Numeric byte-array encoding may use the simplest consistent implementation;
     the implementation uses little-endian bytes and IEEE-754 bits for floats.
   - Printing, interpolation, and string conversion of an error union use its

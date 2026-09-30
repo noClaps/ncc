@@ -1,6 +1,190 @@
 use std::{fs, path::Path, process::Command};
 
 #[test]
+fn map_concatenation_overwrites_collisions_without_aliasing_operands() {
+    success(
+        r#"
+test "map collisions" {
+    mut [str]int[] left = ["shared": [1], "left": [2]]
+    mut [str]int[] right = ["shared": [3, 4], "right": [5]]
+    mut [str]int[] joined = left <> right
+    assert joined.len == 3
+    assert joined["shared"] == [3, 4]
+    assert joined["left"] == [2]
+    assert joined["right"] == [5]
+    joined["shared"][0] = 9
+    assert right["shared"] == [3, 4]
+    left["left"][0] = 8
+    right["right"][0] = 7
+    assert joined["left"] == [2]
+    assert joined["right"] == [5]
+    [str]int[] empty = []
+    assert left <> empty == left
+    assert empty <> right == right
+    [str]int[] last = ["shared": [6]]
+    assert (left <> right <> last)["shared"] == [6]
+}
+"#,
+        "",
+    );
+}
+
+#[test]
+fn nonfinite_float_literals_arithmetic_and_formatting() {
+    success(
+        r#"
+fn runtime(float n) float { @print("") return n }
+float zero = runtime(0.0)
+float one = runtime(1.0)
+float huge = runtime(10.0) ** 200.0
+@println(NaN, ":", inf, ":", -inf)
+@println(one / zero, ":", -one / zero, ":", zero / zero)
+@println(huge * huge, ":", inf - inf, ":", inf * zero)
+@println(one % zero, ":", (-one) ** 0.5, ":", inf + -inf)
+@println(@as(str, -NaN), ":", "{inf}:{-inf}")
+@println([NaN, inf, -inf])
+test "IEEE comparisons" {
+    float invalid = zero / zero
+    assert invalid != invalid
+    assert not (invalid == invalid)
+    assert not (invalid < one)
+    assert not (invalid <= one)
+    assert not (invalid > one)
+    assert not (invalid >= one)
+    assert one / zero == inf
+    assert -one / zero == -inf
+    assert -inf < one
+    assert inf > one
+    assert not (invalid in [invalid])
+    assert inf in [invalid, inf]
+    assert [invalid] != [invalid]
+}
+"#,
+        "NaN:inf:-inf\ninf:-inf:NaN\ninf:NaN:NaN\nNaN:NaN:NaN\nNaN:inf:-inf\n[NaN, inf, -inf]\n",
+    );
+}
+
+#[test]
+fn nonfinite_float_integer_casts_fail_at_runtime() {
+    for value in ["NaN", "inf", "-inf"] {
+        for ty in ["int", "uint"] {
+            runtime_failure(
+                &format!(
+                    "fn runtime() float {{ @print(\"\") return {value} }} _ = @as({ty}, runtime())"
+                ),
+                "cast out of range",
+            );
+        }
+    }
+}
+
+#[test]
+fn inclusion_checks_array_values_and_map_keys() {
+    success(
+        r#"
+struct Entry { int id str name }
+test "inclusion" {
+    int[] numbers = [2, 4, 2]
+    int[] empty = []
+    int[3] fixed = [2, 4, 6]
+    assert 2 in numbers
+    assert 4 in numbers
+    assert not (3 in numbers)
+    assert not (2 in empty)
+    assert 6 in fixed
+    assert not (5 in fixed)
+
+    int[][] nested = [[1, 2], [], [3]]
+    int[] pair = [1, 2]
+    int[] reversed = [2, 1]
+    assert pair in nested
+    assert empty in nested
+    assert not (reversed in nested)
+
+    Entry[] entries = [Entry{.id = 1, .name = "one"}]
+    assert Entry{.id = 1, .name = "one"} in entries
+    assert not (Entry{.id = 1, .name = "other"} in entries)
+
+    [int]str names = [2: "two", 4: "four"]
+    [int]str no_names = []
+    assert 2 in names
+    assert not (3 in names)
+    assert not (2 in no_names)
+    [str]int counts = ["key": 42]
+    assert "key" in counts
+    assert not ("42" in counts)
+}
+"#,
+        "",
+    );
+}
+
+#[test]
+fn string_inclusion_handles_unicode_and_embedded_nuls() {
+    success(
+        r#"
+test "string inclusion" {
+    str text = "start 🍪 café\u{0}end"
+    assert '🍪' in text
+    assert 'é' in text
+    assert '\u{0}' in text
+    assert "🍪 café" in text
+    assert "fé\u{0}en" in text
+    assert "end" in text
+    assert not ('x' in text)
+    assert not ("cafe" in text)
+    assert not ("start end" in text)
+    assert not ("start 🍪 café\u{0}end!" in text)
+    assert not ('a' in "")
+    assert not ("a" in "")
+}
+"#,
+        "",
+    );
+}
+
+#[test]
+fn inclusion_evaluates_each_operand_once_in_source_order() {
+    success(
+        r#"
+fn needle() int { @print("needle ") return 2 }
+fn numbers() int[] { @print("array ") return [1, 2, 3] }
+fn names() [int]str { @print("map ") return [2: "two"] }
+fn letter() char { @print("char ") return '🍪' }
+fn word() str { @print("word ") return "café" }
+fn text() str { @print("text ") return "🍪 café" }
+@println(needle() in numbers())
+@println(needle() in names())
+@println(letter() in text())
+@println(word() in text())
+"#,
+        "needle array true\nneedle map true\nchar text true\nword text true\n",
+    );
+}
+
+#[test]
+fn inclusion_rejects_mismatched_elements_and_noncontainers() {
+    for source in [
+        "_ = 1 in 1",
+        "_ = 1 in (1, 2)",
+        "_ = 1 in \"123\"",
+        "_ = true in \"true\"",
+        "_ = \"a\" in 'a'",
+    ] {
+        rejects(source, "in requires a compatible container and element");
+    }
+    for source in [
+        "float[] values = [1.0] _ = 1 in values",
+        "int[] values = [1] _ = 1.0 in values",
+        "int[1] values = [1] _ = true in values",
+        "[str]int values = [\"a\": 1] _ = 1 in values",
+        "[int]str values = [1: \"a\"] _ = \"a\" in values",
+    ] {
+        rejects(source, "expected `");
+    }
+}
+
+#[test]
 fn maps_require_bare_if_comparisons() {
     for source in [
         "[str]int values = [] if values { _ -> {} }",

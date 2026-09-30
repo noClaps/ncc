@@ -138,8 +138,18 @@ enum Value {
 }
 // Match the C backend's %.17g formatting, including its explicit decimal suffix.
 fn float_string(value: f64) -> Option<String> {
-    if !value.is_finite() {
-        return None;
+    if value.is_nan() {
+        return Some("NaN".into());
+    }
+    if value.is_infinite() {
+        return Some(
+            if value.is_sign_negative() {
+                "-inf"
+            } else {
+                "inf"
+            }
+            .into(),
+        );
     }
     let scientific = format!("{value:.16e}");
     let (mantissa, exponent) = scientific.split_once('e')?;
@@ -247,7 +257,14 @@ impl Value {
                 ty: Type::Named("byte".into(), vec![]),
                 value: Box::new(Expr::Int(n.to_string())),
             },
-            Self::Float(bits) => Expr::Float(format!("{:?}", f64::from_bits(bits))),
+            Self::Float(bits) => {
+                let value = f64::from_bits(bits);
+                Expr::Float(if value.is_finite() {
+                    format!("{value:?}")
+                } else {
+                    float_string(value).expect("nonfinite floats have canonical spellings")
+                })
+            }
             Self::Bool(b) => Expr::Bool(b),
             Self::String(s) => Expr::String(s),
             Self::Char(s) => Expr::Char(s),
@@ -590,7 +607,7 @@ fn evaluate(
         Err(error)
     } else if evaluator.arithmetic_failure {
         let error = Diagnostics::one(
-            "constant evaluation failed: integer overflow, division by zero, invalid shift/exponent, or non-finite float",
+            "constant evaluation failed: integer overflow, division by zero, invalid shift/exponent, or numeric cast out of range",
             0..0,
         );
         Err(if let Some(location) = evaluator.arithmetic_location {
@@ -1009,10 +1026,6 @@ impl Evaluator<'_> {
             Pow => a.powf(b),
             _ => return None,
         };
-        if !result.is_finite() {
-            self.arithmetic_failure = true;
-            return None;
-        }
         Some(Value::Float(result.to_bits()))
     }
     fn base_type<'a>(&'a self, ty: &'a Type) -> &'a Type {
@@ -1074,7 +1087,7 @@ impl Evaluator<'_> {
             }
             Expr::Float(s) => {
                 let value: f64 = s.parse().ok()?;
-                value.is_finite().then(|| Value::Float(value.to_bits()))
+                Some(Value::Float(value.to_bits()))
             }
             Expr::Bool(b) => Some(Value::Bool(*b)),
             Expr::Lambda(_) => {

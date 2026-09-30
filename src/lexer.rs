@@ -224,9 +224,13 @@ pub fn lex(source: &str) -> Result<Vec<Token>, Diagnostics> {
             let s = &source[start..i];
             out.push(Token {
                 newline_before: false,
-                kind: keyword(s)
-                    .map(TokenKind::Keyword)
-                    .unwrap_or_else(|| TokenKind::Ident(s.into())),
+                kind: if matches!(s, "NaN" | "inf") {
+                    TokenKind::Float(s.into())
+                } else {
+                    keyword(s)
+                        .map(TokenKind::Keyword)
+                        .unwrap_or_else(|| TokenKind::Ident(s.into()))
+                },
                 span: start..i,
             });
             continue;
