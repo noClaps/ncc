@@ -1,9 +1,57 @@
 use std::{fs, path::Path, process::Command};
 
+fn fixture_has_tests(source: &str) -> bool {
+    ncc::lexer::lex(source)
+        .and_then(ncc::parser::parse)
+        .is_ok_and(|module| {
+            module
+                .items
+                .iter()
+                .any(|item| matches!(item, ncc::ast::Item::Test { .. }))
+        })
+}
+
+fn compile_fixture(
+    source: &str,
+    path: &Path,
+    release: bool,
+) -> Result<String, ncc::diagnostic::Diagnostics> {
+    if fixture_has_tests(source) {
+        ncc::compile_test_source_with_options(source, path, release)
+    } else {
+        ncc::compile_source_with_options(source, path, release)
+    }
+}
+
+fn executable_fixture(source: &str) -> String {
+    let module = ncc::parser::parse(ncc::lexer::lex(source).unwrap()).unwrap();
+    let mut result = source.to_owned();
+    if fixture_has_tests(source) {
+        // Root intended fixture execution without moving global declaration scopes.
+        for (index, item) in module.items.iter().enumerate().rev() {
+            if let ncc::ast::Item::Statement(statement) = item {
+                let (_, span) = statement.source().unwrap();
+                result.insert_str(span.end, "\n}\n");
+                result.insert_str(
+                    span.start,
+                    &format!("test \"fixture statement {index}\" {{\n"),
+                );
+            }
+        }
+    }
+    result
+}
+
 fn folded(source: &str, names: &[&str], expected: &str) {
-    let unoptimised =
-        ncc::compile_source(source, Path::new("constant.nc")).expect("unoptimised source is valid");
-    let c = ncc::compile_source_with_options(source, Path::new("constant.nc"), true).unwrap();
+    let source = executable_fixture(source);
+    let command = if fixture_has_tests(&source) {
+        "test"
+    } else {
+        "run"
+    };
+    let unoptimised = compile_fixture(&source, Path::new("constant.nc"), false)
+        .expect("unoptimised source is valid");
+    let c = compile_fixture(&source, Path::new("constant.nc"), true).unwrap();
     for name in names {
         assert!(
             unoptimised.contains(&format!("nc_fn_{name}(")),
@@ -16,9 +64,9 @@ fn folded(source: &str, names: &[&str], expected: &str) {
     }
     let directory = ncc::temp::Directory::new().unwrap();
     let input = directory.path().join("constant.nc");
-    fs::write(&input, source).unwrap();
+    fs::write(&input, &source).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_ncc"))
-        .args(["run", "--release"])
+        .args([command, "--release"])
         .arg(&input)
         .output()
         .unwrap();
@@ -30,7 +78,7 @@ fn folded(source: &str, names: &[&str], expected: &str) {
     assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
     if !names.contains(&"signed") {
         let output = Command::new(env!("CARGO_BIN_EXE_ncc"))
-            .arg("run")
+            .arg(command)
             .arg(&input)
             .output()
             .unwrap();
@@ -187,7 +235,8 @@ test "unreachable failures" {
     assert value == 42
 }
 "#;
-    let c = ncc::compile_source_with_options(source, Path::new("limits.nc"), true).unwrap();
+    let executable = executable_fixture(source);
+    let c = compile_fixture(&executable, Path::new("limits.nc"), true).unwrap();
     assert!(
         c.contains("nc_fn_depth("),
         "depth-limited evaluation must fall back"
@@ -250,8 +299,8 @@ fn top_level_assignments_and_control_flow_evaluate_reached_failures() {
         ),
     ] {
         let path = Path::new("top-level.nc");
-        ncc::compile_source(source, path).unwrap();
-        let error = ncc::compile_source_with_options(source, path, true).unwrap_err();
+        compile_fixture(source, path, false).unwrap();
+        let error = compile_fixture(source, path, true).unwrap_err();
         assert!(
             error.to_string().contains("constant evaluation failed"),
             "{source}: {error}"
@@ -305,8 +354,8 @@ value = operation()
 value = value / (value - 5)
 "#;
     let path = Path::new("captured-top-level.nc");
-    ncc::compile_source(source, path).unwrap();
-    let error = ncc::compile_source_with_options(source, path, true).unwrap_err();
+    compile_fixture(source, path, false).unwrap();
+    let error = compile_fixture(source, path, true).unwrap_err();
     assert!(
         error.to_string().contains("constant evaluation failed"),
         "{error}"
@@ -331,6 +380,121 @@ values[0] = value
         &[],
         "effect:3\narray:[3]\n",
     );
+}
+
+#[test]
+fn top_level_output_analysis_preserves_known_state_and_argument_effects() {
+    for source in [
+        "mut int value = 1 @println(\"hello\") value = 1 / 0",
+        "fn output() { @print(\"hello\") } mut int value = 1 output() value = 1 / 0",
+        "mut int value = 0 fn update = fn() int { @print(\"effect\") value = value + 1 return value } @println(update()) @println(update()) value = value / (value - 2)",
+        "mut int value = 0 fn update = fn() int { value = 2 return value } @println(update()) value = 1 / (value - 2)",
+        "mut int value = 0 while value < 2 { @println(value) value = value + 1 } value = 1 / (value - 2)",
+        "mut int value = 0 @println(1 / 0) value = 2",
+    ] {
+        let path = Path::new("after-output.nc");
+        ncc::compile_source(source, path).unwrap();
+        let error = ncc::compile_source_with_options(source, path, true).unwrap_err();
+        assert!(
+            error.to_string().contains("constant evaluation failed"),
+            "{source}: {error}"
+        );
+        assert_eq!(error.0[0].path.as_deref(), Some(path));
+    }
+    folded(
+        r#"
+mut int count = 0
+fn increment = fn() int { @print("effect:") count = count + 1 return count }
+@println(increment(), ":", increment())
+@println(count)
+"#,
+        &[],
+        "effect:effect:1:2\n2\n",
+    );
+}
+
+#[test]
+fn output_with_unknown_arguments_does_not_assume_later_execution() {
+    for source in [
+        "mut int value = 1 @println(@args()) value = 1 / 0",
+        "mut int value = 1 @println(@env()) value = 1 / 0",
+        "fn unknown() { @println(@args()) } mut int value = 1 unknown() value = 1 / 0",
+    ] {
+        ncc::compile_source_with_options(source, Path::new("unknown-output.nc"), true).unwrap();
+    }
+}
+
+#[test]
+fn infinite_loops_remain_runtime_but_their_contents_can_fold() {
+    let source = r#"
+fn sum(int n) int { return n + 1 }
+while true { @println(sum(2)) }
+@println(1 / 0)
+int unreachable = 1 / 0
+"#;
+    for release in [false, true] {
+        let output =
+            ncc::compile_source_with_diagnostics(source, Path::new("forever.nc"), release).unwrap();
+        assert!(output.c.matches("goto ").count() >= 2, "{}", output.c);
+        assert!(
+            output
+                .warnings
+                .0
+                .iter()
+                .any(|d| d.message.contains("infinite loop"))
+        );
+        assert_eq!(
+            output
+                .warnings
+                .0
+                .iter()
+                .filter(|d| d.message == "unreachable code")
+                .count(),
+            2
+        );
+        if release {
+            assert!(!output.c.contains("nc_fn_sum("));
+            assert!(output.c.contains("3LL"));
+        }
+    }
+}
+
+#[test]
+fn infinite_loop_proofs_use_value_block_types_and_builtin_argument_order() {
+    for source in [
+        "while true { int value = if true { true -> { break 1 } false -> { break 2 } } _ = 1 / 0 }",
+        "fn maybe_spin(bool spin) int { if spin { true -> { while true {} } false -> { return 1 } } } @println(maybe_spin(true), 1 / 0)",
+        "@println(@args(), 1 / 0)",
+    ] {
+        for release in [false, true] {
+            ncc::compile_source_with_options(source, Path::new("unreached-arithmetic.nc"), release)
+                .unwrap();
+        }
+    }
+    let source = "test \"spin\" { while true {} } test \"unreachable\" { @println(1 / 0) }";
+    for release in [false, true] {
+        let output = ncc::compile_test_source_with_diagnostics(
+            source,
+            Path::new("infinite-test.nc"),
+            release,
+        )
+        .unwrap();
+        assert!(
+            output
+                .warnings
+                .0
+                .iter()
+                .any(|d| d.message == "unreachable code")
+        );
+    }
+}
+
+#[test]
+fn normal_compilation_ignores_tests_during_top_level_analysis() {
+    let source = "mut int value = 1 test \"ignored\" { value = 2 assert false } @println(\"hello\") value = 1 / (value - 1)";
+    let error =
+        ncc::compile_source_with_options(source, Path::new("ignored-test.nc"), true).unwrap_err();
+    assert_eq!(&source[error.0[0].span.clone()], "1 / (value - 1)");
 }
 
 #[test]
@@ -365,7 +529,7 @@ fn float_string_folding_matches_c_for_boundaries_and_sampled_bit_patterns() {
     for value in values {
         source.push_str(&format!("@println(render({value:.340}))\n"));
     }
-    let c = ncc::compile_source_with_options(&source, Path::new("floats.nc"), true).unwrap();
+    let c = compile_fixture(&source, Path::new("floats.nc"), true).unwrap();
     assert!(
         !c.contains("nc_fn_render("),
         "float conversion was not folded"
@@ -375,7 +539,7 @@ fn float_string_folding_matches_c_for_boundaries_and_sampled_bit_patterns() {
     fs::write(&input, source).unwrap();
     let outputs = ["--debug", "--release"].map(|mode| {
         let output = Command::new(env!("CARGO_BIN_EXE_ncc"))
-            .arg("run")
+            .arg("test")
             .arg(mode)
             .arg(&input)
             .output()
@@ -643,8 +807,8 @@ return convert()
             let source = format!(
                 "fn cast_negative(float value) uint {{ {body} }} @println(cast_negative({value}))",
             );
-            ncc::compile_source(&source, path).unwrap();
-            let error = ncc::compile_source_with_options(&source, path, true).unwrap_err();
+            compile_fixture(&source, path, false).unwrap();
+            let error = compile_fixture(&source, path, true).unwrap_err();
             assert!(
                 error.to_string().contains("constant evaluation failed"),
                 "{value}: {error}",
@@ -674,9 +838,8 @@ fn finite_out_of_range_numeric_casts_are_rejected_during_folding() {
         let source = format!(
             "fn cast({from} value) {to} {{ return @as({to}, value) }} @println(cast({value}))",
         );
-        ncc::compile_source(&source, Path::new("cast.nc")).unwrap();
-        let error =
-            ncc::compile_source_with_options(&source, Path::new("cast.nc"), true).unwrap_err();
+        compile_fixture(&source, Path::new("cast.nc"), false).unwrap();
+        let error = compile_fixture(&source, Path::new("cast.nc"), true).unwrap_err();
         assert!(
             error.to_string().contains("constant evaluation failed"),
             "{from} -> {to}, {value}: {error}",
@@ -690,8 +853,7 @@ fn nonfinite_float_integer_casts_remain_rejected_during_folding() {
         for ty in ["int", "uint"] {
             let source =
                 format!("fn cast(float n) {ty} {{ return @as({ty}, n) }} @println(cast({value}))");
-            let error =
-                ncc::compile_source_with_options(&source, Path::new("bad.nc"), true).unwrap_err();
+            let error = compile_fixture(&source, Path::new("bad.nc"), true).unwrap_err();
             assert!(
                 error.to_string().contains("constant evaluation failed"),
                 "{ty} cast of {value}: {error}"
@@ -782,7 +944,7 @@ fn runtime() int! { try effect_forwarded() noop() return 7 }
         "42\nfailed\neffect:7\n",
     );
     let source = "fn loop() { while true {} } loop()";
-    let c = ncc::compile_source_with_options(source, Path::new("void.nc"), true).unwrap();
+    let c = compile_fixture(source, Path::new("void.nc"), true).unwrap();
     assert!(c.contains("nc_fn_loop("));
 }
 
@@ -1174,7 +1336,7 @@ fut Data work = async construct([4])
         "struct S { int n } @println(S)",
         "enum E { A } E e = E",
     ] {
-        assert!(ncc::compile_source(source, Path::new("types.nc")).is_err());
+        assert!(compile_fixture(source, Path::new("types.nc"), false).is_err());
     }
 }
 
@@ -1405,8 +1567,7 @@ fn repairs() (int[][], int[]) {
         "([[7], [8]], [9])\n",
     );
     let source = "mut int[][] rows = [] fn fail() int { return 1 / 0 } rows[0][fail()] = 7";
-    let error =
-        ncc::compile_source_with_options(source, Path::new("index-failure.nc"), true).unwrap_err();
+    let error = compile_fixture(source, Path::new("index-failure.nc"), true).unwrap_err();
     assert!(error.to_string().contains("constant evaluation failed"));
     assert_eq!(&source[error.0[0].span.clone()], "1 / 0");
 }
@@ -1762,8 +1923,7 @@ fn nominal_power(int n) int { return 1 ** n }
         "fn f(float n) byte { return @as(byte, n) } @println(f(-0.5))",
         "fn f(int n) int { return -n } @println(f(-9223372036854775808))",
     ] {
-        let error =
-            ncc::compile_source_with_options(source, Path::new("bad.nc"), true).unwrap_err();
+        let error = compile_fixture(source, Path::new("bad.nc"), true).unwrap_err();
         assert!(
             error.to_string().contains("constant evaluation failed"),
             "{error}"
@@ -1861,8 +2021,7 @@ fn real(float n) float { if n { 0.0, 1.0 -> { return n } _ -> { return real(n-1.
     ] {
         let source =
             format!("fn overflow({ty} n) {ty} {{ return n + 1 }} @println(overflow({maximum}))");
-        let error =
-            ncc::compile_source_with_options(&source, Path::new("overflow.nc"), true).unwrap_err();
+        let error = compile_fixture(&source, Path::new("overflow.nc"), true).unwrap_err();
         assert!(
             error.to_string().contains("constant evaluation failed"),
             "{error}"

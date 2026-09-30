@@ -26,18 +26,21 @@ test "embedded" {{
     assert bytes[0] == 0
     assert bytes[$] == 255
     assert empty.len == 0
+    @println(bytes.len)
 }}
-@println(bytes.len)
 "#,
         root.join("data.bin").display()
     );
-    fs::write(&input, source).unwrap();
+    fs::write(&input, &source).unwrap();
     let binaries = [root.join("debug"), root.join("release")];
     for (mode, binary) in ["-d", "-r"].into_iter().zip(&binaries) {
-        let output = Command::new(env!("CARGO_BIN_EXE_ncc"))
-            .arg("build")
-            .arg(&input)
-            .arg(mode)
+        let c = ncc::compile_test_source_with_options(&source, &input, mode == "-r").unwrap();
+        let c_path = root.join("embedded.c");
+        fs::write(&c_path, c).unwrap();
+        let output = Command::new("cc")
+            .arg(&c_path)
+            .arg("-std=c11")
+            .arg(if mode == "-r" { "-O3" } else { "-O0" })
             .arg("-o")
             .arg(binary)
             .output()
@@ -158,14 +161,14 @@ test "computed paths" {
     assert captured_path() == a and nested_capture() == a
     byte[] expected = [0, 42, 255]
     assert a == expected
+    @println(a)
 }
-@println(a)
 "#;
     fs::write(&input, source).unwrap();
-    ncc::compile_source(source, &input).unwrap();
+    ncc::compile_test_source(source, &input).unwrap();
     for mode in ["-d", "-r"] {
         let output = Command::new(env!("CARGO_BIN_EXE_ncc"))
-            .args(["run", input.to_str().unwrap(), mode])
+            .args(["test", input.to_str().unwrap(), mode])
             .output()
             .unwrap();
         assert!(

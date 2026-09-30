@@ -7,25 +7,52 @@ use std::{
 type Names = HashMap<String, String>;
 
 pub fn load(module: Module, path: &Path) -> Result<Module, Diagnostics> {
+    load_with_tests(module, path, false)
+}
+
+pub fn load_with_tests(module: Module, path: &Path, tests: bool) -> Result<Module, Diagnostics> {
     let mut loader = Loader {
+        tests,
         done: HashMap::new(),
         active: HashSet::new(),
         items: vec![],
+        errors: vec![],
         next: 0,
     };
     loader.visit(module, path, true)?;
-    Ok(Module {
-        items: loader.items,
-    })
+    if tests {
+        let selected = crate::test_slice::select(&loader.items, &loader.errors);
+        let mut items = Vec::new();
+        for ((item, error), keep) in loader.items.into_iter().zip(loader.errors).zip(selected) {
+            if keep {
+                if let Some(error) = error {
+                    return Err(error);
+                }
+                items.push(item);
+            }
+        }
+        Ok(Module { items })
+    } else {
+        Ok(Module {
+            items: loader.items,
+        })
+    }
 }
 struct Loader {
+    tests: bool,
     done: HashMap<PathBuf, Names>,
     active: HashSet<PathBuf>,
     items: Vec<Item>,
+    errors: Vec<Option<Diagnostics>>,
     next: usize,
 }
 impl Loader {
     fn visit(&mut self, mut module: Module, path: &Path, root: bool) -> Result<Names, Diagnostics> {
+        if !self.tests {
+            module
+                .items
+                .retain(|item| !matches!(item, Item::Test { .. }));
+        }
         let key = source_key(path);
         if let Some(exports) = self.done.get(&key) {
             return Ok(exports.clone());
@@ -54,7 +81,8 @@ impl Loader {
                 }
             }
         }
-        for item in &mut module.items {
+        let mut errors = HashMap::new();
+        for (index, item) in module.items.iter_mut().enumerate() {
             match item {
                 Item::Import {
                     path: imported,
@@ -93,7 +121,7 @@ impl Loader {
                         .parent()
                         .unwrap_or(Path::new("."))
                         .join(&*implementation);
-                    let external = external.canonicalize().map_err(|e| {
+                    let resolved = external.canonicalize().map_err(|e| {
                         Diagnostics::one(
                             format!(
                                 "cannot open external implementation {}: {e}",
@@ -102,7 +130,15 @@ impl Loader {
                             location.span.clone(),
                         )
                         .at_source(&location.path, location.span.clone())
-                    })?;
+                    });
+                    let external = match resolved {
+                        Ok(resolved) => resolved,
+                        Err(error) if self.tests => {
+                            errors.insert(index, error);
+                            external
+                        }
+                        Err(error) => return Err(error),
+                    };
                     *implementation = external.to_string_lossy().into_owned();
                     let mut symbols = Names::new();
                     for f in functions {
@@ -120,12 +156,18 @@ impl Loader {
                 names.insert(format!("{alias}.{name}"), qualified.clone());
             }
         }
-        for mut item in module.items {
+        for (index, mut item) in module.items.into_iter().enumerate() {
             if matches!(item, Item::Import { .. }) {
                 continue;
             }
-            qualify_item(&mut item, &names, &aliases)?;
+            if let Err(error) = qualify_item(&mut item, &names, &aliases) {
+                if !self.tests {
+                    return Err(error);
+                }
+                errors.entry(index).or_insert(error);
+            }
             self.items.push(item);
+            self.errors.push(errors.remove(&index));
         }
         self.active.remove(&key);
         self.done.insert(key, exports.clone());

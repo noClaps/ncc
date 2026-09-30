@@ -201,14 +201,13 @@ fn negative_fractional_float_to_uint_panics_before_truncation() {
     for value in ["-0.75", "-0.5", "-0.0001", tiny.as_str()] {
         let source = format!(
             r#"
-fn argument() float {{ @println("argument") return {value} }}
+fn argument() float {{ _ = @args() @println("argument") return {value} }}
 @println(@as(uint, argument()))
 @println("after")
 "#,
         );
         for release in [false, true] {
-            ncc::compile_source_with_options(&source, Path::new("negative-cast.nc"), release)
-                .unwrap();
+            compile_fixture(&source, Path::new("negative-cast.nc"), release).unwrap();
             let output = run_mode(&source, release);
             assert_eq!(output.status.code(), Some(1), "release={release}: {value}");
             assert_eq!(output.stdout, b"argument\n", "release={release}: {value}");
@@ -420,7 +419,7 @@ int fallback = native.sum([]) catch err { 42 }
     }
     let rejects_external = |source: &str, expected: &str| {
         for release in [false, true] {
-            let error = ncc::compile_source_with_options(source, &input, release)
+            let error = compile_fixture(source, &input, release)
                 .unwrap_err()
                 .to_string();
             assert!(error.contains(expected), "release={release}: {error}");
@@ -623,9 +622,7 @@ fn functions_and_futures_reject_equality_and_string_conversion_recursively() {
             let source = format!("{function}{declaration}\n{operation}");
             rejects(&source, "not defined for functions or unawaited futures");
             for release in [false, true] {
-                let error =
-                    ncc::compile_source_with_options(&source, Path::new("test.nc"), release)
-                        .unwrap_err();
+                let error = compile_fixture(&source, Path::new("test.nc"), release).unwrap_err();
                 assert!(
                     error
                         .to_string()
@@ -1872,16 +1869,16 @@ test "recursive" {
 fn release_evaluates_pure_functions_and_preserves_effects() {
     let scoped =
         "fn scoped() int { mut int x = 1 { x = 2 int x = 3 } return x } @println(scoped())";
-    let c = ncc::compile_source_with_options(scoped, Path::new("scope.nc"), true).unwrap();
+    let c = compile_fixture(scoped, Path::new("scope.nc"), true).unwrap();
     assert!(c.contains("2LL"));
     assert!(!c.contains("nc_fn_scoped"));
     let source = r#"fn fib(int n) int { if n { 0,1 -> { return n } _ -> { return fib(n-1)+fib(n-2) } } } @println(fib(10))"#;
-    let c = ncc::compile_source_with_options(source, Path::new("fib.nc"), true).unwrap();
+    let c = compile_fixture(source, Path::new("fib.nc"), true).unwrap();
     let main = c.split("int main(void)").last().unwrap();
     assert!(main.contains("55LL"));
     assert!(!main.contains("nc_fn_fib"));
     let effect = "fn effect() int { @println(\"keep\") return 2 } @println(effect())";
-    let c = ncc::compile_source_with_options(effect, Path::new("effect.nc"), true).unwrap();
+    let c = compile_fixture(effect, Path::new("effect.nc"), true).unwrap();
     assert!(
         c.split("int main(void)")
             .last()
@@ -2250,7 +2247,7 @@ test "namespaces" {
     fs::write(&main, source).unwrap();
     for release in [false, true] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_ncc"));
-        command.arg("run");
+        command.arg("test");
         if release {
             command.arg("-r");
         }
@@ -2267,7 +2264,7 @@ test "namespaces" {
             "right.Choice<int> value = left.choose<int>(1)",
             "fn accept(right.Point value) {} accept(left.Point{.x = 1})",
         ] {
-            let error = ncc::compile_source_with_options(
+            let error = compile_fixture(
                 &format!("import {{ \"left\" as left \"right\" as right }} {invalid}"),
                 &main,
                 release,
@@ -2284,7 +2281,7 @@ test "namespaces" {
             "right.bias",
             "right.private_add(1)",
         ] {
-            let error = ncc::compile_source_with_options(
+            let error = compile_fixture(
                 &format!("import {{ \"left\" as left \"right\" as right }} _ = {private}"),
                 &main,
                 release,
@@ -2341,7 +2338,7 @@ test "nested imports" {
     .unwrap();
     for release in [false, true] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_ncc"));
-        command.arg("run");
+        command.arg("test");
         if release {
             command.arg("-r");
         }
@@ -2352,7 +2349,7 @@ test "nested imports" {
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(output.stdout.is_empty());
-        let error = ncc::compile_source_with_options(
+        let error = compile_fixture(
             "import { \"library/facade\" as facade } _ = facade.helper.answer(1)",
             &main,
             release,
@@ -2407,7 +2404,7 @@ extern "native.c" as native { fn add(int a, int b) int = "native_add" }
         assert_eq!(output.stdout, b"51\n3\nfour\n(6, 7)\n");
         for name in ["private_first", "private_second"] {
             assert!(
-                ncc::compile_source_with_options(
+                compile_fixture(
                     &format!("import {{ \"one\" as one }} @println(one.{name})"),
                     &main,
                     release
@@ -2418,7 +2415,7 @@ extern "native.c" as native { fn add(int a, int b) int = "native_add" }
             );
         }
         assert!(
-            ncc::compile_source_with_options(
+            compile_fixture(
                 "import { \"one\" as one } @println(one.hidden)",
                 &main,
                 release
@@ -2429,7 +2426,7 @@ extern "native.c" as native { fn add(int a, int b) int = "native_add" }
         );
         fs::write(dir.path().join("cycle.nc"), "import { \"cycle\" as again }").unwrap();
         assert!(
-            ncc::compile_source_with_options("import { \"cycle\" as cycle }", &main, release)
+            compile_fixture("import { \"cycle\" as cycle }", &main, release)
                 .unwrap_err()
                 .to_string()
                 .contains("cyclic")
@@ -2471,7 +2468,7 @@ test "imported types" {
     .unwrap();
     for release in [false, true] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_ncc"));
-        command.arg("run");
+        command.arg("test");
         if release {
             command.arg("--release");
         }
@@ -2561,8 +2558,7 @@ int value = {handler}
 "#
         );
         for release in [false, true] {
-            ncc::compile_source_with_options(&source, Path::new("propagation.nc"), release)
-                .unwrap();
+            compile_fixture(&source, Path::new("propagation.nc"), release).unwrap();
             let output = run_mode(&source, release);
             assert_eq!(output.status.code(), Some(1), "release={release}");
             assert_eq!(output.stdout, b"before\n", "release={release}");
@@ -2720,11 +2716,165 @@ test "records" {
     rejects("struct A { int x } A a = A{.y = 1}", "unknown field");
 }
 
+#[test]
+fn fixture_modes_preserve_execution_and_module_declaration_scopes() {
+    let ordinary = "str text = \"test body\" // test \"not a root\"\n@println(text)";
+    assert!(!fixture_has_tests(ordinary));
+    assert_eq!(executable_fixture(ordinary), ordinary);
+    success(ordinary, "test body\n");
+    rejects("str text = \"test\" _ = missing", "unknown name");
+    rejects("test \"negative root\" { _ = missing }", "unknown name");
+
+    let mixed = r#"
+mut int counter = 1
+fn read() int { return counter }
+@println(read())
+counter = counter + 1
+int value = counter
+int value = value + 10
+@println(counter, ":", value)
+test "module bindings" { assert read() == 2 assert value == 12 }
+"#;
+    let rooted = executable_fixture(mixed);
+    let module = fixture_module(&rooted).unwrap();
+    assert_eq!(
+        module
+            .items
+            .iter()
+            .filter(|item| matches!(item, ncc::ast::Item::Global(_)))
+            .count(),
+        3
+    );
+    assert!(
+        !module
+            .items
+            .iter()
+            .any(|item| matches!(item, ncc::ast::Item::Statement(_)))
+    );
+    assert_eq!(executable_fixture(&rooted), rooted);
+    success(mixed, "1\n2:12\n");
+}
+
+#[test]
+fn test_body_runtime_failures_keep_the_runtime_barrier() {
+    runtime_failure(
+        "test \"runtime panic\" { @println(1 / 0) }",
+        "division by zero",
+    );
+}
+
+#[test]
+fn imported_only_test_roots_use_explicit_test_mode() {
+    let dir = ncc::temp::Directory::new().unwrap();
+    fs::write(
+        dir.path().join("dependency.nc"),
+        "mut int value = 1 value = value + 1 pub fn read() int { return value }",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("suite.nc"),
+        r#"
+import { "dependency" as dependency }
+@println("unrelated imported output")
+test "imported root" { @println("imported test") assert dependency.read() == 2 }
+"#,
+    )
+    .unwrap();
+    let source = "import { \"suite\" as suite }";
+    assert!(!fixture_has_tests(source));
+    let main = dir.path().join("main.nc");
+    fs::write(&main, source).unwrap();
+    for release in [false, true] {
+        // Local AST detection cannot discover imported roots: these fixtures
+        // deliberately choose the test API and CLI rather than the adaptive helper.
+        ncc::compile_test_source_with_options(source, &main, release).unwrap();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ncc"));
+        command.arg("test");
+        if release {
+            command.arg("--release");
+        }
+        let output = command.arg(&main).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"imported test\n", "release={release}");
+    }
+}
+
+fn fixture_module(source: &str) -> Result<ncc::ast::Module, ncc::diagnostic::Diagnostics> {
+    ncc::parser::parse(ncc::lexer::lex(source)?)
+}
+
+fn fixture_has_tests(source: &str) -> bool {
+    fixture_module(source).is_ok_and(|module| {
+        module
+            .items
+            .iter()
+            .any(|item| matches!(item, ncc::ast::Item::Test { .. }))
+    })
+}
+
+fn compile_fixture(
+    source: &str,
+    path: &Path,
+    release: bool,
+) -> Result<String, ncc::diagnostic::Diagnostics> {
+    if fixture_has_tests(source) {
+        ncc::compile_test_source_with_options(source, path, release)
+    } else {
+        ncc::compile_source_with_options(source, path, release)
+    }
+}
+
+fn executable_fixture(source: &str) -> String {
+    let module = fixture_module(source).unwrap();
+    if !module
+        .items
+        .iter()
+        .any(|item| matches!(item, ncc::ast::Item::Test { .. }))
+    {
+        return source.to_owned();
+    }
+    // These mixed fixtures predate test slicing and intentionally execute every
+    // top-level statement. Root each statement separately, keeping declarations
+    // in module scope so closures, shadowing and cross-test bindings stay intact.
+    let mut source = source.to_owned();
+    for (index, item) in module.items.iter().enumerate().rev() {
+        if let ncc::ast::Item::Statement(statement) = item {
+            let (_, span) = statement.source().unwrap();
+            source.insert_str(span.end, "\n}\n");
+            source.insert_str(
+                span.start,
+                &format!("test \"fixture statement {index}\" {{\n"),
+            );
+        }
+    }
+    source
+}
+
 fn runtime_failure(source: &str, message: &str) {
+    let mut source = executable_fixture(source);
+    // Printing is analysable. Put the runtime barrier inside each test root,
+    // rather than in an unrelated top-level statement that slicing would drop.
+    if fixture_has_tests(&source) {
+        let module = fixture_module(&source).unwrap();
+        for item in module.items.iter().rev() {
+            if let ncc::ast::Item::Test { body, .. } = item
+                && let Some(statement) = body.statements.first()
+            {
+                let (_, span) = statement.source().unwrap();
+                source.insert_str(span.start, "_ = @args()\n");
+            }
+        }
+    } else {
+        source.insert_str(0, "_ = @args()\n");
+    }
     for release in [false, true] {
         // Require valid NC first: a front-end error must not masquerade as a panic.
-        ncc::compile_source_with_options(source, Path::new("test.nc"), release).unwrap();
-        let output = run_mode(source, release);
+        compile_fixture(&source, Path::new("test.nc"), release).unwrap();
+        let output = run_mode(&source, release);
         assert_eq!(output.status.code(), Some(1), "release={release}: {source}");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
@@ -2734,11 +2884,16 @@ fn runtime_failure(source: &str, message: &str) {
     }
 }
 fn run_mode(source: &str, release: bool) -> std::process::Output {
+    let source = executable_fixture(source);
     let dir = ncc::temp::Directory::new().unwrap();
     let file = dir.path().join("test.nc");
-    fs::write(&file, source).unwrap();
+    fs::write(&file, &source).unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_ncc"));
-    command.arg("run");
+    command.arg(if fixture_has_tests(&source) {
+        "test"
+    } else {
+        "run"
+    });
     if release {
         command.arg("-r");
     }
@@ -2761,8 +2916,7 @@ fn success(source: &str, stdout: &str) {
 }
 fn rejects(source: &str, message: &str) {
     for release in [false, true] {
-        let error =
-            ncc::compile_source_with_options(source, Path::new("test.nc"), release).unwrap_err();
+        let error = compile_fixture(source, Path::new("test.nc"), release).unwrap_err();
         assert!(
             error.to_string().contains(message),
             "release={release}: {error}"
@@ -2840,8 +2994,7 @@ fn invalid_operator_type_matrix_is_rejected_in_both_modes() {
             let source = format!("{ty} a = {value}\n{ty} b = {value}\n_ = a {op} b");
             for release in [false, true] {
                 assert!(
-                    ncc::compile_source_with_options(&source, Path::new("operators.nc"), release)
-                        .is_err(),
+                    compile_fixture(&source, Path::new("operators.nc"), release).is_err(),
                     "release={release}: {source}"
                 );
             }
@@ -2899,6 +3052,7 @@ struct Holder { void value }
 enum Choice { Value(void) Empty }
 void global = unit()
 test "void storage" {
+    _ = global
     mut void local = unit()
     local = take(local)
     void[2] array = [local, unit()]
@@ -3047,9 +3201,7 @@ test "array lengths" {
         ] {
             let start = source.find(literal).unwrap();
             for release in [false, true] {
-                let errors =
-                    ncc::compile_source_with_options(&source, Path::new("size.nc"), release)
-                        .unwrap_err();
+                let errors = compile_fixture(&source, Path::new("size.nc"), release).unwrap_err();
                 assert!(errors.to_string().contains("array size"), "{errors}");
                 assert_eq!(errors.0[0].span, start..start + literal.len());
             }

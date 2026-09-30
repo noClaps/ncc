@@ -7,8 +7,12 @@
    struct field patterns, `uint len ==` declarations, an unterminated test name,
    and assignment in an assertion. Expand top-level constant evaluation beyond
    its safely evaluatable execution prefix while preserving effects and unknown
-   runtime state; it currently stops at effects, runtime-dependent inputs, tests,
-   and evaluator limits.
+   runtime state; output with known arguments is now analysable, but unknown
+   runtime inputs, other unsupported effects, test-mode assertions, and evaluator
+   limits still stop sequential analysis. Consider configurable evaluation budgets
+   for large individual computations. Refine test-dependency slicing precision:
+   dynamic/native calls and flow-insensitive function summaries conservatively
+   retain potentially relevant code; selected statements/initializers remain whole.
 2. Attempt to eliminate all undefined behavior from the language. Identify
    potentially undefined cases, clarify the intended behavior with the user, and
    let the user document those decisions before implementing them and adding

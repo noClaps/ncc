@@ -1465,6 +1465,8 @@ while j > 0 {
 // `j` is available here since it was declared outside
 ```
 
+The compiler warns about structurally infinite loops, such as `while true {}` without a reachable exit, and about unreachable code following them. These warnings do not reject the program. Such loops remain runtime code in release mode, although expressions inside them can still be optimized. The analysis is conservative and does not attempt to decide whether every possible program terminates.
+
 ### Labels, `break`, and `continue`
 
 There are `break` and `continue` keywords for breaking out of the loop, and skipping to the next iteration, respectively.
@@ -2175,7 +2177,7 @@ The wrapper is the module's public contract. Its implementation may validate arg
 
 ## Testing
 
-You can write tests for your code using the `test` keyword:
+You can write tests for your code using the `test` keyword. Test blocks are only checked and executed by `ncc test`; `ncc build` and `ncc run` ignore their bodies after parsing, including tests in imported modules:
 
 ```nc
 test "test name" {
@@ -2196,6 +2198,26 @@ test "failing test" {
 ```
 
 You can use any code from the module you're writing the test in, or have imported from other modules.
+
+`ncc test` executes test blocks and the outside code they depend on, not the whole
+top-level program. Dependencies include declarations, initializers, and prior
+mutations that determine values observed by a test, including mutations through
+functions and closures. Unrelated top-level declarations and statements are
+excluded. Retained dependencies and test blocks keep their original order.
+
+```nc
+mut int value = 1
+value = 2
+int other_value = 5
+@println(value, other_value)
+
+test "value" {
+  assert value == 1 // Fails: the relevant mutation sets value to 2.
+}
+```
+
+Here the declaration and mutation of `value` are required. `other_value` and the
+standalone print are unrelated and are discarded; the test fails without printing.
 
 ```nc
 import { "std/math" as math }
@@ -2534,7 +2556,8 @@ Usage: ncc [command | --targets]
 
 Commands:
   build       Build the given file to the desired target.
-  run         Build and execute the given file.
+  run         Build and execute the given file, excluding test blocks.
+  test        Build and execute the given file including test blocks.
 
 Options:
   --targets   Show the list of supported compilation targets.
@@ -2564,6 +2587,17 @@ Options:
                          `ncc --targets` command.
   -h, --help             Show this help and exit.
 ```
+
+#### Test
+
+```
+Usage: ncc test <file> [-r | -d] [-- program arguments...]
+```
+
+Compile and execute test blocks, including imported tests, together with their
+required declarations, initializers, and prior mutations. Unrelated top-level
+code is discarded. Retained code keeps its original order. A failing assertion
+or uncaught error exits unsuccessfully. Generated files are removed on exit.
 
 #### Run
 

@@ -381,9 +381,15 @@ fn optimize_module(checked: CheckedModule) -> Result<Module, Diagnostics> {
     evaluate_top_level(&checked, &functions)?;
     let mut env = HashMap::new();
     let mut replacements = Vec::new();
+    let mut reaches_next = true;
     for (index, item) in checked.module.items.iter().enumerate() {
+        if !reaches_next {
+            continue;
+        }
         match item {
             Item::Global(v) => {
+                reaches_next =
+                    crate::flow::expression_reaches_next(&v.value, &checked.expression_types);
                 replacements.push((index, fold(&v.value, &env, &functions, &checked)?));
                 let constant = if !v.mutable && !v.mutex {
                     evaluate(&v.value, &env, &functions, &checked, &mut 100_000)?
@@ -401,9 +407,14 @@ fn optimize_module(checked: CheckedModule) -> Result<Module, Diagnostics> {
                 }
             }
             Item::Statement(statement) => {
+                reaches_next =
+                    crate::flow::statement_reaches_next(statement, &checked.expression_types);
                 if let Stmt::Expr(e) = statement.unlocated() {
                     replacements.push((index, fold(e, &env, &functions, &checked)?))
                 }
+            }
+            Item::Test { body, .. } => {
+                reaches_next = crate::flow::block_reaches_next(body, &checked.expression_types);
             }
             _ => {}
         }
@@ -460,15 +471,16 @@ fn optimize_module(checked: CheckedModule) -> Result<Module, Diagnostics> {
         .retain(|item| !matches!(item, Item::Function(f) if !reachable.contains(&f.name)));
     Ok(module)
 }
-// Analyse the safely evaluatable top-level execution prefix without replacing
-// persistent state or executing effects. Unknown execution keeps runtime code.
+// Analyse known top-level execution without replacing persistent state or
+// executing output effects. Unknown execution keeps runtime code.
 fn evaluate_top_level(
     checked: &CheckedModule,
     functions: &HashMap<String, &Function>,
 ) -> Result<(), Diagnostics> {
-    let mut functions = functions.clone();
     let mut env = HashMap::new();
-    let mut cells = Vec::new();
+    let mut fuel = 100_000;
+    let mut evaluator = Evaluator::new(functions, checked, &mut fuel);
+    evaluator.analyse_output = true;
     for item in &checked.module.items {
         if !matches!(
             item,
@@ -476,33 +488,24 @@ fn evaluate_top_level(
         ) {
             continue;
         }
-        let mut fuel = 100_000;
-        let continued = {
-            let mut evaluator = Evaluator::new(&functions, checked, &mut fuel);
-            evaluator.cells = std::mem::take(&mut cells);
-            let flow = match item {
-                Item::Global(v) => evaluator
-                    .declaration(v, &mut env, &mut Vec::new())
-                    .map(|()| Flow::Next),
-                Item::Statement(statement) => {
-                    evaluator.statements(std::slice::from_ref(statement), &mut env, false)
-                }
-                // Tests may mutate globals; do not carry assumed state past them.
-                Item::Test { .. } => None,
-                _ => Some(Flow::Next),
-            };
-            if let Some(error) = evaluator.failure() {
-                return Err(error);
+        *evaluator.fuel = 100_000;
+        evaluator.memo.clear();
+        let flow = match item {
+            Item::Global(v) => evaluator
+                .declaration(v, &mut env, &mut Vec::new())
+                .map(|()| Flow::Next),
+            Item::Statement(statement) => {
+                evaluator.statements(std::slice::from_ref(statement), &mut env, false)
             }
-            cells = evaluator.cells;
-            matches!(flow, Some(Flow::Next))
+            // Normal compilation removes tests; test-mode assertions still run
+            // at runtime and may mutate globals, so stop assumed state here.
+            Item::Test { .. } => None,
+            _ => Some(Flow::Next),
         };
-        if let Item::Global(v) = item {
-            for name in v.binding_names() {
-                functions.remove(name);
-            }
+        if let Some(error) = evaluator.failure() {
+            return Err(error);
         }
-        if !continued {
+        if !matches!(flow, Some(Flow::Next)) {
             break;
         }
     }
@@ -583,16 +586,24 @@ fn fold(
     } = e.unlocated()
         && matches!(callee.unlocated(),Expr::Name(n) if n.starts_with('@'))
     {
-        let args = args
-            .iter()
-            .map(|arg| {
-                evaluate(arg, env, functions, checked, &mut 100_000).map(|value| {
-                    value
-                        .filter(Value::materializable)
-                        .map_or_else(|| arg.clone(), |value| materialize(value, arg, checked))
-                })
-            })
-            .collect::<Result<_, _>>()?;
+        let mut reached = true;
+        let mut folded_args = Vec::new();
+        for arg in args {
+            let value = match evaluate(arg, env, functions, checked, &mut 100_000) {
+                Ok(value) => value,
+                Err(error) if reached => return Err(error),
+                Err(_) => None,
+            };
+            // An unknown earlier argument may fail or never return. Later
+            // successes can fold, but their failures are not necessarily reached.
+            reached &= value.is_some();
+            folded_args.push(
+                value
+                    .filter(Value::materializable)
+                    .map_or_else(|| arg.clone(), |value| materialize(value, arg, checked)),
+            );
+        }
+        let args = folded_args;
         return Ok(Some(Expr::Call {
             callee: callee.clone(),
             args,
@@ -680,6 +691,7 @@ struct Evaluator<'a> {
     memo: HashMap<(Value, Vec<Value>), Value>,
     cells: Vec<Value>,
     depth: usize,
+    analyse_output: bool,
     arithmetic_failure: bool,
     arithmetic_location: Option<SourceLocation>,
     // A return/throw inside a value expression exits its enclosing function.
@@ -712,6 +724,7 @@ impl<'module> Evaluator<'module> {
             memo: HashMap::new(),
             cells: Vec::new(),
             depth: 0,
+            analyse_output: false,
             arithmetic_failure: false,
             arithmetic_location: None,
             flow: None,
@@ -1527,6 +1540,14 @@ impl<'module> Evaluator<'module> {
                 }
             }
             Expr::Call { callee, args, .. } => {
+                if self.analyse_output
+                    && matches!(callee.unlocated(), Expr::Name(name) if name == "@print" || name == "@println")
+                {
+                    for arg in args {
+                        self.evaluate(arg, env)?;
+                    }
+                    return Some(Value::Void(vec![]));
+                }
                 if matches!(callee.unlocated(), Expr::Name(name) if name == "@target") {
                     return Some(Value::Tuple(vec![
                         Value::String(string_parts(crate::target::OS)),
@@ -1926,19 +1947,29 @@ impl Evaluator<'_> {
                     condition,
                     body,
                     label,
-                } => loop {
-                    if self.evaluate(condition, env)? != Value::Bool(true) {
-                        break Flow::Next;
+                } => {
+                    if crate::flow::infinite_loop(
+                        condition,
+                        body,
+                        label,
+                        &self.checked.expression_types,
+                    ) {
+                        return None;
                     }
-                    match self.block(body, env)? {
-                        Flow::Break(target) if target.is_none() || &target == label => {
+                    loop {
+                        if self.evaluate(condition, env)? != Value::Bool(true) {
                             break Flow::Next;
                         }
-                        Flow::Continue(target) if target.is_none() || &target == label => {}
-                        Flow::Next => {}
-                        flow => break flow,
+                        match self.block(body, env)? {
+                            Flow::Break(target) if target.is_none() || &target == label => {
+                                break Flow::Next;
+                            }
+                            Flow::Continue(target) if target.is_none() || &target == label => {}
+                            Flow::Next => {}
+                            flow => break flow,
+                        }
                     }
-                },
+                }
                 Stmt::For {
                     name,
                     iterable,

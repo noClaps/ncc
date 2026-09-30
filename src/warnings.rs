@@ -1,4 +1,4 @@
-//! Conservative, non-fatal diagnostics for shared state reached by async calls.
+//! Conservative, non-fatal diagnostics for control flow and async shared state.
 use crate::{
     ast::*,
     diagnostic::{Diagnostic, Diagnostics},
@@ -40,8 +40,22 @@ pub fn data_races(checked: &CheckedModule) -> Diagnostics {
             });
         }
     }
-    warnings.dedup_by(|a, b| a.path == b.path && a.span == b.span);
+    warnings.extend(control_flow(checked).0);
+    warnings.sort_by(|a, b| {
+        (&a.path, a.span.start, a.span.end, &a.message).cmp(&(
+            &b.path,
+            b.span.start,
+            b.span.end,
+            &b.message,
+        ))
+    });
+    warnings.dedup_by(|a, b| a.path == b.path && a.span == b.span && a.message == b.message);
     Diagnostics(warnings)
+}
+
+/// Flow-only diagnostics, available independently of async analysis.
+pub fn control_flow(checked: &CheckedModule) -> Diagnostics {
+    crate::flow::warnings(&checked.module, &checked.expression_types)
 }
 
 struct Analysis<'a> {

@@ -22,13 +22,20 @@ Python 3, and a C compiler are required; no Node/npm or compiler dependency is a
 ```sh
 make build
 target/release/ncc run example.nc
+target/release/ncc test example.nc
 target/release/ncc build example.nc --release -o example.c
 target/release/ncc build --help
 ```
 
-`run` keeps build artifacts in a private temporary directory and removes them on
-exit. `build` leaves only the requested output. Explicit `--format C|obj|exe`
-takes precedence over the output filename's extension.
+`run` and `test` keep build artifacts in a private temporary directory and remove
+them on exit. `build` leaves only the requested output. Test blocks are ignored by
+`build` and `run`; `ncc test` executes them, including imported tests, with only
+their required outside dependencies. Those dependencies include global initializers
+and prior mutations through assignments, functions, closures, and async work.
+Unrelated top-level prints and declarations are discarded. Retained code keeps
+its original order. Dependency analysis is conservative for dynamic/native calls
+and keeps complete selected statements and initializers, including their effects.
+Explicit `--format C|obj|exe` takes precedence over the output filename's extension.
 
 `ncc --targets` lists supported targets (currently `macos-arm64`). Select one
 with `ncc build --target macos-arm64` or `NC_TARGET`; an explicit option takes
@@ -51,7 +58,15 @@ bindings within an evaluation, including returned closures; stateful calls are
 not memoized. Access to persistent outer mutable state remains runtime code.
 Arithmetic uses each type's range. Effects, unsupported operations, and exhausted evaluation budgets
 remain runtime code; futures and external calls are never executed by the
-optimiser.
+optimiser. Top-level analysis can continue across `@print` and `@println` when
+their arguments are known, tracking argument effects without executing output or
+removing the runtime calls. The step budget resets for each top-level item;
+evaluation also has a stack-depth safeguard.
+
+Structurally infinite loops are left for runtime execution, while independent
+expressions inside their bodies can still fold. The compiler emits non-fatal
+infinite-loop and unreachable-code warnings in both modes. This conservative
+control-flow analysis does not solve general program termination.
 
 Async calls that may access ordinary shared mutable state produce a non-fatal
 potential-data-race warning. Such programs remain valid. The analysis follows

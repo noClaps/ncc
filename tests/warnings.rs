@@ -24,7 +24,7 @@ fn shared_state_warns_through_named_functions_aliases_and_closures() {
         "mut int count = 0 fn increment() { count = count + 1 } fut void a = async increment() fut void b = async increment() await a await b",
         "mut int count = 0 fn increment() { count = count + 1 } fn forward() { increment() } fut void a = async forward() await a",
         "mut int count = 0 fn increment() { count = count + 1 } (fn() void) alias = increment fut void a = async alias() await a",
-        "test \"local\" { mut int count = 0 fn increment = fn() { count = count + 1 } fut void a = async increment() await a }",
+        "fn local() { mut int count = 0 fn increment = fn() { count = count + 1 } fut void a = async increment() await a }",
         "fn make() (fn() void) { mut int count = 0 return fn() { count = count + 1 } } (fn() void) f = make() fut void a = async f() await a",
         "mut int count = 0 fn write() { count = 2 } fut void a = async write() await a",
         "mut int count = 0 fn read() int { return count } fut int a = async read() _ = await a",
@@ -39,9 +39,9 @@ fn shared_state_warns_through_named_functions_aliases_and_closures() {
 fn mutexes_immutable_captures_and_private_locals_do_not_warn() {
     for source in [
         "mutex int count = 0 fn increment() { lock count { count = count + 1 } } fut void a = async increment() await a",
-        "test \"mutex\" { mutex int count = 0 fn increment() { lock count { count = count + 1 } } fut void a = async increment() await a }",
+        "fn local() { mutex int count = 0 fn increment() { lock count { count = count + 1 } } fut void a = async increment() await a }",
         "fn private() int { mut int count = 0 count = count + 1 return count } fut int a = async private() _ = await a",
-        "test \"copy\" { int count = 1 fn read() int { return count } fut int a = async read() _ = await a }",
+        "fn local() { int count = 1 fn read() int { return count } fut int a = async read() _ = await a }",
         "mut int count = 0 fn private() int { mut int count = 1 count = count + 1 return count } fut int a = async private() _ = await a",
         "mut int count = 0 fn increment() { count = count + 1 } increment()",
         "mut int count = 1 fut void a = async @println(count) await a",
@@ -114,6 +114,109 @@ fn recursive_and_indirect_async_calls_are_conservative_and_terminate() {
 #[test]
 fn pattern_comparisons_count_as_shared_reads() {
     assert!(!warnings("mut int expected = 1 fn matches(int value) bool { return if value { expected -> { true } _ -> { false } } } fut bool job = async matches(1) _ = await job").is_empty());
-    assert!(!warnings("test \"local\" { mut int expected = 1 fn matches(int value) bool { return if value { expected -> { true } _ -> { false } } } fut bool job = async matches(1) _ = await job }").is_empty());
+    assert!(!warnings("fn local() { mut int expected = 1 fn matches(int value) bool { return if value { expected -> { true } _ -> { false } } } fut bool job = async matches(1) _ = await job }").is_empty());
     assert!(warnings("mutex int expected = 1 fn matches(int value) bool { lock expected { return if value { expected -> { true } _ -> { false } } } } fut bool job = async matches(1) _ = await job").is_empty());
+}
+
+#[test]
+fn infinite_loops_and_following_code_warn_without_execution() {
+    for source in [
+        "while true {} @println(1)",
+        "fn spin() { while true {} @println(1) }",
+        "fn spin = fn() { while not false { continue } @println(1) }",
+        "fn spin() { outer: while true { while true { continue :outer } } @println(1) }",
+        "fn spin() { while true { while true { break } } @println(1) }",
+    ] {
+        let messages = warnings(source);
+        assert!(
+            messages.iter().any(|m| m.contains("infinite loop")),
+            "{source}: {messages:?}"
+        );
+        assert!(
+            messages.iter().any(|m| m == "unreachable code"),
+            "{source}: {messages:?}"
+        );
+    }
+}
+
+#[test]
+fn reachable_exits_and_unknown_conditions_do_not_claim_infinite_loops() {
+    for source in [
+        "fn f() { while true { break } @println(1) }",
+        "fn f(bool stop) { while true { if stop { true -> { break } false -> {} } } @println(1) }",
+        "fn f(bool stop) { while stop {} @println(1) }",
+        "fn f() { outer: while true { while true { break :outer } } @println(1) }",
+        "fn f() { while true { return } }",
+        "fn f() int ! { while true { throw \"done\" } }",
+        "fn f() { while true { int unused = if true { true -> { return } false -> { 1 } } } }",
+    ] {
+        let messages = warnings(source);
+        assert!(
+            !messages.iter().any(|m| m.contains("infinite loop")),
+            "{source}: {messages:?}"
+        );
+    }
+}
+
+#[test]
+fn unreachable_exits_do_not_hide_infinite_loops() {
+    for source in [
+        "fn f() { while true { continue break } @println(1) }",
+        "fn f() { while true { if false { true -> { break } false -> {} } } @println(1) }",
+        "fn f() { while true { while false { break } } @println(1) }",
+        "fn f() { while true or false { continue } @println(1) }",
+        "fn f() { while true { fn local = fn() { return } } @println(1) }",
+        "fn f() { while true { int value = if true { true -> { break 1 } false -> { break 2 } } } @println(1) }",
+    ] {
+        let messages = warnings(source);
+        assert!(
+            messages.iter().any(|m| m.contains("infinite loop")),
+            "{source}: {messages:?}"
+        );
+        assert!(
+            messages.iter().any(|m| m == "unreachable code"),
+            "{source}: {messages:?}"
+        );
+    }
+}
+
+#[test]
+fn abrupt_expression_exits_make_following_statements_unreachable() {
+    for source in [
+        "fn f() { int unused = if true { true -> { return } false -> { 1 } } @println(2) }",
+        "fn f() { while true { if true { true -> { break } false -> {} } @println(1) } @println(2) }",
+        "fn f() { while true { continue @println(1) } }",
+    ] {
+        assert!(
+            warnings(source).iter().any(|m| m == "unreachable code"),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn imported_flow_warnings_keep_original_statement_locations() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let library = directory.path().join("spin.nc");
+    let library_source = "pub fn spin<T>(T value) {\n    fn local = fn() {\n        while true {}\n        @println(value)\n    }\n}\n";
+    fs::write(&library, library_source).unwrap();
+    let main = directory.path().join("main.nc");
+    let source = "import { \"spin\" as worker } worker.spin<int>(1) worker.spin<str>(\"x\")";
+    for release in [false, true] {
+        let output = ncc::compile_source_with_diagnostics(source, &main, release).unwrap();
+        assert_eq!(output.warnings.0.len(), 2);
+        for diagnostic in &output.warnings.0 {
+            assert_eq!(diagnostic.path.as_deref(), Some(library.as_path()));
+            let text = &library_source[diagnostic.span.clone()];
+            if diagnostic.message.contains("infinite loop") {
+                assert!(text.starts_with("while true"), "{text}");
+            } else {
+                assert_eq!(diagnostic.message, "unreachable code");
+                assert!(text.starts_with("@println"), "{text}");
+            }
+        }
+        let rendered = output.warnings.render_warnings(source, &main);
+        assert!(rendered.contains("spin.nc:3:"), "{rendered}");
+        assert!(rendered.contains("spin.nc:4:"), "{rendered}");
+    }
 }

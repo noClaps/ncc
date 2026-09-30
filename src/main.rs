@@ -1,4 +1,4 @@
-use ncc::compile_source_with_diagnostics;
+use ncc::{compile_source_with_diagnostics, compile_test_source_with_diagnostics};
 use std::{
     env, fs,
     path::PathBuf,
@@ -29,8 +29,11 @@ fn help(command: &str) {
         "run" => println!(
             "Usage: ncc run <file> [options] [-- program arguments...]\n\nCompile and run without leaving generated files.\n\n  -r, --release  Aggressive constant evaluation and optimisation\n  -d, --debug    Debug build (default)\n  -h, --help     Show help"
         ),
+        "test" => println!(
+            "Usage: ncc test <file> [options] [-- program arguments...]\n\nCompile and execute test blocks without leaving generated files.\n\n  -r, --release  Aggressive constant evaluation and optimisation\n  -d, --debug    Debug build (default)\n  -h, --help     Show help"
+        ),
         _ => println!(
-            "Usage: ncc <command> [options]\n\nCommands:\n  build  Build an executable, C source, or object file\n  run    Compile and execute without leaving build files\n\n  --targets     List supported compilation targets\n  -h, --help     Show help\n  -V, --version  Show version\n\nUse `ncc <command> --help` for command-specific options."
+            "Usage: ncc <command> [options]\n\nCommands:\n  build  Build an executable, C source, or object file\n  run    Compile and execute without leaving build files\n  test   Compile and execute test blocks without leaving build files\n\n  --targets     List supported compilation targets\n  -h, --help     Show help\n  -V, --version  Show version\n\nUse `ncc <command> --help` for command-specific options."
         ),
     }
 }
@@ -52,7 +55,7 @@ fn parse(args: Vec<String>) -> Result<Option<Options>, String> {
         println!("ncc {}", env!("CARGO_PKG_VERSION"));
         return Ok(None);
     }
-    if !matches!(command.as_str(), "build" | "run") {
+    if !matches!(command.as_str(), "build" | "run" | "test") {
         return Err(format!("unknown command `{command}`; use `ncc --help`"));
     }
     let mut options = Options {
@@ -71,7 +74,9 @@ fn parse(args: Vec<String>) -> Result<Option<Options>, String> {
             return Ok(None);
         }
         if !positional && arg == "--" {
-            if options.command == "run" && !options.input.as_os_str().is_empty() {
+            if matches!(options.command.as_str(), "run" | "test")
+                && !options.input.as_os_str().is_empty()
+            {
                 options.arguments.extend(args);
                 break;
             }
@@ -145,7 +150,7 @@ fn execute(o: Options) -> Result<ExitCode, String> {
     build(&o, &source)
 }
 fn build(o: &Options, source: &str) -> Result<ExitCode, String> {
-    let run = o.command == "run";
+    let run = matches!(o.command.as_str(), "run" | "test");
     let target = if run {
         ncc::target::NAME.to_owned()
     } else {
@@ -183,8 +188,12 @@ fn build(o: &Options, source: &str) -> Result<ExitCode, String> {
     {
         return Err("output would overwrite the input source file".into());
     }
-    let compiled = compile_source_with_diagnostics(source, &o.input, o.release)
-        .map_err(|e| e.render(source, &o.input))?;
+    let compile = if o.command == "test" {
+        compile_test_source_with_diagnostics
+    } else {
+        compile_source_with_diagnostics
+    };
+    let compiled = compile(source, &o.input, o.release).map_err(|e| e.render(source, &o.input))?;
     eprint!("{}", compiled.warnings.render_warnings(source, &o.input));
     let c = compiled.c;
     if format == Format::C && !run {

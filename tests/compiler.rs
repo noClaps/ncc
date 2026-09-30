@@ -15,7 +15,7 @@ fn compiles_and_runs_functions_conditionals_and_output() {
           @println(classify(0))
         }
     "#;
-    let c = ncc::compile_source(source, std::path::Path::new("test.nc")).unwrap();
+    let c = ncc::compile_test_source(source, std::path::Path::new("test.nc")).unwrap();
     let directory = std::env::temp_dir().join(format!("ncc-test-{}", std::process::id()));
     let _ = fs::create_dir_all(&directory);
     let source_path = directory.join("program.c");
@@ -39,7 +39,7 @@ fn compiles_and_runs_functions_conditionals_and_output() {
 #[test]
 fn rejects_immutable_assignment() {
     let source = "test \"immutable\" { int value = 1 value = 2 }";
-    let error = ncc::compile_source(source, std::path::Path::new("test.nc")).unwrap_err();
+    let error = ncc::compile_test_source(source, std::path::Path::new("test.nc")).unwrap_err();
     assert!(error.to_string().contains("cannot mutate immutable"));
 }
 
@@ -190,4 +190,263 @@ fn emits_only_headers_required_by_the_program() {
     assert!(!print_only.contains("#include <stdbool.h>"));
     assert!(!print_only.contains("#include <stdlib.h>"));
     assert!(!print_only.contains("#include <math.h>"));
+}
+
+#[test]
+fn ordinary_compilation_ignores_tests_before_semantic_processing() {
+    let path = std::path::Path::new("ignored.nc");
+    for source in [
+        "test \"unknown\" { @println(missing) }",
+        "test \"type error\" { int value = true }",
+        "fn identity<T>(T value) T { return value } test \"generic\" { _ = identity<int, bool>(1) }",
+        "test \"embed\" { _ = @embed(\"missing-file\") }",
+        "test \"assert\" { assert false }",
+        "test \"throw\" { throw \"failure\" }",
+    ] {
+        ncc::compile_source(source, path).unwrap();
+        for release in [false, true] {
+            let c = ncc::compile_source_with_options(source, path, release).unwrap();
+            assert!(!c.contains("#include"), "{source}");
+            let output = ncc::compile_source_with_diagnostics(source, path, release).unwrap();
+            assert!(output.warnings.0.is_empty());
+        }
+    }
+    for release in [false, true] {
+        for source in [
+            "test \"type error\" { int value = true }",
+            "fn identity<T>(T value) T { return value } test \"generic\" { _ = identity<int, bool>(1) }",
+            "test \"embed\" { _ = @embed(\"missing-file\") }",
+        ] {
+            assert!(ncc::compile_test_source_with_options(source, path, release).is_err());
+        }
+        assert!(ncc::compile_source_with_options("test \"syntax\" {", path, release).is_err());
+        assert!(ncc::compile_test_source_with_options("test \"syntax\" {", path, release).is_err());
+    }
+}
+
+#[test]
+fn imported_tests_are_filtered_before_module_qualification() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let path = directory.path().join("main.nc");
+    fs::write(
+        directory.path().join("dependency.nc"),
+        "pub fn value() int { return 7 }",
+    )
+    .unwrap();
+    fs::write(
+        directory.path().join("library.nc"),
+        "import { \"dependency\" as dep } pub fn value() int { return dep.value() } test \"private export\" { _ = dep.missing() }",
+    ).unwrap();
+    let source = "import { \"library\" as lib } @println(lib.value())";
+    for release in [false, true] {
+        ncc::compile_source_with_options(source, &path, release).unwrap();
+        assert!(ncc::compile_test_source_with_options(source, &path, release).is_err());
+    }
+    fs::write(directory.path().join("library.nc"), "test \"syntax\" {").unwrap();
+    assert!(ncc::compile_source(source, &path).is_err());
+}
+
+#[test]
+fn test_dependency_slicing_preserves_transitive_mutations_and_order() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let path = directory.path().join("main.nc");
+    fs::write(
+        directory.path().join("library.nc"),
+        r#"
+mut int shared = 0
+pub fn change<T>(T ignored) { shared = shared + 1 }
+pub fn read() int { return shared }
+change<int>(0)
+@println("unrelated imported output")
+test "imported state" { assert shared == 1 }
+"#,
+    )
+    .unwrap();
+    for (source, expected) in [
+        (
+            r#"mut int value = 1 value = 2 int other_value = 5 @println(value, other_value) test "prior write" { assert value == 2 @println(value) } value = 9"#,
+            "2\n",
+        ),
+        (
+            r#"mut int value = 0 fn change() int { @print("needed:") value = 3 return 9 } int unused = change() int bad = true @println("unrelated") test "initializer writes" { assert value == 3 @println(value) }"#,
+            "needed:3\n",
+        ),
+        (
+            r#"mut int value = 0 fn change() { value = 4 } (fn() void) alias = change alias() test "alias" { assert value == 4 @println(value) }"#,
+            "4\n",
+        ),
+        (
+            r#"mut int value = 0 mut (fn() void) action = fn() {} action = fn() { value = 5 } action() test "replaced closure" { assert value == 5 @println(value) }"#,
+            "5\n",
+        ),
+        (
+            r#"mut int value = 0 { mut int value = 1 value = 8 @println("discard shadow") } test "shadow" { assert value == 0 @println(value) }"#,
+            "0\n",
+        ),
+        (
+            r#"mut int value = 0 fn change() { fn closure = fn() { value = 6 } closure() } change() test "nested closure" { assert value == 6 @println(value) }"#,
+            "6\n",
+        ),
+        (
+            r#"mut int value = 0 for i in [1, 2] { if i { 0 -> { value = 7 } _ -> {} } } test "nested write" { assert value == 7 @println(value) }"#,
+            "7\n",
+        ),
+        (
+            r#"mutex int value = 0 fn change() { lock value { value = 8 } } fut void work = async change() await work test "synchronized" { lock value { assert value == 8 @println(value) } }"#,
+            "8\n",
+        ),
+        (
+            r#"import { "library" as lib } lib.change<str>("ignored") @println("discard root output") test "generic imported mutation" { assert lib.read() == 2 @println(lib.read()) }"#,
+            "2\n",
+        ),
+        (
+            r#"fn make() (fn() int) { mut int cell = 0 return fn() int { cell = cell + 1 return cell } } (fn() int) counter = make() _ = counter() test "escaped captured state" { assert counter() == 2 @println(counter()) }"#,
+            "3\n",
+        ),
+        (
+            r#"mutex int value = 0 fn change() { lock value { value = 10 } } fut void work = async change() fn wait(fut void task) { await task } wait(work) test "indirect synchronization" { lock value { assert value == 10 @println(value) } }"#,
+            "10\n",
+        ),
+    ] {
+        fs::write(&path, source).unwrap();
+        for mode in ["-d", "-r"] {
+            let output = Command::new(env!("CARGO_BIN_EXE_ncc"))
+                .arg("test")
+                .arg(&path)
+                .arg(mode)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{source}, {mode}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(output.stdout, expected.as_bytes(), "{source}, {mode}");
+        }
+    }
+    let source = r#"mut int value = 1 value = 2 int other_value = 5 @println(value, other_value) test "user example" { assert value == 1 }"#;
+    fs::write(&path, source).unwrap();
+    for mode in ["-d", "-r"] {
+        let c = ncc::compile_test_source_with_options(source, &path, mode == "-r").unwrap();
+        assert!(
+            !c.contains("5LL"),
+            "unrelated initializer was retained: {c}"
+        );
+        let output = Command::new(env!("CARGO_BIN_EXE_ncc"))
+            .arg("test")
+            .arg(&path)
+            .arg(mode)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("assert"));
+    }
+}
+
+#[test]
+fn isolated_tests_ignore_unused_errors_but_check_required_dependencies() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let path = directory.path().join("main.nc");
+    fs::write(
+        directory.path().join("library.nc"),
+        "pub fn good() int { return 1 }",
+    )
+    .unwrap();
+    let unused = r#"
+import { "library" as lib }
+extern "missing.c" as native { fn bad() int = "bad" }
+fn bad() { _ = lib.missing() }
+fn generic<T>(T value) T { return missing }
+struct Bad { Missing field }
+int invalid = true
+_ = @embed("missing-file")
+@println(missing)
+"#;
+    for release in [false, true] {
+        for suffix in ["", "test \"isolated\" { assert lib.good() == 1 }"] {
+            let source = format!("{unused}\n{suffix}");
+            ncc::compile_test_source_with_options(&source, &path, release).unwrap();
+        }
+        for source in [
+            "int invalid = true test \"required\" { _ = invalid }",
+            "fn bad() int { return missing } test \"required\" { _ = bad() }",
+            "import { \"library\" as lib } fn bad() { _ = lib.missing() } test \"required\" { bad() }",
+            "extern \"missing.c\" as native { fn bad() int = \"bad\" } test \"required\" { _ = native.bad() }",
+        ] {
+            assert!(
+                ncc::compile_test_source_with_options(source, &path, release).is_err(),
+                "{source}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_slicing_retains_existing_binding_pattern_comparisons() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let path = directory.path().join("patterns.nc");
+    fs::write(
+        &path,
+        r#"
+int expected = 2
+mut int updated = 0
+updated = 2
+fn choose(int subject) int {
+    return if subject { expected -> { 10 } _ -> { 20 } }
+}
+test "existing patterns" {
+    int matched = if 1 { expected -> { 10 } _ -> { 20 } }
+    assert matched == 20
+    assert choose(1) == 20
+    int changed = if 1 { updated -> { 10 } _ -> { 20 } }
+    assert changed == 20
+}
+"#,
+    )
+    .unwrap();
+    for mode in ["-d", "-r"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_ncc"))
+            .arg("test")
+            .arg(&path)
+            .arg(mode)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{mode}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn opaque_native_mutations_are_retained_without_nc_global_writes() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let path = directory.path().join("main.nc");
+    fs::write(directory.path().join("native.c"), "static int state; nc_abi_set_result set(void) { state = 9; } nc_abi_read_result read(void) { return state; }").unwrap();
+    fs::write(
+        &path,
+        r#"
+extern "native.c" as native { fn set() = "set" fn read() int = "read" }
+native.set()
+@println("discard")
+test "native state" { assert native.read() == 9 @println(native.read()) }
+"#,
+    )
+    .unwrap();
+    for mode in ["-d", "-r"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_ncc"))
+            .arg("test")
+            .arg(&path)
+            .arg(mode)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"9\n");
+    }
 }

@@ -82,18 +82,18 @@ test "nonfinite ABI" {
     assert negative == -inf
     assert native.roundtrip(inf) == inf
     assert native.roundtrip(-inf) == -inf
-}
 @println(invalid, ":", positive, ":", negative)
 @println("{invalid}:{positive}:{negative}")
 @println(@as(str, invalid), ":", @as(str, positive), ":", @as(str, negative))
 @eprintln(invalid, ":", positive, ":", negative)
 @println(native.roundtrip(NaN))
+}
 "#,
     )
     .unwrap();
     for release in [false, true] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_ncc"));
-        command.arg("run");
+        command.arg("test");
         if release {
             command.arg("-r");
         }
@@ -211,7 +211,7 @@ extern "native.c" as native {
 fn unit() {}
 void value = native.touch(unit())
 void[] values = native.roundtrip([value, native.touch(value)])
-@println(native.count(), ":", values.len)
+test "void ABI output" { @println(native.count(), ":", values.len) }
 "#,
     )
     .unwrap();
@@ -256,15 +256,21 @@ extern "native.c" as native {
 }
 int[]? optional = native.absent()
 int[]! failure = native.failed()
+test "inactive ABI payloads" {
 @println(optional == native.absent())
 @println(failure == native.failed())
+}
 int[] fallback = failure catch message { @println(message) break [9] }
+test "inactive ABI formatting" {
 @println(fallback)
 @println(failure, ":", native.succeeded())
 @println("{failure}:{native.succeeded()}")
 @println(@as(str, failure), ":", @as(str, native.succeeded()))
+}
 int[]![] results = [failure, native.succeeded()]
+test "inactive ABI containers" {
 @println(results)
+}
 "#,
     )
     .unwrap();
@@ -297,10 +303,10 @@ pub fn value() int { return native.second(3) }
     let source = r#"
 extern "native.c" as native { fn first(int n) int = "first" }
 import { "other" as other }
-@println(native.first(1), other.value())
+test "shared native implementation" { @println(native.first(1), other.value()) }
 "#;
     fs::write(&input, source).unwrap();
-    let c = ncc::compile_source(source, &input).unwrap();
+    let c = ncc::compile_test_source(source, &input).unwrap();
     assert_eq!(c.matches("native.c\"").count(), 1);
     run_both(&input, b"56\n");
     let conflict = r#"
@@ -330,7 +336,7 @@ extern "native.c" as two { fn first(str n) int = "first" }
 fn run_both(input: &std::path::Path, expected: &[u8]) {
     for release in [false, true] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_ncc"));
-        command.arg("run");
+        command.arg("test");
         if release {
             command.arg("-r");
         }

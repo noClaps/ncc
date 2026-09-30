@@ -12,7 +12,12 @@
 - Maintain the root `TODO.md` as a remaining-work list only. Remove completed
   items, narrow partially completed items, and add newly discovered gaps. Do not
   treat passing tests as proof that the specification is fully implemented.
-- The current CLI provides `build` and `run`. A Tree-sitter grammar, LSP, and
+- The current CLI provides `build`, `run`, and `test`. Test blocks are checked and
+  executed only in test mode; normal builds/runs ignore them after parsing,
+  including imported tests. Test mode retains only tests and their transitive
+  outside dependencies, including prior mutations through assignments, functions,
+  closures, and async synchronization; unrelated top-level output is discarded.
+  Preserve order and effects of retained dependencies. A Tree-sitter grammar, LSP, and
   formatter are planned again; the earlier prohibition on those tools is
   superseded. Their CLI integration is not yet decided. Do not restore the
   removed `check` command or linter, editor plugins, extensions, or editor setup
@@ -78,6 +83,10 @@
   output, or the executable when output is unspecified. Honor explicit formats.
 - Release mode must actually optimize, correctly across all supported types.
   Preserve effects, evaluation order, value semantics, and runtime failures.
+- Warn non-fatally for structurally infinite loops and unreachable code. Do not
+  interpret proven infinite loops during constant evaluation; continue folding
+  independent expressions inside their bodies. Retain evaluation step/depth
+  safeguards for cases structural analysis cannot decide.
 - Include C headers only when needed by the generated program.
 - Preserve source locations through module loading, generic specialization, and
   optimization. Semantic errors should identify the failing expression or
@@ -96,7 +105,8 @@
   closure results. Persistent outer mutable state must retain runtime evaluation.
   Release evaluation also analyses safely evaluatable top-level statements in
   source order to diagnose reached arithmetic failures, without removing effects
-  or materializing persistent mutable state.
+  or materializing persistent mutable state. Known `@print`/`@println` arguments
+  are analysed without executing output; runtime calls remain intact.
 - Compile-time string conversion must match runtime formatting, including field
   order, quoting, embedded NULs, Unicode, and nominal types. Keep a safe runtime
   fallback for operations that cannot yet be reproduced exactly.
