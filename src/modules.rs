@@ -1,6 +1,6 @@
 //! Resolve source modules once, enforce exports, and qualify their symbols.
 use crate::{
-    ast::{Block, Expr, Item, Module, Pattern, Stmt, Type},
+    ast::{Block, Expr, Function, Item, Module, Pattern, SourceLocation, Stmt, Type},
     diagnostic::Diagnostics,
     lexer, parser,
 };
@@ -62,7 +62,53 @@ struct Loader {
     next: usize,
 }
 impl Loader {
-    #[allow(clippy::too_many_lines)] // Keep import resolution and ordered item/error collection together.
+    fn import(&mut self, imported: &str, path: &Path) -> Result<Names, Diagnostics> {
+        let imported_path = path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join(imported)
+            .with_extension("nc");
+        let source = std::fs::read_to_string(&imported_path).map_err(|e| {
+            Diagnostics::one(
+                format!("cannot import {}: {e}", imported_path.display()),
+                0..0,
+            )
+        })?;
+        let imported_module = lexer::lex(&source)
+            .and_then(|tokens| parser::parse_at(tokens, &imported_path))
+            .map_err(|error| error.at_source(&imported_path, 0..0))?;
+        self.visit(imported_module, &imported_path, false)
+    }
+
+    fn external_path(
+        &self,
+        implementation: &mut String,
+        location: &SourceLocation,
+        path: &Path,
+    ) -> Result<Option<Diagnostics>, Diagnostics> {
+        let external = path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join(&*implementation);
+        let resolved = external.canonicalize().map_err(|e| {
+            Diagnostics::one(
+                format!(
+                    "cannot open external implementation {}: {e}",
+                    external.display()
+                ),
+                location.span.clone(),
+            )
+            .at_source(&location.path, location.span.clone())
+        });
+        let (external, error) = match resolved {
+            Ok(resolved) => (resolved, None),
+            Err(error) if self.tests => (external, Some(error)),
+            Err(error) => return Err(error),
+        };
+        *implementation = external.to_string_lossy().into_owned();
+        Ok(error)
+    }
+
     fn visit(&mut self, mut module: Module, path: &Path, root: bool) -> Result<Names, Diagnostics> {
         if !self.tests {
             module
@@ -110,21 +156,7 @@ impl Loader {
                             0..0,
                         ));
                     }
-                    let imported_path = path
-                        .parent()
-                        .unwrap_or(Path::new("."))
-                        .join(&*imported)
-                        .with_extension("nc");
-                    let source = std::fs::read_to_string(&imported_path).map_err(|e| {
-                        Diagnostics::one(
-                            format!("cannot import {}: {e}", imported_path.display()),
-                            0..0,
-                        )
-                    })?;
-                    let imported_module = lexer::lex(&source)
-                        .and_then(|tokens| parser::parse_at(tokens, &imported_path))
-                        .map_err(|error| error.at_source(&imported_path, 0..0))?;
-                    let exports = self.visit(imported_module, &imported_path, false)?;
+                    let exports = self.import(imported, path)?;
                     aliases.insert(alias.clone(), exports);
                 }
                 Item::Extern {
@@ -133,29 +165,9 @@ impl Loader {
                     functions,
                     location,
                 } => {
-                    let external = path
-                        .parent()
-                        .unwrap_or(Path::new("."))
-                        .join(&*implementation);
-                    let resolved = external.canonicalize().map_err(|e| {
-                        Diagnostics::one(
-                            format!(
-                                "cannot open external implementation {}: {e}",
-                                external.display()
-                            ),
-                            location.span.clone(),
-                        )
-                        .at_source(&location.path, location.span.clone())
-                    });
-                    let external = match resolved {
-                        Ok(resolved) => resolved,
-                        Err(error) if self.tests => {
-                            errors.insert(index, error);
-                            external
-                        }
-                        Err(error) => return Err(error),
-                    };
-                    *implementation = external.to_string_lossy().into_owned();
+                    if let Some(error) = self.external_path(implementation, location, path)? {
+                        errors.insert(index, error);
+                    }
                     let mut symbols = Names::new();
                     for f in functions {
                         let qualified = format!("{prefix}extern_{alias}_{}", f.name);
@@ -416,7 +428,41 @@ fn statement(
     }
     Ok(())
 }
-#[allow(clippy::too_many_lines)] // Keep all expression qualification variants in one dispatch.
+
+fn qualify_lambda(
+    f: &mut Function,
+    names: &Names,
+    aliases: &HashMap<String, Names>,
+) -> Result<(), Diagnostics> {
+    let mut local = names.clone();
+    for p in &mut f.params {
+        qualify_type(&mut p.ty, names);
+        local.insert(p.name.clone(), p.name.clone());
+    }
+    qualify_type(&mut f.return_type, names);
+    block(&mut f.body, &local, aliases)
+}
+
+fn qualify_conditional(
+    subject: Option<&mut Expr>,
+    arms: &mut [(Vec<Pattern>, Block)],
+    names: &Names,
+    aliases: &HashMap<String, Names>,
+) -> Result<(), Diagnostics> {
+    if let Some(e) = subject {
+        expr(e, names, aliases)?;
+    }
+    for (patterns, b) in arms {
+        let mut local = names.clone();
+        for p in patterns {
+            qualify_pattern(p, names, aliases)?;
+            hide(p, &mut local);
+        }
+        block(b, &local, aliases)?;
+    }
+    Ok(())
+}
+
 fn expr(e: &mut Expr, names: &Names, aliases: &HashMap<String, Names>) -> Result<(), Diagnostics> {
     if let Expr::Located(value, location) = e {
         return expr(value, names, aliases)
@@ -424,15 +470,7 @@ fn expr(e: &mut Expr, names: &Names, aliases: &HashMap<String, Names>) -> Result
     }
     match e {
         Expr::Embed { path, .. } => expr(path, names, aliases)?,
-        Expr::Lambda(f) => {
-            let mut local = names.clone();
-            for p in &mut f.params {
-                qualify_type(&mut p.ty, names);
-                local.insert(p.name.clone(), p.name.clone());
-            }
-            qualify_type(&mut f.return_type, names);
-            block(&mut f.body, &local, aliases)?;
-        }
+        Expr::Lambda(f) => qualify_lambda(f, names, aliases)?,
         Expr::Name(n) => {
             if let Some(name) = names.get(n) {
                 *n = name.clone();
@@ -498,17 +536,7 @@ fn expr(e: &mut Expr, names: &Names, aliases: &HashMap<String, Names>) -> Result
             }
         }
         Expr::If { subject, arms } => {
-            if let Some(e) = subject {
-                expr(e, names, aliases)?;
-            }
-            for (patterns, b) in arms {
-                let mut local = names.clone();
-                for p in patterns {
-                    qualify_pattern(p, names, aliases)?;
-                    hide(p, &mut local);
-                }
-                block(b, &local, aliases)?;
-            }
+            qualify_conditional(subject.as_deref_mut(), arms, names, aliases)?;
         }
         Expr::Else { value, fallback } => {
             expr(value, names, aliases)?;

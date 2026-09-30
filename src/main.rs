@@ -1,7 +1,7 @@
 use ncc::{compile_source_with_diagnostics, compile_test_source_with_diagnostics};
 use std::{
     env, fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, ExitCode},
 };
 
@@ -149,8 +149,7 @@ fn execute(o: &Options) -> Result<ExitCode, String> {
     let source = fs::read_to_string(&o.input).map_err(|e| format!("{}: {e}", o.input.display()))?;
     build(o, &source)
 }
-// Keep compilation, execution, and temporary-artifact cleanup in one scope.
-#[allow(clippy::too_many_lines)]
+
 fn build(o: &Options, source: &str) -> Result<ExitCode, String> {
     let run = matches!(o.command.as_str(), "run" | "test");
     let target = if run {
@@ -162,25 +161,7 @@ fn build(o: &Options, source: &str) -> Result<ExitCode, String> {
             .unwrap_or_else(|| ncc::target::NAME.into())
     };
     ncc::target::validate(&target)?;
-    let format = o.format.unwrap_or_else(|| {
-        match o
-            .output
-            .as_ref()
-            .and_then(|p| p.extension())
-            .and_then(|s| s.to_str())
-        {
-            Some("c") => Format::C,
-            Some("o") => Format::Object,
-            _ => Format::Executable,
-        }
-    });
-    let output = o.output.clone().unwrap_or_else(|| {
-        o.input.with_extension(match format {
-            Format::C => "c",
-            Format::Object => "o",
-            Format::Executable => "",
-        })
-    });
+    let (format, output) = output_artifact(o);
     if !run
         && output
             .canonicalize()
@@ -210,10 +191,58 @@ fn build(o: &Options, source: &str) -> Result<ExitCode, String> {
     let c_path = temporary.path().join("program.c");
     let binary = temporary.path().join("program");
     fs::write(&c_path, &c).map_err(|e| e.to_string())?;
+    compile_native(&c, &c_path, &binary, format, o.release)?;
+    if run {
+        let status = Command::new(&binary)
+            .args(&o.arguments)
+            .status()
+            .map_err(|e| format!("cannot run program: {e}"))?;
+        Ok(ExitCode::from(
+            status
+                .code()
+                .and_then(|c| u8::try_from(c).ok())
+                .unwrap_or(1),
+        ))
+    } else {
+        publish_artifact(&binary, &output)?;
+        Ok(ExitCode::SUCCESS)
+    }
+}
+
+fn output_artifact(o: &Options) -> (Format, PathBuf) {
+    let format = o.format.unwrap_or_else(|| {
+        match o
+            .output
+            .as_ref()
+            .and_then(|p| p.extension())
+            .and_then(|s| s.to_str())
+        {
+            Some("c") => Format::C,
+            Some("o") => Format::Object,
+            _ => Format::Executable,
+        }
+    });
+    let output = o.output.clone().unwrap_or_else(|| {
+        o.input.with_extension(match format {
+            Format::C => "c",
+            Format::Object => "o",
+            Format::Executable => "",
+        })
+    });
+    (format, output)
+}
+
+fn compile_native(
+    c: &str,
+    c_path: &Path,
+    binary: &Path,
+    format: Format,
+    release: bool,
+) -> Result<(), String> {
     let mut native_compiler = Command::new("cc");
-    native_compiler.arg(&c_path).arg("-std=c11");
+    native_compiler.arg(c_path).arg("-std=c11");
     native_compiler.args(["-arch", ncc::target::ARCH]);
-    if o.release {
+    if release {
         native_compiler.arg("-O3");
     } else {
         native_compiler.args(["-O0", "-g"]);
@@ -228,34 +257,25 @@ fn build(o: &Options, source: &str) -> Result<ExitCode, String> {
     }
     let status = native_compiler
         .arg("-o")
-        .arg(&binary)
+        .arg(binary)
         .status()
         .map_err(|e| format!("cannot run C compiler: {e}"))?;
     if !status.success() {
         return Err("C compiler failed".into());
     }
-    if run {
-        let status = Command::new(&binary)
-            .args(&o.arguments)
-            .status()
-            .map_err(|e| format!("cannot run program: {e}"))?;
-        Ok(ExitCode::from(
-            status
-                .code()
-                .and_then(|c| u8::try_from(c).ok())
-                .unwrap_or(1),
-        ))
-    } else {
-        // Replace the inode atomically. Overwriting a previously executed Mach-O
-        // in place can retain stale code-signature cache entries on macOS.
-        let parent = output
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or_else(|| std::path::Path::new("."));
-        let staging = ncc::temp::Directory::new_in(parent).map_err(|e| e.to_string())?;
-        let staged = staging.path().join("output");
-        fs::copy(&binary, &staged).map_err(|e| format!("{}: {e}", output.display()))?;
-        fs::rename(&staged, &output).map_err(|e| format!("{}: {e}", output.display()))?;
-        Ok(ExitCode::SUCCESS)
-    }
+    Ok(())
+}
+
+fn publish_artifact(binary: &Path, output: &Path) -> Result<(), String> {
+    // Replace the inode atomically. Overwriting a previously executed Mach-O
+    // in place can retain stale code-signature cache entries on macOS.
+    let parent = output
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let staging = ncc::temp::Directory::new_in(parent).map_err(|e| e.to_string())?;
+    let staged = staging.path().join("output");
+    fs::copy(binary, &staged).map_err(|e| format!("{}: {e}", output.display()))?;
+    fs::rename(&staged, output).map_err(|e| format!("{}: {e}", output.display()))?;
+    Ok(())
 }

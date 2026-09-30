@@ -41,8 +41,6 @@ fn definitions(item: &Item) -> Vec<String> {
 }
 
 /// Return selected item identities; callers retain the original AST and locations.
-// Keep the declaration/effect fixed points and source-order selection together.
-#[allow(clippy::too_many_lines)]
 pub(crate) fn select(
     items: &[Item],
     errors: &[Option<crate::diagnostic::Diagnostics>],
@@ -86,13 +84,24 @@ pub(crate) fn select(
         .flatten()
         .map(str::to_owned)
         .collect();
-    let mut effects: Vec<_> = items
+    let mut effects = scan_effects(items, errors, &globals, &enums);
+    summarize_effects(items, &declarations, &callable, &mutable, &mut effects);
+    select_dependencies(items, &declarations, &effects, last_test)
+}
+
+fn scan_effects(
+    items: &[Item],
+    errors: &[Option<crate::diagnostic::Diagnostics>],
+    globals: &Names,
+    enums: &Names,
+) -> Vec<Effects> {
+    items
         .iter()
         .enumerate()
         .map(|(index, item)| {
             let mut scan = Scan {
-                globals: &globals,
-                enums: &enums,
+                globals,
+                enums,
                 local: Names::new(),
                 captures: Names::new(),
                 effects: Effects::default(),
@@ -107,12 +116,21 @@ pub(crate) fn select(
             }
             scan.effects
         })
-        .collect();
+        .collect()
+}
+
+fn summarize_effects(
+    items: &[Item],
+    declarations: &HashMap<String, Vec<usize>>,
+    callable: &Names,
+    mutable: &Names,
+    effects: &mut [Effects],
+) {
     // Function values, aliases, returned closures and recursive call chains all
     // contribute dependencies. Unknown callees are conservatively opaque.
     loop {
-        let previous = effects.clone();
-        for effect in &mut effects {
+        let previous = effects.to_vec();
+        for effect in effects.iter_mut() {
             for callee in effect.calls.clone() {
                 if let Some(indices) = declarations.get(&callee) {
                     for &index in indices {
@@ -131,14 +149,14 @@ pub(crate) fn select(
                                     effect.merge(writer);
                                     effect
                                         .calls
-                                        .extend(writer.uses.intersection(&callable).cloned());
+                                        .extend(writer.uses.intersection(callable).cloned());
                                 }
                             }
                         }
                         if matches!(items[index], Item::Global(_)) {
                             effect
                                 .calls
-                                .extend(previous[index].uses.intersection(&callable).cloned());
+                                .extend(previous[index].uses.intersection(callable).cloned());
                         }
                         if matches!(items[index], Item::Extern { .. }) {
                             effect.opaque = true;
@@ -156,6 +174,14 @@ pub(crate) fn select(
             break;
         }
     }
+}
+
+fn select_dependencies(
+    items: &[Item],
+    declarations: &HashMap<String, Vec<usize>>,
+    effects: &[Effects],
+    last_test: usize,
+) -> Vec<bool> {
     let mut selected: Vec<_> = items
         .iter()
         .map(|item| matches!(item, Item::Test { .. }))
@@ -197,8 +223,8 @@ pub(crate) fn select(
                         && synchronization_depends_on(
                             &effects[index].uses,
                             &needed,
-                            &declarations,
-                            &effects,
+                            declarations,
+                            effects,
                         ));
             }
         }

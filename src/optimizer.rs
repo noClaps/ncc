@@ -379,8 +379,6 @@ pub fn optimize(checked: CheckedModule) -> Result<Module, Diagnostics> {
             .map_err(|_| Diagnostics::one("constant evaluator panicked", 0..0))?
     })
 }
-// Keep folding, AST rewrites, and reachability pruning in their evaluation order.
-#[allow(clippy::too_many_lines)]
 fn optimize_module(checked: CheckedModule) -> Result<Module, Diagnostics> {
     let mut functions: HashMap<String, &Function> = checked
         .module
@@ -456,6 +454,10 @@ fn optimize_module(checked: CheckedModule) -> Result<Module, Diagnostics> {
             }
         }
     }
+    prune_unreachable_functions(&mut module);
+    Ok(module)
+}
+fn prune_unreachable_functions(module: &mut Module) {
     let mut reachable = HashSet::new();
     let references = |item: &Item, names: &mut HashSet<String>| {
         crate::visit::item(item, &mut |e| {
@@ -485,8 +487,8 @@ fn optimize_module(checked: CheckedModule) -> Result<Module, Diagnostics> {
     module
         .items
         .retain(|item| !matches!(item, Item::Function(f) if !reachable.contains(&f.name)));
-    Ok(module)
 }
+
 // Analyse known top-level execution without replacing persistent state or
 // executing output effects. Unknown execution keeps runtime code.
 fn evaluate_top_level(
@@ -1235,8 +1237,6 @@ impl<'module> Evaluator<'module> {
         }
         result
     }
-    // Exhaustive language evaluation keeps each expression variant together.
-    #[allow(clippy::too_many_lines)]
     fn expression(&mut self, e: &Expr, env: &mut HashMap<String, Value>) -> Option<Value> {
         let e = e.unlocated();
         let fuel = &mut *self.fuel;
@@ -1250,6 +1250,34 @@ impl<'module> Evaluator<'module> {
         {
             return Some(Value::Int(i64::MIN));
         }
+        match e {
+            Expr::Int(_)
+            | Expr::Float(_)
+            | Expr::Bool(_)
+            | Expr::Bytes(_)
+            | Expr::String(_)
+            | Expr::Char(_)
+            | Expr::None => self.literal_value(e),
+            Expr::Name(n) if n == "$" => self.literal_value(e),
+            Expr::Lambda(_) => self.lambda_value(e, env),
+            Expr::Embed { .. } => self.embed_value(e, env),
+            Expr::Array(_) | Expr::Tuple(_) | Expr::Map(_) | Expr::StructInit { .. } => {
+                self.container_value(e, env)
+            }
+            Expr::Member { object, name } => self.member_value(object, name, env),
+            Expr::Index { object, index } => self.index_value(object, index, env),
+            Expr::Cast { ty, value, .. } => self.cast_value(ty, value, env),
+            Expr::Name(n) => self.name_value(e, n, env),
+            Expr::Unary { op, value } => self.unary_value(*op, value, env),
+            Expr::Binary { left, op, right } => self.binary_value(left, *op, right, env),
+            Expr::Call { callee, args, .. } => self.call_value(callee, args, env),
+            Expr::If { .. } | Expr::Else { .. } | Expr::Try(_) | Expr::Catch { .. } => {
+                self.branch_value(e, env)
+            }
+            _ => None,
+        }
+    }
+    fn literal_value(&self, e: &Expr) -> Option<Value> {
         match e {
             Expr::Int(s) => {
                 let n = crate::lexer::integer(s).ok()?;
@@ -1266,55 +1294,27 @@ impl<'module> Evaluator<'module> {
                 Some(Value::Float(value.to_bits()))
             }
             Expr::Bool(b) => Some(Value::Bool(*b)),
-            Expr::Lambda(_) => {
-                let key = e.id();
-                let captures = self.checked.captures.get(&key)?;
-                let values = captures
-                    .iter()
-                    .map(|capture| {
-                        if capture.mutex {
-                            return None;
-                        }
-                        if capture.mutable {
-                            return match env.get(&capture.name)? {
-                                value @ Value::Cell(_) => {
-                                    Some((capture.name.clone(), value.clone()))
-                                }
-                                _ => None,
-                            };
-                        }
-                        let value = env.get(&capture.name).cloned().or_else(|| {
-                            self.constant_binding(capture.initializer?, &capture.name)
-                        })?;
-                        Some((capture.name.clone(), value))
-                    })
-                    .collect::<Option<_>>()?;
-                Some(Value::Closure(key, values))
-            }
             Expr::Bytes(bytes) => Some(Value::Array(
                 bytes.iter().copied().map(Value::Byte).collect(),
             )),
-            Expr::Embed {
-                path,
-                source_path,
-                span,
-            } => {
-                let Value::String(path) = self.evaluate(path, env)? else {
-                    return None;
-                };
-                match embedded_bytes(&path.concat(), source_path) {
-                    Ok(bytes) => Some(Value::Array(bytes.into_iter().map(Value::Byte).collect())),
-                    Err(error) => {
-                        self.embed_error = Some(
-                            Diagnostics::one(error.to_string(), span.clone())
-                                .at_source(source_path, span.clone()),
-                        );
-                        None
-                    }
-                }
-            }
             Expr::String(s) => Some(Value::String(string_parts(s))),
             Expr::Char(s) => Some(Value::Char(s.clone())),
+            Expr::None => {
+                let Type::Optional(inner) = self.expr_type(e)? else {
+                    return None;
+                };
+                Some(Value::Optional((**inner).clone(), None))
+            }
+            Expr::Name(n) if n == "$" => self
+                .indices
+                .last()
+                .and_then(|n| n.checked_sub(1))
+                .map(Value::Uint),
+            _ => None,
+        }
+    }
+    fn container_value(&mut self, e: &Expr, env: &mut HashMap<String, Value>) -> Option<Value> {
+        match e {
             Expr::Array(values) => {
                 let value = Value::Array(
                     values
@@ -1352,303 +1352,11 @@ impl<'module> Evaluator<'module> {
                     .map(|(name, value)| Some((name.clone(), self.evaluate(value, env)?)))
                     .collect::<Option<_>>()?,
             )),
-            Expr::None => {
-                let Type::Optional(inner) = self.expr_type(e)? else {
-                    return None;
-                };
-                Some(Value::Optional((**inner).clone(), None))
-            }
-            Expr::Member { object, name } => {
-                if let Expr::Name(owner) = object.unlocated()
-                    && let Some(TypeInfo::Enum(_)) = self.checked.types.get(owner)
-                {
-                    return Some(Value::Enum(owner.clone(), name.clone(), vec![]));
-                }
-                match self.evaluate(object, env)? {
-                    Value::Struct(_, fields) => fields
-                        .into_iter()
-                        .find(|(field, _)| field == name)
-                        .map(|(_, value)| value),
-                    Value::Array(values) if name == "len" => Some(Value::Uint(values.len() as u64)),
-                    Value::Map(values) if name == "len" => Some(Value::Uint(values.len() as u64)),
-                    Value::String(value) if name == "len" => Some(Value::Uint(value.len() as u64)),
-                    _ => None,
-                }
-            }
-            Expr::Index { object, index } => {
-                let object = self.evaluate(object, env)?;
-                let index = self.index(index, &object, env)?;
-                if let Value::Map(entries) = object {
-                    return entries
-                        .into_iter()
-                        .find(|(key, _)| key.equals(&index))
-                        .map(|(_, value)| value);
-                }
-                let n = match index {
-                    Value::Int(n) => usize::try_from(n).ok()?,
-                    Value::Uint(n) => usize::try_from(n).ok()?,
-                    _ => return None,
-                };
-                match object {
-                    Value::Array(values) | Value::Tuple(values) => values.get(n).cloned(),
-                    Value::String(value) => value.get(n).cloned().map(Value::Char),
-                    _ => None,
-                }
-            }
-            Expr::Cast { ty, value, .. } => {
-                let from = self.expr_type(value)?.clone();
-                let value = self.evaluate(value, env)?;
-                if self.base_type(ty) == self.base_type(&from) {
-                    self.coerce(value, ty)
-                } else {
-                    self.cast(ty, &from, value)
-                }
-            }
-            Expr::Name(n) if n == "$" => self
-                .indices
-                .last()
-                .and_then(|n| n.checked_sub(1))
-                .map(Value::Uint),
-            Expr::Name(n) => {
-                if let Some(value) = env.get(n) {
-                    return match value {
-                        Value::Cell(index) => self.cells.get(*index).cloned(),
-                        value => Some(value.clone()),
-                    };
-                }
-                if let Some(key) = self.checked.constant_sources.get(&e.id()) {
-                    return self.constant_binding((*key)?, n);
-                }
-                self.functions
-                    .contains_key(n)
-                    .then(|| Value::Function(n.clone()))
-            }
-            Expr::Unary { op, value } => match (op, self.evaluate(value, env)?) {
-                (UnaryOp::Neg, Value::Int(v)) => {
-                    let result = v.checked_neg();
-                    if result.is_none() {
-                        self.arithmetic_failure = true;
-                    }
-                    result.map(Value::Int)
-                }
-                (UnaryOp::Neg, Value::Float(v)) => {
-                    Some(Value::Float((-f64::from_bits(v)).to_bits()))
-                }
-                (UnaryOp::Not, Value::Bool(b)) => Some(Value::Bool(!b)),
-                (UnaryOp::BitNot, Value::Int(v)) => Some(Value::Int(!v)),
-                (UnaryOp::BitNot, Value::Uint(v)) => Some(Value::Uint(!v)),
-                (UnaryOp::BitNot, Value::Byte(v)) => Some(Value::Byte(!v)),
-                _ => None,
-            },
-            Expr::Binary { left, op, right } => {
-                let left = self.evaluate(left, env)?;
-                if *op == BinaryOp::And && left == Value::Bool(false) {
-                    return Some(left);
-                }
-                if *op == BinaryOp::Or && left == Value::Bool(true) {
-                    return Some(left);
-                }
-                let right = self.evaluate(right, env)?;
-                if matches!(op, BinaryOp::Eq | BinaryOp::Ne) && !matches!(left, Value::Float(_)) {
-                    let equal = left.equals(&right);
-                    return Some(Value::Bool(if *op == BinaryOp::Eq {
-                        equal
-                    } else {
-                        !equal
-                    }));
-                }
-                match (left, right) {
-                    (Value::Map(mut a), Value::Map(b)) if *op == BinaryOp::Concat => {
-                        for (key, value) in b {
-                            if let Some((_, existing)) =
-                                a.iter_mut().find(|(other, _)| other.equals(&key))
-                            {
-                                *existing = value;
-                            } else {
-                                a.push((key, value));
-                            }
-                        }
-                        Some(Value::Map(a))
-                    }
-                    (Value::Array(mut a), Value::Array(b)) if *op == BinaryOp::Concat => {
-                        a.extend(b);
-                        Some(Value::Array(a))
-                    }
-                    (value, Value::Array(values)) if *op == BinaryOp::In => Some(Value::Bool(
-                        values.iter().any(|element| element.equals(&value)),
-                    )),
-                    (value, Value::Map(values)) if *op == BinaryOp::In => Some(Value::Bool(
-                        values.iter().any(|(key, _)| key.equals(&value)),
-                    )),
-                    (Value::Int(a), Value::Int(b)) => {
-                        use BinaryOp::{
-                            Add, BitAnd, BitOr, BitXor, Div, Eq, Ge, Gt, Le, Lt, Mod, Mul, Ne, Pow,
-                            Shl, Shr, Sub,
-                        };
-                        let result = match op {
-                            Add => a.checked_add(b).map(Value::Int),
-                            Sub => a.checked_sub(b).map(Value::Int),
-                            Mul => a.checked_mul(b).map(Value::Int),
-                            Div => a.checked_div(b).map(Value::Int),
-                            Mod => a.checked_rem(b).map(Value::Int),
-                            Pow if (-1..=1).contains(&a) && b >= 0 => Some(Value::Int(if b == 0 {
-                                1
-                            } else if a == -1 {
-                                if b % 2 == 0 { 1 } else { -1 }
-                            } else {
-                                a
-                            })),
-                            Pow => u32::try_from(b)
-                                .ok()
-                                .and_then(|b| a.checked_pow(b))
-                                .map(Value::Int),
-                            BitAnd => Some(Value::Int(a & b)),
-                            BitOr => Some(Value::Int(a | b)),
-                            BitXor => Some(Value::Int(a ^ b)),
-                            Shl => u32::try_from(b)
-                                .ok()
-                                .filter(|b| *b < 64)
-                                .and_then(|b| i64::try_from(i128::from(a) << b).ok())
-                                .map(Value::Int),
-                            Shr => u32::try_from(b)
-                                .ok()
-                                .and_then(|b| a.checked_shr(b))
-                                .map(Value::Int),
-                            Eq => Some(Value::Bool(a == b)),
-                            Ne => Some(Value::Bool(a != b)),
-                            Lt => Some(Value::Bool(a < b)),
-                            Le => Some(Value::Bool(a <= b)),
-                            Gt => Some(Value::Bool(a > b)),
-                            Ge => Some(Value::Bool(a >= b)),
-                            _ => None,
-                        };
-                        if result.is_none()
-                            && matches!(op, Add | Sub | Mul | Div | Mod | Pow | Shl | Shr)
-                        {
-                            self.arithmetic_failure = true;
-                        }
-                        result
-                    }
-                    (Value::Uint(a), Value::Uint(b)) => self.unsigned(a, b, *op, false),
-                    (Value::Byte(a), Value::Byte(b)) => {
-                        self.unsigned(a.into(), b.into(), *op, true)
-                    }
-                    (Value::Float(a), Value::Float(b)) => {
-                        Self::float(f64::from_bits(a), f64::from_bits(b), *op)
-                    }
-                    (Value::Bool(a), Value::Bool(b)) => match op {
-                        BinaryOp::And => Some(Value::Bool(a && b)),
-                        BinaryOp::Or => Some(Value::Bool(a || b)),
-                        BinaryOp::Eq => Some(Value::Bool(a == b)),
-                        BinaryOp::Ne => Some(Value::Bool(a != b)),
-                        _ => None,
-                    },
-                    (Value::String(a), Value::String(b)) => match op {
-                        BinaryOp::Concat => {
-                            let mut a = a;
-                            a.extend(b);
-                            Some(Value::String(a))
-                        }
-                        BinaryOp::Eq => Some(Value::Bool(a == b)),
-                        BinaryOp::Ne => Some(Value::Bool(a != b)),
-                        BinaryOp::In => Some(Value::Bool(
-                            a.is_empty() || b.windows(a.len()).any(|part| part == a),
-                        )),
-                        _ => None,
-                    },
-                    (Value::Char(a), Value::String(b)) if *op == BinaryOp::In => {
-                        Some(Value::Bool(b.contains(&a)))
-                    }
-                    (Value::Char(a), Value::Char(b)) => match op {
-                        BinaryOp::Eq => Some(Value::Bool(a == b)),
-                        BinaryOp::Ne => Some(Value::Bool(a != b)),
-                        _ => None,
-                    },
-                    _ => None,
-                }
-            }
-            Expr::Call { callee, args, .. } => {
-                if self.analyse_output
-                    && matches!(callee.unlocated(), Expr::Name(name) if name == "@print" || name == "@println")
-                {
-                    for arg in args {
-                        self.evaluate(arg, env)?;
-                    }
-                    return Some(Value::Void(vec![]));
-                }
-                if matches!(callee.unlocated(), Expr::Name(name) if name == "@target") {
-                    return Some(Value::Tuple(vec![
-                        Value::String(string_parts(crate::target::OS)),
-                        Value::String(string_parts(crate::target::ARCH)),
-                    ]));
-                }
-                if let Expr::Member { object, name } = callee.unlocated()
-                    && let Expr::Name(owner) = object.unlocated()
-                    && let Some(TypeInfo::Enum(_)) = self.checked.types.get(owner)
-                {
-                    return Some(Value::Enum(
-                        owner.clone(),
-                        name.clone(),
-                        args.iter()
-                            .map(|v| self.evaluate(v, env))
-                            .collect::<Option<_>>()?,
-                    ));
-                }
-                let callable = self.evaluate(callee, env)?;
-                let (f, mut scope) = match &callable {
-                    Value::Function(n) => (*self.functions.get(n)?, HashMap::new()),
-                    Value::Closure(key, captures) => {
-                        (*self.lambdas.get(key)?, captures.iter().cloned().collect())
-                    }
-                    _ => return None,
-                };
-                let mut values = vec![];
-                for (p, arg) in f.params.iter().zip(args) {
-                    let value = self.evaluate(arg, env)?;
-                    let value = self.coerce(value, &p.ty)?;
-                    values.push(value.clone());
-                    scope.insert(p.name.clone(), value);
-                }
-                let cacheable =
-                    !callable.contains_cell() && !values.iter().any(Value::contains_cell);
-                let key = (callable, values);
-                if cacheable && let Some(value) = self.memo.get(&key) {
-                    return Some(value.clone());
-                }
-                match self
-                    .block(&f.body, &mut scope)
-                    .or_else(|| self.flow.take())?
-                {
-                    Flow::Next
-                        if f.return_type == Type::void()
-                            || f.return_type == Type::ErrorUnion(Box::new(Type::void())) =>
-                    {
-                        let v = self.coerce(Value::Void(vec![]), &f.return_type)?;
-                        if cacheable && !v.contains_cell() {
-                            self.memo.insert(key, v.clone());
-                        }
-                        Some(v)
-                    }
-                    Flow::Return(v) => {
-                        let v = self.coerce(v, &f.return_type)?;
-                        if cacheable && !v.contains_cell() {
-                            self.memo.insert(key, v.clone());
-                        }
-                        Some(v)
-                    }
-                    Flow::Throw(message) => {
-                        let Type::ErrorUnion(inner) = &f.return_type else {
-                            return None;
-                        };
-                        let value = Value::Failure((**inner).clone(), message);
-                        if cacheable {
-                            self.memo.insert(key, value.clone());
-                        }
-                        Some(value)
-                    }
-                    _ => None,
-                }
-            }
+            _ => None,
+        }
+    }
+    fn branch_value(&mut self, e: &Expr, env: &mut HashMap<String, Value>) -> Option<Value> {
+        match e {
             Expr::If { subject, arms } => {
                 let flow = self.conditional(subject.as_deref(), arms, env, true)?;
                 self.flow_value(flow)
@@ -1681,6 +1389,364 @@ impl<'module> Evaluator<'module> {
                     }
                     self.flow_value(flow?)
                 }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+    fn lambda_value(&mut self, e: &Expr, env: &HashMap<String, Value>) -> Option<Value> {
+        let key = e.id();
+        let captures = self.checked.captures.get(&key)?;
+        let values = captures
+            .iter()
+            .map(|capture| {
+                if capture.mutex {
+                    return None;
+                }
+                if capture.mutable {
+                    return match env.get(&capture.name)? {
+                        value @ Value::Cell(_) => Some((capture.name.clone(), value.clone())),
+                        _ => None,
+                    };
+                }
+                let value = env
+                    .get(&capture.name)
+                    .cloned()
+                    .or_else(|| self.constant_binding(capture.initializer?, &capture.name))?;
+                Some((capture.name.clone(), value))
+            })
+            .collect::<Option<_>>()?;
+        Some(Value::Closure(key, values))
+    }
+    fn embed_value(&mut self, e: &Expr, env: &mut HashMap<String, Value>) -> Option<Value> {
+        let Expr::Embed {
+            path,
+            source_path,
+            span,
+        } = e
+        else {
+            return None;
+        };
+
+        let Value::String(path) = self.evaluate(path, env)? else {
+            return None;
+        };
+        match embedded_bytes(&path.concat(), source_path) {
+            Ok(bytes) => Some(Value::Array(bytes.into_iter().map(Value::Byte).collect())),
+            Err(error) => {
+                self.embed_error = Some(
+                    Diagnostics::one(error.to_string(), span.clone())
+                        .at_source(source_path, span.clone()),
+                );
+                None
+            }
+        }
+    }
+    fn member_value(
+        &mut self,
+        object: &Expr,
+        name: &str,
+        env: &mut HashMap<String, Value>,
+    ) -> Option<Value> {
+        if let Expr::Name(owner) = object.unlocated()
+            && let Some(TypeInfo::Enum(_)) = self.checked.types.get(owner)
+        {
+            return Some(Value::Enum(owner.clone(), name.to_owned(), vec![]));
+        }
+        match self.evaluate(object, env)? {
+            Value::Struct(_, fields) => fields
+                .into_iter()
+                .find(|(field, _)| field == name)
+                .map(|(_, value)| value),
+            Value::Array(values) if name == "len" => Some(Value::Uint(values.len() as u64)),
+            Value::Map(values) if name == "len" => Some(Value::Uint(values.len() as u64)),
+            Value::String(value) if name == "len" => Some(Value::Uint(value.len() as u64)),
+            _ => None,
+        }
+    }
+    fn index_value(
+        &mut self,
+        object: &Expr,
+        index: &Expr,
+        env: &mut HashMap<String, Value>,
+    ) -> Option<Value> {
+        let object = self.evaluate(object, env)?;
+        let index = self.index(index, &object, env)?;
+        if let Value::Map(entries) = object {
+            return entries
+                .into_iter()
+                .find(|(key, _)| key.equals(&index))
+                .map(|(_, value)| value);
+        }
+        let n = match index {
+            Value::Int(n) => usize::try_from(n).ok()?,
+            Value::Uint(n) => usize::try_from(n).ok()?,
+            _ => return None,
+        };
+        match object {
+            Value::Array(values) | Value::Tuple(values) => values.get(n).cloned(),
+            Value::String(value) => value.get(n).cloned().map(Value::Char),
+            _ => None,
+        }
+    }
+    fn cast_value(
+        &mut self,
+        ty: &Type,
+        value: &Expr,
+        env: &mut HashMap<String, Value>,
+    ) -> Option<Value> {
+        let from = self.expr_type(value)?.clone();
+        let value = self.evaluate(value, env)?;
+        if self.base_type(ty) == self.base_type(&from) {
+            self.coerce(value, ty)
+        } else {
+            self.cast(ty, &from, value)
+        }
+    }
+    fn name_value(&mut self, e: &Expr, n: &str, env: &HashMap<String, Value>) -> Option<Value> {
+        if let Some(value) = env.get(n) {
+            return match value {
+                Value::Cell(index) => self.cells.get(*index).cloned(),
+                value => Some(value.clone()),
+            };
+        }
+        if let Some(key) = self.checked.constant_sources.get(&e.id()) {
+            return self.constant_binding((*key)?, n);
+        }
+        self.functions
+            .contains_key(n)
+            .then(|| Value::Function(n.to_owned()))
+    }
+    fn call_value(
+        &mut self,
+        callee: &Expr,
+        args: &[Expr],
+        env: &mut HashMap<String, Value>,
+    ) -> Option<Value> {
+        if self.analyse_output
+            && matches!(callee.unlocated(), Expr::Name(name) if name == "@print" || name == "@println")
+        {
+            for arg in args {
+                self.evaluate(arg, env)?;
+            }
+            return Some(Value::Void(vec![]));
+        }
+        if matches!(callee.unlocated(), Expr::Name(name) if name == "@target") {
+            return Some(Value::Tuple(vec![
+                Value::String(string_parts(crate::target::OS)),
+                Value::String(string_parts(crate::target::ARCH)),
+            ]));
+        }
+        if let Expr::Member { object, name } = callee.unlocated()
+            && let Expr::Name(owner) = object.unlocated()
+            && let Some(TypeInfo::Enum(_)) = self.checked.types.get(owner)
+        {
+            return Some(Value::Enum(
+                owner.clone(),
+                name.clone(),
+                args.iter()
+                    .map(|v| self.evaluate(v, env))
+                    .collect::<Option<_>>()?,
+            ));
+        }
+        let callable = self.evaluate(callee, env)?;
+        let (f, mut scope) = match &callable {
+            Value::Function(n) => (*self.functions.get(n)?, HashMap::new()),
+            Value::Closure(key, captures) => {
+                (*self.lambdas.get(key)?, captures.iter().cloned().collect())
+            }
+            _ => return None,
+        };
+        let mut values = vec![];
+        for (p, arg) in f.params.iter().zip(args) {
+            let value = self.evaluate(arg, env)?;
+            let value = self.coerce(value, &p.ty)?;
+            values.push(value.clone());
+            scope.insert(p.name.clone(), value);
+        }
+        let cacheable = !callable.contains_cell() && !values.iter().any(Value::contains_cell);
+        let key = (callable, values);
+        if cacheable && let Some(value) = self.memo.get(&key) {
+            return Some(value.clone());
+        }
+        match self
+            .block(&f.body, &mut scope)
+            .or_else(|| self.flow.take())?
+        {
+            Flow::Next
+                if f.return_type == Type::void()
+                    || f.return_type == Type::ErrorUnion(Box::new(Type::void())) =>
+            {
+                let v = self.coerce(Value::Void(vec![]), &f.return_type)?;
+                if cacheable && !v.contains_cell() {
+                    self.memo.insert(key, v.clone());
+                }
+                Some(v)
+            }
+            Flow::Return(v) => {
+                let v = self.coerce(v, &f.return_type)?;
+                if cacheable && !v.contains_cell() {
+                    self.memo.insert(key, v.clone());
+                }
+                Some(v)
+            }
+            Flow::Throw(message) => {
+                let Type::ErrorUnion(inner) = &f.return_type else {
+                    return None;
+                };
+                let value = Value::Failure((**inner).clone(), message);
+                if cacheable {
+                    self.memo.insert(key, value.clone());
+                }
+                Some(value)
+            }
+            _ => None,
+        }
+    }
+    fn unary_value(
+        &mut self,
+        op: UnaryOp,
+        value: &Expr,
+        env: &mut HashMap<String, Value>,
+    ) -> Option<Value> {
+        match (op, self.evaluate(value, env)?) {
+            (UnaryOp::Neg, Value::Int(v)) => {
+                let result = v.checked_neg();
+                if result.is_none() {
+                    self.arithmetic_failure = true;
+                }
+                result.map(Value::Int)
+            }
+            (UnaryOp::Neg, Value::Float(v)) => Some(Value::Float((-f64::from_bits(v)).to_bits())),
+            (UnaryOp::Not, Value::Bool(b)) => Some(Value::Bool(!b)),
+            (UnaryOp::BitNot, Value::Int(v)) => Some(Value::Int(!v)),
+            (UnaryOp::BitNot, Value::Uint(v)) => Some(Value::Uint(!v)),
+            (UnaryOp::BitNot, Value::Byte(v)) => Some(Value::Byte(!v)),
+            _ => None,
+        }
+    }
+    fn signed(&mut self, a: i64, b: i64, op: BinaryOp) -> Option<Value> {
+        use BinaryOp::{
+            Add, BitAnd, BitOr, BitXor, Div, Eq, Ge, Gt, Le, Lt, Mod, Mul, Ne, Pow, Shl, Shr, Sub,
+        };
+        let result = match op {
+            Add => a.checked_add(b).map(Value::Int),
+            Sub => a.checked_sub(b).map(Value::Int),
+            Mul => a.checked_mul(b).map(Value::Int),
+            Div => a.checked_div(b).map(Value::Int),
+            Mod => a.checked_rem(b).map(Value::Int),
+            Pow if (-1..=1).contains(&a) && b >= 0 => Some(Value::Int(if b == 0 {
+                1
+            } else if a == -1 {
+                if b % 2 == 0 { 1 } else { -1 }
+            } else {
+                a
+            })),
+            Pow => u32::try_from(b)
+                .ok()
+                .and_then(|b| a.checked_pow(b))
+                .map(Value::Int),
+            BitAnd => Some(Value::Int(a & b)),
+            BitOr => Some(Value::Int(a | b)),
+            BitXor => Some(Value::Int(a ^ b)),
+            Shl => u32::try_from(b)
+                .ok()
+                .filter(|b| *b < 64)
+                .and_then(|b| i64::try_from(i128::from(a) << b).ok())
+                .map(Value::Int),
+            Shr => u32::try_from(b)
+                .ok()
+                .and_then(|b| a.checked_shr(b))
+                .map(Value::Int),
+            Eq => Some(Value::Bool(a == b)),
+            Ne => Some(Value::Bool(a != b)),
+            Lt => Some(Value::Bool(a < b)),
+            Le => Some(Value::Bool(a <= b)),
+            Gt => Some(Value::Bool(a > b)),
+            Ge => Some(Value::Bool(a >= b)),
+            _ => None,
+        };
+        if result.is_none() && matches!(op, Add | Sub | Mul | Div | Mod | Pow | Shl | Shr) {
+            self.arithmetic_failure = true;
+        }
+        result
+    }
+    fn binary_value(
+        &mut self,
+        left: &Expr,
+        op: BinaryOp,
+        right: &Expr,
+        env: &mut HashMap<String, Value>,
+    ) -> Option<Value> {
+        let left = self.evaluate(left, env)?;
+        if op == BinaryOp::And && left == Value::Bool(false) {
+            return Some(left);
+        }
+        if op == BinaryOp::Or && left == Value::Bool(true) {
+            return Some(left);
+        }
+        let right = self.evaluate(right, env)?;
+        if matches!(op, BinaryOp::Eq | BinaryOp::Ne) && !matches!(left, Value::Float(_)) {
+            let equal = left.equals(&right);
+            return Some(Value::Bool(if op == BinaryOp::Eq { equal } else { !equal }));
+        }
+        self.binary_operands(left, op, right)
+    }
+    fn binary_operands(&mut self, left: Value, op: BinaryOp, right: Value) -> Option<Value> {
+        match (left, right) {
+            (Value::Map(mut a), Value::Map(b)) if op == BinaryOp::Concat => {
+                for (key, value) in b {
+                    if let Some((_, existing)) = a.iter_mut().find(|(other, _)| other.equals(&key))
+                    {
+                        *existing = value;
+                    } else {
+                        a.push((key, value));
+                    }
+                }
+                Some(Value::Map(a))
+            }
+            (Value::Array(mut a), Value::Array(b)) if op == BinaryOp::Concat => {
+                a.extend(b);
+                Some(Value::Array(a))
+            }
+            (value, Value::Array(values)) if op == BinaryOp::In => Some(Value::Bool(
+                values.iter().any(|element| element.equals(&value)),
+            )),
+            (value, Value::Map(values)) if op == BinaryOp::In => Some(Value::Bool(
+                values.iter().any(|(key, _)| key.equals(&value)),
+            )),
+            (Value::Int(a), Value::Int(b)) => self.signed(a, b, op),
+            (Value::Uint(a), Value::Uint(b)) => self.unsigned(a, b, op, false),
+            (Value::Byte(a), Value::Byte(b)) => self.unsigned(a.into(), b.into(), op, true),
+            (Value::Float(a), Value::Float(b)) => {
+                Self::float(f64::from_bits(a), f64::from_bits(b), op)
+            }
+            (Value::Bool(a), Value::Bool(b)) => match op {
+                BinaryOp::And => Some(Value::Bool(a && b)),
+                BinaryOp::Or => Some(Value::Bool(a || b)),
+                BinaryOp::Eq => Some(Value::Bool(a == b)),
+                BinaryOp::Ne => Some(Value::Bool(a != b)),
+                _ => None,
+            },
+            (Value::String(a), Value::String(b)) => match op {
+                BinaryOp::Concat => {
+                    let mut a = a;
+                    a.extend(b);
+                    Some(Value::String(a))
+                }
+                BinaryOp::Eq => Some(Value::Bool(a == b)),
+                BinaryOp::Ne => Some(Value::Bool(a != b)),
+                BinaryOp::In => Some(Value::Bool(
+                    a.is_empty() || b.windows(a.len()).any(|part| part == a),
+                )),
+                _ => None,
+            },
+            (Value::Char(a), Value::String(b)) if op == BinaryOp::In => {
+                Some(Value::Bool(b.contains(&a)))
+            }
+            (Value::Char(a), Value::Char(b)) => match op {
+                BinaryOp::Eq => Some(Value::Bool(a == b)),
+                BinaryOp::Ne => Some(Value::Bool(a != b)),
                 _ => None,
             },
             _ => None,
@@ -1916,8 +1982,6 @@ impl Evaluator<'_> {
     ) -> Option<Flow> {
         self.statements(&b.statements, env, valued)
     }
-    // Statement dispatch shares flow and scope restoration across all variants.
-    #[allow(clippy::too_many_lines)]
     fn statements(
         &mut self,
         statements: &[Stmt],
@@ -1933,22 +1997,7 @@ impl Evaluator<'_> {
                     self.declaration(v, env, &mut declared)?;
                     Flow::Next
                 }
-                Stmt::Assign { target, value } => {
-                    let v = self.evaluate(value, env)?;
-                    let mut path = Vec::new();
-                    let name = self.place(target, env, &mut path)?;
-                    if name != "_" {
-                        let ty = self.checked.expression_types.get(&target.id())?;
-                        let v = self.coerce(v, ty)?;
-                        let binding = env.get_mut(&name)?;
-                        let storage = match binding {
-                            Value::Cell(index) => self.cells.get_mut(*index)?,
-                            value => value,
-                        };
-                        assign(storage, &path, v)?;
-                    }
-                    Flow::Next
-                }
+                Stmt::Assign { target, value } => self.assignment(target, value, env)?,
                 Stmt::Return(Some(e)) => Flow::Return(self.evaluate(e, env)?),
                 Stmt::Return(None) => Flow::Return(Value::Void(vec![])),
                 Stmt::Throw(e) => match self.evaluate(e, env)? {
@@ -1977,67 +2026,13 @@ impl Evaluator<'_> {
                     condition,
                     body,
                     label,
-                } => {
-                    if crate::flow::infinite_loop(
-                        condition,
-                        body,
-                        label.as_deref(),
-                        &self.checked.expression_types,
-                    ) {
-                        return None;
-                    }
-                    loop {
-                        if self.evaluate(condition, env)? != Value::Bool(true) {
-                            break Flow::Next;
-                        }
-                        match self.block(body, env)? {
-                            Flow::Break(target) if target.is_none() || &target == label => {
-                                break Flow::Next;
-                            }
-                            Flow::Continue(target) if target.is_none() || &target == label => {}
-                            Flow::Next => {}
-                            flow => break flow,
-                        }
-                    }
-                }
+                } => self.while_loop(condition, body, label.as_deref(), env)?,
                 Stmt::For {
                     name,
                     iterable,
                     body,
                     label,
-                } => {
-                    let traversal = match self.evaluate(iterable, env)? {
-                        Value::Array(elements) => (0..elements.len())
-                            .map(|i| Value::Uint(i as u64))
-                            .collect::<Vec<_>>(),
-                        Value::Map(entries) => entries.into_iter().map(|(key, _)| key).collect(),
-                        Value::String(text) => {
-                            (0..text.len()).map(|i| Value::Uint(i as u64)).collect()
-                        }
-                        _ => return None,
-                    };
-                    let previous = env.remove(name);
-                    let mut flow = Flow::Next;
-                    for key in traversal {
-                        *self.fuel = self.fuel.checked_sub(1)?;
-                        env.insert(name.clone(), key);
-                        match self.block(body, env)? {
-                            Flow::Break(target) if target.is_none() || &target == label => break,
-                            Flow::Continue(target) if target.is_none() || &target == label => {}
-                            Flow::Next => {}
-                            result => {
-                                flow = result;
-                                break;
-                            }
-                        }
-                    }
-                    if let Some(previous) = previous {
-                        env.insert(name.clone(), previous);
-                    } else {
-                        env.remove(name);
-                    }
-                    flow
-                }
+                } => self.for_loop(name, iterable, body, label.as_deref(), env)?,
                 Stmt::LabeledIf { label, value } => {
                     let Expr::If { subject, arms } = value.unlocated() else {
                         return None;
@@ -2066,5 +2061,88 @@ impl Evaluator<'_> {
             }
         }
         Some(result)
+    }
+    fn assignment(
+        &mut self,
+        target: &Expr,
+        value: &Expr,
+        env: &mut HashMap<String, Value>,
+    ) -> Option<Flow> {
+        let v = self.evaluate(value, env)?;
+        let mut path = Vec::new();
+        let name = self.place(target, env, &mut path)?;
+        if name != "_" {
+            let ty = self.checked.expression_types.get(&target.id())?;
+            let v = self.coerce(v, ty)?;
+            let binding = env.get_mut(&name)?;
+            let storage = match binding {
+                Value::Cell(index) => self.cells.get_mut(*index)?,
+                value => value,
+            };
+            assign(storage, &path, v)?;
+        }
+        Some(Flow::Next)
+    }
+    fn while_loop(
+        &mut self,
+        condition: &Expr,
+        body: &Block,
+        label: Option<&str>,
+        env: &mut HashMap<String, Value>,
+    ) -> Option<Flow> {
+        if crate::flow::infinite_loop(condition, body, label, &self.checked.expression_types) {
+            return None;
+        }
+        Some(loop {
+            if self.evaluate(condition, env)? != Value::Bool(true) {
+                break Flow::Next;
+            }
+            match self.block(body, env)? {
+                Flow::Break(target) if target.is_none() || target.as_deref() == label => {
+                    break Flow::Next;
+                }
+                Flow::Continue(target) if target.is_none() || target.as_deref() == label => {}
+                Flow::Next => {}
+                flow => break flow,
+            }
+        })
+    }
+    fn for_loop(
+        &mut self,
+        name: &str,
+        iterable: &Expr,
+        body: &Block,
+        label: Option<&str>,
+        env: &mut HashMap<String, Value>,
+    ) -> Option<Flow> {
+        let traversal = match self.evaluate(iterable, env)? {
+            Value::Array(elements) => (0..elements.len())
+                .map(|i| Value::Uint(i as u64))
+                .collect::<Vec<_>>(),
+            Value::Map(entries) => entries.into_iter().map(|(key, _)| key).collect(),
+            Value::String(text) => (0..text.len()).map(|i| Value::Uint(i as u64)).collect(),
+            _ => return None,
+        };
+        let previous = env.remove(name);
+        let mut flow = Flow::Next;
+        for key in traversal {
+            *self.fuel = self.fuel.checked_sub(1)?;
+            env.insert(name.to_owned(), key);
+            match self.block(body, env)? {
+                Flow::Break(target) if target.is_none() || target.as_deref() == label => break,
+                Flow::Continue(target) if target.is_none() || target.as_deref() == label => {}
+                Flow::Next => {}
+                result => {
+                    flow = result;
+                    break;
+                }
+            }
+        }
+        if let Some(previous) = previous {
+            env.insert(name.to_owned(), previous);
+        } else {
+            env.remove(name);
+        }
+        Some(flow)
     }
 }
