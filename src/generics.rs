@@ -10,8 +10,37 @@ use std::collections::{HashMap, HashSet};
 /// # Errors
 /// Returns diagnostics for duplicate declarations, invalid generic applications,
 /// or exceeded function/type specialization limits.
-#[allow(clippy::too_many_lines)] // Keep the ordered specialization phases together.
 pub fn specialize(mut module: Module) -> Result<Module, Diagnostics> {
+    check_declarations(&module)?;
+    let mut pass = Pass::new(&module);
+    module
+        .items
+        .retain(|i| !matches!(i, Item::Function(f) if !f.generics.is_empty()));
+    module.items.retain(|i| {
+        !matches!(i, Item::Struct(s) if !s.generics.is_empty())
+            && !matches!(i, Item::Enum(e) if !e.generics.is_empty())
+    });
+    for item in &mut module.items {
+        pass.item_types(item, &HashMap::new())?;
+    }
+    pass.register_declarations(&module);
+    for item in &mut module.items {
+        match item {
+            Item::Function(f) => pass.function_body(f, &HashMap::new())?,
+            Item::Global(v) => pass.variable(v, &HashMap::new())?,
+            Item::Statement(s) => pass.statement(s, &HashMap::new())?,
+            Item::Test { body, .. } => pass.block(body, &HashMap::new())?,
+            _ => {}
+        }
+    }
+    module
+        .items
+        .extend(pass.generated.into_iter().map(Item::Function));
+    module.items.extend(pass.generated_types);
+    Ok(module)
+}
+
+fn check_declarations(module: &Module) -> Result<(), Diagnostics> {
     // Check before removing templates: collection into a map would otherwise
     // silently overwrite duplicate generic declarations, even unused ones.
     let mut names: HashSet<&str> = BUILTIN_TYPES.into_iter().collect();
@@ -35,96 +64,9 @@ pub fn specialize(mut module: Module) -> Result<Module, Diagnostics> {
             }
         }
     }
-    let templates = module
-        .items
-        .iter()
-        .filter_map(|item| {
-            if let Item::Function(f) = item {
-                if f.generics.is_empty() {
-                    None
-                } else {
-                    Some((f.name.clone(), f.clone()))
-                }
-            } else {
-                None
-            }
-        })
-        .collect();
-    let mut pass = Pass {
-        templates,
-        instances: HashMap::new(),
-        generated: vec![],
-        type_templates: module
-            .items
-            .iter()
-            .filter_map(|item| match item {
-                Item::Struct(s) if !s.generics.is_empty() => Some((s.name.clone(), item.clone())),
-                Item::Enum(e) if !e.generics.is_empty() => Some((e.name.clone(), item.clone())),
-                _ => None,
-            })
-            .collect(),
-        type_instances: HashMap::new(),
-        generated_types: vec![],
-        values: HashMap::new(),
-        declarations: HashMap::new(),
-        return_type: None,
-    };
-    module
-        .items
-        .retain(|i| !matches!(i, Item::Function(f) if !f.generics.is_empty()));
-    module.items.retain(|i| {
-        !matches!(i, Item::Struct(s) if !s.generics.is_empty())
-            && !matches!(i, Item::Enum(e) if !e.generics.is_empty())
-    });
-    for item in &mut module.items {
-        pass.item_types(item, &HashMap::new())?;
-    }
-    for item in &module.items {
-        match item {
-            Item::Function(f) => {
-                pass.values.insert(
-                    f.name.clone(),
-                    Type::Function(
-                        f.params.iter().map(|p| p.ty.clone()).collect(),
-                        Box::new(f.return_type.clone()),
-                    ),
-                );
-            }
-            Item::Extern { functions, .. } => {
-                for f in functions {
-                    pass.values.insert(
-                        f.name.clone(),
-                        Type::Function(
-                            f.params.iter().map(|p| p.ty.clone()).collect(),
-                            Box::new(f.return_type.clone()),
-                        ),
-                    );
-                }
-            }
-            Item::Struct(s) => {
-                pass.declarations.insert(s.name.clone(), item.clone());
-            }
-            Item::Enum(e) => {
-                pass.declarations.insert(e.name.clone(), item.clone());
-            }
-            _ => {}
-        }
-    }
-    for item in &mut module.items {
-        match item {
-            Item::Function(f) => pass.function_body(f, &HashMap::new())?,
-            Item::Global(v) => pass.variable(v, &HashMap::new())?,
-            Item::Statement(s) => pass.statement(s, &HashMap::new())?,
-            Item::Test { body, .. } => pass.block(body, &HashMap::new())?,
-            _ => {}
-        }
-    }
-    module
-        .items
-        .extend(pass.generated.into_iter().map(Item::Function));
-    module.items.extend(pass.generated_types);
-    Ok(module)
+    Ok(())
 }
+
 struct Pass {
     templates: HashMap<String, Function>,
     instances: HashMap<(String, Vec<Type>), String>,
@@ -135,6 +77,81 @@ struct Pass {
     values: HashMap<String, Type>,
     declarations: HashMap<String, Item>,
     return_type: Option<Type>,
+}
+
+impl Pass {
+    fn new(module: &Module) -> Self {
+        let templates = module
+            .items
+            .iter()
+            .filter_map(|item| {
+                if let Item::Function(f) = item {
+                    if f.generics.is_empty() {
+                        None
+                    } else {
+                        Some((f.name.clone(), f.clone()))
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect();
+        Self {
+            templates,
+            instances: HashMap::new(),
+            generated: vec![],
+            type_templates: module
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    Item::Struct(s) if !s.generics.is_empty() => {
+                        Some((s.name.clone(), item.clone()))
+                    }
+                    Item::Enum(e) if !e.generics.is_empty() => Some((e.name.clone(), item.clone())),
+                    _ => None,
+                })
+                .collect(),
+            type_instances: HashMap::new(),
+            generated_types: vec![],
+            values: HashMap::new(),
+            declarations: HashMap::new(),
+            return_type: None,
+        }
+    }
+
+    fn register_declarations(&mut self, module: &Module) {
+        for item in &module.items {
+            match item {
+                Item::Function(f) => {
+                    self.values.insert(
+                        f.name.clone(),
+                        Type::Function(
+                            f.params.iter().map(|p| p.ty.clone()).collect(),
+                            Box::new(f.return_type.clone()),
+                        ),
+                    );
+                }
+                Item::Extern { functions, .. } => {
+                    for f in functions {
+                        self.values.insert(
+                            f.name.clone(),
+                            Type::Function(
+                                f.params.iter().map(|p| p.ty.clone()).collect(),
+                                Box::new(f.return_type.clone()),
+                            ),
+                        );
+                    }
+                }
+                Item::Struct(s) => {
+                    self.declarations.insert(s.name.clone(), item.clone());
+                }
+                Item::Enum(e) => {
+                    self.declarations.insert(e.name.clone(), item.clone());
+                }
+                _ => {}
+            }
+        }
+    }
 }
 pub(crate) fn substitute(ty: &mut Type, bindings: &HashMap<String, Type>) {
     match ty {
@@ -574,7 +591,81 @@ impl Pass {
         }
         Ok(())
     }
-    #[allow(clippy::too_many_lines)] // Keep expression variants in one specialization dispatch.
+
+    fn call(
+        &mut self,
+        callee: &mut Expr,
+        args: &mut [Expr],
+        generics: &mut Vec<Type>,
+        b: &HashMap<String, Type>,
+    ) -> Result<(), Diagnostics> {
+        for t in generics.iter_mut() {
+            self.ty(t, b)?;
+        }
+        if !generics.is_empty() {
+            let Expr::Name(name) = callee.unlocated() else {
+                return Err(Diagnostics::one(
+                    "generic call requires a named function",
+                    0..0,
+                ));
+            };
+            let name = self.instance(name, generics)?;
+            *callee = Expr::Name(name);
+            generics.clear();
+        } else if let Expr::Name(name) = callee.unlocated()
+            && self.templates.contains_key(name)
+        {
+            return Err(Diagnostics::one(
+                format!("generic function `{name}` requires explicit type arguments"),
+                0..0,
+            ));
+        }
+        if let Some(Type::Function(params, _)) = self.expression_type(callee) {
+            for (arg, ty) in args.iter_mut().zip(params) {
+                self.hint(arg, &ty);
+            }
+        }
+        self.expr(callee, b)?;
+        for arg in args {
+            self.expr(arg, b)?;
+        }
+        Ok(())
+    }
+
+    fn conditional(
+        &mut self,
+        subject: Option<&mut Expr>,
+        arms: &mut [(Vec<Pattern>, Block)],
+        b: &HashMap<String, Type>,
+    ) -> Result<(), Diagnostics> {
+        let subject_type = subject.as_deref().and_then(|s| self.expression_type(s));
+        if let Some(s) = subject {
+            self.expr(s, b)?;
+        }
+        for (patterns, body) in arms {
+            for p in patterns {
+                if let Some(Type::Named(instance, _)) = &subject_type
+                    && let Pattern::Variant { name, .. } = p
+                    && let Some((owner, variant)) = name.rsplit_once('.')
+                    && self
+                        .type_instances
+                        .iter()
+                        .any(|((base, _), n)| base == owner && n == instance)
+                {
+                    *name = format!("{instance}.{variant}");
+                }
+                if let Pattern::Literal(e) = p {
+                    if let Some(t) = &subject_type {
+                        self.hint(e, t);
+                    }
+                    self.expr(e, b)?;
+                }
+            }
+            self.block(body, b)?;
+        }
+        Ok(())
+    }
+
     fn expr(&mut self, e: &mut Expr, b: &HashMap<String, Type>) -> Result<(), Diagnostics> {
         if let Expr::Located(value, location) = e {
             return self
@@ -593,38 +684,7 @@ impl Pass {
                 callee,
                 args,
                 generics,
-            } => {
-                for t in generics.iter_mut() {
-                    self.ty(t, b)?;
-                }
-                if !generics.is_empty() {
-                    let Expr::Name(name) = callee.unlocated() else {
-                        return Err(Diagnostics::one(
-                            "generic call requires a named function",
-                            0..0,
-                        ));
-                    };
-                    let name = self.instance(name, generics)?;
-                    **callee = Expr::Name(name);
-                    generics.clear();
-                } else if let Expr::Name(name) = callee.unlocated()
-                    && self.templates.contains_key(name)
-                {
-                    return Err(Diagnostics::one(
-                        format!("generic function `{name}` requires explicit type arguments"),
-                        0..0,
-                    ));
-                }
-                if let Some(Type::Function(params, _)) = self.expression_type(callee) {
-                    for (arg, ty) in args.iter_mut().zip(params) {
-                        self.hint(arg, &ty);
-                    }
-                }
-                self.expr(callee, b)?;
-                for arg in args {
-                    self.expr(arg, b)?;
-                }
-            }
+            } => self.call(callee, args, generics, b)?,
             Expr::Cast { ty, value, .. } => {
                 let constructor = matches!((&*ty, value.unlocated()), (Type::Named(n, args), Expr::StructInit { name, .. }) if n == name && !args.is_empty());
                 self.ty(ty, b)?;
@@ -678,33 +738,7 @@ impl Pass {
                     self.expr(v, b)?;
                 }
             }
-            Expr::If { subject, arms } => {
-                let subject_type = subject.as_ref().and_then(|s| self.expression_type(s));
-                if let Some(s) = subject {
-                    self.expr(s, b)?;
-                }
-                for (patterns, body) in arms {
-                    for p in patterns {
-                        if let Some(Type::Named(instance, _)) = &subject_type
-                            && let Pattern::Variant { name, .. } = p
-                            && let Some((owner, variant)) = name.rsplit_once('.')
-                            && self
-                                .type_instances
-                                .iter()
-                                .any(|((base, _), n)| base == owner && n == instance)
-                        {
-                            *name = format!("{instance}.{variant}");
-                        }
-                        if let Pattern::Literal(e) = p {
-                            if let Some(t) = &subject_type {
-                                self.hint(e, t);
-                            }
-                            self.expr(e, b)?;
-                        }
-                    }
-                    self.block(body, b)?;
-                }
-            }
+            Expr::If { subject, arms } => self.conditional(subject.as_deref_mut(), arms, b)?,
             Expr::Else { value, fallback } => {
                 self.expr(value, b)?;
                 self.block(fallback, b)?;

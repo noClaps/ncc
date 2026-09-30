@@ -357,83 +357,11 @@ impl Checker {
     fn item(&mut self, item: &Item) -> Result<(), Diagnostics> {
         self.item_inner(item).map_err(|error| at_item(error, item))
     }
-    #[allow(clippy::too_many_lines)] // Keep declaration validation variants in one dispatch.
     fn item_inner(&mut self, item: &Item) -> Result<(), Diagnostics> {
         match item {
             Item::Extern {
                 path, functions, ..
-            } => {
-                // NC accepts exactly the lowercase .c suffix, not .C or other extensions.
-                #[allow(clippy::case_sensitive_file_extension_comparisons)]
-                if !path.ends_with(".c") {
-                    return Checker::fail("external implementations must be C source files (.c)");
-                }
-                for function in functions {
-                    if function.symbol.is_empty()
-                        || !function.symbol.chars().enumerate().all(|(i, c)| {
-                            c == '_' || c.is_ascii_alphabetic() || (i > 0 && c.is_ascii_digit())
-                        })
-                    {
-                        return Checker::fail("external symbol must be a C identifier");
-                    }
-                    if matches!(
-                        function.symbol.as_str(),
-                        "auto"
-                            | "break"
-                            | "case"
-                            | "char"
-                            | "const"
-                            | "continue"
-                            | "default"
-                            | "do"
-                            | "double"
-                            | "else"
-                            | "enum"
-                            | "extern"
-                            | "float"
-                            | "for"
-                            | "goto"
-                            | "if"
-                            | "inline"
-                            | "int"
-                            | "long"
-                            | "register"
-                            | "restrict"
-                            | "return"
-                            | "short"
-                            | "signed"
-                            | "sizeof"
-                            | "static"
-                            | "struct"
-                            | "switch"
-                            | "typedef"
-                            | "union"
-                            | "unsigned"
-                            | "void"
-                            | "volatile"
-                            | "while"
-                            | "_Alignas"
-                            | "_Alignof"
-                            | "_Atomic"
-                            | "_Bool"
-                            | "_Complex"
-                            | "_Generic"
-                            | "_Imaginary"
-                            | "_Noreturn"
-                            | "_Static_assert"
-                            | "_Thread_local"
-                    ) {
-                        return Checker::fail("external symbol cannot be a C keyword");
-                    }
-                    self.validate_type(&function.return_type)?;
-                    if self.contains_future(&function.return_type) {
-                        return Checker::fail("futures cannot be returned from external functions");
-                    }
-                    for param in &function.params {
-                        self.validate_type(&param.ty)?;
-                    }
-                }
-            }
+            } => self.check_extern(path, functions)?,
             Item::Struct(x) => self.with_generics(&x.generics, |this| {
                 for f in &x.fields {
                     this.validate_type(&f.ty)?;
@@ -504,6 +432,84 @@ impl Checker {
                 self.pop();
             }
             Item::Import { .. } => {}
+        }
+        Ok(())
+    }
+    fn check_extern(&self, path: &str, functions: &[FunctionDecl]) -> Result<(), Diagnostics> {
+        // NC accepts exactly the lowercase .c suffix, not .C or other extensions.
+        #[allow(clippy::case_sensitive_file_extension_comparisons)]
+        if !path.ends_with(".c") {
+            return Checker::fail("external implementations must be C source files (.c)");
+        }
+        for function in functions {
+            Self::check_external_symbol(&function.symbol)?;
+            self.validate_type(&function.return_type)?;
+            if self.contains_future(&function.return_type) {
+                return Checker::fail("futures cannot be returned from external functions");
+            }
+            for param in &function.params {
+                self.validate_type(&param.ty)?;
+            }
+        }
+        Ok(())
+    }
+    fn check_external_symbol(symbol: &str) -> Result<(), Diagnostics> {
+        if symbol.is_empty()
+            || !symbol
+                .chars()
+                .enumerate()
+                .all(|(i, c)| c == '_' || c.is_ascii_alphabetic() || (i > 0 && c.is_ascii_digit()))
+        {
+            return Checker::fail("external symbol must be a C identifier");
+        }
+        if matches!(
+            symbol,
+            "auto"
+                | "break"
+                | "case"
+                | "char"
+                | "const"
+                | "continue"
+                | "default"
+                | "do"
+                | "double"
+                | "else"
+                | "enum"
+                | "extern"
+                | "float"
+                | "for"
+                | "goto"
+                | "if"
+                | "inline"
+                | "int"
+                | "long"
+                | "register"
+                | "restrict"
+                | "return"
+                | "short"
+                | "signed"
+                | "sizeof"
+                | "static"
+                | "struct"
+                | "switch"
+                | "typedef"
+                | "union"
+                | "unsigned"
+                | "void"
+                | "volatile"
+                | "while"
+                | "_Alignas"
+                | "_Alignof"
+                | "_Atomic"
+                | "_Bool"
+                | "_Complex"
+                | "_Generic"
+                | "_Imaginary"
+                | "_Noreturn"
+                | "_Static_assert"
+                | "_Thread_local"
+        ) {
+            return Checker::fail("external symbol cannot be a C keyword");
         }
         Ok(())
     }
@@ -621,7 +627,6 @@ impl Checker {
             None => error,
         })
     }
-    #[allow(clippy::too_many_lines)] // Keep statement checking and control-flow state in one dispatch.
     fn stmt_inner(&mut self, s: &Stmt) -> Result<(), Diagnostics> {
         match s {
             Stmt::Located(statement, _) => self.stmt(statement)?,
@@ -663,24 +668,7 @@ impl Checker {
                     return Checker::fail("assertion requires bool");
                 }
             }
-            Stmt::Return(x) => {
-                let expected = self
-                    .function_return
-                    .clone()
-                    .ok_or_else(|| Diagnostics::one("return outside function", 0..0))?;
-                if let Some(value) = x {
-                    self.expected(value, &expected)?;
-                } else {
-                    Checker::assignable(
-                        if let Type::ErrorUnion(inner) = &expected {
-                            inner
-                        } else {
-                            &expected
-                        },
-                        &Type::void(),
-                    )?;
-                }
-            }
+            Stmt::Return(value) => self.check_return(value.as_ref())?,
             Stmt::Throw(x) => {
                 if self
                     .function_return
@@ -700,19 +688,7 @@ impl Checker {
                 body,
                 label,
             } => {
-                let iter = self.expr(iterable)?;
-                let key = match iter {
-                    Type::Array(_, _) => named("uint"),
-                    Type::Map(k, _) => *k,
-                    Type::Named(n, _) if n == "str" => named("uint"),
-                    _ => return Checker::fail("for loop expects an array, map, or str"),
-                };
-                self.push();
-                self.bind(name, key, false);
-                self.loops.push((label.clone(), true, true));
-                self.block(body)?;
-                self.loops.pop();
-                self.pop();
+                self.check_for(name, iterable, body, label.as_deref())?;
             }
             Stmt::While {
                 condition,
@@ -725,40 +701,7 @@ impl Checker {
                 self.block(body)?;
                 self.loops.pop();
             }
-            Stmt::Lock { name, body, label } => {
-                if let Some((i, binding)) = self
-                    .scopes
-                    .iter()
-                    .enumerate()
-                    .rev()
-                    .find_map(|(i, s)| s.get(name).map(|v| (i, v.clone())))
-                {
-                    for (depth, captures) in &mut self.capture_frames {
-                        if i < *depth {
-                            captures.insert(name.clone(), binding.clone());
-                        }
-                    }
-                }
-                let b = self
-                    .lookup(name)
-                    .ok_or_else(|| Diagnostics::one(format!("unknown variable `{name}`"), 0..0))?
-                    .clone();
-                if !b.mutex {
-                    return Checker::fail("lock requires a mutex variable");
-                }
-                self.push();
-                self.bind(name, b.ty, true);
-                self.scopes
-                    .last_mut()
-                    .unwrap()
-                    .get_mut(name)
-                    .unwrap()
-                    .locked = true;
-                self.loops.push((label.clone(), false, true));
-                self.block(body)?;
-                self.loops.pop();
-                self.pop();
-            }
+            Stmt::Lock { name, body, label } => self.check_lock(name, body, label.as_deref())?,
             Stmt::Break(Some(value), _) => {
                 let Some(expected) = self.value_targets.last().cloned() else {
                     return Checker::fail(
@@ -768,23 +711,105 @@ impl Checker {
                 self.expected(value, &expected)?;
             }
             Stmt::Break(_, label) | Stmt::Continue(label) => {
-                let continuing = matches!(s, Stmt::Continue(_));
-                if !self
-                    .loops
-                    .iter()
-                    .rev()
-                    .any(|(name, can_continue, can_break)| {
-                        label
-                            .as_ref()
-                            .is_none_or(|label| name.as_ref() == Some(label))
-                            && (!continuing || *can_continue)
-                            && (label.is_some() || continuing || *can_break)
-                    })
-                {
-                    return Checker::fail("no valid target for break or continue");
+                self.check_jump(label.as_deref(), matches!(s, Stmt::Continue(_)))?;
+            }
+        }
+        Ok(())
+    }
+    fn check_jump(&self, label: Option<&str>, continuing: bool) -> Result<(), Diagnostics> {
+        if !self
+            .loops
+            .iter()
+            .rev()
+            .any(|(name, can_continue, can_break)| {
+                label.is_none_or(|label| name.as_deref() == Some(label))
+                    && (!continuing || *can_continue)
+                    && (label.is_some() || continuing || *can_break)
+            })
+        {
+            return Checker::fail("no valid target for break or continue");
+        }
+        Ok(())
+    }
+    fn check_return(&mut self, value: Option<&Expr>) -> Result<(), Diagnostics> {
+        let expected = self
+            .function_return
+            .clone()
+            .ok_or_else(|| Diagnostics::one("return outside function", 0..0))?;
+        if let Some(value) = value {
+            self.expected(value, &expected)?;
+        } else {
+            Checker::assignable(
+                if let Type::ErrorUnion(inner) = &expected {
+                    inner
+                } else {
+                    &expected
+                },
+                &Type::void(),
+            )?;
+        }
+        Ok(())
+    }
+    fn check_for(
+        &mut self,
+        name: &str,
+        iterable: &Expr,
+        body: &Block,
+        label: Option<&str>,
+    ) -> Result<(), Diagnostics> {
+        let iter = self.expr(iterable)?;
+        let key = match iter {
+            Type::Array(_, _) => named("uint"),
+            Type::Map(k, _) => *k,
+            Type::Named(n, _) if n == "str" => named("uint"),
+            _ => return Checker::fail("for loop expects an array, map, or str"),
+        };
+        self.push();
+        self.bind(name, key, false);
+        self.loops.push((label.map(str::to_owned), true, true));
+        self.block(body)?;
+        self.loops.pop();
+        self.pop();
+        Ok(())
+    }
+    fn check_lock(
+        &mut self,
+        name: &str,
+        body: &Block,
+        label: Option<&str>,
+    ) -> Result<(), Diagnostics> {
+        if let Some((i, binding)) = self
+            .scopes
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(i, s)| s.get(name).map(|v| (i, v.clone())))
+        {
+            for (depth, captures) in &mut self.capture_frames {
+                if i < *depth {
+                    captures.insert(name.to_owned(), binding.clone());
                 }
             }
         }
+        let b = self
+            .lookup(name)
+            .ok_or_else(|| Diagnostics::one(format!("unknown variable `{name}`"), 0..0))?
+            .clone();
+        if !b.mutex {
+            return Checker::fail("lock requires a mutex variable");
+        }
+        self.push();
+        self.bind(name, b.ty, true);
+        self.scopes
+            .last_mut()
+            .unwrap()
+            .get_mut(name)
+            .unwrap()
+            .locked = true;
+        self.loops.push((label.map(str::to_owned), false, true));
+        self.block(body)?;
+        self.loops.pop();
+        self.pop();
         Ok(())
     }
     fn lvalue(&mut self, e: &Expr) -> Result<Type, Diagnostics> {
@@ -864,7 +889,6 @@ impl Checker {
         }
         self.expected(&v.value, &v.ty)
     }
-    #[allow(clippy::too_many_lines)] // Keep expected-type rules for expression variants together.
     fn expected(&mut self, e: &Expr, ty: &Type) -> Result<(), Diagnostics> {
         if let Expr::Located(value, location) = e {
             if matches!(value.unlocated(), Expr::Async(_)) {
@@ -942,6 +966,11 @@ impl Checker {
             self.expected(e, inner)?;
             return Ok(());
         }
+        self.expected_value(e, ty)?;
+        self.expression_types.insert(e.id(), ty.clone());
+        Ok(())
+    }
+    fn expected_value(&mut self, e: &Expr, ty: &Type) -> Result<(), Diagnostics> {
         match (e, ty) {
             (Expr::Map(entries), Type::Map(key, value)) => {
                 for (k, v) in entries {
@@ -1001,10 +1030,8 @@ impl Checker {
                 Checker::assignable(ty, &got)?;
             }
         }
-        self.expression_types.insert(e.id(), ty.clone());
         Ok(())
     }
-    #[allow(clippy::too_many_lines)] // Keep expression type rules and metadata recording in one dispatch.
     fn expr_inner(&mut self, e: &Expr) -> Result<Type, Diagnostics> {
         match e {
             Expr::Located(_, _) => unreachable!("expression locations are handled by expr"),
@@ -1013,143 +1040,12 @@ impl Checker {
                 self.expected(path, &named("str"))?;
                 Ok(Type::Array(Box::new(named("byte")), None))
             }
-            Expr::Lambda(f) => {
-                if self.contains_future(&f.return_type) {
-                    return Checker::fail("futures cannot be returned from functions");
-                }
-                self.validate_type(&f.return_type)?;
-                let old_scopes = self.scopes.clone();
-                // A function does not inherit permission granted by an enclosing
-                // lock. Capture the mutex itself and require a new lock to write.
-                for binding in self.scopes.iter_mut().flat_map(|scope| scope.values_mut()) {
-                    if binding.locked {
-                        binding.mutable = false;
-                        binding.mutex = true;
-                        binding.locked = false;
-                    }
-                }
-                self.capture_frames
-                    .push((self.scopes.len(), HashMap::new()));
-                self.push();
-                for p in &f.params {
-                    self.validate_type(&p.ty)?;
-                    self.bind(&p.name, p.ty.clone(), false);
-                }
-                let ret = self.function_return.replace(f.return_type.clone());
-                let loops = std::mem::take(&mut self.loops);
-                let targets = std::mem::take(&mut self.value_targets);
-                let indexing = std::mem::replace(&mut self.indexing, 0);
-                let in_test = std::mem::replace(&mut self.in_test, false);
-                self.block(&f.body)?;
-                if f.return_type != Type::void()
-                    && f.return_type != Type::ErrorUnion(Box::new(Type::void()))
-                    && !crate::flow::returns(&f.body, &self.expression_types)
-                {
-                    return Checker::fail(
-                        "anonymous function may finish without returning a value",
-                    );
-                }
-                self.scopes = old_scopes;
-                self.function_return = ret;
-                self.loops = loops;
-                self.value_targets = targets;
-                self.indexing = indexing;
-                self.in_test = in_test;
-                let mut captures: Vec<_> = self
-                    .capture_frames
-                    .pop()
-                    .unwrap()
-                    .1
-                    .into_iter()
-                    .map(|(name, binding)| Capture {
-                        name,
-                        mutable: binding.mutable,
-                        declaration: binding.declaration,
-                        ty: binding.ty,
-                        mutex: binding.mutex,
-                        initializer: binding.initializer,
-                    })
-                    .collect();
-                captures.sort_by(|a, b| a.name.cmp(&b.name));
-                if captures
-                    .iter()
-                    .any(|capture| self.contains_future(&capture.ty))
-                {
-                    return Checker::fail(
-                        "functions cannot capture futures; await the value before capturing it",
-                    );
-                }
-                self.captures.insert(e.id(), captures);
-                Ok(Type::Function(
-                    f.params.iter().map(|p| p.ty.clone()).collect(),
-                    Box::new(f.return_type.clone()),
-                ))
-            }
+            Expr::Lambda(f) => self.check_lambda(e, f),
             Expr::Cast {
                 ty,
                 value,
                 implicit,
-            } => {
-                self.validate_type(ty)?;
-                if let Type::Named(n, _) = ty
-                    && let Some(TypeInfo::Alias(base)) = self.types.get(n).cloned()
-                {
-                    // Give literals the base type's context (empty containers, unsigned
-                    // values and optional promotions need it before they can be checked).
-                    if matches!(
-                        value.unlocated(),
-                        Expr::Int(_)
-                            | Expr::Float(_)
-                            | Expr::String(_)
-                            | Expr::Char(_)
-                            | Expr::Bool(_)
-                            | Expr::Array(_)
-                            | Expr::Tuple(_)
-                            | Expr::Map(_)
-                            | Expr::None
-                    ) {
-                        self.expected(value, &base)?;
-                    } else {
-                        let from = self.expr(value)?;
-                        if from != *ty
-                            && !matches!(&from, Type::Named(name, _) if matches!(self.types.get(name), Some(TypeInfo::Alias(inner)) if inner == ty))
-                        {
-                            Checker::assignable(&base, &from)?;
-                        }
-                    }
-                    return Ok(ty.clone());
-                }
-                let from = self.expr(value)?;
-                if !implicit
-                    && let Type::Named(n, _) = &from
-                    && matches!(self.types.get(n),Some(TypeInfo::Alias(base)) if base == ty)
-                {
-                    return Ok(ty.clone());
-                }
-                if *ty == named("str") {
-                    self.value_operation(&from, "string conversion")?;
-                }
-                if let (Type::Array(a, None), Type::Array(b, Some(_))) = (ty, &from)
-                    && a == b
-                {
-                    return Ok(ty.clone());
-                }
-                let string_array = matches!(ty,Type::Array(t,None) if (**t == named("char") && from == named("str")) || (**t == named("byte") && (from == named("str") || from == named("char"))));
-                let bool_integer =
-                    from == named("bool") && (*ty == named("int") || *ty == named("uint"));
-                if !(numeric(ty) && numeric(&from))
-                    && ty != &from
-                    && *ty != named("str")
-                    && !string_array
-                    && !bool_integer
-                    && !(from == named("byte") && *ty == named("char"))
-                    && !(matches!(ty,Type::Array(t,None) if **t == named("byte"))
-                        && matches!(&from,Type::Named(n,_) if matches!(n.as_str(),"int"|"uint"|"float")))
-                {
-                    return Checker::fail("this cast is not implemented");
-                }
-                Ok(ty.clone())
-            }
+            } => self.check_cast(ty, value, *implicit),
             Expr::Int(s) => Ok(if s.ends_with('u') {
                 integer(s)?;
                 named("uint")
@@ -1165,404 +1061,19 @@ impl Checker {
             Expr::Bool(_) => Ok(named("bool")),
             Expr::None => Checker::fail("cannot infer type of none"),
             Expr::Name(n) if n == "$" && self.indexing > 0 => Ok(named("uint")),
-            Expr::Name(n) => {
-                if let Some((i, binding)) = self
-                    .scopes
-                    .iter()
-                    .enumerate()
-                    .rev()
-                    .find_map(|(i, s)| s.get(n).map(|v| (i, v.clone())))
-                {
-                    if binding.mutex {
-                        return Checker::fail(format!(
-                            "cannot read mutex `{n}` outside a lock scope"
-                        ));
-                    }
-                    if i == 0 && binding.mutable && !binding.mutex {
-                        self.shared_accesses.insert(e.id());
-                    }
-                    self.constant_sources.insert(e.id(), binding.initializer);
-                    for (depth, captures) in &mut self.capture_frames {
-                        if i < *depth {
-                            captures.insert(n.clone(), binding.clone());
-                        }
-                    }
-                }
-                self.lookup(n)
-                    .map(|b| b.ty.clone())
-                    .or_else(|| match self.types.get(n) {
-                        Some(TypeInfo::External(function)) => Some(Type::Function(
-                            function.params.iter().map(|p| p.ty.clone()).collect(),
-                            Box::new(function.return_type.clone()),
-                        )),
-                        Some(TypeInfo::Function(function)) => Some(Type::Function(
-                            function
-                                .params
-                                .iter()
-                                .map(|param| param.ty.clone())
-                                .collect(),
-                            Box::new(function.return_type.clone()),
-                        )),
-                        Some(_) | None => None,
-                    })
-                    .ok_or_else(|| Diagnostics::one(format!("unknown name `{n}`"), 0..0))
-            }
+            Expr::Name(n) => self.check_name(e, n),
             Expr::Discard => Ok(Type::void()),
-            Expr::Array(xs) => {
-                if xs.is_empty() {
-                    return Checker::fail("cannot infer type of empty array");
-                }
-                let t = self.expr(&xs[0])?;
-                for x in &xs[1..] {
-                    let actual = self.expr(x)?;
-                    Checker::assignable(&t, &actual)?;
-                }
-                Ok(Type::Array(Box::new(t), Some(xs.len())))
-            }
-            Expr::Map(xs) => {
-                if xs.is_empty() {
-                    return Checker::fail("cannot infer type of empty map");
-                }
-                let (k, v) = &xs[0];
-                let kt = self.expr(k)?;
-                self.value_operation(&kt, "map-key equality")?;
-                let vt = self.expr(v)?;
-                for (k, v) in &xs[1..] {
-                    let actual_key = self.expr(k)?;
-                    let actual_value = self.expr(v)?;
-                    Checker::assignable(&kt, &actual_key)?;
-                    Checker::assignable(&vt, &actual_value)?;
-                }
-                Ok(Type::Map(Box::new(kt), Box::new(vt)))
-            }
+            Expr::Array(xs) => self.check_array(xs),
+            Expr::Map(xs) => self.check_map(xs),
             Expr::Tuple(xs) => Ok(Type::Tuple(
                 xs.iter().map(|x| self.expr(x)).collect::<Result<_, _>>()?,
             )),
-            Expr::Unary { op, value } => {
-                if *op == UnaryOp::Neg
-                    && matches!(value.unlocated(), Expr::Int(text) if !text.ends_with('u') && integer(text).ok() == Some(1u64 << 63))
-                {
-                    self.expression_types.insert(value.id(), named("uint"));
-                    return Ok(named("int"));
-                }
-                let t = self.expr(value)?;
-                match op {
-                    UnaryOp::Not => Checker::assignable(&named("bool"), &t)?,
-                    UnaryOp::Neg | UnaryOp::BitNot => {
-                        if !numeric(&t) {
-                            return Checker::fail("numeric unary operation required");
-                        }
-                        if *op == UnaryOp::BitNot && t == named("float") {
-                            return Checker::fail("bitwise operations require integers");
-                        }
-                    }
-                }
-                Ok(t)
-            }
-            Expr::Binary { left, op, right } => {
-                let l = if matches!(left.unlocated(), Expr::Int(_))
-                    && !matches!(right.unlocated(), Expr::Int(_))
-                    && *op != BinaryOp::In
-                {
-                    let r = self.expr(right)?;
-                    if numeric(&r) && r != named("float") {
-                        self.expected(left, &r)?;
-                        r
-                    } else {
-                        self.expr(left)?
-                    }
-                } else {
-                    self.expr(left)?
-                };
-                let r = if matches!(right.unlocated(), Expr::Int(_))
-                    && numeric(&l)
-                    && l != named("float")
-                {
-                    self.expected(right, &l)?;
-                    l.clone()
-                } else {
-                    self.expr(right)?
-                };
-                if *op == BinaryOp::In {
-                    self.value_operation(&l, "equality")?;
-                    match &r {
-                        Type::Array(element, _) => Checker::assignable(element, &l)?,
-                        Type::Map(key, _) => Checker::assignable(key, &l)?,
-                        Type::Named(n, _)
-                            if n == "str"
-                                && matches!(&l, Type::Named(n, _) if n == "str" || n == "char") => {
-                        }
-                        _ => {
-                            return Checker::fail("in requires a compatible container and element");
-                        }
-                    }
-                    return Ok(named("bool"));
-                }
-                if matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
-                    self.value_operation(&l, "equality")?;
-                }
-                if let (Type::Array(a, n), Type::Array(b, m)) = (&l, &r) {
-                    Checker::assignable(a, b)?;
-                    return match op {
-                        BinaryOp::Concat => Ok(Type::Array(
-                            a.clone(),
-                            n.zip(*m).and_then(|(n, m)| n.checked_add(m)),
-                        )),
-                        BinaryOp::Eq | BinaryOp::Ne => Ok(named("bool")),
-                        _ => Checker::fail("unsupported operator for arrays"),
-                    };
-                }
-                if *op == BinaryOp::Concat && l != named("str") && !matches!(l, Type::Map(_, _)) {
-                    return Checker::fail("concatenation requires arrays, maps, or strings");
-                }
-                Checker::assignable(&l, &r)?;
-                match op {
-                    BinaryOp::And | BinaryOp::Or => Checker::assignable(&named("bool"), &l)?,
-                    BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge if !numeric(&l) => {
-                        return Checker::fail("ordered comparisons require numeric operands");
-                    }
-                    BinaryOp::Add
-                    | BinaryOp::Sub
-                    | BinaryOp::Mul
-                    | BinaryOp::Div
-                    | BinaryOp::Mod
-                    | BinaryOp::Pow => {
-                        if !numeric(&l) {
-                            return Checker::fail("arithmetic requires numeric operands");
-                        }
-                    }
-                    BinaryOp::BitAnd
-                    | BinaryOp::BitOr
-                    | BinaryOp::BitXor
-                    | BinaryOp::Shl
-                    | BinaryOp::Shr
-                        if (!numeric(&l) || l == named("float")) =>
-                    {
-                        return Checker::fail("bitwise operations require integers");
-                    }
-                    _ => {}
-                }
-                if matches!(
-                    op,
-                    BinaryOp::Eq
-                        | BinaryOp::Ne
-                        | BinaryOp::Lt
-                        | BinaryOp::Le
-                        | BinaryOp::Gt
-                        | BinaryOp::Ge
-                        | BinaryOp::And
-                        | BinaryOp::Or
-                ) {
-                    Ok(named("bool"))
-                } else {
-                    Ok(l)
-                }
-            }
-            Expr::Call { callee, args, .. } => {
-                if let Expr::Name(name) = callee.unlocated() {
-                    let ty = match name.as_str() {
-                        "@args" => Some(Type::Array(Box::new(named("str")), None)),
-                        "@env" => Some(Type::Map(Box::new(named("str")), Box::new(named("str")))),
-                        "@target" => Some(Type::Tuple(vec![named("str"), named("str")])),
-                        _ => None,
-                    };
-                    if let Some(ty) = ty {
-                        if !args.is_empty() {
-                            return Checker::fail(format!("{name} expects no arguments"));
-                        }
-                        return Ok(ty);
-                    }
-                }
-                if let Expr::Name(name) = callee.unlocated()
-                    && matches!(
-                        name.as_str(),
-                        "@print" | "@println" | "@eprint" | "@eprintln"
-                    )
-                {
-                    for arg in args {
-                        let ty = self.expr(arg)?;
-                        self.value_operation(&ty, "string conversion")?;
-                    }
-                    return Ok(Type::void());
-                }
-                let callee_t = self.expr(callee)?;
-                let Type::Function(params, ret) = callee_t else {
-                    return Checker::fail("called value is not a function");
-                };
-                if params.len() != args.len() {
-                    return Checker::fail("incorrect number of arguments");
-                }
-                for (p, a) in params.iter().zip(args) {
-                    self.expected(a, p)?;
-                }
-                Ok(*ret)
-            }
-            Expr::Index { object, index } => {
-                let o = self.expr(object)?;
-                if let Type::Map(key, value) = &o {
-                    self.expected(index, key)?;
-                    return Ok((**value).clone());
-                }
-                if let Type::Tuple(types) = &o {
-                    if let Expr::Int(text) = index.unlocated() {
-                        let n = usize::try_from(integer(text)?)
-                            .map_err(|_| Diagnostics::one("tuple index out of bounds", 0..0))?;
-                        self.expr(index)?;
-                        return types
-                            .get(n)
-                            .cloned()
-                            .ok_or_else(|| Diagnostics::one("tuple index out of bounds", 0..0));
-                    }
-                    return Checker::fail("tuple index must be an integer literal");
-                }
-                self.indexing += 1;
-                let index_type = self.expr(index)?;
-                self.indexing -= 1;
-                if index_type != named("uint") && index_type != named("int") {
-                    return Checker::fail("array index must be int or uint");
-                }
-                match o {
-                    Type::Array(t, _) => Ok(*t),
-                    Type::Named(n, _) if n == "str" => Ok(named("char")),
-                    Type::Tuple(_) => Checker::fail("tuple index must be a compile-time value"),
-                    _ => Checker::fail("value is not indexable"),
-                }
-            }
-            Expr::Member { object, name } => {
-                let namespace = matches!(object.unlocated(), Expr::Name(n)
-                    if self.lookup(n).is_none() && matches!(self.types.get(n), Some(TypeInfo::Enum(_))));
-                let o = if namespace {
-                    let Expr::Name(n) = object.unlocated() else {
-                        unreachable!()
-                    };
-                    let ty = named(n);
-                    self.expression_types.insert(object.id(), ty.clone());
-                    ty
-                } else {
-                    self.expr(object)?
-                };
-                if let Type::Named(n, _) = &o {
-                    if let Some(TypeInfo::Enum(declaration)) = self.types.get(n) {
-                        if !namespace {
-                            return Checker::fail(
-                                "enum variants must be accessed through the enum type, not an enum value",
-                            );
-                        }
-                        let Some(variant) = declaration.variants.iter().find(|v| v.name == *name)
-                        else {
-                            return Checker::fail(format!("unknown enum variant `{name}`"));
-                        };
-                        return Ok(if variant.values.is_empty() {
-                            o.clone()
-                        } else {
-                            Type::Function(variant.values.clone(), Box::new(o.clone()))
-                        });
-                    }
-                    if let Some(TypeInfo::Struct(declaration)) = self.types.get(n) {
-                        return declaration
-                            .fields
-                            .iter()
-                            .find(|f| f.name == *name)
-                            .map(|f| f.ty.clone())
-                            .ok_or_else(|| {
-                                Diagnostics::one(format!("unknown field `{name}`"), 0..0)
-                            });
-                    }
-                }
-                let has_len = matches!(o, Type::Array(_, _) | Type::Map(_, _))
-                    || matches!(o, Type::Named(ref n, _) if n == "str");
-                if name == "len" && has_len {
-                    return Ok(named("uint"));
-                }
-                Checker::fail(format!("type does not have member `{name}`"))
-            }
-            Expr::If { subject, arms } => {
-                let subject_type = if let Some(subject) = subject {
-                    self.expr(subject)?
-                } else {
-                    named("bool")
-                };
-                if matches!(subject_type, Type::Map(_, _)) {
-                    return Checker::fail(
-                        "maps cannot be matched directly; use a bare `if` with comparisons",
-                    );
-                }
-                let mut wildcard = false;
-                let mut booleans = HashSet::new();
-                let mut bytes = HashSet::new();
-                let mut variants = HashSet::new();
-                let target = self
-                    .expression_types
-                    .get(&e.id())
-                    .filter(|ty| **ty != Type::void())
-                    .cloned();
-                for (patterns, body) in arms {
-                    self.push();
-                    let mut bindings = None;
-                    for pattern in patterns {
-                        self.scopes.last_mut().unwrap().clear();
-                        let total = self.check_pattern(pattern, &subject_type)?;
-                        let current = self.scopes.last().unwrap();
-                        if bindings
-                            .as_ref()
-                            .is_some_and(|bindings| bindings != current)
-                        {
-                            return Checker::fail(
-                                "alternative patterns must bind the same names with the same types",
-                            );
-                        }
-                        bindings = Some(current.clone());
-                        match pattern {
-                            Pattern::Wildcard => wildcard = true,
-                            Pattern::Literal(value) => {
-                                if let Expr::Bool(b) = value.unlocated() {
-                                    booleans.insert(*b);
-                                }
-                                if subject_type == named("byte")
-                                    && let Expr::Int(text) = value.unlocated()
-                                {
-                                    bytes.insert(integer(text)?);
-                                }
-                                if let Expr::Member { name, .. } = value.unlocated() {
-                                    variants.insert(name.clone());
-                                }
-                            }
-                            Pattern::Variant { name, .. } if total => {
-                                variants.insert(name.rsplit('.').next().unwrap().to_string());
-                            }
-                            _ => wildcard |= total,
-                        }
-                    }
-                    if let Some(ty) = &target {
-                        self.value_block(body, ty)?;
-                    } else {
-                        self.block(body)?;
-                    }
-                    self.pop();
-                }
-                let enum_complete = if let Type::Named(n, _) = &subject_type {
-                    if let Some(TypeInfo::Enum(e)) = self.types.get(n) {
-                        e.variants.iter().all(|v| variants.contains(&v.name))
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                };
-                if !(wildcard
-                    || enum_complete
-                    || (subject_type == named("bool") && booleans.len() == 2)
-                    || (subject_type == named("byte") && bytes.len() == 256))
-                {
-                    return Checker::fail(
-                        "conditional is not exhaustive; add a `_` fallback branch",
-                    );
-                }
-                if arms.is_empty() {
-                    return Ok(Type::void());
-                }
-                Ok(target.unwrap_or_else(Type::void))
-            }
+            Expr::Unary { op, value } => self.check_unary(*op, value),
+            Expr::Binary { left, op, right } => self.check_binary(left, *op, right),
+            Expr::Call { callee, args, .. } => self.check_call(callee, args),
+            Expr::Index { object, index } => self.check_index(object, index),
+            Expr::Member { object, name } => self.check_member(object, name),
+            Expr::If { subject, arms } => self.check_if(e, subject.as_deref(), arms),
             Expr::Async(x) => {
                 if !matches!(x.unlocated(), Expr::Call { .. }) {
                     return Checker::fail("async requires a function call");
@@ -1573,52 +1084,587 @@ impl Checker {
                 Type::Future(t) => Ok(*t),
                 _ => Checker::fail("await expects a future"),
             },
-            Expr::Try(x) => {
-                if self
-                    .function_return
-                    .as_ref()
-                    .is_some_and(|t| !matches!(t, Type::ErrorUnion(_)))
-                {
-                    return Checker::fail("try requires a throwing function return type (`!`)");
-                }
-                match self.expr(x)? {
-                    Type::ErrorUnion(inner) => Ok(*inner),
-                    _ => Checker::fail("try requires an error union"),
-                }
-            }
-            Expr::Else { value, fallback } => {
-                let Type::Optional(inner) = self.expr(value)? else {
-                    return Checker::fail("else requires an optional value");
-                };
-                self.value_targets.push((*inner).clone());
-                let result = self.value_block(fallback, &inner);
-                self.value_targets.pop();
-                result?;
-                Ok(*inner)
-            }
-            Expr::Catch { value, name, body } => {
-                let Type::ErrorUnion(inner) = self.expr(value)? else {
-                    return Checker::fail("catch requires an error union");
-                };
-                self.push();
-                self.bind(name, named("error"), false);
-                self.value_targets.push((*inner).clone());
-                let result = if *inner == Type::void() {
-                    self.block(body)
-                } else {
-                    self.value_block(body, &inner)
-                };
-                self.value_targets.pop();
-                self.pop();
-                result?;
-                Ok(*inner)
-            }
+            Expr::Try(x) => self.check_try(x),
+            Expr::Else { value, fallback } => self.check_else(value, fallback),
+            Expr::Catch { value, name, body } => self.check_catch(value, name, body),
             Expr::StructInit { name, .. } => {
                 let ty = named(name);
                 self.expected(e, &ty)?;
                 Ok(ty)
             }
         }
+    }
+    fn check_lambda(&mut self, e: &Expr, f: &Function) -> Result<Type, Diagnostics> {
+        if self.contains_future(&f.return_type) {
+            return Checker::fail("futures cannot be returned from functions");
+        }
+        self.validate_type(&f.return_type)?;
+        let old_scopes = self.scopes.clone();
+        // A function does not inherit permission granted by an enclosing
+        // lock. Capture the mutex itself and require a new lock to write.
+        for binding in self.scopes.iter_mut().flat_map(|scope| scope.values_mut()) {
+            if binding.locked {
+                binding.mutable = false;
+                binding.mutex = true;
+                binding.locked = false;
+            }
+        }
+        self.capture_frames
+            .push((self.scopes.len(), HashMap::new()));
+        self.push();
+        for p in &f.params {
+            self.validate_type(&p.ty)?;
+            self.bind(&p.name, p.ty.clone(), false);
+        }
+        let ret = self.function_return.replace(f.return_type.clone());
+        let loops = std::mem::take(&mut self.loops);
+        let targets = std::mem::take(&mut self.value_targets);
+        let indexing = std::mem::replace(&mut self.indexing, 0);
+        let in_test = std::mem::replace(&mut self.in_test, false);
+        self.block(&f.body)?;
+        if f.return_type != Type::void()
+            && f.return_type != Type::ErrorUnion(Box::new(Type::void()))
+            && !crate::flow::returns(&f.body, &self.expression_types)
+        {
+            return Checker::fail("anonymous function may finish without returning a value");
+        }
+        self.scopes = old_scopes;
+        self.function_return = ret;
+        self.loops = loops;
+        self.value_targets = targets;
+        self.indexing = indexing;
+        self.in_test = in_test;
+        let mut captures: Vec<_> = self
+            .capture_frames
+            .pop()
+            .unwrap()
+            .1
+            .into_iter()
+            .map(|(name, binding)| Capture {
+                name,
+                mutable: binding.mutable,
+                declaration: binding.declaration,
+                ty: binding.ty,
+                mutex: binding.mutex,
+                initializer: binding.initializer,
+            })
+            .collect();
+        captures.sort_by(|a, b| a.name.cmp(&b.name));
+        if captures
+            .iter()
+            .any(|capture| self.contains_future(&capture.ty))
+        {
+            return Checker::fail(
+                "functions cannot capture futures; await the value before capturing it",
+            );
+        }
+        self.captures.insert(e.id(), captures);
+        Ok(Type::Function(
+            f.params.iter().map(|p| p.ty.clone()).collect(),
+            Box::new(f.return_type.clone()),
+        ))
+    }
+    fn check_cast(&mut self, ty: &Type, value: &Expr, implicit: bool) -> Result<Type, Diagnostics> {
+        self.validate_type(ty)?;
+        if let Type::Named(n, _) = ty
+            && let Some(TypeInfo::Alias(base)) = self.types.get(n).cloned()
+        {
+            // Give literals the base type's context (empty containers, unsigned
+            // values and optional promotions need it before they can be checked).
+            if matches!(
+                value.unlocated(),
+                Expr::Int(_)
+                    | Expr::Float(_)
+                    | Expr::String(_)
+                    | Expr::Char(_)
+                    | Expr::Bool(_)
+                    | Expr::Array(_)
+                    | Expr::Tuple(_)
+                    | Expr::Map(_)
+                    | Expr::None
+            ) {
+                self.expected(value, &base)?;
+            } else {
+                let from = self.expr(value)?;
+                if from != *ty
+                    && !matches!(&from, Type::Named(name, _) if matches!(self.types.get(name), Some(TypeInfo::Alias(inner)) if inner == ty))
+                {
+                    Checker::assignable(&base, &from)?;
+                }
+            }
+            return Ok(ty.clone());
+        }
+        let from = self.expr(value)?;
+        if !implicit
+            && let Type::Named(n, _) = &from
+            && matches!(self.types.get(n),Some(TypeInfo::Alias(base)) if base == ty)
+        {
+            return Ok(ty.clone());
+        }
+        if *ty == named("str") {
+            self.value_operation(&from, "string conversion")?;
+        }
+        if let (Type::Array(a, None), Type::Array(b, Some(_))) = (ty, &from)
+            && a == b
+        {
+            return Ok(ty.clone());
+        }
+        let string_array = matches!(ty,Type::Array(t,None) if (**t == named("char") && from == named("str")) || (**t == named("byte") && (from == named("str") || from == named("char"))));
+        let bool_integer = from == named("bool") && (*ty == named("int") || *ty == named("uint"));
+        if !(numeric(ty) && numeric(&from))
+            && ty != &from
+            && *ty != named("str")
+            && !string_array
+            && !bool_integer
+            && !(from == named("byte") && *ty == named("char"))
+            && !(matches!(ty,Type::Array(t,None) if **t == named("byte"))
+                && matches!(&from,Type::Named(n,_) if matches!(n.as_str(),"int"|"uint"|"float")))
+        {
+            return Checker::fail("this cast is not implemented");
+        }
+        Ok(ty.clone())
+    }
+    fn check_name(&mut self, e: &Expr, n: &str) -> Result<Type, Diagnostics> {
+        if let Some((i, binding)) = self
+            .scopes
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(i, s)| s.get(n).map(|v| (i, v.clone())))
+        {
+            if binding.mutex {
+                return Checker::fail(format!("cannot read mutex `{n}` outside a lock scope"));
+            }
+            if i == 0 && binding.mutable && !binding.mutex {
+                self.shared_accesses.insert(e.id());
+            }
+            self.constant_sources.insert(e.id(), binding.initializer);
+            for (depth, captures) in &mut self.capture_frames {
+                if i < *depth {
+                    captures.insert(n.to_owned(), binding.clone());
+                }
+            }
+        }
+        self.lookup(n)
+            .map(|b| b.ty.clone())
+            .or_else(|| match self.types.get(n) {
+                Some(TypeInfo::External(function)) => Some(Type::Function(
+                    function.params.iter().map(|p| p.ty.clone()).collect(),
+                    Box::new(function.return_type.clone()),
+                )),
+                Some(TypeInfo::Function(function)) => Some(Type::Function(
+                    function
+                        .params
+                        .iter()
+                        .map(|param| param.ty.clone())
+                        .collect(),
+                    Box::new(function.return_type.clone()),
+                )),
+                Some(_) | None => None,
+            })
+            .ok_or_else(|| Diagnostics::one(format!("unknown name `{n}`"), 0..0))
+    }
+    fn check_array(&mut self, xs: &[Expr]) -> Result<Type, Diagnostics> {
+        if xs.is_empty() {
+            return Checker::fail("cannot infer type of empty array");
+        }
+        let t = self.expr(&xs[0])?;
+        for x in &xs[1..] {
+            let actual = self.expr(x)?;
+            Checker::assignable(&t, &actual)?;
+        }
+        Ok(Type::Array(Box::new(t), Some(xs.len())))
+    }
+    fn check_map(&mut self, xs: &[(Expr, Expr)]) -> Result<Type, Diagnostics> {
+        if xs.is_empty() {
+            return Checker::fail("cannot infer type of empty map");
+        }
+        let (k, v) = &xs[0];
+        let kt = self.expr(k)?;
+        self.value_operation(&kt, "map-key equality")?;
+        let vt = self.expr(v)?;
+        for (k, v) in &xs[1..] {
+            let actual_key = self.expr(k)?;
+            let actual_value = self.expr(v)?;
+            Checker::assignable(&kt, &actual_key)?;
+            Checker::assignable(&vt, &actual_value)?;
+        }
+        Ok(Type::Map(Box::new(kt), Box::new(vt)))
+    }
+    fn check_unary(&mut self, op: UnaryOp, value: &Expr) -> Result<Type, Diagnostics> {
+        if op == UnaryOp::Neg
+            && matches!(value.unlocated(), Expr::Int(text) if !text.ends_with('u') && integer(text).ok() == Some(1u64 << 63))
+        {
+            self.expression_types.insert(value.id(), named("uint"));
+            return Ok(named("int"));
+        }
+        let t = self.expr(value)?;
+        match op {
+            UnaryOp::Not => Checker::assignable(&named("bool"), &t)?,
+            UnaryOp::Neg | UnaryOp::BitNot => {
+                if !numeric(&t) {
+                    return Checker::fail("numeric unary operation required");
+                }
+                if op == UnaryOp::BitNot && t == named("float") {
+                    return Checker::fail("bitwise operations require integers");
+                }
+            }
+        }
+        Ok(t)
+    }
+    fn check_binary(
+        &mut self,
+        left: &Expr,
+        op: BinaryOp,
+        right: &Expr,
+    ) -> Result<Type, Diagnostics> {
+        let (l, r) = self.binary_operands(left, op, right)?;
+        if op == BinaryOp::In {
+            self.value_operation(&l, "equality")?;
+            match &r {
+                Type::Array(element, _) => Checker::assignable(element, &l)?,
+                Type::Map(key, _) => Checker::assignable(key, &l)?,
+                Type::Named(n, _)
+                    if n == "str"
+                        && matches!(&l, Type::Named(n, _) if n == "str" || n == "char") => {}
+                _ => {
+                    return Checker::fail("in requires a compatible container and element");
+                }
+            }
+            return Ok(named("bool"));
+        }
+        if matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
+            self.value_operation(&l, "equality")?;
+        }
+        if let (Type::Array(a, n), Type::Array(b, m)) = (&l, &r) {
+            Checker::assignable(a, b)?;
+            return match op {
+                BinaryOp::Concat => Ok(Type::Array(
+                    a.clone(),
+                    n.zip(*m).and_then(|(n, m)| n.checked_add(m)),
+                )),
+                BinaryOp::Eq | BinaryOp::Ne => Ok(named("bool")),
+                _ => Checker::fail("unsupported operator for arrays"),
+            };
+        }
+        if op == BinaryOp::Concat && l != named("str") && !matches!(l, Type::Map(_, _)) {
+            return Checker::fail("concatenation requires arrays, maps, or strings");
+        }
+        Checker::assignable(&l, &r)?;
+        match op {
+            BinaryOp::And | BinaryOp::Or => Checker::assignable(&named("bool"), &l)?,
+            BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge if !numeric(&l) => {
+                return Checker::fail("ordered comparisons require numeric operands");
+            }
+            BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::Mul
+            | BinaryOp::Div
+            | BinaryOp::Mod
+            | BinaryOp::Pow => {
+                if !numeric(&l) {
+                    return Checker::fail("arithmetic requires numeric operands");
+                }
+            }
+            BinaryOp::BitAnd
+            | BinaryOp::BitOr
+            | BinaryOp::BitXor
+            | BinaryOp::Shl
+            | BinaryOp::Shr
+                if (!numeric(&l) || l == named("float")) =>
+            {
+                return Checker::fail("bitwise operations require integers");
+            }
+            _ => {}
+        }
+        if matches!(
+            op,
+            BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge
+                | BinaryOp::And
+                | BinaryOp::Or
+        ) {
+            Ok(named("bool"))
+        } else {
+            Ok(l)
+        }
+    }
+    fn binary_operands(
+        &mut self,
+        left: &Expr,
+        op: BinaryOp,
+        right: &Expr,
+    ) -> Result<(Type, Type), Diagnostics> {
+        let l = if matches!(left.unlocated(), Expr::Int(_))
+            && !matches!(right.unlocated(), Expr::Int(_))
+            && op != BinaryOp::In
+        {
+            let r = self.expr(right)?;
+            if numeric(&r) && r != named("float") {
+                self.expected(left, &r)?;
+                r
+            } else {
+                self.expr(left)?
+            }
+        } else {
+            self.expr(left)?
+        };
+        let r = if matches!(right.unlocated(), Expr::Int(_)) && numeric(&l) && l != named("float") {
+            self.expected(right, &l)?;
+            l.clone()
+        } else {
+            self.expr(right)?
+        };
+        Ok((l, r))
+    }
+    fn check_call(&mut self, callee: &Expr, args: &[Expr]) -> Result<Type, Diagnostics> {
+        if let Expr::Name(name) = callee.unlocated() {
+            let ty = match name.as_str() {
+                "@args" => Some(Type::Array(Box::new(named("str")), None)),
+                "@env" => Some(Type::Map(Box::new(named("str")), Box::new(named("str")))),
+                "@target" => Some(Type::Tuple(vec![named("str"), named("str")])),
+                _ => None,
+            };
+            if let Some(ty) = ty {
+                if !args.is_empty() {
+                    return Checker::fail(format!("{name} expects no arguments"));
+                }
+                return Ok(ty);
+            }
+        }
+        if let Expr::Name(name) = callee.unlocated()
+            && matches!(
+                name.as_str(),
+                "@print" | "@println" | "@eprint" | "@eprintln"
+            )
+        {
+            for arg in args {
+                let ty = self.expr(arg)?;
+                self.value_operation(&ty, "string conversion")?;
+            }
+            return Ok(Type::void());
+        }
+        let callee_t = self.expr(callee)?;
+        let Type::Function(params, ret) = callee_t else {
+            return Checker::fail("called value is not a function");
+        };
+        if params.len() != args.len() {
+            return Checker::fail("incorrect number of arguments");
+        }
+        for (p, a) in params.iter().zip(args) {
+            self.expected(a, p)?;
+        }
+        Ok(*ret)
+    }
+    fn check_index(&mut self, object: &Expr, index: &Expr) -> Result<Type, Diagnostics> {
+        let o = self.expr(object)?;
+        if let Type::Map(key, value) = &o {
+            self.expected(index, key)?;
+            return Ok((**value).clone());
+        }
+        if let Type::Tuple(types) = &o {
+            if let Expr::Int(text) = index.unlocated() {
+                let n = usize::try_from(integer(text)?)
+                    .map_err(|_| Diagnostics::one("tuple index out of bounds", 0..0))?;
+                self.expr(index)?;
+                return types
+                    .get(n)
+                    .cloned()
+                    .ok_or_else(|| Diagnostics::one("tuple index out of bounds", 0..0));
+            }
+            return Checker::fail("tuple index must be an integer literal");
+        }
+        self.indexing += 1;
+        let index_type = self.expr(index)?;
+        self.indexing -= 1;
+        if index_type != named("uint") && index_type != named("int") {
+            return Checker::fail("array index must be int or uint");
+        }
+        match o {
+            Type::Array(t, _) => Ok(*t),
+            Type::Named(n, _) if n == "str" => Ok(named("char")),
+            Type::Tuple(_) => Checker::fail("tuple index must be a compile-time value"),
+            _ => Checker::fail("value is not indexable"),
+        }
+    }
+    fn check_member(&mut self, object: &Expr, name: &str) -> Result<Type, Diagnostics> {
+        let namespace = matches!(object.unlocated(), Expr::Name(n)
+        if self.lookup(n).is_none() && matches!(self.types.get(n), Some(TypeInfo::Enum(_))));
+        let o = if namespace {
+            let Expr::Name(n) = object.unlocated() else {
+                unreachable!()
+            };
+            let ty = named(n);
+            self.expression_types.insert(object.id(), ty.clone());
+            ty
+        } else {
+            self.expr(object)?
+        };
+        if let Type::Named(n, _) = &o {
+            if let Some(TypeInfo::Enum(declaration)) = self.types.get(n) {
+                if !namespace {
+                    return Checker::fail(
+                        "enum variants must be accessed through the enum type, not an enum value",
+                    );
+                }
+                let Some(variant) = declaration.variants.iter().find(|v| v.name == name) else {
+                    return Checker::fail(format!("unknown enum variant `{name}`"));
+                };
+                return Ok(if variant.values.is_empty() {
+                    o.clone()
+                } else {
+                    Type::Function(variant.values.clone(), Box::new(o.clone()))
+                });
+            }
+            if let Some(TypeInfo::Struct(declaration)) = self.types.get(n) {
+                return declaration
+                    .fields
+                    .iter()
+                    .find(|f| f.name == name)
+                    .map(|f| f.ty.clone())
+                    .ok_or_else(|| Diagnostics::one(format!("unknown field `{name}`"), 0..0));
+            }
+        }
+        let has_len = matches!(o, Type::Array(_, _) | Type::Map(_, _))
+            || matches!(o, Type::Named(ref n, _) if n == "str");
+        if name == "len" && has_len {
+            return Ok(named("uint"));
+        }
+        Checker::fail(format!("type does not have member `{name}`"))
+    }
+    fn check_if(
+        &mut self,
+        e: &Expr,
+        subject: Option<&Expr>,
+        arms: &[(Vec<Pattern>, Block)],
+    ) -> Result<Type, Diagnostics> {
+        let subject_type = if let Some(subject) = subject {
+            self.expr(subject)?
+        } else {
+            named("bool")
+        };
+        if matches!(subject_type, Type::Map(_, _)) {
+            return Checker::fail(
+                "maps cannot be matched directly; use a bare `if` with comparisons",
+            );
+        }
+        let mut wildcard = false;
+        let mut booleans = HashSet::new();
+        let mut bytes = HashSet::new();
+        let mut variants = HashSet::new();
+        let target = self
+            .expression_types
+            .get(&e.id())
+            .filter(|ty| **ty != Type::void())
+            .cloned();
+        for (patterns, body) in arms {
+            self.push();
+            let mut bindings = None;
+            for pattern in patterns {
+                self.scopes.last_mut().unwrap().clear();
+                let total = self.check_pattern(pattern, &subject_type)?;
+                let current = self.scopes.last().unwrap();
+                if bindings
+                    .as_ref()
+                    .is_some_and(|bindings| bindings != current)
+                {
+                    return Checker::fail(
+                        "alternative patterns must bind the same names with the same types",
+                    );
+                }
+                bindings = Some(current.clone());
+                match pattern {
+                    Pattern::Wildcard => wildcard = true,
+                    Pattern::Literal(value) => {
+                        if let Expr::Bool(b) = value.unlocated() {
+                            booleans.insert(*b);
+                        }
+                        if subject_type == named("byte")
+                            && let Expr::Int(text) = value.unlocated()
+                        {
+                            bytes.insert(integer(text)?);
+                        }
+                        if let Expr::Member { name, .. } = value.unlocated() {
+                            variants.insert(name.clone());
+                        }
+                    }
+                    Pattern::Variant { name, .. } if total => {
+                        variants.insert(name.rsplit('.').next().unwrap().to_string());
+                    }
+                    _ => wildcard |= total,
+                }
+            }
+            if let Some(ty) = &target {
+                self.value_block(body, ty)?;
+            } else {
+                self.block(body)?;
+            }
+            self.pop();
+        }
+        let enum_complete = if let Type::Named(n, _) = &subject_type {
+            if let Some(TypeInfo::Enum(e)) = self.types.get(n) {
+                e.variants.iter().all(|v| variants.contains(&v.name))
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if !(wildcard
+            || enum_complete
+            || (subject_type == named("bool") && booleans.len() == 2)
+            || (subject_type == named("byte") && bytes.len() == 256))
+        {
+            return Checker::fail("conditional is not exhaustive; add a `_` fallback branch");
+        }
+        if arms.is_empty() {
+            return Ok(Type::void());
+        }
+        Ok(target.unwrap_or_else(Type::void))
+    }
+    fn check_try(&mut self, x: &Expr) -> Result<Type, Diagnostics> {
+        if self
+            .function_return
+            .as_ref()
+            .is_some_and(|t| !matches!(t, Type::ErrorUnion(_)))
+        {
+            return Checker::fail("try requires a throwing function return type (`!`)");
+        }
+        match self.expr(x)? {
+            Type::ErrorUnion(inner) => Ok(*inner),
+            _ => Checker::fail("try requires an error union"),
+        }
+    }
+    fn check_else(&mut self, value: &Expr, fallback: &Block) -> Result<Type, Diagnostics> {
+        let Type::Optional(inner) = self.expr(value)? else {
+            return Checker::fail("else requires an optional value");
+        };
+        self.value_targets.push((*inner).clone());
+        let result = self.value_block(fallback, &inner);
+        self.value_targets.pop();
+        result?;
+        Ok(*inner)
+    }
+    fn check_catch(&mut self, value: &Expr, name: &str, body: &Block) -> Result<Type, Diagnostics> {
+        let Type::ErrorUnion(inner) = self.expr(value)? else {
+            return Checker::fail("catch requires an error union");
+        };
+        self.push();
+        self.bind(name, named("error"), false);
+        self.value_targets.push((*inner).clone());
+        let result = if *inner == Type::void() {
+            self.block(body)
+        } else {
+            self.value_block(body, &inner)
+        };
+        self.value_targets.pop();
+        self.pop();
+        result?;
+        Ok(*inner)
     }
     fn assignable(expected: &Type, got: &Type) -> Result<(), Diagnostics> {
         if let (Type::Array(a, None), Type::Array(b, _)) = (expected, got) {
