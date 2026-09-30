@@ -196,6 +196,32 @@ assert @as(int, runtime(-0.75)) == 0
 }
 
 #[test]
+fn negative_fractional_float_to_uint_panics_before_truncation() {
+    let tiny = format!("-0.{}5", "0".repeat(323));
+    for value in ["-0.75", "-0.5", "-0.0001", tiny.as_str()] {
+        let source = format!(
+            r#"
+fn argument() float {{ @println("argument") return {value} }}
+@println(@as(uint, argument()))
+@println("after")
+"#,
+        );
+        for release in [false, true] {
+            ncc::compile_source_with_options(&source, Path::new("negative-cast.nc"), release)
+                .unwrap();
+            let output = run_mode(&source, release);
+            assert_eq!(output.status.code(), Some(1), "release={release}: {value}");
+            assert_eq!(output.stdout, b"argument\n", "release={release}: {value}");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains("cast out of range"),
+                "release={release}: {value}: {stderr}",
+            );
+        }
+    }
+}
+
+#[test]
 fn finite_out_of_range_numeric_casts_panic_before_c_conversion() {
     for (from, to, value) in [
         ("float", "int", "9223372036854775808.0"),

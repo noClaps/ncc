@@ -60,6 +60,8 @@
     and values returned by C externs. Printing, interpolation, and string
     conversion use `NaN`, `inf`, and `-inf`. Converting nonfinite floats to `int`
     or `uint` must panic; never emit an unchecked nonfinite-to-integer C cast.
+  - Float-to-`uint` conversion rejects inputs below zero before truncation:
+    negative fractions must panic rather than truncate to zero.
   - Numeric byte-array encoding may use the simplest consistent implementation;
     the implementation uses little-endian bytes and IEEE-754 bits for floats.
   - Printing, interpolation, and string conversion of an error union use its

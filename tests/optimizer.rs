@@ -518,6 +518,42 @@ fn truncate_unsigned(float value) uint { return @as(uint, value) }
 }
 
 #[test]
+fn negative_fractional_float_to_uint_is_rejected_before_constant_truncation() {
+    let tiny = format!("-0.{}5", "0".repeat(323));
+    let path = Path::new("negative-cast.nc");
+    for value in ["-0.75", "-0.5", "-0.0001", tiny.as_str()] {
+        for (body, failing_expression) in [
+            ("return @as(uint, value)", "@as(uint, value)"),
+            (
+                r#"
+(float, bool) captured = (value, true)
+fn convert = fn() uint { return @as(uint, captured[0]) }
+return convert()
+"#,
+                "@as(uint, captured[0])",
+            ),
+        ] {
+            let source = format!(
+                "fn cast_negative(float value) uint {{ {body} }} @println(cast_negative({value}))",
+            );
+            ncc::compile_source(&source, path).unwrap();
+            let error = ncc::compile_source_with_options(&source, path, true).unwrap_err();
+            assert!(
+                error.to_string().contains("constant evaluation failed"),
+                "{value}: {error}",
+            );
+            let diagnostic = &error.0[0];
+            assert_eq!(diagnostic.path.as_deref(), Some(path), "{value}: {error}");
+            assert_eq!(
+                &source[diagnostic.span.clone()],
+                failing_expression,
+                "{value}: {error}",
+            );
+        }
+    }
+}
+
+#[test]
 fn finite_out_of_range_numeric_casts_are_rejected_during_folding() {
     for (from, to, value) in [
         ("float", "int", "9223372036854775808.0"),
