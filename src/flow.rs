@@ -108,7 +108,8 @@ pub(crate) fn warnings(module: &Module, types: &HashMap<usize, Type>) -> Diagnos
     Diagnostics(analysis.warnings.unwrap().into_inner())
 }
 
-fn constant_bool(expression: &Expr) -> Option<bool> {
+/// A syntactic Boolean fact; never evaluates names, calls, or mutable state.
+pub(crate) fn constant_bool(expression: &Expr) -> Option<bool> {
     match expression.unlocated() {
         Expr::Bool(value) => Some(*value),
         Expr::Unary {

@@ -1,5 +1,5 @@
 //! Conservative, source-order dependency slicing before test-mode semantic checks.
-use crate::ast::{Block, Expr, Function, Item, Pattern, Stmt, Type};
+use crate::ast::{BinaryOp, Block, Expr, Function, Item, Pattern, Stmt, Type};
 use std::collections::{HashMap, HashSet};
 
 type Names = HashSet<String>;
@@ -278,6 +278,12 @@ impl Scan<'_> {
             self.effects.mark(kind);
         }
     }
+    fn with_runtime_effects(&mut self, reachable: bool, scan: impl FnOnce(&mut Self)) {
+        let runtime_effects = self.runtime_effects;
+        self.runtime_effects &= reachable;
+        scan(self);
+        self.runtime_effects = runtime_effects;
+    }
     fn name(&mut self, name: &str) {
         if !self.local.contains(name) && self.globals.contains(name) {
             self.effects.uses.insert(name.into());
@@ -495,7 +501,10 @@ impl Scan<'_> {
                 condition, body, ..
             } => {
                 self.expr(condition);
-                self.block(body);
+                self.with_runtime_effects(
+                    crate::flow::constant_bool(condition) != Some(false),
+                    |scan| scan.block(body),
+                );
             }
             Stmt::Lock { name, body, .. } => {
                 self.name(name);
@@ -503,6 +512,37 @@ impl Scan<'_> {
             }
             Stmt::Continue(_) => {}
             Stmt::Located(..) => unreachable!(),
+        }
+    }
+    fn conditional(&mut self, subject: Option<&Expr>, arms: &[(Vec<Pattern>, Block)]) {
+        if let Some(subject) = subject {
+            self.expr(subject);
+        }
+        let known = subject.map_or(Some(true), crate::flow::constant_bool);
+        // Unknown patterns may match or fall through; only definite matches
+        // make subsequent patterns and arms unreachable.
+        let mut remaining = true;
+        for (patterns, body) in arms {
+            let local = self.local.clone();
+            let captures = self.captures.clone();
+            let mut can_match = false;
+            for pattern in patterns {
+                self.with_runtime_effects(remaining, |scan| scan.pattern(pattern));
+                let matches = match pattern {
+                    Pattern::Wildcard => Some(true),
+                    Pattern::Literal(value) => known.and_then(|known| {
+                        crate::flow::constant_bool(value).map(|value| value == known)
+                    }),
+                    _ => None,
+                };
+                if remaining {
+                    can_match |= matches != Some(false);
+                    remaining &= matches != Some(true);
+                }
+            }
+            self.with_runtime_effects(can_match, |scan| scan.block(body));
+            self.local = local;
+            self.captures = captures;
         }
     }
     fn expr(&mut self, e: &Expr) {
@@ -570,25 +610,15 @@ impl Scan<'_> {
                 self.mark_runtime_effect(EffectKind::Await);
                 self.expr(value);
             }
-            Expr::Binary { left, right, .. } => {
+            Expr::Binary { left, op, right } => {
                 self.expr(left);
-                self.expr(right);
+                let reachable = !matches!(
+                    (op, crate::flow::constant_bool(left)),
+                    (BinaryOp::And, Some(false)) | (BinaryOp::Or, Some(true))
+                );
+                self.with_runtime_effects(reachable, |scan| scan.expr(right));
             }
-            Expr::If { subject, arms } => {
-                if let Some(e) = subject {
-                    self.expr(e);
-                }
-                for (ps, b) in arms {
-                    let local = self.local.clone();
-                    let captures = self.captures.clone();
-                    for p in ps {
-                        self.pattern(p);
-                    }
-                    self.block(b);
-                    self.local = local;
-                    self.captures = captures;
-                }
-            }
+            Expr::If { subject, arms } => self.conditional(subject.as_deref(), arms),
             Expr::Else { value, fallback } => {
                 self.expr(value);
                 self.block(fallback);

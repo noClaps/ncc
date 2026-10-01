@@ -793,3 +793,367 @@ fn test_slicing_dead_assignments_preserve_qualification_error_evidence() {
         &SlicingCliExpectation::Diagnostic,
     );
 }
+
+#[test]
+fn test_slicing_boolean_dead_branches_exclude_writes_and_calls() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let mut sources = Vec::new();
+    for body in [
+        "if false { true -> { EFFECT } false -> {} }",
+        "if not false { false -> { EFFECT } true -> {} }",
+        "if true and not false { false -> { EFFECT } _ -> {} }",
+        "if false or true { false -> { EFFECT } _ -> {} }",
+        "if { false -> { EFFECT } _ -> {} }",
+        "if true { false, false -> { EFFECT } false, true -> {} _ -> { EFFECT } }",
+        "if false { true, false -> {} _ -> { EFFECT } }",
+        "if true { _ -> {} true -> { EFFECT } }",
+        "while false { EFFECT }",
+        "while not (true or false) { EFFECT }",
+        "while false and change() { EFFECT }",
+        "if false and change() { true -> { EFFECT } _ -> {} }",
+        "if true or change() { false -> { EFFECT } _ -> {} }",
+        "if { not true -> { EFFECT } _ -> {} }",
+    ] {
+        for effect in ["value = 9", "_ = change()"] {
+            sources.push(format!(
+                r#"
+mut int value = 0
+fn change() bool {{ value = 9 return true }}
+fn dead() int {{ {} return 7 }}
+@println("excluded:", dead())
+test "dead Boolean effects" {{ assert value == 0 @println(value) }}
+"#,
+                body.replace("EFFECT", effect),
+            ));
+        }
+    }
+    let cases: Vec<_> = sources
+        .iter()
+        .map(|source| (source.as_str(), "0\n"))
+        .collect();
+    assert_slicing_cli_cases(directory.path(), &cases, &SlicingCliExpectation::Output);
+}
+
+#[test]
+fn test_slicing_boolean_short_circuits_exclude_rhs_calls() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let sources: Vec<_> = [
+        "false and change()",
+        "not true and change()",
+        "(true and false) and change()",
+        "true or change()",
+        "not false or change()",
+        "(false or true) or change()",
+        "false and (true or change())",
+        "true or (false and change())",
+    ]
+    .iter()
+    .map(|expression| {
+        format!(
+            r#"
+mut int value = 0
+fn change() bool {{ value = 9 return true }}
+fn dead() bool {{ return {expression} }}
+@println("excluded:", dead())
+test "dead RHS" {{ assert value == 0 @println(value) }}
+"#,
+        )
+    })
+    .collect();
+    let cases: Vec<_> = sources
+        .iter()
+        .map(|source| (source.as_str(), "0\n"))
+        .collect();
+    assert_slicing_cli_cases(directory.path(), &cases, &SlicingCliExpectation::Output);
+}
+
+#[test]
+fn test_slicing_boolean_dead_dynamic_calls_exclude_opacity() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let sources: Vec<_> = [
+        "if false { true -> { _ = action() } _ -> {} }",
+        "if { true -> {} _ -> { _ = action() } }",
+        "while false { _ = action() }",
+        "_ = false and action()",
+        "_ = true or action()",
+    ]
+    .iter()
+    .map(|body| {
+        format!(
+            r#"
+mut int value = 0
+fn dead((fn() bool) action) int {{ {body} return 7 }}
+@println("excluded:", dead(fn() bool {{ return true }}))
+test "dead dynamic mutation" {{ assert value == 0 @println(value) }}
+"#,
+        )
+    })
+    .collect();
+    let cases: Vec<_> = sources
+        .iter()
+        .map(|source| (source.as_str(), "0\n"))
+        .collect();
+    assert_slicing_cli_cases(directory.path(), &cases, &SlicingCliExpectation::Output);
+}
+
+#[test]
+fn test_slicing_boolean_dead_native_calls_exclude_opacity() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    fs::write(directory.path().join("native.c"), "static int state; nc_abi_set_result set(void) { state = 9; } nc_abi_read_result read(void) { return state; }").unwrap();
+    let sources: Vec<_> = [
+        "if false { true -> { native.set() } _ -> {} }",
+        "if { true -> {} _ -> { native.set() } }",
+        "while false { native.set() }",
+        "_ = false and mutate()",
+        "_ = true or mutate()",
+    ]
+    .iter()
+    .map(|body| {
+        format!(
+            r#"
+extern "native.c" as native {{ fn set() = "set" fn read() int = "read" }}
+fn mutate() bool {{ native.set() return true }}
+fn dead() int {{ {body} return 7 }}
+@println("excluded:", dead())
+native.set()
+test "live native mutation" {{ assert native.read() == 9 @println(native.read()) }}
+"#,
+        )
+    })
+    .collect();
+    let cases: Vec<_> = sources
+        .iter()
+        .map(|source| (source.as_str(), "9\n"))
+        .collect();
+    assert_slicing_cli_cases(directory.path(), &cases, &SlicingCliExpectation::Output);
+}
+
+#[test]
+fn test_slicing_boolean_dead_await_does_not_retain_unrelated_output() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let sources: Vec<_> = [
+        "if false { true -> { _ = await task } _ -> {} }",
+        "if { true -> {} _ -> { _ = await task } }",
+        "while false { _ = await task }",
+        "_ = false and await task",
+        "_ = true or await task",
+    ]
+    .iter()
+    .map(|body| {
+        format!(
+            r#"
+fn produce() bool {{ @println("worker") return true }}
+fut bool work = async produce()
+fn dead(fut bool task) int {{ {body} return 7 }}
+@println("excluded:", dead(work))
+test "live await" {{ assert await work @println("kept") }}
+"#,
+        )
+    })
+    .collect();
+    let cases: Vec<_> = sources
+        .iter()
+        .map(|source| (source.as_str(), "worker\nkept\n"))
+        .collect();
+    assert_slicing_cli_cases(directory.path(), &cases, &SlicingCliExpectation::Output);
+}
+
+#[test]
+fn test_slicing_boolean_ordered_patterns_stop_dead_comparisons_and_arms() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let sources: Vec<_> = [
+        "if true { false, true, change() -> {} _ -> { _ = change() } }",
+        "if false { true, false, change() -> {} _ -> { _ = change() } }",
+        "if { false, true, change() -> {} _ -> { _ = change() } }",
+        "if true { true -> {} change() -> {} _ -> { _ = change() } }",
+        "if true { unknown() -> {} true -> {} change() -> {} _ -> { _ = change() } }",
+        "if { unknown() -> {} false, true -> {} change() -> {} _ -> { _ = change() } }",
+    ]
+    .iter()
+    .map(|body| {
+        format!(
+            r#"
+mut int value = 0
+fn unknown() bool {{ return false }}
+fn change() bool {{ value = 9 return true }}
+fn dead() int {{ {body} return 7 }}
+@println("excluded:", dead())
+test "ordered dead effects" {{ assert value == 0 @println(value) }}
+"#,
+        )
+    })
+    .collect();
+    let cases: Vec<_> = sources
+        .iter()
+        .map(|source| (source.as_str(), "0\n"))
+        .collect();
+    assert_slicing_cli_cases(directory.path(), &cases, &SlicingCliExpectation::Output);
+}
+
+#[test]
+fn test_slicing_boolean_reached_mutations_and_pattern_effects_are_retained() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let sources: Vec<_> = [
+        "if true { false -> {} true -> { value = value + 1 } }",
+        "if not true { true -> {} _ -> { _ = change() } }",
+        "if { false -> {} true -> { _ = change() } _ -> {} }",
+        "if true { false, true -> { _ = change() } _ -> {} }",
+        "_ = true and change()",
+        "_ = false or change()",
+        "_ = change() and false",
+        "_ = change() or true",
+        "while change() { break }",
+        "if change() { true -> {} _ -> {} }",
+        "if true { probe() -> {} true -> {} _ -> {} }",
+        "if true { false, probe(), true -> {} _ -> {} }",
+        "if { probe() -> {} false, true -> {} _ -> {} }",
+        "if { probe(), true -> {} _ -> {} }",
+        "if { change() -> {} _ -> {} }",
+        "if true { expected -> {} true -> { _ = change() } _ -> {} }",
+        "if false { expected -> { _ = change() } _ -> {} }",
+        "if unknown { true -> { _ = change() } false -> {} }",
+        "_ = unknown and change()",
+        "_ = expected or change()",
+    ]
+    .iter()
+    .map(|body| {
+        format!(
+            r#"
+mut int value = 0
+bool expected = false
+bool unknown = true
+fn change() bool {{ value = value + 1 return true }}
+fn probe() bool {{ value = value + 1 return false }}
+fn required() int {{ {body} return 7 }}
+@println("required:", required())
+test "reached Boolean effects" {{ assert value == 1 @println(value) }}
+"#,
+        )
+    })
+    .collect();
+    let cases: Vec<_> = sources
+        .iter()
+        .map(|source| (source.as_str(), "required:7\n1\n"))
+        .collect();
+    assert_slicing_cli_cases(directory.path(), &cases, &SlicingCliExpectation::Output);
+}
+
+#[test]
+fn test_slicing_boolean_reached_dynamic_mutations_are_retained() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let sources: Vec<_> = [
+        "if true { true -> { _ = action() } _ -> {} }",
+        "if { action() -> {} _ -> {} }",
+        "while action() { break }",
+        "_ = true and action()",
+        "_ = false or action()",
+    ]
+    .iter()
+    .map(|body| {
+        format!(
+            r#"
+mut int value = 0
+fn required((fn() bool) action) int {{ {body} return 7 }}
+@println("required:", required(fn() bool {{ value = 1 return true }}))
+test "reached dynamic mutation" {{ assert value == 1 @println(value) }}
+"#,
+        )
+    })
+    .collect();
+    let cases: Vec<_> = sources
+        .iter()
+        .map(|source| (source.as_str(), "required:7\n1\n"))
+        .collect();
+    assert_slicing_cli_cases(directory.path(), &cases, &SlicingCliExpectation::Output);
+}
+
+#[test]
+fn test_slicing_boolean_dead_syntax_keeps_type_and_value_dependencies() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    assert_slicing_cli_cases(
+        directory.path(),
+        &[(
+            r#"
+struct Box { int value }
+mut int target = 0
+fn helper() int { return 9 }
+fn condition() bool { return true }
+fn retained() int {
+    if false { true -> { Box box = Box { .value = helper() } target = box.value } _ -> {} }
+    while false { Box box = Box { .value = helper() } _ = box.value }
+    _ = false and condition()
+    _ = true or condition()
+    if { true -> {} condition() -> { _ = helper() } _ -> {} }
+    return 7
+}
+test "dead syntax dependencies" { assert retained() == 7 assert target == 0 @println(retained()) }
+"#,
+            "7\n",
+        )],
+        &SlicingCliExpectation::Output,
+    );
+}
+
+#[test]
+fn test_slicing_boolean_dead_references_still_receive_semantic_checks() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    assert_slicing_cli_cases(
+        directory.path(),
+        &[
+            (
+                r#"fn retained() { if false { true -> { int invalid = true } _ -> {} } } test "dead type" { retained() }"#,
+                "expected `int`, found `bool`",
+            ),
+            (
+                r#"fn helper() bool { return missing } fn retained() { _ = false and helper() } test "dead helper" { retained() }"#,
+                "missing",
+            ),
+            (
+                r#"fn helper() bool { return missing } fn retained() { _ = true or helper() } test "dead helper" { retained() }"#,
+                "missing",
+            ),
+            (
+                r#"struct Box { Missing field } fn retained() { while false { Box box = Box { .field = 0 } } } test "dead type" { retained() }"#,
+                "Missing",
+            ),
+            (
+                r#"int value = 0 fn retained() { if { true -> {} _ -> { value = 1 } } } test "dead assignment" { retained() }"#,
+                "cannot mutate immutable",
+            ),
+            (
+                r#"fn helper() bool { return missing } fn retained() { if true { false, true, helper() -> {} _ -> {} } } test "dead pattern" { retained() }"#,
+                "missing",
+            ),
+            (
+                r#"fn helper() bool { return missing } fn retained() { if { true -> {} helper() -> {} _ -> {} } } test "dead arm" { retained() }"#,
+                "missing",
+            ),
+        ],
+        &SlicingCliExpectation::Diagnostic,
+    );
+}
+
+#[test]
+fn test_slicing_boolean_dead_assignments_keep_qualification_evidence() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    fs::write(
+        directory.path().join("library.nc"),
+        "pub fn good() int { return 1 }",
+    )
+    .unwrap();
+    let sources: Vec<_> = [
+        "if false { true -> { lib.missing = 1 } _ -> {} }",
+        "if { true -> {} _ -> { lib.missing = 1 } }",
+        "while false { lib.missing = 1 }",
+    ]
+    .iter()
+    .map(|body| {
+        format!("import {{ \"library\" as lib }} {body} test \"qualification\" {{ assert true }}")
+    })
+    .collect();
+    let cases: Vec<_> = sources
+        .iter()
+        .map(|source| (source.as_str(), "does not export `missing`"))
+        .collect();
+    assert_slicing_cli_cases(directory.path(), &cases, &SlicingCliExpectation::Diagnostic);
+}

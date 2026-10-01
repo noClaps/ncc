@@ -36,10 +36,13 @@ fallback for process inputs, native calls, and futures.
 
 Test-slicing regressions invoke `ncc test` directly in debug and release modes,
 without wrapping outside statements in synthetic test roots. Summaries exclude
-executable effects after direct jumps in the same block, but retain references
-needed to type-check dead syntax. Tests protect jump-operand mutations, captured
-writes, await dependencies, qualification errors, and scope restoration. Reachable
-dynamic/native calls and more complex control flow remain conservative.
+executable effects after direct jumps in the same block and in syntactically
+proven dead Boolean branches, false loops, and short-circuit operands. References
+needed to type-check dead syntax remain. Tests protect ordered multi-pattern arms,
+unknown pattern effects, name comparisons, jump-operand mutations, captured writes,
+await dependencies, qualification errors, and scope restoration. Reachable
+dynamic/native calls, callable creation versus invocation, and more complex
+control flow remain conservative.
 
 Successful conformance fixtures use debug and release execution, including
 module exports, imported generic types and patterns, and external C calls.
