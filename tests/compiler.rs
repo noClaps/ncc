@@ -656,6 +656,148 @@ test "mutual recursive read" { assert first(3) == 5 @println(second(2)) }
 }
 
 #[test]
+fn test_slicing_callable_promotion_excludes_dead_references() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let sources: Vec<_> = [
+        "(fn() int) action = fn() int { return 7 _ = read() }",
+        "mut (fn() int) action = fn() int { return 0 }\naction = fn() int { return 7 _ = read() }",
+        "(fn() int) original = fn() int { if false { true -> { _ = read() } _ -> {} } return 7 }\nmut (fn() int) action = fn() int { return 0 }\naction = original",
+        "mut (fn() int) action = fn() int { return 0 }\naction = fn() int { _ = false and read() == 9 return 7 }",
+    ]
+    .iter()
+    .map(|callable| {
+        format!(
+            r#"
+mut int value = 0
+fn mutate() {{ @println("discarded mutation") value = 9 }}
+mutate()
+fn read() int {{ return value }}
+{callable}
+test "dead callable reference" {{ assert action() == 7 @println(action()) }}
+"#,
+        )
+    })
+    .collect();
+    let cases: Vec<_> = sources
+        .iter()
+        .map(|source| (source.as_str(), "7\n"))
+        .collect();
+    assert_slicing_cli_cases(directory.path(), &cases, &SlicingCliExpectation::Output);
+}
+
+#[test]
+fn test_slicing_callable_promotion_preserves_returned_and_captured_aliases() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    assert_slicing_cli_cases(
+        directory.path(),
+        &[
+            (
+                r#"
+mut int value = 0
+fn mutate() { @println("required mutation") value = 9 }
+mutate()
+fn first(int n) int {
+    if n > 0 { true -> { return second(n - 1) } _ -> {} }
+    return value
+}
+fn second(int n) int { return first(n) }
+fn read() int { return first(3) }
+fn make() (fn() int) { return read }
+(fn() int) original = make()
+mut (fn() int) action = fn() int { return 0 }
+action = original
+test "returned recursive callback" { assert action() == 9 @println(action()) }
+"#,
+                "required mutation\n9\n",
+            ),
+            (
+                r#"
+fn make() (fn() int) {
+    mut int cell = 0
+    return fn() int { cell = cell + 1 return cell }
+}
+(fn() int) counter = make()
+mut (fn() int) action = fn() int { return 0 }
+action = counter
+@println("required prior:", action())
+test "captured alias replacement" { @println("kept:", action()) }
+"#,
+                "required prior:1\nkept:2\n",
+            ),
+        ],
+        &SlicingCliExpectation::Output,
+    );
+}
+
+#[test]
+fn test_slicing_callable_promotion_preserves_mutex_synchronization() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    assert_slicing_cli_cases(
+        directory.path(),
+        &[
+            (
+                r#"
+mutex int value = 0
+fn change() { lock value { value = 9 } }
+fut void work = async change()
+{ await work @println("waited") }
+fn read() int { lock value { return value } }
+fn make() (fn() int) { return read }
+mut (fn() int) action = fn() int { return 0 }
+action = make()
+test "returned mutex reader" { assert action() == 9 @println(action()) }
+"#,
+                "waited\n9\n",
+            ),
+            (
+                r#"
+fn make() (fn() int) {
+    mutex int cell = 0
+    return fn() int { lock cell { cell = cell + 1 return cell } }
+}
+(fn() int) counter = make()
+mut (fn() int) action = fn() int { return 0 }
+action = counter
+fn bump() { _ = action() }
+fut void work = async bump()
+{ await work @println("waited") }
+test "escaped mutex alias" { @println("kept:", action()) }
+"#,
+                "waited\nkept:2\n",
+            ),
+        ],
+        &SlicingCliExpectation::Output,
+    );
+}
+
+#[test]
+fn test_slicing_callable_promotion_preserves_dead_imported_diagnostics() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let library = directory.path().join("library.nc");
+    let expected = format!("{}:2:26: error: unknown name `missing`", library.display());
+    for callable in [
+        "(fn() int) action = fn() int { return 7 _ = helper() }",
+        "mut (fn() int) action = fn() int { return 0 }\naction = fn() int { return 7 _ = helper() }",
+    ] {
+        fs::write(
+            &library,
+            format!(
+                "\nfn helper() int {{ return missing }}\n{callable}\npub fn retained() int {{ return action() }}\n"
+            ),
+        )
+        .unwrap();
+        assert_slicing_cli_cases(
+            directory.path(),
+            &[(
+                r#"import { "library" as lib } test "dead imported callable" { assert lib.retained() == 7 }"#,
+                &expected,
+            )],
+            &SlicingCliExpectation::Diagnostic,
+        );
+    }
+}
+
+#[test]
 fn test_slicing_runtime_demand_preserves_opaque_callback_state() {
     let directory = ncc::temp::Directory::new().unwrap();
     assert_slicing_cli_cases(

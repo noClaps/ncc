@@ -51,7 +51,11 @@ error locations without retaining unrelated writers; direct and recursive reads,
 callback state, and syntax-selected initializers have runtime regressions.
 Synchronization traversal follows runtime references rather than dead syntax;
 regressions preserve outside waits for native readers and escaped mutex-protected
-closure state while discarding unrelated waits.
+closure state while discarding unrelated waits. Callable-dependency promotion
+likewise follows runtime references in global initializers and callable replacements,
+so dead helper references retain semantic checking without demanding unrelated
+mutations. Regressions preserve returned recursive callbacks, escaped captured-cell
+aliases, required mutex synchronization, and imported error locations.
 Reachable dynamic/native calls, callable creation versus invocation, and more complex
 control flow remain conservative.
 

@@ -166,16 +166,16 @@ fn summarize_effects(
                             for writer in &previous {
                                 if writer.writes.contains(&callee) {
                                     effect.merge(writer);
-                                    effect
-                                        .calls
-                                        .extend(writer.uses.intersection(callable).cloned());
+                                    effect.calls.extend(
+                                        writer.runtime_uses.intersection(callable).cloned(),
+                                    );
                                 }
                             }
                         }
                         if matches!(items[index], Item::Global(_)) {
-                            effect
-                                .calls
-                                .extend(previous[index].uses.intersection(callable).cloned());
+                            effect.calls.extend(
+                                previous[index].runtime_uses.intersection(callable).cloned(),
+                            );
                         }
                         if matches!(items[index], Item::Extern { .. }) {
                             effect.mark(EffectKind::Opaque);
