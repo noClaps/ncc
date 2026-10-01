@@ -14,6 +14,7 @@ enum EffectKind {
 #[derive(Clone, Default, PartialEq, Eq)]
 struct Effects {
     uses: Names,
+    runtime_uses: Names,
     writes: Names,
     calls: Names,
     kinds: HashSet<EffectKind>,
@@ -27,6 +28,7 @@ impl Effects {
     }
     fn merge(&mut self, other: &Self) {
         self.uses.extend(other.uses.iter().cloned());
+        self.runtime_uses.extend(other.runtime_uses.iter().cloned());
         self.writes.extend(other.writes.iter().cloned());
         self.calls.extend(other.calls.iter().cloned());
         self.kinds.extend(other.kinds.iter().copied());
@@ -206,11 +208,27 @@ fn select_dependencies(
     loop {
         let previous = selected.clone();
         let mut needed = Names::new();
+        let mut runtime_needed = Names::new();
+        let mut opaque_runtime = false;
         for (index, effect) in effects.iter().enumerate() {
             if selected[index] {
                 needed.extend(effect.uses.iter().cloned());
                 needed.extend(definitions(&items[index]));
+                // Declaration bodies execute through call summaries, not merely
+                // because they are retained for checking. Global initializers run.
+                if matches!(
+                    items[index],
+                    Item::Global(_) | Item::Statement(_) | Item::Test { .. }
+                ) {
+                    runtime_needed.extend(effect.runtime_uses.iter().cloned());
+                    opaque_runtime |= effect.contains(EffectKind::Opaque);
+                }
             }
+        }
+        if opaque_runtime {
+            // Unknown callbacks can read globals and escaped cells through
+            // immutable callable bindings. Preserve the full dependency demand.
+            runtime_needed.extend(needed.iter().cloned());
         }
         for name in &needed {
             if let Some(indices) = declarations.get(name) {
@@ -235,11 +253,11 @@ fn select_dependencies(
             }
             if index <= last_test && matches!(item, Item::Global(_) | Item::Statement(_)) {
                 selected[index] |= effects[index].contains(EffectKind::Opaque)
-                    || !effects[index].writes.is_disjoint(&needed)
+                    || !effects[index].writes.is_disjoint(&runtime_needed)
                     || (effects[index].contains(EffectKind::Await)
                         && synchronization_depends_on(
                             &effects[index].uses,
-                            &needed,
+                            &runtime_needed,
                             declarations,
                             effects,
                         ));
@@ -297,6 +315,9 @@ impl Scan<'_> {
     fn name(&mut self, name: &str) {
         if !self.local.contains(name) && self.globals.contains(name) {
             self.effects.uses.insert(name.into());
+            if self.runtime_effects {
+                self.effects.runtime_uses.insert(name.into());
+            }
         }
     }
     fn ty(&mut self, ty: &Type) {
@@ -660,6 +681,8 @@ mod tests {
         incoming.mark(EffectKind::CapturedWrite);
         incoming.writes.insert("state".into());
         incoming.calls.insert("helper".into());
+        incoming.uses.extend(["dead".into(), "live".into()]);
+        incoming.runtime_uses.insert("live".into());
 
         combined.merge(&incoming);
         for kind in [
@@ -671,6 +694,11 @@ mod tests {
             assert!(combined.contains(kind));
         }
         assert!(combined.uses.contains("input"));
+        assert!(combined.uses.contains("dead"));
+        assert!(combined.uses.contains("live"));
+        assert!(combined.runtime_uses.contains("live"));
+        assert!(!combined.runtime_uses.contains("dead"));
+        assert!(!combined.runtime_uses.contains("input"));
         assert!(combined.writes.contains("state"));
         assert!(combined.calls.contains("helper"));
         assert!(!incoming.contains(EffectKind::Assignment));

@@ -499,6 +499,185 @@ fn assert_slicing_cli_cases(
 }
 
 #[test]
+fn test_slicing_runtime_demand_excludes_mutations_for_dead_helper_references() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    assert_slicing_cli_cases(
+        directory.path(),
+        &[
+            (
+                r#"
+mut int value = 0
+fn mutate() { @println("discarded mutation") value = 9 }
+mutate()
+struct Box { int value }
+fn helper() int { return value }
+fn retained() int { return 7 Box box = Box { .value = helper() } _ = box.value }
+test "dead direct reference" { assert retained() == 7 @println(retained()) }
+"#,
+                "7\n",
+            ),
+            (
+                r#"
+mut int value = 0
+fn mutate() { @println("discarded mutation") value = 9 }
+mutate()
+fn helper(int n) int {
+    if n > 0 { true -> { return helper(n - 1) } _ -> {} }
+    return value
+}
+fn retained() int { return 7 _ = helper(2) }
+test "dead recursive reference" { assert retained() == 7 @println(retained()) }
+"#,
+                "7\n",
+            ),
+        ],
+        &SlicingCliExpectation::Output,
+    );
+}
+
+#[test]
+fn test_slicing_runtime_demand_preserves_direct_and_mutual_recursive_reads() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    assert_slicing_cli_cases(
+        directory.path(),
+        &[
+            (
+                r#"
+mut int value = 0
+value = 5
+fn read() int { return value }
+test "direct read" { assert read() == 5 @println(read()) }
+"#,
+                "5\n",
+            ),
+            (
+                r#"
+mut int value = 0
+value = 2
+fn mutate() { @println("required mutation") value = value + 3 }
+mutate()
+fn first(int n) int {
+    if n > 0 { true -> { return second(n - 1) } _ -> {} }
+    return value
+}
+fn second(int n) int { return first(n) }
+test "mutual recursive read" { assert first(3) == 5 @println(second(2)) }
+"#,
+                "required mutation\n5\n",
+            ),
+        ],
+        &SlicingCliExpectation::Output,
+    );
+}
+
+#[test]
+fn test_slicing_runtime_demand_preserves_opaque_callback_state() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    assert_slicing_cli_cases(
+        directory.path(),
+        &[
+            (
+                r#"
+mut int value = 0
+value = 9
+fn read() int { return value }
+fn invoke((fn() int) action) int { return action() }
+test "reader callback" { assert invoke(read) == 9 @println(invoke(read)) }
+"#,
+                "9\n",
+            ),
+            (
+                r#"
+mut int value = 0
+value = 9
+fn read() int { return value }
+fn invoke() int { (fn() int) action = read return action() }
+test "local reader alias" { assert invoke() == 9 @println(invoke()) }
+"#,
+                "9\n",
+            ),
+            (
+                r#"
+mut int value = 0
+value = 9
+fn read() int { return value }
+mut (fn() int) action = fn() int { return 0 }
+action = read
+fn invoke((fn() int) callback) int { return callback() }
+test "replaced reader callback" { assert invoke(action) == 9 @println(invoke(action)) }
+"#,
+                "9\n",
+            ),
+            (
+                r#"
+fn make() (fn() int) {
+    mut int cell = 0
+    return fn() int { cell = cell + 1 return cell }
+}
+(fn() int) counter = make()
+_ = counter()
+fn read() int { return counter() }
+fn invoke((fn() int) action) int { return action() }
+test "escaped counter callback" { assert invoke(read) == 2 @println(invoke(read)) }
+"#,
+                "3\n",
+            ),
+        ],
+        &SlicingCliExpectation::Output,
+    );
+}
+
+#[test]
+fn test_slicing_runtime_demand_preserves_syntax_selected_global_initializer() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    assert_slicing_cli_cases(
+        directory.path(),
+        &[(
+            r#"
+mut int value = 0
+fn mutate() { @println("required mutation") value = 5 }
+mutate()
+fn initialize() int { @println("initializer:", value) return value }
+int snapshot = initialize()
+fn retained() int { return 7 _ = snapshot }
+test "syntax selected initializer" { assert retained() == 7 @println(retained()) }
+"#,
+            "required mutation\ninitializer:5\n7\n",
+        )],
+        &SlicingCliExpectation::Output,
+    );
+}
+
+#[test]
+fn test_slicing_runtime_demand_preserves_dead_dependency_diagnostic_locations() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let library = directory.path().join("library.nc");
+    for (source, location, diagnostic) in [
+        (
+            "\nfn helper() int { return missing }\npub fn retained() int { return 7 _ = helper() }\n",
+            "2:26",
+            "unknown name `missing`",
+        ),
+        (
+            "\nstruct Box { Missing field }\npub fn retained() int { return 7 Box box = Box { .field = 0 } _ = box.field }\n",
+            "2:1",
+            "unknown type `Missing`",
+        ),
+    ] {
+        fs::write(&library, source).unwrap();
+        let expected = format!("{}:{location}: error: {diagnostic}", library.display());
+        assert_slicing_cli_cases(
+            directory.path(),
+            &[(
+                r#"import { "library" as lib } test "dead imported dependency" { assert lib.retained() == 7 }"#,
+                &expected,
+            )],
+            &SlicingCliExpectation::Diagnostic,
+        );
+    }
+}
+
+#[test]
 fn test_slicing_direct_return_excludes_dead_writes_and_calls() {
     let directory = ncc::temp::Directory::new().unwrap();
     assert_slicing_cli_cases(

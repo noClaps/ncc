@@ -38,13 +38,18 @@ Test-slicing regressions invoke `ncc test` directly in debug and release modes,
 without wrapping outside statements in synthetic test roots. Summaries exclude
 executable effects after direct jumps through the same or nested plain lexical
 blocks and in syntactically proven dead Boolean branches, false loops, and
-short-circuit operands. References
-needed to type-check dead syntax remain. Tests protect ordered multi-pattern arms,
+short-circuit operands. References needed to type-check dead syntax remain, but
+known runtime paths separately determine which prior mutations are retained.
+Opaque calls fall back to full dependency demand to protect callback reads and
+escaped state. Selected global initializers still execute in full. Tests protect
+ordered multi-pattern arms,
 unknown pattern effects, name comparisons, jump-operand mutations, captured writes,
 await dependencies, qualification errors, and scope restoration. Boundary tests
 preserve reached effects after loops, locks, labeled conditionals, and value
-expressions that consume jumps. Reachable
-dynamic/native calls, callable creation versus invocation, and more complex
+expressions that consume jumps. Dead helper references preserve imported semantic
+error locations without retaining unrelated writers; direct and recursive reads,
+callback state, and syntax-selected initializers have runtime regressions.
+Reachable dynamic/native calls, callable creation versus invocation, and more complex
 control flow remain conservative.
 
 Successful conformance fixtures use debug and release execution, including
