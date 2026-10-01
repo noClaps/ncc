@@ -2,8 +2,6 @@
 
 - [ ] Expand language and edge-case coverage.
   - [ ] Cover every part of the language and as many edge cases as possible.
-  - [ ] Update existing test assertions for Rust 1.99 Clippy's `assert_is_empty`
-        lint so all-target checks pass with warnings denied.
   - [ ] Ask the user about unclear specification semantics, then capture the
         agreed behavior in tests.
   - [ ] Expand top-level constant evaluation beyond its safely evaluatable

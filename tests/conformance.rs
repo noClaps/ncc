@@ -2331,7 +2331,7 @@ test "namespaces" {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(output.stdout.is_empty());
+        assert_eq!(output.stdout.as_slice(), b"");
         for invalid in [
             "right.Point value = left.Point{.x = 1}",
             "right.Box<int> value = left.wrap<int>(1)",
@@ -2422,7 +2422,7 @@ test "nested imports" {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(output.stdout.is_empty());
+        assert_eq!(output.stdout.as_slice(), b"");
         let error = compile_fixture(
             "import { \"library/facade\" as facade } _ = facade.helper.answer(1)",
             &main,

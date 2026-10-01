@@ -249,8 +249,8 @@ fn test_failures_are_nonzero_and_leave_no_generated_files() {
         for mode in ["-d", "-r"] {
             let output = cli(&["test", path, mode]);
             assert!(!output.status.success(), "{body}, {mode}");
-            assert!(!output.stderr.is_empty());
-            assert!(output.stdout.is_empty());
+            assert_ne!(output.stderr.as_slice(), b"");
+            assert_eq!(output.stdout.as_slice(), b"");
             assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
             let output = cli(&["run", path, mode]);
             assert!(output.status.success());
@@ -262,6 +262,6 @@ fn test_failures_are_nonzero_and_leave_no_generated_files() {
     fs::write(&input, "@println(\"no tests\")").unwrap();
     let output = cli(&["test", path]);
     assert!(output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout.as_slice(), b"");
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
 }

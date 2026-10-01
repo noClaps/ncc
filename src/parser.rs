@@ -1208,7 +1208,7 @@ mod tests {
             panic!()
         };
         assert_eq!(args.len(), 1);
-        assert!(generics.is_empty());
+        assert_eq!(generics.as_slice(), &[] as &[Type]);
         let Expr::Member { object, name } = callee.unlocated() else {
             panic!()
         };

@@ -208,7 +208,10 @@ fn ordinary_compilation_ignores_tests_before_semantic_processing() {
             let c = ncc::compile_source_with_options(source, path, release).unwrap();
             assert!(!c.contains("#include"), "{source}");
             let output = ncc::compile_source_with_diagnostics(source, path, release).unwrap();
-            assert!(output.warnings.0.is_empty());
+            assert_eq!(
+                output.warnings.0.as_slice(),
+                &[] as &[ncc::diagnostic::Diagnostic]
+            );
         }
     }
     for release in [false, true] {
@@ -339,7 +342,7 @@ test "imported state" { assert shared == 1 }
             .output()
             .unwrap();
         assert!(!output.status.success());
-        assert!(output.stdout.is_empty());
+        assert_eq!(output.stdout.as_slice(), b"");
         assert!(String::from_utf8_lossy(&output.stderr).contains("assert"));
     }
 }

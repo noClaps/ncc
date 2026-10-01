@@ -472,10 +472,11 @@ mod tests {
             }
         }
         let checked = checked("test \"done\" {} @println(1)");
-        assert!(
+        assert_eq!(
             warnings(&checked.module, &checked.expression_types)
                 .0
-                .is_empty()
+                .as_slice(),
+            &[] as &[crate::diagnostic::Diagnostic]
         );
     }
 
