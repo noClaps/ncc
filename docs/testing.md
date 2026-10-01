@@ -36,11 +36,14 @@ fallback for process inputs, native calls, and futures.
 
 Test-slicing regressions invoke `ncc test` directly in debug and release modes,
 without wrapping outside statements in synthetic test roots. Summaries exclude
-executable effects after direct jumps in the same block and in syntactically
-proven dead Boolean branches, false loops, and short-circuit operands. References
+executable effects after direct jumps through the same or nested plain lexical
+blocks and in syntactically proven dead Boolean branches, false loops, and
+short-circuit operands. References
 needed to type-check dead syntax remain. Tests protect ordered multi-pattern arms,
 unknown pattern effects, name comparisons, jump-operand mutations, captured writes,
-await dependencies, qualification errors, and scope restoration. Reachable
+await dependencies, qualification errors, and scope restoration. Boundary tests
+preserve reached effects after loops, locks, labeled conditionals, and value
+expressions that consume jumps. Reachable
 dynamic/native calls, callable creation versus invocation, and more complex
 control flow remain conservative.
 

@@ -560,6 +560,200 @@ test "dead effect" {{ assert value == 0 @println(value) }}
 }
 
 #[test]
+fn test_slicing_plain_block_exits_exclude_enclosing_dead_effects() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let mut sources = Vec::new();
+    for exit in ["return 7", r#"throw "must not execute""#] {
+        for block in [
+            "{ int local = 1 EXIT }",
+            "{ int local = 1 { _ = local EXIT } }",
+        ] {
+            for effect in ["value = 9", "change()"] {
+                sources.push(format!(
+                    r#"
+mut int value = 0
+fn change() {{ value = 9 }}
+fn dead() int! {{ {} {effect} }}
+@println("excluded:", dead())
+fn required() {{ @print("required:") value = value + 1 }}
+required()
+test "nested exit" {{ assert value == 1 @println(value) }}
+"#,
+                    block.replace("EXIT", exit),
+                ));
+            }
+        }
+    }
+    let cases: Vec<_> = sources
+        .iter()
+        .map(|source| (source.as_str(), "required:1\n"))
+        .collect();
+    assert_slicing_cli_cases(directory.path(), &cases, &SlicingCliExpectation::Output);
+}
+
+#[test]
+fn test_slicing_plain_block_loop_exits_keep_after_loop_effects() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let mut sources = Vec::new();
+    for exit in ["break", "continue"] {
+        for body in [
+            "for i in [0, 1] { { _ = i { EXIT } } EFFECT }",
+            "mut int i = 2 while i > 0 { i = i - 1 { { EXIT } } EFFECT }",
+        ] {
+            for effect in ["value = 9", "change()"] {
+                let body = body.replace("EXIT", exit).replace("EFFECT", effect);
+                sources.push(format!(
+                    r#"
+mut int value = 0
+fn change() {{ value = 9 }}
+fn dead() int {{ {body} return 7 }}
+@println("excluded:", dead())
+fn required() int {{
+    {body}
+    @print("required:")
+    value = value + 1
+    return 7
+}}
+@println(required())
+test "after loop" {{ assert value == 1 @println(value) }}
+"#,
+                ));
+            }
+        }
+    }
+    let cases: Vec<_> = sources
+        .iter()
+        .map(|source| (source.as_str(), "required:7\n1\n"))
+        .collect();
+    assert_slicing_cli_cases(directory.path(), &cases, &SlicingCliExpectation::Output);
+}
+
+#[test]
+fn test_slicing_plain_block_scope_boundaries_keep_reached_effects() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let sources: Vec<_> = [
+        "done: if true { true -> { { break :done } } _ -> {} }",
+        "done: lock guard { { { break :done } } }",
+        "lock guard { { break } }",
+        "int[] items = [] for i in items { { return 0 } }",
+        "while false { { throw \"not reached\" } }",
+    ]
+    .iter()
+    .map(|body| {
+        format!(
+            r#"
+mut int value = 0
+mutex int guard = 0
+fn required() int! {{
+    {{
+        {body}
+        @print("required:")
+        value = value + 1
+    }}
+    return 7
+}}
+@println(required() catch err {{ throw err }})
+test "scope continuation" {{ assert value == 1 @println(value) }}
+"#,
+        )
+    })
+    .collect();
+    let cases: Vec<_> = sources
+        .iter()
+        .map(|source| (source.as_str(), "required:7\n1\n"))
+        .collect();
+    assert_slicing_cli_cases(directory.path(), &cases, &SlicingCliExpectation::Output);
+}
+
+#[test]
+fn test_slicing_plain_block_value_breaks_keep_expression_continuations() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let sources: Vec<_> = [
+        "if true { true -> { { { break 7 } } value = 9 change() 0 } _ -> { 0 } }",
+        "absent else { { { break 7 } } value = 9 change() 0 }",
+        "fail() catch err { { { break 7 } } value = 9 change() 0 }",
+    ]
+    .iter()
+    .map(|expression| {
+        format!(
+            r#"
+mut int value = 0
+int? absent = none
+fn fail() int! {{ throw "fallback" }}
+fn change() {{ value = 9 }}
+fn dead() int {{ int result = {expression} return result }}
+@println("excluded:", dead())
+fn required() int {{
+    {{
+        int result = {expression}
+        @print("required:")
+        value = value + 1
+        return result
+    }}
+}}
+@println(required())
+test "value block continuation" {{ assert value == 1 @println(value) }}
+"#,
+        )
+    })
+    .collect();
+    let cases: Vec<_> = sources
+        .iter()
+        .map(|source| (source.as_str(), "required:7\n1\n"))
+        .collect();
+    assert_slicing_cli_cases(directory.path(), &cases, &SlicingCliExpectation::Output);
+}
+
+#[test]
+fn test_slicing_plain_block_dead_suffix_keeps_syntax_and_qualification() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    assert_slicing_cli_cases(
+        directory.path(),
+        &[(
+            r#"
+struct Box { int value }
+fn helper() int { return 9 }
+fn retained() int {
+    { int local = 1 { _ = local return 7 } }
+    Box box = Box { .value = helper() }
+    _ = box.value
+}
+test "nested syntax dependencies" { assert retained() == 7 @println(retained()) }
+"#,
+            "7\n",
+        )],
+        &SlicingCliExpectation::Output,
+    );
+    fs::write(
+        directory.path().join("library.nc"),
+        "pub fn good() int { return 1 }",
+    )
+    .unwrap();
+    assert_slicing_cli_cases(
+        directory.path(),
+        &[
+            (
+                r#"fn helper() int { return missing } fn retained() int { { { return 7 } } _ = helper() } test "dead helper" { assert retained() == 7 }"#,
+                "missing",
+            ),
+            (
+                r#"fn retained() int { { { return 7 } } int invalid = true } test "dead invalid" { assert retained() == 7 }"#,
+                "expected `int`, found `bool`",
+            ),
+            (
+                r#"import { "library" as lib } fn retained() int { { { return 7 } } lib.missing = 1 } test "qualification" { assert retained() == 7 }"#,
+                "does not export `missing`",
+            ),
+            (
+                "import { \"library\" as lib } for i in [0] { { { break } }\nlib.missing = 1 } test \"qualification\" { assert true }",
+                "does not export `missing`",
+            ),
+        ],
+        &SlicingCliExpectation::Diagnostic,
+    );
+}
+
+#[test]
 fn test_slicing_direct_return_excludes_dead_captured_writes() {
     let directory = ncc::temp::Directory::new().unwrap();
     assert_slicing_cli_cases(

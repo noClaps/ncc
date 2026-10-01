@@ -17,8 +17,8 @@
     - [ ] Refine conservative retention caused by dynamic/native calls.
     - [ ] Distinguish callable creation from invocation in effect summaries,
           including lambda arguments whose bodies are never called.
-    - [ ] Track exits through nested blocks without confusing consumed jumps
-          with exits from their enclosing statements.
+    - [ ] Extend exit tracking through loops, locks, labeled conditionals, and
+          value expressions without losing reachable continuation.
     - [ ] Separate semantic declaration dependencies from runtime value
           dependencies so dead references do not retain unrelated prior writers.
     - [ ] Refine whole-statement/initializer retention.

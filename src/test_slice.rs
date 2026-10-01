@@ -33,6 +33,16 @@ impl Effects {
     }
 }
 
+fn exits_plain_block(statement: &Stmt) -> bool {
+    match statement.unlocated() {
+        Stmt::Return(_) | Stmt::Throw(_) | Stmt::Break(..) | Stmt::Continue(_) => true,
+        Stmt::Block(block) => block.statements.iter().any(exits_plain_block),
+        // Loops, labeled constructs, and value expressions can consume jumps.
+        // Their continuation requires more context than this untyped scan has.
+        _ => false,
+    }
+}
+
 fn definitions(item: &Item) -> Vec<String> {
     match item {
         Item::Function(f) => vec![f.name.clone()],
@@ -428,12 +438,9 @@ impl Scan<'_> {
         let runtime_effects = self.runtime_effects;
         for s in &b.statements {
             self.stmt(s);
-            if matches!(
-                s.unlocated(),
-                Stmt::Return(_) | Stmt::Throw(_) | Stmt::Break(..) | Stmt::Continue(_)
-            ) {
+            if exits_plain_block(s) {
                 // Keep dead syntax dependencies for checking, but exclude its
-                // executable effects. Nested blocks restore their own state.
+                // executable effects after jumps through plain lexical blocks.
                 self.runtime_effects = false;
             }
         }
