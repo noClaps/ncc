@@ -1451,6 +1451,63 @@ fn nested_places() (int, int) {
 }
 
 #[test]
+fn composite_rhs_snapshot_survives_source_and_tuple_ancestor_changes_during_folding() {
+    folded(
+        r#"
+struct Payload { [str]int[] rows }
+fn snapshot() (int, int[], int[], int) {
+    mut (Payload[], int) state = (
+        [Payload{.rows = ["k": [1, 2]]}, Payload{.rows = ["k": [3]]}], 10
+    )
+    mut int trace = 0
+    fn rhs() Payload { trace = trace * 10 + 1 return state[0][0] }
+    fn target() int {
+        trace = trace * 10 + 2
+        state[0][0].rows["k"][0] = 99
+        state = ([Payload{.rows = ["k": [7]]}, Payload{.rows = ["k": [8]]}], 20)
+        return 1
+    }
+    state[0][target()] = rhs()
+    return trace, state[0][0].rows["k"], state[0][1].rows["k"], state[1]
+}
+@println(snapshot())
+"#,
+        &["snapshot"],
+        "(12, [7], [1, 2], 20)\n",
+    );
+}
+
+#[test]
+fn nested_traversal_snapshots_are_independent_during_folding() {
+    folded(
+        r"
+fn snapshots() (uint[], int) {
+    mut int[][] rows = [[1, 2], [3]]
+    mut uint[] visited = []
+    mut int total = 0
+    for i in rows {
+        for j in rows[i] {
+            visited = visited <> [i * 10 + j]
+            if i == 0 and j == 0 {
+                true -> { rows = [[10], [20, 30, 40], [50]] }
+                false -> {}
+            }
+            if i == 1 {
+                true -> { total = total + rows[i][j] }
+                false -> {}
+            }
+        }
+    }
+    return visited, total
+}
+@println(snapshots())
+",
+        &["snapshots"],
+        "([0, 1, 10, 11, 12], 90)\n",
+    );
+}
+
+#[test]
 fn mixed_nested_assignment_places_preserve_folding_effect_order() {
     folded(
         r#"

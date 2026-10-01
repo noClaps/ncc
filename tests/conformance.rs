@@ -838,6 +838,43 @@ test "original indices" {
 }
 
 #[test]
+fn nested_traversals_keep_independent_snapshots_after_ancestor_replacement() {
+    success(
+        r#"
+fn runtime(int value) int { _ = @args() @print("") return value }
+test "independent nested traversal snapshots" {
+    mut int[][] rows = [[runtime(1), 2], [3]]
+    mut uint[] visited = []
+    mut int total = 0
+    for i in rows {
+        assert i < 2
+        for j in rows[i] {
+            assert j < 3
+            visited = visited <> [i * 10 + j]
+            if i == 0 and j == 0 {
+                true -> { rows = [[10], [20, 30, 40], [50]] }
+                false -> {}
+            }
+            if i == 1 {
+                true -> { total = total + rows[i][j] }
+                false -> {}
+            }
+        }
+    }
+    assert visited == [0u, 1u, 10u, 11u, 12u]
+    assert total == 90
+    assert rows.len == 3
+    assert rows[0] == [10]
+    assert rows[1] == [20, 30, 40]
+    assert rows[2] == [50]
+    @println(visited, " ", total)
+}
+"#,
+        "[0, 1, 10, 11, 12] 90\n",
+    );
+}
+
+#[test]
 fn for_traversal_retains_original_map_keys_under_insertion_and_replacement() {
     success(
         r#"
@@ -1609,6 +1646,67 @@ fn nested_places() (int, int, str, int, int) {
 @println(nested_places())
 "#,
         "(312145, 9, Z, 8, 1)\n",
+    );
+}
+
+#[test]
+fn composite_assignment_rhs_is_copied_before_index_replaces_tuple_ancestor() {
+    success(
+        r#"
+struct Payload { [str]int[] rows }
+fn runtime(int value) int { _ = @args() @print("") return value }
+test "RHS copy before tuple ancestor replacement" {
+    mut (Payload[], int) state = (
+        [
+            Payload{.rows = ["k": [runtime(1), 2], "other": [4]]},
+            Payload{.rows = ["k": [3]]}
+        ],
+        10
+    )
+    mut int trace = 0
+    mut int rhs_calls = 0
+    mut int index_calls = 0
+    mut int[] changed_source = []
+    fn source() Payload {
+        @print("rhs:")
+        rhs_calls = rhs_calls + 1
+        trace = trace * 10 + 1
+        return state[0][0]
+    }
+    fn target() int {
+        @print("index:")
+        index_calls = index_calls + 1
+        trace = trace * 10 + 2
+        state[0][0].rows["k"][0] = 99
+        state[0][0].rows["other"][0] = 98
+        changed_source = state[0][0].rows["k"]
+        state = (
+            [
+                Payload{.rows = ["k": [7]]},
+                Payload{.rows = ["k": [8]]},
+                Payload{.rows = ["k": [9]]}
+            ],
+            20
+        )
+        return 1
+    }
+    state[0][target()] = source()
+    assert rhs_calls == 1 and index_calls == 1
+    assert trace == 12
+    assert changed_source == [99, 2]
+    assert state[0].len == 3
+    assert state[0][0].rows.len == 1
+    assert state[0][0].rows["k"] == [7]
+    assert state[0][1].rows.len == 2
+    assert state[0][1].rows["k"] == [1, 2]
+    assert state[0][1].rows["other"] == [4]
+    assert state[0][2].rows.len == 1
+    assert state[0][2].rows["k"] == [9]
+    assert state[1] == 20
+    @println(state[0][1].rows["k"], " ", trace)
+}
+"#,
+        "rhs:index:[1, 2] 12\n",
     );
 }
 
