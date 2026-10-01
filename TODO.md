@@ -15,8 +15,13 @@
           individual computations.
   - [ ] Refine test-dependency slicing precision.
     - [ ] Refine conservative retention caused by dynamic/native calls.
-    - [ ] Distinguish callable creation from invocation in effect summaries,
-          including lambda arguments whose bodies are never called.
+    - [ ] Distinguish callable creation from invocation in effect summaries.
+      - [ ] Generalize deferred invocation summaries to named callback arguments,
+            callable aliases, forwarding, and escaping callbacks.
+      - [ ] Refine capture-creation value demand without losing immutable copies
+            or mutable callable replacements.
+      - [ ] Refine escaped-cell write proxies so retaining a callback initializer
+            does not by itself demand unrelated prior invocations.
     - [ ] Extend exit tracking through loops, locks, labeled conditionals, and
           value expressions without losing reachable continuation.
     - [ ] Refine whole-statement/initializer retention.

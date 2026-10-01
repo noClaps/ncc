@@ -499,6 +499,368 @@ fn assert_slicing_cli_cases(
 }
 
 #[test]
+fn test_slicing_unused_lambda_discards_callback_only_writes_and_calls() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    assert_slicing_cli_cases(
+        directory.path(),
+        &[
+            (
+                r#"
+mut int value = 0
+fn ignore((fn() void) callback) { @println("discarded call") }
+ignore(fn() void { value = 9 })
+test "unused direct write" { assert value == 0 @println(value) }
+"#,
+                "0\n",
+            ),
+            (
+                r#"
+mut int value = 0
+fn change() { value = 9 }
+fn ignore((fn() void) callback) { @println("discarded call") }
+ignore(fn() void { change() })
+test "unused helper call" { assert value == 0 @println(value) }
+"#,
+                "0\n",
+            ),
+            (
+                r#"
+mut int value = 0
+fn change() { value = 9 }
+fn ignore((fn() void) callback) { @println("discarded call") }
+ignore(fn() void { fut void work = async change() await work })
+test "unused async callback" { assert value == 0 @println(value) }
+"#,
+                "0\n",
+            ),
+        ],
+        &SlicingCliExpectation::Output,
+    );
+}
+
+#[test]
+fn test_slicing_unused_lambda_does_not_promote_dynamic_or_recursive_effects() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let sources: Vec<_> = [
+        "(fn() void) indirect = action indirect()",
+        "recurse(2)",
+        "fut void work = async recurse(2) await work",
+    ]
+    .iter()
+    .map(|body| {
+        format!(
+            r#"
+mut int observed = 0
+mut int unrelated = 0
+fn action() {{ unrelated = unrelated + 1 @println("discarded invocation:", unrelated) }}
+action()
+fn recurse(int n) {{
+    if n > 0 {{ true -> {{ recurse(n - 1) }} _ -> {{ action() }} }}
+}}
+fn retain((fn() void) callback) {{ observed = 7 @println("retained call") }}
+retain(fn() void {{ {body} }})
+test "unused invocation effects" {{ assert observed == 7 @println(observed) }}
+"#,
+        )
+    })
+    .collect();
+    let cases: Vec<_> = sources
+        .iter()
+        .map(|source| (source.as_str(), "retained call\n7\n"))
+        .collect();
+    assert_slicing_cli_cases(directory.path(), &cases, &SlicingCliExpectation::Output);
+}
+
+#[test]
+fn test_slicing_unused_lambda_preserves_capture_initializers() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    assert_slicing_cli_cases(
+        directory.path(),
+        &[(
+            r#"
+mut int observed = 0
+fn initialize() int { @println("capture initializer") return 9 }
+int captured = initialize()
+fn retain((fn() int) callback) { observed = 7 }
+retain(fn() int { return captured })
+test "unused capture dependency" { assert observed == 7 @println(observed) }
+"#,
+            "capture initializer\n7\n",
+        )],
+        &SlicingCliExpectation::Output,
+    );
+}
+
+#[test]
+fn test_slicing_unused_lambda_preserves_prior_mutable_capture_mutations() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    assert_slicing_cli_cases(
+        directory.path(),
+        &[(
+            r#"
+mut int captured = 0
+mut int observed = 0
+fn change() { captured = 9 @println("capture mutation:", captured) }
+change()
+fn retain((fn() int) callback) { observed = 7 }
+retain(fn() int { return captured })
+test "conservative mutable capture" { assert observed == 7 @println(observed) }
+"#,
+            "capture mutation:9\n7\n",
+        )],
+        &SlicingCliExpectation::Output,
+    );
+}
+
+#[test]
+fn test_slicing_unused_lambda_refinement_respects_callee_shadowing() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    assert_slicing_cli_cases(
+        directory.path(),
+        &[
+            (
+                r#"
+mut int value = 0
+fn ignore((fn() void) callback) {}
+{
+    (fn((fn() void)) void) ignore = fn((fn() void) callback) { callback() }
+    ignore(fn() void { value = 9 @println("local callback") })
+}
+test "local callee shadow" { assert value == 9 @println(value) }
+"#,
+                "local callback\n9\n",
+            ),
+            (
+                r#"
+mut int value = 0
+fn ignore((fn() void) callback) {}
+fn invoke((fn() void) callback) { callback() }
+fn caller((fn((fn() void)) void) ignore) {
+    ignore(fn() void { value = 9 @println("parameter callback") })
+}
+caller(invoke)
+test "parameter callee shadow" { assert value == 9 @println(value) }
+"#,
+                "parameter callback\n9\n",
+            ),
+        ],
+        &SlicingCliExpectation::Output,
+    );
+}
+
+#[test]
+fn test_slicing_unused_lambda_certification_checks_dead_parameter_references() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    assert_slicing_cli_cases(
+        directory.path(),
+        &[(
+            r#"
+mut int value = 0
+fn accept((fn() void) callback) {
+    return
+    _ = callback == callback
+}
+accept(fn() void { value = 9 })
+test "dead callback equality" { assert value == 0 }
+"#,
+            "equality is not defined",
+        )],
+        &SlicingCliExpectation::Diagnostic,
+    );
+}
+
+#[test]
+fn test_slicing_unused_lambda_certification_checks_name_pattern_parameters() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    assert_slicing_cli_cases(
+        directory.path(),
+        &[(
+            r#"
+mut int value = 0
+fn accept((fn() void) callback) {
+    if fn() void {} { callback -> {} _ -> {} }
+}
+accept(fn() void { value = 9 })
+test "callback name pattern" { assert value == 0 }
+"#,
+            "pattern equality is not defined",
+        )],
+        &SlicingCliExpectation::Diagnostic,
+    );
+}
+
+#[test]
+fn test_slicing_unused_lambda_preserves_partial_qualification_assignment_fallback() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    fs::write(
+        directory.path().join("library.nc"),
+        "pub fn good() int { return 1 }",
+    )
+    .unwrap();
+    assert_slicing_cli_cases(
+        directory.path(),
+        &[(
+            r#"
+import { "library" as lib }
+mut int value = 0
+fn ignore((fn() void) callback) {}
+ignore(fn() void { _ = lib.good() _ = lib.missing() value = 9 })
+test "partial callback qualification" { assert value == 0 }
+"#,
+            "does not export `missing`",
+        )],
+        &SlicingCliExpectation::Diagnostic,
+    );
+}
+
+#[test]
+fn test_slicing_unused_lambda_refinement_preserves_used_callbacks() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let sources: Vec<_> = [
+        "fn accept((fn() void) callback) { callback() }\naccept(fn() void { value = 9 })",
+        "fn accept((fn() void) callback) (fn() void) { return callback }\n(fn() void) action = accept(fn() void { value = 9 })\naction()",
+        "fn invoke((fn() void) callback) { callback() }\nfn accept((fn() void) callback) { invoke(callback) }\naccept(fn() void { value = 9 })",
+        "fn accept((fn() void) callback) (fn() void) { return fn() void { callback() } }\n(fn() void) action = accept(fn() void { value = 9 })\naction()",
+        "fn accept((fn() void) callback) { return callback() }\naccept(fn() void { value = 9 })",
+    ]
+    .iter()
+    .map(|call| {
+        format!(
+            r#"
+mut int value = 0
+{call}
+test "used callback" {{ assert value == 9 @println(value) }}
+"#,
+        )
+    })
+    .collect();
+    let cases: Vec<_> = sources
+        .iter()
+        .map(|source| (source.as_str(), "9\n"))
+        .collect();
+    assert_slicing_cli_cases(directory.path(), &cases, &SlicingCliExpectation::Output);
+}
+
+#[test]
+fn test_slicing_unused_lambda_refinement_preserves_argument_evaluation() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    assert_slicing_cli_cases(
+        directory.path(),
+        &[
+            (
+                r#"
+mut int value = 0
+fn produce() (fn() void) { value = 9 @println("producer") return fn() void {} }
+fn ignore((fn() void) callback) { @println("retained call") }
+ignore(produce())
+test "effectful callback producer" { assert value == 9 @println(value) }
+"#,
+                "producer\nretained call\n9\n",
+            ),
+            (
+                r#"
+mut int value = 0
+fn produce() int { value = 9 @println("producer") return 1 }
+fn ignore((fn() void) callback, int argument) { @println("retained call") }
+ignore(fn() void {}, produce())
+test "ordinary argument effect" { assert value == 9 @println(value) }
+"#,
+                "producer\nretained call\n9\n",
+            ),
+            (
+                r#"
+mut int value = 0
+(fn() void { value = 9 @println("immediate lambda") })()
+test "immediate invocation" { assert value == 9 @println(value) }
+"#,
+                "immediate lambda\n9\n",
+            ),
+        ],
+        &SlicingCliExpectation::Output,
+    );
+}
+
+#[test]
+fn test_slicing_unused_lambda_discards_irrelevant_local_diagnostics() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    assert_slicing_cli_cases(
+        directory.path(),
+        &[(
+            r#"
+mut int value = 0
+fn ignore((fn() void) callback) { @println("discarded call") }
+ignore(fn() void { value = 9 _ = missing })
+test "irrelevant bad callback" { assert value == 0 @println(value) }
+"#,
+            "0\n",
+        )],
+        &SlicingCliExpectation::Output,
+    );
+}
+
+#[test]
+fn test_slicing_unused_lambda_preserves_relevant_local_diagnostics() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    assert_slicing_cli_cases(
+        directory.path(),
+        &[(
+            r#"
+mut int value = 0
+fn retain((fn() void) callback) { value = 7 }
+retain(fn() void { _ = missing })
+test "relevant bad callback" { assert value == 7 }
+"#,
+            "unknown name `missing`",
+        )],
+        &SlicingCliExpectation::Diagnostic,
+    );
+}
+
+#[test]
+fn test_slicing_unused_lambda_discards_irrelevant_imported_diagnostics() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let library = directory.path().join("library.nc");
+    fs::write(&library, "\npub fn helper() int { return missing }\n").unwrap();
+
+    assert_slicing_cli_cases(
+        directory.path(),
+        &[(
+            r#"
+import { "library" as lib }
+mut int value = 0
+fn ignore((fn() void) callback) { @println("discarded call") }
+ignore(fn() void { value = lib.helper() })
+test "irrelevant imported helper" { assert value == 0 @println(value) }
+"#,
+            "0\n",
+        )],
+        &SlicingCliExpectation::Output,
+    );
+}
+
+#[test]
+fn test_slicing_unused_lambda_preserves_relevant_imported_diagnostics() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let library = directory.path().join("library.nc");
+    fs::write(&library, "\npub fn helper() int { return missing }\n").unwrap();
+    let expected = format!("{}:2:30: error: unknown name `missing`", library.display());
+    assert_slicing_cli_cases(
+        directory.path(),
+        &[(
+            r#"
+import { "library" as lib }
+mut int value = 0
+fn retain((fn() int) callback) { value = 7 }
+retain(fn() int { return lib.helper() })
+test "relevant imported helper" { assert value == 7 }
+"#,
+            &expected,
+        )],
+        &SlicingCliExpectation::Diagnostic,
+    );
+}
+
+#[test]
 fn test_slicing_runtime_demand_excludes_mutations_for_dead_helper_references() {
     let directory = ncc::temp::Directory::new().unwrap();
     assert_slicing_cli_cases(

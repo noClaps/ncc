@@ -56,8 +56,16 @@ likewise follows runtime references in global initializers and callable replacem
 so dead helper references retain semantic checking without demanding unrelated
 mutations. Regressions preserve returned recursive callbacks, escaped captured-cell
 aliases, required mutex synchronization, and imported error locations.
-Reachable dynamic/native calls, callable creation versus invocation, and more complex
-control flow remain conservative.
+Literal lambda arguments to unambiguous named functions with syntactically unused
+parameters contribute semantic and conservative capture-creation dependencies, but
+not invocation effects. Regressions cover discarded callback-only statements,
+dynamic/recursive/async callback bodies, retained capture initializers and mutable
+state, invoked and escaping callbacks, effectful producer arguments, name-pattern
+comparisons, shadowing, and local/imported qualification errors. References in dead
+or shadowed syntax deliberately prevent unused-parameter certification.
+Reachable dynamic/native calls, other callable creation versus invocation cases,
+capture-creation demand, escaped-cell initializer proxies, and more complex control
+flow remain conservative.
 
 Successful conformance fixtures use debug and release execution, including
 module exports, imported generic types and patterns, and external C calls.

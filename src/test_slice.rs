@@ -3,6 +3,7 @@ use crate::ast::{BinaryOp, Block, Expr, Function, Item, Pattern, Stmt, Type};
 use std::collections::{HashMap, HashSet};
 
 type Names = HashSet<String>;
+type UnusedArguments = HashMap<String, Vec<bool>>;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum EffectKind {
@@ -101,9 +102,54 @@ pub(crate) fn select(
         .flatten()
         .map(str::to_owned)
         .collect();
-    let mut effects = scan_effects(items, errors, &globals, &enums);
+    let unused_arguments = unused_arguments(items, errors, &declarations);
+    let mut effects = scan_effects(items, errors, &globals, &enums, &unused_arguments);
     summarize_effects(items, &declarations, &callable, &mutable, &mut effects);
     select_dependencies(items, &declarations, &effects, last_test)
+}
+
+fn unused_arguments(
+    items: &[Item],
+    errors: &[Option<crate::diagnostic::Diagnostics>],
+    declarations: &HashMap<String, Vec<usize>>,
+) -> UnusedArguments {
+    let names = Names::new();
+    let unused = UnusedArguments::new();
+    let mut result = UnusedArguments::new();
+    for (index, item) in items.iter().enumerate() {
+        let Item::Function(function) = item else {
+            continue;
+        };
+        if errors[index].is_some()
+            || declarations
+                .get(&function.name)
+                .is_none_or(|indices| indices.len() != 1)
+        {
+            continue;
+        }
+        let mut scan = Scan {
+            globals: &names,
+            enums: &names,
+            unused_arguments: &unused,
+            mentioned: Names::new(),
+            local: Names::new(),
+            captures: Names::new(),
+            effects: Effects::default(),
+            runtime_effects: true,
+        };
+        // Any mention, including dead or shadowed syntax and nested closures,
+        // blocks the certificate: the parameter may be invoked or escape.
+        scan.block(&function.body);
+        result.insert(
+            function.name.clone(),
+            function
+                .params
+                .iter()
+                .map(|parameter| !scan.mentioned.contains(&parameter.name))
+                .collect(),
+        );
+    }
+    result
 }
 
 fn scan_effects(
@@ -111,6 +157,7 @@ fn scan_effects(
     errors: &[Option<crate::diagnostic::Diagnostics>],
     globals: &Names,
     enums: &Names,
+    unused_arguments: &UnusedArguments,
 ) -> Vec<Effects> {
     items
         .iter()
@@ -119,6 +166,8 @@ fn scan_effects(
             let mut scan = Scan {
                 globals,
                 enums,
+                unused_arguments,
+                mentioned: Names::new(),
                 local: Names::new(),
                 captures: Names::new(),
                 effects: Effects::default(),
@@ -295,6 +344,8 @@ fn synchronization_depends_on(
 struct Scan<'a> {
     globals: &'a Names,
     enums: &'a Names,
+    unused_arguments: &'a UnusedArguments,
+    mentioned: Names,
     local: Names,
     captures: Names,
     effects: Effects,
@@ -313,6 +364,7 @@ impl Scan<'_> {
         self.runtime_effects = runtime_effects;
     }
     fn name(&mut self, name: &str) {
+        self.mentioned.insert(name.into());
         if !self.local.contains(name) && self.globals.contains(name) {
             self.effects.uses.insert(name.into());
             if self.runtime_effects {
@@ -428,6 +480,9 @@ impl Scan<'_> {
         match p {
             Pattern::Literal(e) => self.expr(e),
             Pattern::Name(n) => {
+                // Untyped name patterns can compare existing values. Count them
+                // even when shadowing would conservatively reject an unused parameter.
+                self.mentioned.insert(n.clone());
                 self.captures.remove(n);
                 self.local.insert(n.clone());
             }
@@ -573,6 +628,39 @@ impl Scan<'_> {
             self.captures = captures;
         }
     }
+    fn arguments(&mut self, callee: &Expr, args: &[Expr]) {
+        let unused = match callee.unlocated() {
+            Expr::Name(name) if !self.local.contains(name) => self.unused_arguments.get(name),
+            _ => None,
+        }
+        .filter(|unused| unused.len() == args.len());
+        for (index, argument) in args.iter().enumerate() {
+            if unused.is_some_and(|unused| unused[index])
+                && let Expr::Lambda(function) = argument.unlocated()
+            {
+                self.unused_lambda(function);
+            } else {
+                self.expr(argument);
+            }
+        }
+    }
+    fn unused_lambda(&mut self, function: &Function) {
+        let surrounding = std::mem::take(&mut self.effects);
+        self.function(function);
+        let creation = std::mem::replace(&mut self.effects, surrounding);
+        if self.runtime_effects {
+            // Capture creation can copy immutable values. Keep all syntax
+            // dependencies conservatively, without executing the callback body.
+            self.effects
+                .runtime_uses
+                .extend(creation.uses.iter().cloned());
+        }
+        if creation.contains(EffectKind::Assignment) {
+            // Qualification errors still need the defensive assignment fallback.
+            self.effects.mark(EffectKind::Assignment);
+        }
+        self.effects.uses.extend(creation.uses);
+    }
     fn expr(&mut self, e: &Expr) {
         match e.unlocated() {
             Expr::Name(n) => self.name(n),
@@ -605,9 +693,7 @@ impl Scan<'_> {
                 generics,
             } => {
                 self.expr(callee);
-                for arg in args {
-                    self.expr(arg);
-                }
+                self.arguments(callee, args);
                 for ty in generics {
                     self.ty(ty);
                 }
