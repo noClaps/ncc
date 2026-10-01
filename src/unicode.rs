@@ -163,8 +163,7 @@ mod tests {
         }
     }
 
-    // Decomposed text must remain unnormalized to test grapheme boundaries.
-    #[allow(clippy::unicode_not_nfc)]
+    // Unicode escapes preserve decomposed text when testing grapheme boundaries.
     #[test]
     fn matches_reference_boundaries() {
         let contexts = [
@@ -175,7 +174,7 @@ mod tests {
             "🇮",
             "👩\u{301}\u{200d}",
             "क्",
-            "가",
+            "\u{1100}\u{1161}",
         ];
         for &(lo, hi, _) in RANGES {
             for c in [lo, hi] {

@@ -244,10 +244,10 @@ impl Value {
             _ => true,
         }
     }
-    // NC equality uses exact IEEE-754 comparisons, including NaN semantics.
-    #[allow(clippy::float_cmp)]
     fn equals(&self, other: &Self) -> bool {
         match (self, other) {
+            // NC equality is exact IEEE-754 equality, including NaN and signed zero.
+            #[allow(clippy::float_cmp)]
             (Self::Float(a), Self::Float(b)) => f64::from_bits(*a) == f64::from_bits(*b),
             (Self::Array(a), Self::Array(b)) | (Self::Tuple(a), Self::Tuple(b)) => {
                 a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.equals(b))
@@ -1048,9 +1048,6 @@ impl<'module> Evaluator<'module> {
             _ => return None,
         })
     }
-    // NC float/integer casts intentionally round or truncate. Float-to-integer
-    // conversion is guarded by finite/range checks before the Rust cast.
-    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
     fn cast(&mut self, ty: &Type, from: &Type, value: Value) -> Option<Value> {
         if *self.base_type(ty) == Type::Named("str".into(), vec![]) {
             return self.string(&value, from).map(Value::String);
@@ -1093,7 +1090,12 @@ impl<'module> Evaluator<'module> {
                     "uint" => (0.0..18_446_744_073_709_551_616.0).contains(&n),
                     _ => (-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&n),
                 };
-                (n.is_finite() && fits).then(|| n.trunc() as i128)
+                (n.is_finite() && fits).then(|| {
+                    // NC truncates toward zero; the finite/range checks guard this cast.
+                    #[allow(clippy::cast_possible_truncation)]
+                    let integer = n.trunc() as i128;
+                    integer
+                })
             }
             _ => None,
         };
@@ -1103,7 +1105,11 @@ impl<'module> Evaluator<'module> {
             "byte" => integer.and_then(|n| u8::try_from(n).ok()).map(Value::Byte),
             "float" => match value {
                 Value::Float(_) => Some(value),
+                // NC integer-to-float conversion intentionally rounds to IEEE-754 precision.
+                #[allow(clippy::cast_precision_loss)]
                 Value::Int(n) => Some(Value::Float((n as f64).to_bits())),
+                // NC integer-to-float conversion intentionally rounds to IEEE-754 precision.
+                #[allow(clippy::cast_precision_loss)]
                 Value::Uint(n) => Some(Value::Float((n as f64).to_bits())),
                 Value::Byte(n) => Some(Value::Float(f64::from(n).to_bits())),
                 _ => None,
@@ -1177,12 +1183,14 @@ impl<'module> Evaluator<'module> {
             }
         })
     }
-    // Match NC's exact IEEE-754 equality rather than approximate comparisons.
-    #[allow(clippy::float_cmp)]
     fn float(a: f64, b: f64, op: BinaryOp) -> Option<Value> {
         use BinaryOp::{Add, Div, Eq, Ge, Gt, Le, Lt, Mod, Mul, Ne, Pow, Sub};
         let comparison = match op {
+            // NC equality is exact IEEE-754 equality, not an approximate comparison.
+            #[allow(clippy::float_cmp)]
             Eq => Some(a == b),
+            // IEEE-754 inequality must also preserve NaN and signed-zero behavior.
+            #[allow(clippy::float_cmp)]
             Ne => Some(a != b),
             Lt => Some(a < b),
             Le => Some(a <= b),

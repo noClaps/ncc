@@ -436,9 +436,7 @@ impl Checker {
         Ok(())
     }
     fn check_extern(&self, path: &str, functions: &[FunctionDecl]) -> Result<(), Diagnostics> {
-        // NC accepts exactly the lowercase .c suffix, not .C or other extensions.
-        #[allow(clippy::case_sensitive_file_extension_comparisons)]
-        if !path.ends_with(".c") {
+        if std::path::Path::new(path).extension() != Some(std::ffi::OsStr::new("c")) {
             return Checker::fail("external implementations must be C source files (.c)");
         }
         for function in functions {

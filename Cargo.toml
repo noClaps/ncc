@@ -19,3 +19,5 @@ pedantic = { level = "warn", priority = -1 }
 too_many_lines = "forbid"
 needless_pass_by_value = "forbid"
 struct_excessive_bools = "forbid"
+case_sensitive_file_extension_comparisons = "forbid"
+unicode_not_nfc = "forbid"

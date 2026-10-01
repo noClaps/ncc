@@ -128,8 +128,11 @@
   `needless_pass_by_value`, and `struct_excessive_bools` are forbidden: split long
   functions into cohesive helpers, borrow values that do not need ownership, and
   model state explicitly rather than exempting or compressing code.
-  Preserve decomposed Unicode fixtures rather than normalizing their bytes
-  to satisfy a lint.
+  `case_sensitive_file_extension_comparisons` and `unicode_not_nfc` are also
+  forbidden. Use path extension APIs and preserve decomposed Unicode fixtures
+  with Rust escapes or external source fixtures, never by normalizing their bytes.
+  Scope remaining allowances to the specific operation requiring them and briefly
+  explain the language semantics that make each necessary.
 - Never run `nc-tests/builtins.nc` with uncensored output: it prints environment
   variables. Run the large Fibonacci example only in release mode.
 - Preserve user changes and examples. Commit small, coherent changes often.
