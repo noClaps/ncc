@@ -4,27 +4,32 @@ use std::collections::{HashMap, HashSet};
 
 type Names = HashSet<String>;
 
-// Effect properties are independent and can all hold simultaneously.
-#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum EffectKind {
+    Opaque,
+    Await,
+    Assignment,
+    CapturedWrite,
+}
 #[derive(Clone, Default, PartialEq, Eq)]
 struct Effects {
     uses: Names,
     writes: Names,
     calls: Names,
-    opaque: bool,
-    awaits: bool,
-    assigns: bool,
-    captured_write: bool,
+    kinds: HashSet<EffectKind>,
 }
 impl Effects {
+    fn mark(&mut self, kind: EffectKind) {
+        self.kinds.insert(kind);
+    }
+    fn contains(&self, kind: EffectKind) -> bool {
+        self.kinds.contains(&kind)
+    }
     fn merge(&mut self, other: &Self) {
         self.uses.extend(other.uses.iter().cloned());
         self.writes.extend(other.writes.iter().cloned());
         self.calls.extend(other.calls.iter().cloned());
-        self.opaque |= other.opaque;
-        self.awaits |= other.awaits;
-        self.assigns |= other.assigns;
-        self.captured_write |= other.captured_write;
+        self.kinds.extend(other.kinds.iter().copied());
     }
 }
 
@@ -110,9 +115,10 @@ fn scan_effects(
             // Qualification can stop partway through a bad item, leaving names
             // unresolved. Never infer that its remaining assignments are harmless.
             if errors[index].is_some()
-                && (scan.effects.assigns || matches!(item, Item::Function(_)))
+                && (scan.effects.contains(EffectKind::Assignment)
+                    || matches!(item, Item::Function(_)))
             {
-                scan.effects.opaque = true;
+                scan.effects.mark(EffectKind::Opaque);
             }
             scan.effects
         })
@@ -135,7 +141,7 @@ fn summarize_effects(
                 if let Some(indices) = declarations.get(&callee) {
                     for &index in indices {
                         effect.merge(&previous[index]);
-                        if previous[index].captured_write {
+                        if previous[index].contains(EffectKind::CapturedWrite) {
                             // Escaped cells have no module name. Associate their
                             // mutations with the callable exposing those cells.
                             effect.writes.insert(callee.clone());
@@ -159,14 +165,14 @@ fn summarize_effects(
                                 .extend(previous[index].uses.intersection(callable).cloned());
                         }
                         if matches!(items[index], Item::Extern { .. }) {
-                            effect.opaque = true;
+                            effect.mark(EffectKind::Opaque);
                         }
                     }
                 } else {
-                    effect.opaque = true;
+                    effect.mark(EffectKind::Opaque);
                 }
             }
-            if effect.opaque {
+            if effect.contains(EffectKind::Opaque) {
                 effect.writes.extend(mutable.iter().cloned());
             }
         }
@@ -217,9 +223,9 @@ fn select_dependencies(
                 selected[index] |= native.contains(path);
             }
             if index <= last_test && matches!(item, Item::Global(_) | Item::Statement(_)) {
-                selected[index] |= effects[index].opaque
+                selected[index] |= effects[index].contains(EffectKind::Opaque)
                     || !effects[index].writes.is_disjoint(&needed)
-                    || (effects[index].awaits
+                    || (effects[index].contains(EffectKind::Await)
                         && synchronization_depends_on(
                             &effects[index].uses,
                             &needed,
@@ -418,7 +424,7 @@ impl Scan<'_> {
                 self.effects.writes.insert(n.clone());
             }
             Expr::Name(n) if self.captures.contains(n) => {
-                self.effects.captured_write = true;
+                self.effects.mark(EffectKind::CapturedWrite);
             }
             Expr::Tuple(es) => {
                 for e in es {
@@ -439,7 +445,7 @@ impl Scan<'_> {
             }
             Stmt::Block(b) => self.block(b),
             Stmt::Assign { target, value } => {
-                self.effects.assigns = true;
+                self.effects.mark(EffectKind::Assignment);
                 self.expr(value);
                 self.target(target);
             }
@@ -530,7 +536,7 @@ impl Scan<'_> {
                     // otherwise require conservative effects before type checking.
                     Expr::Member { object, .. } if matches!(object.unlocated(), Expr::Name(n) if self.enums.contains(n) && !self.local.contains(n)) =>
                         {}
-                    _ => self.effects.opaque = true,
+                    _ => self.effects.mark(EffectKind::Opaque),
                 }
             }
             Expr::Index { object, index } => {
@@ -540,7 +546,7 @@ impl Scan<'_> {
             Expr::Member { object, .. } => self.expr(object),
             Expr::Unary { value, .. } | Expr::Async(value) | Expr::Try(value) => self.expr(value),
             Expr::Await(value) => {
-                self.effects.awaits = true;
+                self.effects.mark(EffectKind::Await);
                 self.expr(value);
             }
             Expr::Binary { left, right, .. } => {
@@ -578,5 +584,42 @@ impl Scan<'_> {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EffectKind, Effects};
+
+    #[test]
+    fn merging_preserves_independent_effects_and_dependencies() {
+        let mut combined = Effects::default();
+        combined.mark(EffectKind::Assignment);
+        combined.mark(EffectKind::Await);
+        combined.uses.insert("input".into());
+        let mut incoming = Effects::default();
+        incoming.mark(EffectKind::Opaque);
+        incoming.mark(EffectKind::CapturedWrite);
+        incoming.writes.insert("state".into());
+        incoming.calls.insert("helper".into());
+
+        combined.merge(&incoming);
+        for kind in [
+            EffectKind::Assignment,
+            EffectKind::Await,
+            EffectKind::Opaque,
+            EffectKind::CapturedWrite,
+        ] {
+            assert!(combined.contains(kind));
+        }
+        assert!(combined.uses.contains("input"));
+        assert!(combined.writes.contains("state"));
+        assert!(combined.calls.contains("helper"));
+        assert!(!incoming.contains(EffectKind::Assignment));
+        assert!(!incoming.contains(EffectKind::Await));
+
+        let merged = combined.clone();
+        combined.merge(&incoming);
+        assert!(combined == merged);
     }
 }

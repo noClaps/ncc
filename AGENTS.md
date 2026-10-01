@@ -124,9 +124,11 @@
   and `cargo build --offline --release`.
 - Keep Clippy's configured pedantic lints passing with warnings denied. Prefer
   fixes over exemptions; intentional semantics may use narrowly scoped, explained
-  allowances only for lints that are not forbidden. `too_many_lines` is forbidden:
-  split long functions into cohesive helpers rather than exempting or compressing
-  them. Preserve decomposed Unicode fixtures rather than normalizing their bytes
+  allowances only for lints that are not forbidden. `too_many_lines`,
+  `needless_pass_by_value`, and `struct_excessive_bools` are forbidden: split long
+  functions into cohesive helpers, borrow values that do not need ownership, and
+  model state explicitly rather than exempting or compressing code.
+  Preserve decomposed Unicode fixtures rather than normalizing their bytes
   to satisfy a lint.
 - Never run `nc-tests/builtins.nc` with uncensored output: it prints environment
   variables. Run the large Fibonacci example only in release mode.

@@ -15,52 +15,64 @@ pub fn property(c: u32) -> u8 {
         .filter(|(lo, _, _)| *lo <= c)
         .map_or(0, |(_, _, v)| *v)
 }
+#[derive(Default, PartialEq, Eq)]
+enum Emoji {
+    #[default]
+    None,
+    Pictograph,
+    AfterZwj,
+}
+#[derive(Default, PartialEq, Eq)]
+enum Indic {
+    #[default]
+    None,
+    Consonant,
+    LinkedConsonant,
+}
 // UAX #29 rules require independent, overlapping state for these properties.
-#[allow(clippy::struct_excessive_bools)]
 #[derive(Default)]
 struct State {
-    previous: u8,
-    started: bool,
+    previous: Option<u8>,
     regional: usize,
-    emoji: bool,
-    zwj: bool,
-    consonant: bool,
-    linker: bool,
+    emoji: Emoji,
+    indic: Indic,
 }
 impl State {
     fn push(&mut self, c: u32) -> bool {
         let property = property(c);
         let current = property & 15;
-        let previous = self.previous;
-        let boundary = !self.started
-            || if previous == 1 && current == 7 {
-                false
-            } else if matches!(previous, 1 | 2 | 7) || matches!(current, 1 | 2 | 7) {
-                true
-            } else {
+        let boundary = match self.previous {
+            None => true,
+            Some(1) if current == 7 => false,
+            Some(previous) if matches!(previous, 1 | 2 | 7) || matches!(current, 1 | 2 | 7) => true,
+            Some(previous) => {
                 !((previous == 6 && matches!(current, 6 | 8 | 9 | 14))
                     || (matches!(previous, 8 | 14) && matches!(current, 13 | 14))
                     || (matches!(previous, 9 | 13) && current == 13)
                     || matches!(current, 3 | 12 | 15)
                     || previous == 10
-                    || (current == 5 && self.consonant && self.linker)
-                    || (previous == 15 && current == 4 && self.zwj)
+                    || (current == 5 && self.indic == Indic::LinkedConsonant)
+                    || (previous == 15 && current == 4 && self.emoji == Emoji::AfterZwj)
                     || (previous == 11 && current == 11 && self.regional % 2 == 1))
-            };
+            }
+        };
         self.regional = if current == 11 { self.regional + 1 } else { 0 };
-        self.zwj = current == 15 && self.emoji;
-        self.emoji = current == 4 || (current == 3 && self.emoji);
+        self.emoji = match current {
+            4 => Emoji::Pictograph,
+            3 if self.emoji == Emoji::Pictograph => Emoji::Pictograph,
+            15 if self.emoji == Emoji::Pictograph => Emoji::AfterZwj,
+            _ => Emoji::None,
+        };
         if current == 5 {
-            self.consonant = true;
-            self.linker = false;
+            self.indic = Indic::Consonant;
         } else if matches!(c, 0x94d | 0x9cd | 0xacd | 0xb4d | 0xc4d | 0xd4d) {
-            self.linker = true;
+            if self.indic != Indic::None {
+                self.indic = Indic::LinkedConsonant;
+            }
         } else if property & 16 == 0 {
-            self.consonant = false;
-            self.linker = false;
+            self.indic = Indic::None;
         }
-        self.previous = current;
-        self.started = true;
+        self.previous = Some(current);
         boundary
     }
 }
@@ -90,6 +102,67 @@ pub fn c_tables() -> String {
 mod tests {
     use super::*;
     use unicode_segmentation::UnicodeSegmentation;
+    fn assert_reference_boundaries(text: &str) {
+        let expected: Vec<_> = text.grapheme_indices(true).map(|(i, _)| i).collect();
+        assert_eq!(boundaries(text), expected, "{text:?}");
+    }
+
+    #[test]
+    fn emoji_state_transitions_match_reference() {
+        let contexts = [
+            "",
+            "👩",
+            "👩\u{301}\u{308}",
+            "👩\u{200d}",
+            "👩\u{200d}\u{200d}",
+            "👩\u{200d}\u{301}",
+            "👩\u{200d}👩",
+            "👩a",
+            "👩\r\n",
+            "👩\u{301}a\u{301}",
+            "\u{200d}",
+        ];
+        for prefix in contexts {
+            for suffix in ["👩", "\u{301}👩", "\u{200d}👩", "\u{200d}\u{200d}👩"] {
+                assert_reference_boundaries(&format!("{prefix}{suffix}"));
+            }
+        }
+    }
+
+    #[test]
+    fn indic_state_transitions_match_reference() {
+        for linker in [
+            '\u{94d}', '\u{9cd}', '\u{acd}', '\u{b4d}', '\u{c4d}', '\u{d4d}',
+        ] {
+            for text in [
+                format!("{linker}क"),
+                format!("{linker}\u{301}{linker}क"),
+                format!("क\u{301}क{linker}क"),
+                format!("क{linker}कक"),
+                format!("क{linker}क{linker}क"),
+                format!("क{linker}{linker}क"),
+                format!("क\u{301}{linker}\u{301}क"),
+                format!("क{linker}\u{200d}क"),
+                format!("क{linker}\u{200d}\u{200d}क"),
+                format!("क{linker}a\u{301}{linker}क"),
+                format!("क{linker}\r\n{linker}क"),
+                format!("क{linker}👩\u{200d}👩क"),
+            ] {
+                assert_reference_boundaries(&text);
+            }
+        }
+    }
+
+    #[test]
+    fn regional_indicator_transitions_match_reference() {
+        for count in 0..=7 {
+            let indicators = "🇮".repeat(count);
+            for separator in ["", "a", "\r\n", "\u{301}", "\u{200d}", "👩\u{200d}"] {
+                assert_reference_boundaries(&format!("{indicators}{separator}🇮🇳🇮🇳"));
+            }
+        }
+    }
+
     // Decomposed text must remain unnormalized to test grapheme boundaries.
     #[allow(clippy::unicode_not_nfc)]
     #[test]
@@ -109,8 +182,7 @@ mod tests {
                 let c = char::from_u32(c).unwrap();
                 for prefix in contexts {
                     let text = format!("{prefix}{c}a{c}\u{301}👩\u{200d}👩");
-                    let expected: Vec<_> = text.grapheme_indices(true).map(|(i, _)| i).collect();
-                    assert_eq!(boundaries(&text), expected, "{text:?}");
+                    assert_reference_boundaries(&text);
                 }
             }
         }

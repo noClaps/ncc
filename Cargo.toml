@@ -17,3 +17,5 @@ codegen-units = 1
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 too_many_lines = "forbid"
+needless_pass_by_value = "forbid"
+struct_excessive_bools = "forbid"

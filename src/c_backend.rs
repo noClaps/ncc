@@ -624,10 +624,7 @@ impl Emitter<'_> {
         self.array_types[slot].2 = element_type;
         Ok(name)
     }
-    // Consume emitted expressions consistently with `expr` and `line`; callers
-    // hand off owned strings that are no longer needed after materialization.
-    #[allow(clippy::needless_pass_by_value)]
-    fn temp(&mut self, expr: &Expr, value: String) -> Result<String, Diagnostics> {
+    fn temp(&mut self, expr: &Expr, value: &str) -> Result<String, Diagnostics> {
         let ty = self.ty(expr)?;
         if ty == Type::void() {
             self.line(format!("{value};"));
@@ -1216,7 +1213,7 @@ impl Emitter<'_> {
             Expr::Array(values) => self.array_literal(e, values),
             Expr::Index { object, index } => {
                 let value = self.index(object, index)?;
-                self.temp(e, value)
+                self.temp(e, &value)
             }
             Expr::Member { object, name } => self.member_expression(e, object, name),
             Expr::Bytes(bytes) => self.bytes_literal(e, bytes),
@@ -1252,7 +1249,7 @@ impl Emitter<'_> {
         if self.ty(e)? == Type::void() {
             return Ok("0".into());
         }
-        self.temp(e, format!("{value}.value"))
+        self.temp(e, &format!("{value}.value"))
     }
     fn catch_expression(
         &mut self,
@@ -1369,7 +1366,7 @@ impl Emitter<'_> {
         let ty = self.ty(e)?;
         if matches!(ty, Type::Map(_, _)) && values.is_empty() {
             let ct = self.c_type(&ty)?;
-            return self.temp(e, format!("({ct}){{0}}"));
+            return self.temp(e, &format!("({ct}){{0}}"));
         }
         let Type::Array(element, _) = &ty else {
             return unsupported("array literal in this context");
@@ -1401,7 +1398,7 @@ impl Emitter<'_> {
         if name == "len" && ty == Type::Named("str".into(), vec![]) {
             self.unicode_support();
             let object = self.expr(object)?;
-            return self.temp(e, format!("nc_str_len({object})"));
+            return self.temp(e, &format!("nc_str_len({object})"));
         }
         if let Some(declaration) = self.enum_decl(&ty) {
             let tag = declaration
@@ -1414,14 +1411,14 @@ impl Emitter<'_> {
             if !variant.values.is_empty() {
                 return self.enum_constructor(e, &ct, tag, &variant.values);
             }
-            return self.temp(e, format!("({ct}){{{tag},0}}"));
+            return self.temp(e, &format!("({ct}){{{tag},0}}"));
         }
         let object = self.expr(object)?;
         let value = format!(
             "({object}).{}{name}",
             if self.fields(&ty).is_some() { "f_" } else { "" }
         );
-        self.temp(e, value)
+        self.temp(e, &value)
     }
     fn bytes_literal(&mut self, e: &Expr, bytes: &[u8]) -> Result<String, Diagnostics> {
         self.allocation_support();
@@ -1449,7 +1446,7 @@ impl Emitter<'_> {
             return Ok("0".into());
         }
         let ct = self.c_type(&ty)?;
-        self.temp(e, format!("*({ct}*)({value}->result)"))
+        self.temp(e, &format!("*({ct}*)({value}->result)"))
     }
     fn unary_expression(
         &mut self,
@@ -1460,7 +1457,7 @@ impl Emitter<'_> {
         if op == UnaryOp::Neg
             && matches!(value.unlocated(), Expr::Int(text) if !text.ends_with('u') && integer(text).ok() == Some(1u64 << 63))
         {
-            return self.temp(e, "(-9223372036854775807LL - 1LL)".into());
+            return self.temp(e, "(-9223372036854775807LL - 1LL)");
         }
         let value = self.expr(value)?;
         if op == UnaryOp::Neg && !matches!(self.ty(e)?, Type::Named(n, _) if n == "float") {
@@ -1474,7 +1471,7 @@ impl Emitter<'_> {
                 UnaryOp::BitNot => "~",
             }
         );
-        self.temp(e, value)
+        self.temp(e, &value)
     }
     fn atom_expression(&mut self, e: &Expr) -> Result<String, Diagnostics> {
         let value = match e {
@@ -1524,7 +1521,7 @@ impl Emitter<'_> {
             }
             _ => return unsupported("this expression"),
         };
-        self.temp(e, value)
+        self.temp(e, &value)
     }
     fn cast_expression(
         &mut self,
@@ -1553,7 +1550,7 @@ impl Emitter<'_> {
             self.allocation_support();
             let text = self.fresh();
             self.line(format!("char *{text} = nc_alloc(3,1); if ({value}<128) {text}[0]=(char){value}; else {{ {text}[0]=(char)(0xc0|({value}>>6)); {text}[1]=(char)(0x80|({value}&63)); }}"));
-            return self.temp(e, format!("(nc_string){{{value}<128 ? 1 : 2, {text}}}"));
+            return self.temp(e, &format!("(nc_string){{{value}<128 ? 1 : 2, {text}}}"));
         }
         if matches!(ty,Type::Array(element,None) if **element == Type::Named("byte".into(),vec![]))
             && matches!(&from,Type::Named(n,_) if matches!(n.as_str(),"int"|"uint"|"float"))
@@ -1573,7 +1570,7 @@ impl Emitter<'_> {
         }
         self.check_numeric_cast(ty, &from, &value);
         let ct = self.c_type(ty)?;
-        self.temp(e, format!("(({ct})({value}))"))
+        self.temp(e, &format!("(({ct})({value}))"))
     }
     fn numeric_bytes_cast(
         &mut self,
@@ -1701,7 +1698,7 @@ impl Emitter<'_> {
             BinaryOp::In => return self.inclusion_expression(e, right, &l, &r),
             _ => format!("({l} {} {r})", operator(op)),
         };
-        self.temp(e, value)
+        self.temp(e, &value)
     }
     fn concat_expression(
         &mut self,
@@ -1740,7 +1737,7 @@ impl Emitter<'_> {
             return Ok(result);
         }
         self.unicode_support();
-        self.temp(e, format!("nc_str_concat({l}, {r})"))
+        self.temp(e, &format!("nc_str_concat({l}, {r})"))
     }
     fn inclusion_expression(
         &mut self,
@@ -1751,7 +1748,7 @@ impl Emitter<'_> {
     ) -> Result<String, Diagnostics> {
         if let Type::Map(key, _) = self.ty(right)? {
             let found = self.map_find(r, l, &key)?;
-            return self.temp(e, format!("{found} < {r}.len"));
+            return self.temp(e, &format!("{found} < {r}.len"));
         }
         if let Type::Array(element, _) = self.ty(right)? {
             self.headers.insert("stdbool.h");
@@ -1765,7 +1762,7 @@ impl Emitter<'_> {
             return Ok(result);
         }
         self.unicode_support();
-        self.temp(e, format!("nc_str_contains({r}, {l})"))
+        self.temp(e, &format!("nc_str_contains({r}, {l})"))
     }
     fn call_expression(
         &mut self,
@@ -1809,7 +1806,7 @@ impl Emitter<'_> {
                     self.copy(ty, &value)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            return self.temp(e, format!("{}({})", self.name(name), values.join(", ")));
+            return self.temp(e, &format!("{}({})", self.name(name), values.join(", ")));
         }
         let callee = self.expr(callee)?;
         let args = args
@@ -1825,7 +1822,7 @@ impl Emitter<'_> {
         } else {
             format!(", {}", args.join(", "))
         };
-        self.temp(e, format!("{callee}.call({callee}.env{suffix})"))
+        self.temp(e, &format!("{callee}.call({callee}.env{suffix})"))
     }
     fn query_call(&mut self, e: &Expr, name: &str) -> Result<String, Diagnostics> {
         match name {
@@ -1833,7 +1830,7 @@ impl Emitter<'_> {
                 let ct = self.c_type(&self.ty(e)?)?;
                 self.temp(
                     e,
-                    format!(
+                    &format!(
                         "({ct}){{{}, {}}}",
                         nc_string(crate::target::OS),
                         nc_string(crate::target::ARCH)
@@ -1889,7 +1886,7 @@ impl Emitter<'_> {
             let arg = self.copy(ty, &arg)?;
             self.line(format!("{pointer}->f_{i} = {arg};"));
         }
-        self.temp(e, format!("({ct}){{{tag},{pointer}}}"))
+        self.temp(e, &format!("({ct}){{{tag},{pointer}}}"))
     }
     fn print_call(&mut self, name: &str, args: &[Expr]) -> Result<String, Diagnostics> {
         self.headers.insert("stdio.h");
@@ -2059,7 +2056,7 @@ impl Emitter<'_> {
         self.line(format!(
             "{job}->future.result = &{job}->result; nc_start(&{job}->future, {worker}, {job});"
         ));
-        self.temp(e, format!("&{job}->future"))
+        self.temp(e, &format!("&{job}->future"))
     }
     fn enum_constructor(
         &mut self,
@@ -2081,7 +2078,7 @@ impl Emitter<'_> {
         let signature = format!("static {result_type} {wrapper}({})", arguments.join(", "));
         self.runtime_prototypes.push(format!("{signature};"));
         self.runtime_functions.push(format!("{signature} {{ (void)env; {payload} *payload = nc_alloc(1, sizeof({payload})); *payload = ({payload}){{{}}}; return ({result_type}){{{tag}, payload}}; }}", fields.join(", ")));
-        self.temp(e, format!("({callable}){{{wrapper},0}}"))
+        self.temp(e, &format!("({callable}){{{wrapper},0}}"))
     }
     fn function_value(&mut self, e: &Expr, name: &str) -> Result<String, Diagnostics> {
         let ty = self.ty(e)?;
@@ -2104,7 +2101,7 @@ impl Emitter<'_> {
             "{signature} {{ (void)env; {}{call}; }}",
             if **ret == Type::void() { "" } else { "return " }
         ));
-        self.temp(e, format!("({ct}){{{wrapper},0}}"))
+        self.temp(e, &format!("({ct}){{{wrapper},0}}"))
     }
     fn lambda(&mut self, e: &Expr, f: &Function) -> Result<String, Diagnostics> {
         let captures = self.checked.captures[&e.id()].clone();
@@ -2158,7 +2155,7 @@ impl Emitter<'_> {
         self.value_targets = targets;
         self.index_context = indices;
         let environment = self.capture_environment(env_ct.as_deref(), &captures)?;
-        self.temp(e, format!("({ct}){{{function},{environment}}}"))
+        self.temp(e, &format!("({ct}){{{function},{environment}}}"))
     }
     fn capture_type(&mut self, captures: &[Capture]) -> Result<Option<String>, Diagnostics> {
         Ok(if captures.is_empty() {
