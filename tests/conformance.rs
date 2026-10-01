@@ -199,6 +199,35 @@ assert @as(int, runtime(-0.75)) == 0
 }
 
 #[test]
+fn signed_unsigned_runtime_casts_preserve_the_shared_integer_range() {
+    let mut source = String::from(
+        "fn runtime_signed(int value) int { @print(\"\") return value }\n\
+         fn runtime_unsigned(uint value) uint { @print(\"\") return value }\n\
+         test \"exact integer casts\" {\n",
+    );
+    for value in [
+        0_i64,
+        1,
+        255,
+        9_007_199_254_740_991,
+        9_007_199_254_740_992,
+        9_007_199_254_740_993,
+        i64::MAX - 1,
+        i64::MAX,
+    ] {
+        writeln!(
+            source,
+            "assert @as(uint, runtime_signed({value})) == {value}u\n\
+             assert @as(int, runtime_unsigned({value}u)) == {value}\n\
+             assert @as(int, @as(uint, runtime_signed({value}))) == {value}",
+        )
+        .unwrap();
+    }
+    source.push_str("}\n@println(\"exact integer casts\")\n");
+    success(&source, "exact integer casts\n");
+}
+
+#[test]
 fn negative_fractional_float_to_uint_panics_before_truncation() {
     let tiny = format!("-0.{}5", "0".repeat(323));
     for value in ["-0.75", "-0.5", "-0.0001", tiny.as_str()] {

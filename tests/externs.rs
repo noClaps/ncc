@@ -136,6 +136,90 @@ test "nonfinite ABI" {
 }
 
 #[test]
+fn c_extern_nominal_float_error_chains_preserve_active_payloads_and_cast_checks() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let input = directory.path().join("main.nc");
+    fs::write(
+        directory.path().join("native.c"),
+        "nc_abi_roundtrip_result roundtrip(nc_abi_roundtrip_arg0 value) { return value; }\n",
+    )
+    .unwrap();
+    let declarations = r#"
+type Result = float!
+type Outer = Result
+extern "native.c" as native {
+    fn roundtrip(Outer value) Outer = "roundtrip"
+}
+fn roundtrip(float! value) float! {
+    Outer wrapped = @as(Outer, @as(Result, value))
+    return try @as(float!, @as(Result, native.roundtrip(wrapped)))
+}
+fn failed() float! { throw "bad" }
+"#;
+    fs::write(
+        &input,
+        declarations.to_owned()
+            + r#"
+test "nominal nonfinite error ABI" {
+    float! nan = NaN
+    float! positive = inf
+    float! negative = -inf
+    float![] values = [
+        roundtrip(nan), roundtrip(positive), roundtrip(negative), roundtrip(failed())
+    ]
+    @println(values)
+    @println("{values}")
+    @println(@as(str, values))
+}
+"#,
+    )
+    .unwrap();
+    run_both(
+        &input,
+        b"[NaN, inf, -inf, error: bad]\n[NaN, inf, -inf, error: bad]\n[NaN, inf, -inf, error: bad]\n",
+    );
+    for value in ["NaN", "inf", "-inf"] {
+        for ty in ["int", "uint"] {
+            fs::write(
+                &input,
+                format!(
+                    r"{declarations}
+float! successful = {value}
+float extracted = roundtrip(successful) catch message {{ break 0.0 }}
+@println(@as({ty}, extracted))
+",
+                ),
+            )
+            .unwrap();
+            for release in [false, true] {
+                let mut command = Command::new(env!("CARGO_BIN_EXE_ncc"));
+                command.arg("run");
+                if release {
+                    command.arg("-r");
+                }
+                let output = command.arg(&input).output().unwrap();
+                assert_eq!(
+                    output.status.code(),
+                    Some(1),
+                    "{value} -> {ty}, release={release}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(
+                    output.stdout.is_empty(),
+                    "{value} -> {ty}, release={release}: {:?}",
+                    output.stdout
+                );
+                assert!(
+                    String::from_utf8_lossy(&output.stderr).contains("cast out of range"),
+                    "{value} -> {ty}, release={release}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn c_abi_roundtrips_scalar_nominal_and_composite_values() {
     let directory = ncc::temp::Directory::new().unwrap();
     let input = directory.path().join("main.nc");

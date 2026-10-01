@@ -1277,6 +1277,31 @@ fn specified_cast_table_matches_in_debug_and_release() {
 }
 
 #[test]
+fn signed_unsigned_casts_fold_without_losing_integer_precision() {
+    let mut source = String::from(
+        "fn as_unsigned(int value) uint { return @as(uint, value) }\n\
+         fn as_signed(uint value) int { return @as(int, value) }\n",
+    );
+    let mut expected = String::new();
+    for value in [
+        0_i64,
+        1,
+        255,
+        9_007_199_254_740_991,
+        9_007_199_254_740_992,
+        9_007_199_254_740_993,
+        i64::MAX - 1,
+        i64::MAX,
+    ] {
+        writeln!(source, "@println(as_unsigned({value}))\n@println(as_signed({value}u))\n@println(as_signed(as_unsigned({value})))").unwrap();
+        for _ in 0..3 {
+            writeln!(expected, "{value}").unwrap();
+        }
+    }
+    folded(&source, &["as_unsigned", "as_signed"], &expected);
+}
+
+#[test]
 fn enum_constructors_are_first_class_and_async_callable() {
     folded(
         r"
