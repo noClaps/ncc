@@ -1,4 +1,52 @@
 #[test]
+fn repaired_design_examples_parse_and_type_check() {
+    let design = include_str!("../docs/design.md");
+    for (marker, test_mode) in [
+        ("Person p = Person", false),
+        ("test \"getting length of first element in array\"", true),
+        ("test \"environment variables\"", true),
+        ("test \"target\"", true),
+    ] {
+        let source = design
+            .split("```nc\n")
+            .skip(1)
+            .filter_map(|section| section.split_once("\n```"))
+            .map(|(source, _)| source)
+            .find(|source| source.contains(marker))
+            .unwrap_or_else(|| panic!("missing design example: {marker}"));
+        ncc::parser::parse(ncc::lexer::lex(source).unwrap()).unwrap();
+        for release in [false, true] {
+            let path = std::path::Path::new("design-example.nc");
+            let result = if test_mode {
+                ncc::compile_test_source_with_options(source, path, release)
+            } else {
+                ncc::compile_source_with_options(source, path, release)
+            };
+            assert!(result.is_ok(), "{marker}, release={release}: {result:?}");
+        }
+    }
+}
+
+#[test]
+fn design_nonoptional_array_error_is_not_a_missing_binding_syntax_error() {
+    let source = "int?[] arr = none";
+    ncc::parser::parse(ncc::lexer::lex(source).unwrap()).unwrap();
+    for release in [false, true] {
+        let error = ncc::compile_source_with_options(
+            source,
+            std::path::Path::new("nonoptional-array.nc"),
+            release,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("cannot infer type of none"),
+            "{error}"
+        );
+        assert_eq!(&source[error.0[0].span.clone()], "none");
+    }
+}
+
+#[test]
 fn type_errors_use_language_syntax_instead_of_rust_debug_output() {
     for (source, expected) in [
         ("int value = true", "expected `int`, found `bool`"),

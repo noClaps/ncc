@@ -30,9 +30,9 @@ The optional `--compiler-parity` check additionally requires Rust/Cargo. It buil
 `scripts/parser-check.rs` under `target`, compares every corpus case with the
 compiler lexer/parser, and parses every compiler-accepted `nc` code fence in
 `docs/design.md`. It does not load imports, evaluate `@embed`, type-check, generate
-C, or execute programs. Currently 142 design snippets are checked; 18 rejected
-snippets are excluded because they contain templates, intentional errors, or
-malformed documentation examples. This is a syntax check, not semantic conformance.
+C, or execute programs. Currently 151 design snippets are checked; 13 rejected
+snippets are excluded because they contain illustrative templates, pseudocode, or
+intentional syntax errors. This is a syntax check, not semantic conformance.
 
 To regenerate only, from this directory:
 

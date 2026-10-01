@@ -120,7 +120,7 @@ int[]? arr = none
 int?[] arr = [none]
 
 int[]? arr = [none] // compile error: `int[]` cannot hold optional values
-int?[] = none // compile error: attempted to assign `none` to a non-optional
+int?[] arr = none // compile error: attempted to assign `none` to a non-optional
 ```
 
 ## Types
@@ -1315,7 +1315,7 @@ if p {
   Person{.name = "Nathan", .age = 23} -> { @print("Welcome!") }
   // `.age = 23` branch already matched above, value of `p.age` assigned to
   // `age` variable
-  Person(.name = "Nathan", .age = age) -> { @print("Incorrect age: {age}") }
+  Person{.name = "Nathan", .age = age} -> { @print("Incorrect age: {age}") }
   // `.name = "Nathan"` branches already matched above, value of `p.name`
   // assigned to `name` variable, value of `p.age` discarded.
   Person{.name = name, .age = _} -> { @print("Incorrect name: {name}") }
@@ -1765,7 +1765,7 @@ test "getting length of first element in array" {
   uint len = get_len_of_first<int[]>([[1, 2, 3], [4, 5]])
   assert len == 3
 
-  uint len == get_len_of_first<[char]int>([['a': 1, 'b': 2], ['c': 3, 'd': 4, 'e': 5]])
+  uint len = get_len_of_first<[char]int>([['a': 1, 'b': 2], ['c': 3, 'd': 4, 'e': 5]])
   assert len == 2
 }
 ```
@@ -2471,9 +2471,9 @@ For example:
 This is a builtin function to get the environment variables as a `[str]str` map.
 
 ```nc
-test "environment variables {
+test "environment variables" {
   [str]str env = @env()
-  assert "HOME" in env && env["HOME"] == "/usr/bin/cc"
+  assert "HOME" in env and env["HOME"] == "/usr/bin/cc"
 }
 ```
 
@@ -2486,7 +2486,7 @@ test "target" {
   str os, str arch = @target()
   // on macOS arm64
   assert os == "macos"
-  assert arch = "arm64"
+  assert arch == "arm64"
 }
 ```
 
