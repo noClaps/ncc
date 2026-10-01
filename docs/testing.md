@@ -20,6 +20,15 @@ Runtime assertions, output, and mutations remain intact. Regressions cover
 cross-test state, lexical shadowing, original diagnostic locations, and runtime
 fallback for process inputs, native calls, and futures.
 
+Release precomputation transactionally collapses a bounded, call-free initial
+execution region into final global initializers. Regressions compare debug/release
+array-building and numeric loops, value copies, later shared mutations and escaped
+closures, barriers, exhausted budgets, and runtime failure ordering. Computations
+following calls, closure creation, effects, or unknown state remain runtime code.
+`tests/c_names.rs` checks recognizable, collision-safe C names for bindings,
+parameters, capture fields, shadowing, and imported globals, and executes its
+fixtures in both modes.
+
 ## Coverage map
 
 | Area                                                                                                                                                                  | Regression tests               |

@@ -236,6 +236,146 @@ test "constant expressions" {
 }
 
 #[test]
+fn top_level_pure_prefix_precomputes_array_and_numeric_loops() {
+    let strings = "mut str[] buf=[] mut int i=0 while i<1024 {buf=buf<>[\"\"] i=i+1} @println(buf)";
+    let mut expected = String::from("[");
+    expected.push_str(&vec!["\"\""; 1024].join(", "));
+    expected.push_str("]\n");
+    for (source, expected) in [
+        (strings, expected.as_str()),
+        (
+            "mut int sum=0 mut int i=0 while i<100 {sum=sum+i i=i+1} @println(sum,\":\",i)",
+            "4950:100\n",
+        ),
+        (
+            "mut int sum=0 for i in [2,4,6] {sum=sum+@as(int,i)} @println(sum)",
+            "3\n",
+        ),
+        (
+            "mut float sum=0.0 mut uint i=0 while i<4 {sum=sum+0.5 i=i+1} @println(sum)",
+            "2.0\n",
+        ),
+    ] {
+        let debug = compile_fixture(source, Path::new("prefix.nc"), false).unwrap();
+        let release = compile_fixture(source, Path::new("prefix.nc"), true).unwrap();
+        let runtime_work = if source.contains("for i") {
+            "__builtin_add_overflow"
+        } else {
+            "} goto "
+        };
+        assert!(debug.contains(runtime_work), "missing original loop");
+        assert!(!release.contains(runtime_work), "loop was not precomputed");
+        folded(source, &[], expected);
+    }
+}
+
+#[test]
+fn top_level_precomputation_preserves_copies_and_later_shared_storage() {
+    let source = r#"
+mut int[][] values = [[1]]
+int[][] original = values
+mut int i = 0
+while i < 3 { values[0][0] = values[0][0] + 1 i = i + 1 }
+fn read() int { return values[0][0] }
+fn update = fn() int { values[0][0] = values[0][0] + 1 return read() }
+@println(original, ":", read(), ":", update(), ":", values)
+values[0][0] = 9
+@println(update(), ":", values)
+"#;
+    let release = compile_fixture(source, Path::new("shared-prefix.nc"), true).unwrap();
+    assert!(!release.contains("} goto "));
+    folded(source, &[], "[[1]]:4:5:[[5]]\n10:[[10]]\n");
+}
+
+#[test]
+fn top_level_precomputation_stops_at_effects_unknown_state_and_closure_creation() {
+    for (source, expected) in [
+        (
+            "mut int i=0 @print(\"before:\") while i<3 {i=i+1} @println(i)",
+            "before:3\n",
+        ),
+        (
+            "mut int i=0 fn read=fn() int {return i} while i<3 {i=i+1} @println(read())",
+            "3\n",
+        ),
+        (
+            "mut int i=0 fn update() {i=1} update() while i<3 {i=i+1} @println(i)",
+            "3\n",
+        ),
+        (
+            "mut int i=@as(int,@args().len) while i<3 {i=i+1} @println(i)",
+            "3\n",
+        ),
+        (
+            "mut int i=0 while i<3 {@print(i) i=i+1} @println(i)",
+            "0123\n",
+        ),
+    ] {
+        let c = compile_fixture(source, Path::new("barrier.nc"), true).unwrap();
+        assert!(c.contains("} goto "), "crossed a barrier: {source}");
+        folded(source, &[], expected);
+    }
+}
+
+#[test]
+fn top_level_precomputation_keeps_runtime_suffix_and_escaped_captures() {
+    let source = r"
+mut int i=0
+while i<3 {i=i+1}
+fn read=fn() int {return i}
+@println(read())
+while i<5 {i=i+1}
+@println(read())
+";
+    let c = compile_fixture(source, Path::new("escaped.nc"), true).unwrap();
+    assert_eq!(c.matches("} goto ").count(), 1, "only the prefix folds");
+    folded(source, &[], "3\n5\n");
+    let source = r"
+mut int i=0
+while i<3 {i=i+1}
+@println(i)
+str[] args=@args()
+while i<5 {i=i+1}
+@println(i)
+";
+    // Do not resume after unknown input, even for independent computations.
+    let c = compile_fixture(source, Path::new("unknown-suffix.nc"), true).unwrap();
+    assert_eq!(c.matches("} goto ").count(), 1);
+    folded(source, &[], "3\n5\n");
+}
+
+#[test]
+fn top_level_precomputation_rolls_back_exhausted_and_failed_regions() {
+    let source = "mut int i=0 while i<20000 {i=i+1} @println(i)";
+    let c = compile_fixture(source, Path::new("budget.nc"), true).unwrap();
+    assert!(c.contains("} goto "), "exhausted region must remain intact");
+    folded(source, &[], "20000\n");
+    for source in [
+        "mut int[] values=[1] mut int i=0 while i<3 {i=i+1} values[2]=i @println(\"unreached\")",
+        "mut int i=0 @println(\"before\") mut int[] values=[1] values[2]=i @println(\"unreached\")",
+    ] {
+        let directory = ncc::temp::Directory::new().unwrap();
+        let input = directory.path().join("failure.nc");
+        fs::write(&input, source).unwrap();
+        for mode in ["--debug", "--release"] {
+            let output = Command::new(env!("CARGO_BIN_EXE_ncc"))
+                .args(["run", mode])
+                .arg(&input)
+                .output()
+                .unwrap();
+            assert!(!output.status.success());
+            let expected = if source.contains("before") {
+                "before\n"
+            } else {
+                ""
+            };
+            assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
+            assert!(String::from_utf8_lossy(&output.stderr).contains("index out of bounds"));
+        }
+    }
+}
+
+#[test]
 fn top_level_assignments_and_control_flow_evaluate_reached_failures() {
     for (source, failing_expression) in [
         ("mut int[] values = [1]\nvalues[0] = 1 / 0", "1 / 0"),

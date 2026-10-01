@@ -433,6 +433,7 @@ fn optimize_module(checked: CheckedModule) -> Result<Module, Diagnostics> {
             _ => {}
         }
     }
+    let prefix = precompute_prefix(&checked, &functions);
     let mut body_replacements = expression_constants(&checked, &functions);
     let mut module = checked.module;
     for item in &mut module.items {
@@ -452,6 +453,15 @@ fn optimize_module(checked: CheckedModule) -> Result<Module, Diagnostics> {
                 },
                 _ => unreachable!(),
             }
+        }
+    }
+    for (index, value) in prefix {
+        match &mut module.items[index] {
+            Item::Global(v) => v.value = value.expect("precomputed global has a value"),
+            Item::Statement(statement) => {
+                *statement.unlocated_mut() = Stmt::Block(Block { statements: vec![] });
+            }
+            _ => unreachable!(),
         }
     }
     prune_unreachable_functions(&mut module);
@@ -487,6 +497,93 @@ fn prune_unreachable_functions(module: &mut Module) {
     module
         .items
         .retain(|item| !matches!(item, Item::Function(f) if !reachable.contains(&f.name)));
+}
+
+// Only the initial, call-free execution region can move into initializers:
+// nothing has observed these globals yet. Calls and closure creation are barriers
+// even if individually pure, since they can observe or export shared storage.
+fn prefix_items(checked: &CheckedModule) -> Vec<usize> {
+    let mut names = HashSet::new();
+    let mut indices = Vec::new();
+    for (index, item) in checked.module.items.iter().enumerate() {
+        match item {
+            Item::Global(v) => {
+                let Pattern::Name(name) = &v.pattern else {
+                    break;
+                };
+                if v.mutex || name == "_" || !names.insert(name.clone()) {
+                    break;
+                }
+            }
+            Item::Statement(_) => {}
+            Item::Test { .. } => break,
+            _ => continue,
+        }
+        let mut barrier = false;
+        crate::visit::item(item, &mut |e| {
+            barrier |= matches!(e, Expr::Call { .. } | Expr::Lambda(_) | Expr::Async(_));
+        });
+        if barrier {
+            break;
+        }
+        indices.push(index);
+    }
+    indices
+}
+
+fn precompute_prefix(
+    checked: &CheckedModule,
+    functions: &HashMap<String, &Function>,
+) -> Vec<(usize, Option<Expr>)> {
+    let indices = prefix_items(checked);
+    if !indices
+        .iter()
+        .any(|&index| matches!(checked.module.items[index], Item::Statement(_)))
+    {
+        return vec![];
+    }
+    let mut fuel = 100_000;
+    let mut evaluator = Evaluator::new(functions, checked, &mut fuel);
+    let mut env = HashMap::new();
+    for &index in &indices {
+        let flow = match &checked.module.items[index] {
+            Item::Global(v) => evaluator
+                .declaration(v, &mut env, &mut Vec::new())
+                .map(|()| Flow::Next),
+            Item::Statement(statement) => {
+                evaluator.statements(std::slice::from_ref(statement), &mut env, false)
+            }
+            _ => unreachable!(),
+        };
+        // Evaluation is transactional: partial writes, failures and exhausted
+        // budgets must never become runtime initializers.
+        if !matches!(flow, Some(Flow::Next)) {
+            return vec![];
+        }
+    }
+    indices
+        .into_iter()
+        .map(|index| {
+            let value = match &checked.module.items[index] {
+                Item::Global(v) => {
+                    let value = env.get(v.binding_names()[0])?;
+                    let value = match value {
+                        Value::Cell(cell) => evaluator.cells.get(*cell)?,
+                        value => value,
+                    };
+                    if !value.materializable() {
+                        return None;
+                    }
+                    let mut initializer = v.value.clone();
+                    *initializer.unlocated_mut() = materialize(value.clone(), &v.value, checked);
+                    Some(initializer)
+                }
+                _ => None,
+            };
+            Some((index, value))
+        })
+        .collect::<Option<Vec<_>>>()
+        .unwrap_or_default()
 }
 
 // Analyse known top-level execution without replacing persistent state or

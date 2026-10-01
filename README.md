@@ -63,6 +63,13 @@ their arguments are known, tracking argument effects without executing output or
 removing the runtime calls. The step budget resets for each top-level item;
 evaluation also has a stack-depth safeguard.
 
+Release mode can precompute a bounded, call-free initial region containing mutable
+bindings and loops, replacing its work with final global initializers. It stops at
+calls, closure creation, effects, or unknown state and rolls back if evaluation
+fails or exceeds its budget. Global storage remains available for later mutations.
+Generated C binding names retain their NC names, such as `nc_var_buf_1`; unique
+suffixes distinguish shadowed bindings, and closure fields use `nc_capture_` names.
+
 Structurally infinite loops are left for runtime execution, while independent
 expressions inside their bodies can still fold. The compiler emits non-fatal
 infinite-loop and unreachable-code warnings in both modes. This conservative

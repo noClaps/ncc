@@ -50,6 +50,10 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
 
 type GlobalSlots = HashMap<usize, Vec<String>>;
 
+fn capture_field(name: &str, index: usize) -> String {
+    format!("nc_capture_{name}_{index}")
+}
+
 fn emit_declarations(e: &mut Emitter<'_>) -> Result<(String, GlobalSlots), Diagnostics> {
     let checked = e.checked;
     let mut declarations = String::new();
@@ -421,8 +425,12 @@ impl Emitter<'_> {
         self.next += 1;
         format!("nc_v{}", self.next)
     }
+    fn fresh_named(&mut self, name: &str) -> String {
+        self.next += 1;
+        format!("nc_var_{name}_{}", self.next)
+    }
     fn bind(&mut self, name: &str) -> String {
-        let id = self.fresh();
+        let id = self.fresh_named(name);
         self.scopes
             .last_mut()
             .unwrap()
@@ -2121,7 +2129,8 @@ impl Emitter<'_> {
             },
         ) in captures.iter().enumerate()
         {
-            let code = format!("(({}*)nc_env)->f_{i}", env_ct.as_ref().unwrap());
+            let field = capture_field(n, i);
+            let code = format!("(({}*)nc_env)->{field}", env_ct.as_ref().unwrap());
             scope.insert(
                 n.clone(),
                 if *mutable && !*mutex {
@@ -2132,7 +2141,7 @@ impl Emitter<'_> {
             );
         }
         for p in &f.params {
-            let name = self.fresh();
+            let name = self.fresh_named(&p.name);
             params.push(format!("{} {name}", self.c_type(&p.ty)?));
             scope.insert(p.name.clone(), name);
         }
@@ -2167,7 +2176,11 @@ impl Emitter<'_> {
             for (
                 i,
                 Capture {
-                    ty, mutex, mutable, ..
+                    name: binding,
+                    ty,
+                    mutex,
+                    mutable,
+                    ..
                 },
             ) in captures.iter().enumerate()
             {
@@ -2179,7 +2192,7 @@ impl Emitter<'_> {
                     self.c_type(ty)?
                 };
                 dependencies.push(ct.trim_end_matches(" *").into());
-                fields.push(format!("{ct} f_{i};"));
+                fields.push(format!("{ct} {};", capture_field(binding, i)));
             }
             self.define_type(
                 &name,
@@ -2217,7 +2230,7 @@ impl Emitter<'_> {
                 } else {
                     self.copy(ty, &self.name(name))?
                 };
-                self.line(format!("{env}->f_{i} = {value};"));
+                self.line(format!("{env}->{} = {value};", capture_field(name, i)));
             }
             env
         } else {

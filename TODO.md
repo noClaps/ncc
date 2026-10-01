@@ -9,6 +9,9 @@
         Output with known arguments and test assertions with known conditions are
         already analysable. False assertions retain their runtime failure and stop
         sequential analysis; other remaining barriers are:
+    - [ ] Extend safe top-level precomputation beyond the initial call-free region,
+          including pure calls and multi-binding declarations without losing effects
+          or escaped-storage dependencies.
     - [ ] Unknown runtime inputs.
     - [ ] Other unsupported effects.
     - [ ] Evaluator limits; consider configurable evaluation budgets for large

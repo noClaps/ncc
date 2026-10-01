@@ -89,7 +89,9 @@
   interpret proven infinite loops during constant evaluation; continue folding
   independent expressions inside their bodies. Retain evaluation step/depth
   safeguards for cases structural analysis cannot decide.
-- Include C headers only when needed by the generated program.
+- Include C headers only when needed by the generated program. Preserve NC
+  binding names in generated C variables, parameters, and capture fields, with
+  collision-safe prefixes and suffixes; anonymous temporaries may remain numbered.
 - Preserve source locations through module loading, generic specialization, and
   optimization. Semantic errors should identify the failing expression or
   statement in its original file, including imported code.
@@ -106,8 +108,13 @@
   calls whose callable or arguments contain shared cells, or reuse stateful
   closure results. Persistent outer mutable state must retain runtime evaluation.
   Release evaluation also analyses safely evaluatable top-level statements in
-  source order to diagnose reached arithmetic failures, without removing effects
-  or materializing persistent mutable state. Known `@print`/`@println` arguments
+  source order to diagnose reached arithmetic failures, without removing effects.
+  A successfully evaluated, call-free initial execution region may be replaced
+  with final global initializers before any values or storage escape. Keep global
+  runtime storage for later mutations and captures; roll back the entire region on
+  unsupported operations, failures, or evaluator limits. Do not resume this
+  precomputation past calls, closure creation, effects, or unknown state.
+  Known `@print`/`@println` arguments
   are analysed without executing output; runtime calls remain intact. Test-mode
   analysis follows retained test blocks and known-true assertions in source order;
   false or unknown assertions stop analysis and retain runtime checks. Named calls
