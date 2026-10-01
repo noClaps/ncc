@@ -56,6 +56,12 @@ String-conversion tests cover the `error: ` prefix, inactive error payloads,
 recursive constituent restrictions, and explicit custom-type unwrapping (including
 custom strings versus interpolation and chained custom types).
 
+Nested optional/error fallback tests cover nonlocal loop jumps, early returns,
+and `try` propagation while retaining shared mutations. An abandoned assignment
+must not evaluate its target. Folding tests also verify restoration of shadowed
+bindings on fallback jumps; negative cases retain rejection of missing values and
+invalid jump targets.
+
 Function side-effect coverage includes shared mutable scalar and container
 bindings, named callbacks, nested and returned closures, write-only captures,
 shadowing, tuple bindings, and independent factory invocations. Immutable closure

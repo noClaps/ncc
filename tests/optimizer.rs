@@ -1241,6 +1241,107 @@ fn lazy_error(int! input) int { return input catch _ { break 1 / 0 } }
 }
 
 #[test]
+fn nested_fallback_loop_jumps_fold_without_evaluating_abandoned_assignment_targets() {
+    folded(
+        r#"
+fn failed() int! { throw "outer" }
+fn assignment_jumps() (int, int, int) {
+    mut int[] values = [0]
+    mut int changes = 0
+    mut int target_calls = 0
+    fn target() uint { target_calls = target_calls + 1 return 0 }
+    rows: for i in [10, 20, 30] {
+        for j in [0] {
+            values[target()] = failed() catch _ {
+                changes = changes + 10
+                int? absent = none
+                int recovered = absent else {
+                    changes = changes + 1
+                    if i {
+                        0 -> { continue :rows }
+                        2 -> { break :rows }
+                        _ -> { break 7 }
+                    }
+                }
+                changes = changes + 100
+                break recovered
+            }
+        }
+        changes = changes + 1000
+    }
+    return values[0], changes, target_calls
+}
+@println(assignment_jumps())
+"#,
+        &["assignment_jumps"],
+        "(7, 1133, 1)\n",
+    );
+}
+
+#[test]
+fn fallback_jumps_restore_shadowed_bindings_before_loop_continuation() {
+    folded(
+        r"
+fn cleanup() int {
+    mut int value = 7
+    for i in [1, 2, 3] {
+        mut int value = 99
+        int? missing = none
+        int skipped = missing else { continue }
+        value = skipped
+    }
+    return value
+}
+@println(cleanup())
+",
+        &["cleanup"],
+        "7\n",
+    );
+}
+
+#[test]
+fn nested_fallback_try_and_return_fold_with_shared_mutations_and_skipped_tails() {
+    folded(
+        r#"
+fn failed() int! { throw "outer" }
+fn nested_recovery(bool fail, bool early) (int, int) {
+    mut int changes = 0
+    fn step() int! {
+        changes = changes + 100
+        if fail { true -> { throw "inner" } false -> { return 7 } }
+    }
+    fn recover() int! {
+        int value = failed() catch outer {
+            changes = changes + 1
+            int? absent = none
+            int recovered = absent else {
+                changes = changes + 10
+                int n = try step()
+                if early { true -> { return n + changes } false -> {} }
+                changes = changes + 1000
+                break n
+            }
+            changes = changes + 10000
+            break recovered
+        }
+        changes = changes + 100000
+        return value + changes
+    }
+    int result = recover() catch message {
+        if @as(str, message) { "inner" -> { break -1 } _ -> { break -2 } }
+    }
+    return result, changes
+}
+@println(nested_recovery(false, false))
+@println(nested_recovery(false, true))
+@println(nested_recovery(true, false))
+"#,
+        &["nested_recovery"],
+        "(111118, 111111)\n(118, 111)\n(-1, 111)\n",
+    );
+}
+
+#[test]
 fn optional_else_and_error_catch_fold_independent_extracted_array_copies() {
     folded(
         r#"

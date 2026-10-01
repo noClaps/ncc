@@ -1694,7 +1694,7 @@ impl Checker {
                 s.unlocated(),
                 Stmt::Expr(_) | Stmt::Break(Some(_), _) | Stmt::Return(_) | Stmt::Throw(_)
             )
-        });
+        }) || !crate::flow::block_reaches_next(block, &self.expression_types);
         self.pop();
         if !exits {
             return Checker::fail(

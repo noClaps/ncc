@@ -712,7 +712,7 @@ struct Evaluator<'a> {
     analysis_globals: HashMap<String, Value>,
     arithmetic_failure: bool,
     arithmetic_location: Option<SourceLocation>,
-    // A return/throw inside a value expression exits its enclosing function.
+    // Value expressions can exit enclosing statements through returns, throws, or jumps.
     flow: Option<Flow>,
     indices: Vec<u64>,
 }
@@ -1774,11 +1774,11 @@ impl<'module> Evaluator<'module> {
     fn flow_value(&mut self, flow: Flow) -> Option<Value> {
         match flow {
             Flow::Value(value) => Some(value),
-            Flow::Return(_) | Flow::Throw(_) => {
+            Flow::Return(_) | Flow::Throw(_) | Flow::Break(_) | Flow::Continue(_) => {
                 self.flow = Some(flow);
                 None
             }
-            _ => None,
+            Flow::Next => None,
         }
     }
 }
@@ -2011,70 +2011,14 @@ impl Evaluator<'_> {
         let mut result = Flow::Next;
         for (index, s) in statements.iter().enumerate() {
             *self.fuel = self.fuel.checked_sub(1)?;
-            let flow = match s.unlocated() {
-                Stmt::Var(v) => {
-                    self.declaration(v, env, &mut declared)?;
-                    Flow::Next
-                }
-                Stmt::Assign { target, value } => self.assignment(target, value, env)?,
-                Stmt::Assert(e) if self.analyse_output => {
-                    // Assertions remain runtime checks; only proven success permits
-                    // analysis of subsequent statements with the current state.
-                    if self.evaluate(e, env)? != Value::Bool(true) {
-                        return None;
-                    }
-                    Flow::Next
-                }
-                Stmt::Return(Some(e)) => Flow::Return(self.evaluate(e, env)?),
-                Stmt::Return(None) => Flow::Return(Value::Void(vec![])),
-                Stmt::Throw(e) => match self.evaluate(e, env)? {
-                    Value::String(message) => Flow::Throw(message),
-                    _ => return None,
-                },
-                Stmt::Expr(value) if matches!(value.unlocated(), Expr::If { .. }) => {
-                    let Expr::If { subject, arms } = value.unlocated() else {
-                        unreachable!()
-                    };
-                    self.conditional(
-                        subject.as_deref(),
-                        arms,
-                        env,
-                        valued && index + 1 == statements.len(),
-                    )?
-                }
-                Stmt::Expr(e) if valued && index + 1 == statements.len() => {
-                    Flow::Value(self.evaluate(e, env)?)
-                }
-                Stmt::Expr(e) => {
-                    self.evaluate(e, env)?;
-                    Flow::Next
-                }
-                Stmt::While {
-                    condition,
-                    body,
-                    label,
-                } => self.while_loop(condition, body, label.as_deref(), env)?,
-                Stmt::For {
-                    name,
-                    iterable,
-                    body,
-                    label,
-                } => self.for_loop(name, iterable, body, label.as_deref(), env)?,
-                Stmt::LabeledIf { label, value } => {
-                    let Expr::If { subject, arms } = value.unlocated() else {
-                        return None;
-                    };
-                    match self.conditional(subject.as_deref(), arms, env, false)? {
-                        Flow::Break(Some(target)) if target == *label => Flow::Next,
-                        flow => flow,
-                    }
-                }
-                Stmt::Block(body) => self.block(body, env)?,
-                Stmt::Break(None, label) => Flow::Break(label.clone()),
-                Stmt::Break(Some(e), None) => Flow::Value(self.evaluate(e, env)?),
-                Stmt::Continue(label) => Flow::Continue(label.clone()),
-                _ => return None,
-            };
+            let flow = self
+                .statement_flow(
+                    s,
+                    env,
+                    &mut declared,
+                    valued && index + 1 == statements.len(),
+                )
+                .or_else(|| self.flow.take())?;
             if !matches!(flow, Flow::Next) {
                 result = flow;
                 break;
@@ -2088,6 +2032,71 @@ impl Evaluator<'_> {
             }
         }
         Some(result)
+    }
+    fn statement_flow(
+        &mut self,
+        statement: &Stmt,
+        env: &mut HashMap<String, Value>,
+        declared: &mut Vec<(String, Option<Value>)>,
+        valued: bool,
+    ) -> Option<Flow> {
+        Some(match statement.unlocated() {
+            Stmt::Var(v) => {
+                self.declaration(v, env, declared)?;
+                Flow::Next
+            }
+            Stmt::Assign { target, value } => self.assignment(target, value, env)?,
+            Stmt::Assert(e) if self.analyse_output => {
+                // Assertions remain runtime checks; only proven success permits
+                // analysis of subsequent statements with the current state.
+                if self.evaluate(e, env)? != Value::Bool(true) {
+                    return None;
+                }
+                Flow::Next
+            }
+            Stmt::Return(Some(e)) => Flow::Return(self.evaluate(e, env)?),
+            Stmt::Return(None) => Flow::Return(Value::Void(vec![])),
+            Stmt::Throw(e) => match self.evaluate(e, env)? {
+                Value::String(message) => Flow::Throw(message),
+                _ => return None,
+            },
+            Stmt::Expr(value) if matches!(value.unlocated(), Expr::If { .. }) => {
+                let Expr::If { subject, arms } = value.unlocated() else {
+                    unreachable!()
+                };
+                self.conditional(subject.as_deref(), arms, env, valued)?
+            }
+            Stmt::Expr(e) if valued => Flow::Value(self.evaluate(e, env)?),
+            Stmt::Expr(e) => {
+                self.evaluate(e, env)?;
+                Flow::Next
+            }
+            Stmt::While {
+                condition,
+                body,
+                label,
+            } => self.while_loop(condition, body, label.as_deref(), env)?,
+            Stmt::For {
+                name,
+                iterable,
+                body,
+                label,
+            } => self.for_loop(name, iterable, body, label.as_deref(), env)?,
+            Stmt::LabeledIf { label, value } => {
+                let Expr::If { subject, arms } = value.unlocated() else {
+                    return None;
+                };
+                match self.conditional(subject.as_deref(), arms, env, false)? {
+                    Flow::Break(Some(target)) if target == *label => Flow::Next,
+                    flow => flow,
+                }
+            }
+            Stmt::Block(body) => self.block(body, env)?,
+            Stmt::Break(None, label) => Flow::Break(label.clone()),
+            Stmt::Break(Some(e), None) => Flow::Value(self.evaluate(e, env)?),
+            Stmt::Continue(label) => Flow::Continue(label.clone()),
+            _ => return None,
+        })
     }
     fn assignment(
         &mut self,

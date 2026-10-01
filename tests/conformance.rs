@@ -2587,6 +2587,112 @@ fn forward(bool succeeds) int! {
 }
 
 #[test]
+fn fallback_branches_still_require_values_or_valid_nonlocal_exits() {
+    for source in [
+        "fn f(int? value) int { return value else { while true { break } } }",
+        "fn f(int? value) int { return value else { local: while true { break :local } } }",
+    ] {
+        rejects(source, "value-producing branch must provide a value");
+    }
+    for source in [
+        "fn f(int? value) int { return value else { continue } }",
+        "fn f(int? value) int { return value else { break :missing } }",
+    ] {
+        rejects(source, "no valid target for break or continue");
+    }
+}
+
+#[test]
+fn nested_fallback_loop_jumps_skip_assignment_targets_and_preserve_mutations() {
+    success(
+        r#"
+fn failed() int! { _ = @args() @print("") throw "outer" }
+fn assignment_jumps() (int, int, int) {
+    mut int[] values = [0]
+    mut int changes = 0
+    mut int target_calls = 0
+    fn target() uint {
+        target_calls = target_calls + 1
+        return 0
+    }
+    rows: for i in [10, 20, 30] {
+        for j in [0] {
+            values[target()] = failed() catch _ {
+                changes = changes + 10
+                int? absent = none
+                int recovered = absent else {
+                    changes = changes + 1
+                    if i {
+                        0 -> { continue :rows }
+                        2 -> { break :rows }
+                        _ -> { break 7 }
+                    }
+                }
+                changes = changes + 100
+                break recovered
+            }
+        }
+        changes = changes + 1000
+    }
+    return (values[0], changes, target_calls)
+}
+@println(assignment_jumps())
+"#,
+        "(7, 1133, 1)\n",
+    );
+}
+
+#[test]
+fn nested_fallback_try_and_return_skip_recovery_tails_and_preserve_mutations() {
+    success(
+        r#"
+fn failed() int! { _ = @args() @print("") throw "outer" }
+fn nested_recovery(bool fail, bool early) (int, int) {
+    mut int changes = 0
+    fn step() int! {
+        changes = changes + 100
+        if fail {
+            true -> { throw "inner" }
+            false -> { return 7 }
+        }
+    }
+    fn recover() int! {
+        int value = failed() catch outer {
+            changes = changes + 1
+            int? absent = none
+            int recovered = absent else {
+                changes = changes + 10
+                int n = try step()
+                if early {
+                    true -> { return n + changes }
+                    false -> {}
+                }
+                changes = changes + 1000
+                break n
+            }
+            changes = changes + 10000
+            break recovered
+        }
+        changes = changes + 100000
+        return value + changes
+    }
+    int result = recover() catch message {
+        if @as(str, message) {
+            "inner" -> { break -1 }
+            _ -> { break -2 }
+        }
+    }
+    return (result, changes)
+}
+@println(nested_recovery(false, false))
+@println(nested_recovery(false, true))
+@println(nested_recovery(true, false))
+"#,
+        "(111118, 111111)\n(118, 111)\n(-1, 111)\n",
+    );
+}
+
+#[test]
 fn optional_and_error_payload_extraction_preserves_value_copies() {
     success(
         r#"
