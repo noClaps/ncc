@@ -12,19 +12,27 @@ cargo build --release
 Use `--offline` on Cargo commands when dependencies are already cached. The core
 compiler has no production dependencies. Unicode segmentation is a test oracle only.
 
+Release analysis follows safely known state through retained test blocks and
+assertion-expression effects, including repeated named calls sharing global
+mutations. Known-true assertions permit continued analysis; false or unknown
+assertions stop it without converting assertion failures into compile-time errors.
+Runtime assertions, output, and mutations remain intact. Regressions cover
+cross-test state, lexical shadowing, original diagnostic locations, and runtime
+fallback for process inputs, native calls, and futures.
+
 ## Coverage map
 
-| Area | Regression tests |
-| --- | --- |
-| Types, bindings, operators, patterns, loops, errors, optionals, generics, imports, closures, concurrency, value semantics | `tests/conformance.rs` |
-| Compile-time folding, numeric widths, cast table, closures, active error payloads, evaluation limits, sampled float formatting, evaluation order, Unicode/NUL strings | `tests/optimizer.rs` |
-| Binary embedding, lexical/tuple/captured paths, empty files, symlink and runtime-dependency rejection | `tests/embed.rs` |
-| C ABI declarations, shared implementation files, inactive optional/error payloads | `tests/externs.rs` |
-| CLI help/options, removed-command rejection, release mode, targets, runtime process state | `tests/cli.rs` |
-| Non-fatal async race warnings, mutex-safe cases, indirect/recursive calls, imported specialization locations, build/run success | `tests/warnings.rs` |
-| Build formats, artifact isolation, required C headers, basic diagnostics | `tests/compiler.rs` |
-| Escapes, multiline literals, graphemes, expression ranges, imported/specialized/constant-evaluation diagnostics | `tests/frontend.rs` |
-| Grapheme boundaries against an independent oracle | Unit tests in `src/unicode.rs` |
+| Area                                                                                                                                                                  | Regression tests               |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
+| Types, bindings, operators, patterns, loops, errors, optionals, generics, imports, closures, concurrency, value semantics                                             | `tests/conformance.rs`         |
+| Compile-time folding, numeric widths, cast table, closures, active error payloads, evaluation limits, sampled float formatting, evaluation order, Unicode/NUL strings | `tests/optimizer.rs`           |
+| Binary embedding, lexical/tuple/captured paths, empty files, symlink and runtime-dependency rejection                                                                 | `tests/embed.rs`               |
+| C ABI declarations, shared implementation files, inactive optional/error payloads                                                                                     | `tests/externs.rs`             |
+| CLI help/options, removed-command rejection, release mode, targets, runtime process state                                                                             | `tests/cli.rs`                 |
+| Non-fatal async race warnings, mutex-safe cases, indirect/recursive calls, imported specialization locations, build/run success                                       | `tests/warnings.rs`            |
+| Build formats, artifact isolation, required C headers, basic diagnostics                                                                                              | `tests/compiler.rs`            |
+| Escapes, multiline literals, graphemes, expression ranges, imported/specialized/constant-evaluation diagnostics                                                       | `tests/frontend.rs`            |
+| Grapheme boundaries against an independent oracle                                                                                                                     | Unit tests in `src/unicode.rs` |
 
 Successful conformance fixtures use debug and release execution, including
 module exports, imported generic types and patterns, and external C calls.

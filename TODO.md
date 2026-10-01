@@ -12,11 +12,11 @@
     - [ ] Assignment in an assertion.
   - [ ] Expand top-level constant evaluation beyond its safely evaluatable
         execution prefix while preserving effects and unknown runtime state.
-        Output with known arguments is already analysable; sequential analysis still
-        stops at:
+        Output with known arguments and test assertions with known conditions are
+        already analysable. False assertions retain their runtime failure and stop
+        sequential analysis; other remaining barriers are:
     - [ ] Unknown runtime inputs.
     - [ ] Other unsupported effects.
-    - [ ] Test-mode assertions.
     - [ ] Evaluator limits; consider configurable evaluation budgets for large
           individual computations.
   - [ ] Refine test-dependency slicing precision.

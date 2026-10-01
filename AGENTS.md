@@ -108,7 +108,11 @@
   Release evaluation also analyses safely evaluatable top-level statements in
   source order to diagnose reached arithmetic failures, without removing effects
   or materializing persistent mutable state. Known `@print`/`@println` arguments
-  are analysed without executing output; runtime calls remain intact.
+  are analysed without executing output; runtime calls remain intact. Test-mode
+  analysis follows retained test blocks and known-true assertions in source order;
+  false or unknown assertions stop analysis and retain runtime checks. Named calls
+  use known lexical global storage, never caller-local shadows, and analysis must
+  repeat call effects rather than memoizing them.
 - Compile-time string conversion must match runtime formatting, including field
   order, quoting, embedded NULs, Unicode, and nominal types. Keep a safe runtime
   fallback for operations that cannot yet be reproduced exactly.

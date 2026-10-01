@@ -384,6 +384,214 @@ fn output_with_unknown_arguments_does_not_assume_later_execution() {
     }
 }
 
+fn test_analysis_reached_failure(source: &str, failing_expression: &str) {
+    let path = Path::new("test-analysis.nc");
+    ncc::compile_test_source_with_options(source, path, false).unwrap();
+    let Err(error) = ncc::compile_test_source_with_options(source, path, true) else {
+        panic!("release test analysis did not reject {failing_expression}");
+    };
+    assert!(
+        error.to_string().contains("constant evaluation failed"),
+        "{source}: {error}"
+    );
+    let diagnostic = &error.0[0];
+    assert_eq!(diagnostic.path.as_deref(), Some(path), "{error}");
+    assert_eq!(
+        &source[diagnostic.span.clone()],
+        failing_expression,
+        "{error}"
+    );
+}
+
+#[test]
+fn test_analysis_tracks_known_true_assertion_side_effects() {
+    let source = r#"
+mut int value = 0
+fn advance() bool { value = value + 1 return value == 1 }
+test "assertion effects" {
+    assert advance()
+    value = 1 / (value - 1)
+}
+"#;
+    for release in [false, true] {
+        ncc::compile_source_with_options(source, Path::new("ignored-test.nc"), release).unwrap();
+    }
+    test_analysis_reached_failure(source, "1 / (value - 1)");
+}
+
+#[test]
+fn test_analysis_repeats_named_calls_without_inheriting_caller_shadows() {
+    test_analysis_reached_failure(
+        r#"
+mut int value = 0
+fn next() int { value = value + 1 return value }
+test "lexical global scope" {
+    {
+        mut int value = 99
+        assert next() == 1
+        assert value == 99
+    }
+    assert next() == 2
+    value = 1 / (value - 2)
+}
+"#,
+        "1 / (value - 2)",
+    );
+}
+
+#[test]
+fn test_analysis_flows_across_tests_and_intervening_global_mutations() {
+    test_analysis_reached_failure(
+        r#"
+mut int value = 0
+test "first" {
+    value = value + 1
+    assert value == 1
+}
+value = value + 2
+test "second" {
+    assert value == 3
+    value = 1 / (value - 3)
+}
+"#,
+        "1 / (value - 3)",
+    );
+}
+
+#[test]
+fn test_analysis_cleans_up_shadowed_test_locals() {
+    test_analysis_reached_failure(
+        r#"
+mut int value = 2
+test "shadow" {
+    mut int value = 9
+    value = value + 1
+    int local = value
+    assert local == 10
+}
+test "outer binding" {
+    int local = value
+    assert local == 2
+    value = 1 / (local - 2)
+}
+"#,
+        "1 / (local - 2)",
+    );
+}
+
+#[test]
+fn test_analysis_preserves_assertions_output_and_mutations_at_runtime() {
+    let source = r#"
+mut int value = 0
+fn advance() bool { @print("effect:") value = value + 1 return value == 1 }
+test "first" {
+    @println("before:", value)
+    assert advance()
+    mut int value = 9
+    value = value + 1
+    assert value == 10
+    @println("local:", value)
+}
+value = value + 2
+test "second" {
+    assert value == 3
+    @println("global:", value)
+}
+"#;
+    let c = ncc::compile_test_source_with_options(source, Path::new("retained-tests.nc"), true)
+        .unwrap();
+    assert_eq!(
+        c.matches("nc_panic(\"assertion failed\")").count(),
+        3,
+        "{c}"
+    );
+    folded(source, &[], "before:0\neffect:local:10\nglobal:3\n");
+}
+
+#[test]
+fn test_analysis_false_assertion_stops_before_variable_dependent_arithmetic() {
+    let source = r#"
+mut int value = 0
+fn reject() bool { value = value + 1 return false }
+test "fails at runtime" {
+    @println("before assertion")
+    assert reject()
+    value = 1 / (value - 1)
+}
+value = 1 / (value - 1)
+test "not reached" { assert value == 0 }
+"#;
+    let directory = ncc::temp::Directory::new().unwrap();
+    let input = directory.path().join("false-assertion.nc");
+    fs::write(&input, source).unwrap();
+    for release in [false, true] {
+        let c = ncc::compile_test_source_with_options(source, &input, release).unwrap();
+        assert!(c.contains("assertion failed"), "{c}");
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ncc"));
+        command.arg("test");
+        if release {
+            command.arg("--release");
+        }
+        let output = command.arg(&input).output().unwrap();
+        assert!(!output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            "before assertion\n"
+        );
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains("assertion failed"), "{stderr}");
+        assert!(!stderr.contains("division by zero"), "{stderr}");
+        assert!(!stderr.contains("constant evaluation failed"), "{stderr}");
+    }
+}
+
+#[test]
+fn test_analysis_unknown_assertions_do_not_assume_later_execution() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let input = directory.path().join("unknown-test.nc");
+    fs::write(
+        directory.path().join("unknown.c"),
+        "#include <stdbool.h>\nbool ready(void) { return true; }\n",
+    )
+    .unwrap();
+    for source in [
+        r#"mut int value = 1 test "unknown args" { assert @args().len == 0 value = 1 / (value - 1) } test "later" { value = 1 / (value - 1) }"#,
+        r#"extern "unknown.c" as native { fn ready() bool = "ready" } mut int value = 1 test "unknown native" { assert native.ready() value = 1 / (value - 1) } test "later" { value = 1 / (value - 1) }"#,
+        r#"fn ready() bool { return true } mut int value = 1 test "unknown future" { fut bool work = async ready() assert await work value = 1 / (value - 1) } test "later" { value = 1 / (value - 1) }"#,
+    ] {
+        for release in [false, true] {
+            ncc::compile_test_source_with_options(source, &input, release).unwrap();
+        }
+    }
+}
+
+#[test]
+fn test_analysis_diagnoses_reached_output_arguments_without_executing_output() {
+    let source = r#"
+mut int value = 0
+fn advance() bool { @println("assertion effect") value = 2 return true }
+test "reached output" {
+    @println("before assertion")
+    assert advance()
+    @println(1 / (value - 2))
+}
+"#;
+    test_analysis_reached_failure(source, "1 / (value - 2)");
+    let directory = ncc::temp::Directory::new().unwrap();
+    let input = directory.path().join("silent-analysis.nc");
+    fs::write(&input, source).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_ncc"))
+        .args(["test", "--release"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty(), "{:?}", output.stdout);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("constant evaluation failed"), "{stderr}");
+    assert!(!stderr.contains("assertion effect"), "{stderr}");
+}
+
 #[test]
 fn infinite_loops_remain_runtime_but_their_contents_can_fold() {
     let source = r"

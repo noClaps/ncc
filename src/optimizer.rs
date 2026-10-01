@@ -508,6 +508,7 @@ fn evaluate_top_level(
         }
         *evaluator.fuel = 100_000;
         evaluator.memo.clear();
+        evaluator.analysis_globals.clone_from(&env);
         let flow = match item {
             Item::Global(v) => evaluator
                 .declaration(v, &mut env, &mut Vec::new())
@@ -515,9 +516,7 @@ fn evaluate_top_level(
             Item::Statement(statement) => {
                 evaluator.statements(std::slice::from_ref(statement), &mut env, false)
             }
-            // Normal compilation removes tests; test-mode assertions still run
-            // at runtime and may mutate globals, so stop assumed state here.
-            Item::Test { .. } => None,
+            Item::Test { body, .. } => evaluator.block(body, &mut env),
             _ => Some(Flow::Next),
         };
         if let Some(error) = evaluator.failure() {
@@ -710,6 +709,7 @@ struct Evaluator<'a> {
     cells: Vec<Value>,
     depth: usize,
     analyse_output: bool,
+    analysis_globals: HashMap<String, Value>,
     arithmetic_failure: bool,
     arithmetic_location: Option<SourceLocation>,
     // A return/throw inside a value expression exits its enclosing function.
@@ -743,6 +743,7 @@ impl<'module> Evaluator<'module> {
             cells: Vec::new(),
             depth: 0,
             analyse_output: false,
+            analysis_globals: HashMap::new(),
             arithmetic_failure: false,
             arithmetic_location: None,
             flow: None,
@@ -1559,7 +1560,14 @@ impl<'module> Evaluator<'module> {
         }
         let callable = self.evaluate(callee, env)?;
         let (f, mut scope) = match &callable {
-            Value::Function(n) => (*self.functions.get(n)?, HashMap::new()),
+            Value::Function(n) => (
+                *self.functions.get(n)?,
+                if self.analyse_output {
+                    self.analysis_globals.clone()
+                } else {
+                    HashMap::new()
+                },
+            ),
             Value::Closure(key, captures) => {
                 (*self.lambdas.get(key)?, captures.iter().cloned().collect())
             }
@@ -1572,7 +1580,10 @@ impl<'module> Evaluator<'module> {
             values.push(value.clone());
             scope.insert(p.name.clone(), value);
         }
-        let cacheable = !callable.contains_cell() && !values.iter().any(Value::contains_cell);
+        // Sequential analysis observes global mutations and must repeat call effects.
+        let cacheable = !self.analyse_output
+            && !callable.contains_cell()
+            && !values.iter().any(Value::contains_cell);
         let key = (callable, values);
         if cacheable && let Some(value) = self.memo.get(&key) {
             return Some(value.clone());
@@ -2006,6 +2017,14 @@ impl Evaluator<'_> {
                     Flow::Next
                 }
                 Stmt::Assign { target, value } => self.assignment(target, value, env)?,
+                Stmt::Assert(e) if self.analyse_output => {
+                    // Assertions remain runtime checks; only proven success permits
+                    // analysis of subsequent statements with the current state.
+                    if self.evaluate(e, env)? != Value::Bool(true) {
+                        return None;
+                    }
+                    Flow::Next
+                }
                 Stmt::Return(Some(e)) => Flow::Return(self.evaluate(e, env)?),
                 Stmt::Return(None) => Flow::Return(Value::Void(vec![])),
                 Stmt::Throw(e) => match self.evaluate(e, env)? {
