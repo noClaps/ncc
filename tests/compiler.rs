@@ -1,4 +1,4 @@
-use std::{fs, process::Command};
+use std::{fs, path::Path, process::Command};
 
 #[test]
 fn compiles_and_runs_functions_conditionals_and_output() {
@@ -452,4 +452,344 @@ test "native state" { assert native.read() == 9 @println(native.read()) }
         );
         assert_eq!(output.stdout, b"9\n");
     }
+}
+
+enum SlicingCliExpectation {
+    Output,
+    Diagnostic,
+}
+
+fn assert_slicing_cli_cases(
+    directory: &Path,
+    cases: &[(&str, &str)],
+    expectation: &SlicingCliExpectation,
+) {
+    let path = directory.join("main.nc");
+    let mut failures = Vec::new();
+    for (source, expected) in cases {
+        fs::write(&path, source).unwrap();
+        for mode in ["-d", "-r"] {
+            let output = Command::new(env!("CARGO_BIN_EXE_ncc"))
+                .arg("test")
+                .arg(&path)
+                .arg(mode)
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let matches = match expectation {
+                SlicingCliExpectation::Output => {
+                    output.status.success() && output.stdout == expected.as_bytes()
+                }
+                SlicingCliExpectation::Diagnostic => {
+                    !output.status.success()
+                        && output.stdout.is_empty()
+                        && stderr.contains(expected)
+                }
+            };
+            if !matches {
+                failures.push(format!(
+                    "{mode}, expected {expected:?}: {source}\nstatus: {}\nstdout: {:?}\nstderr: {stderr}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stdout),
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+#[test]
+fn test_slicing_direct_return_excludes_dead_writes_and_calls() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    assert_slicing_cli_cases(
+        directory.path(),
+        &[
+            (
+                r#"
+mut int value = 0
+fn dead() int { return 7 value = 9 }
+@println("excluded:", dead())
+fn required() { @print("required:") value = 3 }
+required()
+test "live mutation" { assert value == 3 @println(value) }
+"#,
+                "required:3\n",
+            ),
+            (
+                r#"
+mut int value = 0
+fn change() { value = 9 }
+fn dead() int { return 7 change() }
+@println("excluded:", dead())
+test "dead transitive call" { assert value == 0 @println(value) }
+"#,
+                "0\n",
+            ),
+        ],
+        &SlicingCliExpectation::Output,
+    );
+}
+
+#[test]
+fn test_slicing_direct_throw_break_continue_exclude_dead_effects() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let mut cases = Vec::new();
+    for body in [
+        r#"fn dead() int! { throw "must not execute" DEAD }"#,
+        "fn dead() int { for i in [0] { break\nDEAD } return 7 }",
+        "fn dead() int { for i in [0] { continue DEAD } return 7 }",
+    ] {
+        for effect in ["value = 9", "change()"] {
+            cases.push(format!(
+                r#"
+mut int value = 0
+fn change() {{ value = 9 }}
+{}
+@println("excluded:", dead())
+test "dead effect" {{ assert value == 0 @println(value) }}
+"#,
+                body.replace("DEAD", effect),
+            ));
+        }
+    }
+    let cases: Vec<_> = cases
+        .iter()
+        .map(|source| (source.as_str(), "0\n"))
+        .collect();
+    assert_slicing_cli_cases(directory.path(), &cases, &SlicingCliExpectation::Output);
+}
+
+#[test]
+fn test_slicing_direct_return_excludes_dead_captured_writes() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    assert_slicing_cli_cases(
+        directory.path(),
+        &[(
+            r#"
+fn make() (fn() int) {
+    mut int cell = 0
+    return fn() int { return cell cell = cell + 1 }
+}
+(fn() int) counter = make()
+@println("excluded:", counter())
+test "dead captured write" { assert counter() == 0 @println(counter()) }
+"#,
+            "0\n",
+        )],
+        &SlicingCliExpectation::Output,
+    );
+}
+
+#[test]
+fn test_slicing_direct_return_excludes_dead_await() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    assert_slicing_cli_cases(
+        directory.path(),
+        &[(
+            r#"
+fn produce() int { @println("worker") return 9 }
+fut int work = async produce()
+fn dead(fut int task) int { return 7 _ = await task }
+@println("excluded:", dead(work))
+test "live await" { assert await work == 9 @println("kept") }
+"#,
+            "worker\nkept\n",
+        )],
+        &SlicingCliExpectation::Output,
+    );
+}
+
+#[test]
+fn test_slicing_direct_return_excludes_dead_dynamic_and_native_opacity() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    fs::write(directory.path().join("native.c"), "static int state; nc_abi_set_result set(void) { state = 9; } nc_abi_read_result read(void) { return state; }").unwrap();
+    assert_slicing_cli_cases(
+        directory.path(),
+        &[
+            (
+                r#"
+mut int value = 0
+fn dead((fn() void) action) int { return 7 action() }
+@println("excluded:", dead(fn() {}))
+test "dead dynamic call" { assert value == 0 @println(value) }
+"#,
+                "0\n",
+            ),
+            (
+                r#"
+extern "native.c" as native { fn set() = "set" fn read() int = "read" }
+fn dead() int { return 7 native.set() }
+@println("excluded:", dead())
+native.set()
+test "live native mutation" { assert native.read() == 9 @println(native.read()) }
+"#,
+                "9\n",
+            ),
+        ],
+        &SlicingCliExpectation::Output,
+    );
+}
+
+#[test]
+fn test_slicing_live_dynamic_calls_remain_conservative() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    assert_slicing_cli_cases(
+        directory.path(),
+        &[(
+            r#"
+mut int value = 0
+fn invoke((fn() void) action) int { action() return 7 }
+@println("required:", invoke(fn() { value = 1 }))
+test "live dynamic call" { assert value == 1 @println(value) }
+"#,
+            "required:7\n1\n",
+        )],
+        &SlicingCliExpectation::Output,
+    );
+}
+
+#[test]
+fn test_slicing_jump_operands_retain_mutations() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    assert_slicing_cli_cases(
+        directory.path(),
+        &[
+            (
+                r#"
+mut int value = 0
+fn change() int { value = 1 return 7 }
+fn result() int { return change() }
+@println("required:", result())
+test "return operand" { assert value == 1 @println(value) }
+"#,
+                "required:7\n1\n",
+            ),
+            (
+                r#"
+mut int value = 0
+fn message() str { @print("required:") value = 1 return "failure" }
+fn fail() void! { throw message() }
+_ = fail()
+test "throw operand" { assert value == 1 @println(value) }
+"#,
+                "required:1\n",
+            ),
+            (
+                r#"
+mut int value = 0
+fn change() int { value = 1 return 7 }
+int unused = if true { true -> { break change() } _ -> { 0 } }
+test "value break operand" { assert value == 1 @println(value) }
+"#,
+                "1\n",
+            ),
+        ],
+        &SlicingCliExpectation::Output,
+    );
+}
+
+#[test]
+fn test_slicing_scope_restoration_retains_reachable_mutations() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let mut cases = Vec::new();
+    for body in [
+        "if false { true -> { return 0 value = 9 } _ -> {} }",
+        "while false { return 0 value = 9 }",
+        "_ = false and change()",
+        "_ = true or change()",
+        "for i in [0] { { break } value = 9 }",
+        "for i in [0] { { continue } value = 9 }",
+    ] {
+        cases.push(format!(
+            r#"
+mut int value = 0
+fn change() bool {{ value = 9 return true }}
+fn required() int {{
+    {body}
+    value = value + 1
+    return 7
+}}
+@println("required:", required())
+test "reachable mutation" {{ assert value == 1 @println(value) }}
+"#,
+        ));
+    }
+    let cases: Vec<_> = cases
+        .iter()
+        .map(|source| (source.as_str(), "required:7\n1\n"))
+        .collect();
+    assert_slicing_cli_cases(directory.path(), &cases, &SlicingCliExpectation::Output);
+}
+
+#[test]
+fn test_slicing_retained_dead_code_keeps_struct_and_helper_dependencies() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    assert_slicing_cli_cases(
+        directory.path(),
+        &[(
+            r#"
+struct Box { int value }
+fn helper() int { return 9 }
+fn retained() int {
+    return 7
+    Box box = Box { .value = helper() }
+    _ = box.value
+}
+test "syntax dependencies" { assert retained() == 7 @println(retained()) }
+"#,
+            "7\n",
+        )],
+        &SlicingCliExpectation::Output,
+    );
+}
+
+#[test]
+fn test_slicing_retained_dead_code_still_rejects_semantic_errors() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    assert_slicing_cli_cases(
+        directory.path(),
+        &[
+            (
+                r#"fn retained() int { return 7 int invalid = true } test "dead invalid" { assert retained() == 7 }"#,
+                "expected `int`, found `bool`",
+            ),
+            (
+                r#"fn helper() int { return missing } fn retained() int { return 7 _ = helper() } test "dead helper" { assert retained() == 7 }"#,
+                "missing",
+            ),
+            (
+                r#"struct Box { Missing field } fn retained() int { return 7 Box box = Box { .field = 0 } } test "dead type" { assert retained() == 7 }"#,
+                "Missing",
+            ),
+            (
+                r#"fn retained() int { int value = 0 return 7 value = 1 } test "dead assignment" { assert retained() == 7 }"#,
+                "cannot mutate immutable",
+            ),
+        ],
+        &SlicingCliExpectation::Diagnostic,
+    );
+}
+
+#[test]
+fn test_slicing_dead_assignments_preserve_qualification_error_evidence() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    fs::write(
+        directory.path().join("library.nc"),
+        "pub fn good() int { return 1 }",
+    )
+    .unwrap();
+    assert_slicing_cli_cases(
+        directory.path(),
+        &[
+            (
+                "import { \"library\" as lib } for i in [0] { break\nlib.missing = 1 } test \"qualification\" { assert true }",
+                "does not export `missing`",
+            ),
+            (
+                r#"import { "library" as lib } for i in [0] { continue lib.missing = 1 } test "qualification" { assert true }"#,
+                "does not export `missing`",
+            ),
+        ],
+        &SlicingCliExpectation::Diagnostic,
+    );
 }

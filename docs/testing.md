@@ -34,6 +34,13 @@ fallback for process inputs, native calls, and futures.
 | Escapes, multiline literals, graphemes, expression ranges, imported/specialized/constant-evaluation diagnostics                                                       | `tests/frontend.rs`            |
 | Grapheme boundaries against an independent oracle                                                                                                                     | Unit tests in `src/unicode.rs` |
 
+Test-slicing regressions invoke `ncc test` directly in debug and release modes,
+without wrapping outside statements in synthetic test roots. Summaries exclude
+executable effects after direct jumps in the same block, but retain references
+needed to type-check dead syntax. Tests protect jump-operand mutations, captured
+writes, await dependencies, qualification errors, and scope restoration. Reachable
+dynamic/native calls and more complex control flow remain conservative.
+
 Successful conformance fixtures use debug and release execution, including
 module exports, imported generic types and patterns, and external C calls.
 Module visibility, cyclic imports, and external-declaration errors are checked

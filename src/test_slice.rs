@@ -110,6 +110,7 @@ fn scan_effects(
                 local: Names::new(),
                 captures: Names::new(),
                 effects: Effects::default(),
+                runtime_effects: true,
             };
             scan.item(item);
             // Qualification can stop partway through a bad item, leaving names
@@ -269,8 +270,14 @@ struct Scan<'a> {
     local: Names,
     captures: Names,
     effects: Effects,
+    runtime_effects: bool,
 }
 impl Scan<'_> {
+    fn mark_runtime_effect(&mut self, kind: EffectKind) {
+        if self.runtime_effects {
+            self.effects.mark(kind);
+        }
+    }
     fn name(&mut self, name: &str) {
         if !self.local.contains(name) && self.globals.contains(name) {
             self.effects.uses.insert(name.into());
@@ -412,19 +419,31 @@ impl Scan<'_> {
     fn block(&mut self, b: &Block) {
         let local = self.local.clone();
         let captures = self.captures.clone();
+        let runtime_effects = self.runtime_effects;
         for s in &b.statements {
             self.stmt(s);
+            if matches!(
+                s.unlocated(),
+                Stmt::Return(_) | Stmt::Throw(_) | Stmt::Break(..) | Stmt::Continue(_)
+            ) {
+                // Keep dead syntax dependencies for checking, but exclude its
+                // executable effects. Nested blocks restore their own state.
+                self.runtime_effects = false;
+            }
         }
         self.local = local;
         self.captures = captures;
+        self.runtime_effects = runtime_effects;
     }
     fn target(&mut self, e: &Expr) {
         match e.unlocated() {
-            Expr::Name(n) if !self.local.contains(n) && self.globals.contains(n) => {
+            Expr::Name(n)
+                if self.runtime_effects && !self.local.contains(n) && self.globals.contains(n) =>
+            {
                 self.effects.writes.insert(n.clone());
             }
             Expr::Name(n) if self.captures.contains(n) => {
-                self.effects.mark(EffectKind::CapturedWrite);
+                self.mark_runtime_effect(EffectKind::CapturedWrite);
             }
             Expr::Tuple(es) => {
                 for e in es {
@@ -527,7 +546,9 @@ impl Scan<'_> {
                 match callee.unlocated() {
                     Expr::Name(n) if n.starts_with('@') => {}
                     Expr::Name(n) if !self.local.contains(n) && self.globals.contains(n) => {
-                        self.effects.calls.insert(n.clone());
+                        if self.runtime_effects {
+                            self.effects.calls.insert(n.clone());
+                        }
                     }
                     Expr::Lambda(_) => {}
 
@@ -536,7 +557,7 @@ impl Scan<'_> {
                     // otherwise require conservative effects before type checking.
                     Expr::Member { object, .. } if matches!(object.unlocated(), Expr::Name(n) if self.enums.contains(n) && !self.local.contains(n)) =>
                         {}
-                    _ => self.effects.mark(EffectKind::Opaque),
+                    _ => self.mark_runtime_effect(EffectKind::Opaque),
                 }
             }
             Expr::Index { object, index } => {
@@ -546,7 +567,7 @@ impl Scan<'_> {
             Expr::Member { object, .. } => self.expr(object),
             Expr::Unary { value, .. } | Expr::Async(value) | Expr::Try(value) => self.expr(value),
             Expr::Await(value) => {
-                self.effects.mark(EffectKind::Await);
+                self.mark_runtime_effect(EffectKind::Await);
                 self.expr(value);
             }
             Expr::Binary { left, right, .. } => {
