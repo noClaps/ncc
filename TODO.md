@@ -20,8 +20,8 @@
             callable aliases, forwarding, and escaping callbacks.
       - [ ] Refine capture-creation value demand without losing immutable copies
             or mutable callable replacements.
-      - [ ] Refine escaped-cell write proxies so retaining a callback initializer
-            does not by itself demand unrelated prior invocations.
+      - [ ] Distinguish allocation from invocation for factories held in
+            function-valued bindings.
     - [ ] Extend exit tracking through loops, locks, labeled conditionals, and
           value expressions without losing reachable continuation.
     - [ ] Refine whole-statement/initializer retention.

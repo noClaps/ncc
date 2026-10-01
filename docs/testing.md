@@ -63,9 +63,15 @@ dynamic/recursive/async callback bodies, retained capture initializers and mutab
 state, invoked and escaping callbacks, effectful producer arguments, name-pattern
 comparisons, shadowing, and local/imported qualification errors. References in dead
 or shadowed syntax deliberately prevent unused-parameter certification.
+Escaped-cell write proxies attach to global value bindings, not named factories.
+Destructured sibling bindings are conservatively grouped because their callbacks
+can share storage. Regressions discard syntax-only invocation history and separate
+independent factory instances while preserving real factory mutations of existing
+cells, sibling writer/reader history, callable aliases and replacements, and awaited
+mutex-protected sibling writes.
 Reachable dynamic/native calls, other callable creation versus invocation cases,
-capture-creation demand, escaped-cell initializer proxies, and more complex control
-flow remain conservative.
+capture-creation demand, factories held in function-valued bindings, and more complex
+control flow remain conservative.
 
 Successful conformance fixtures use debug and release execution, including
 module exports, imported generic types and patterns, and external C calls.

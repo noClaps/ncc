@@ -203,10 +203,13 @@ fn summarize_effects(
                 if let Some(indices) = declarations.get(&callee) {
                     for &index in indices {
                         effect.merge(&previous[index]);
-                        if previous[index].contains(EffectKind::CapturedWrite) {
-                            // Escaped cells have no module name. Associate their
-                            // mutations with the callable exposing those cells.
-                            effect.writes.insert(callee.clone());
+                        if matches!(items[index], Item::Global(_))
+                            && previous[index].contains(EffectKind::CapturedWrite)
+                        {
+                            // Global callable values expose escaped cells; named
+                            // factories may allocate independent cells per call.
+                            // Destructured siblings can share the same storage.
+                            effect.writes.extend(definitions(&items[index]));
                         }
                         if matches!(items[index], Item::Global(_)) {
                             // A function-valued binding may have been replaced.

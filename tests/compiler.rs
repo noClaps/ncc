@@ -572,6 +572,166 @@ test "unused invocation effects" {{ assert observed == 7 @println(observed) }}
 }
 
 #[test]
+fn test_slicing_escaped_cell_proxy_discards_syntax_only_invocation_history() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    assert_slicing_cli_cases(
+        directory.path(),
+        &[(
+            r#"
+fn make() (fn() int) {
+    mut int cell = 0
+    @println("action initializer")
+    return fn() int { cell = cell + 1 @println("discarded action:", cell) return cell }
+}
+(fn() int) action = make()
+_ = action()
+fn answer() int { return 7 _ = action() }
+test "syntax-only escaped callable" { assert answer() == 7 @println(answer()) }
+"#,
+            "action initializer\n7\n",
+        )],
+        &SlicingCliExpectation::Output,
+    );
+}
+
+#[test]
+fn test_slicing_escaped_cell_proxy_separates_independent_factory_instances() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    assert_slicing_cli_cases(
+        directory.path(),
+        &[(
+            r#"
+fn make(str name) (fn() int) {
+    mut int cell = 0
+    return fn() int { cell = cell + 1 @println(name, ":", cell) return cell }
+}
+(fn() int) first = make("first")
+(fn() int) second = make("discarded second")
+_ = second()
+_ = first()
+_ = second()
+_ = first()
+test "independent escaped cells" {
+    int actual = first()
+    assert actual == 3
+    @println("observed:", actual)
+}
+"#,
+            "first:1\nfirst:2\nfirst:3\nobserved:3\n",
+        )],
+        &SlicingCliExpectation::Output,
+    );
+}
+
+#[test]
+fn test_slicing_escaped_cell_proxy_preserves_factory_calls_to_global_counter() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    assert_slicing_cli_cases(
+        directory.path(),
+        &[(
+            r#"
+fn make_counter() (fn() int) {
+    mut int cell = 0
+    return fn() int { cell = cell + 1 @println("counter:", cell) return cell }
+}
+(fn() int) counter = make_counter()
+_ = counter()
+fn make() (fn() int) {
+    @println("factory before")
+    _ = counter()
+    @println("factory after")
+    mut int own = 0
+    return fn() int { own = own + 1 return own }
+}
+_ = make()
+test "factory mutates existing escaped cell" {
+    int actual = counter()
+    assert actual == 3
+    @println("observed:", actual)
+}
+"#,
+            "counter:1\nfactory before\ncounter:2\nfactory after\ncounter:3\nobserved:3\n",
+        )],
+        &SlicingCliExpectation::Output,
+    );
+}
+
+#[test]
+fn test_slicing_escaped_cell_proxy_preserves_destructured_sibling_writer_history() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    assert_slicing_cli_cases(
+        directory.path(),
+        &[(
+            r#"
+fn make() ((fn() void), (fn() int)) {
+    mut int cell = 0
+    return fn() void { cell = cell + 1 @println("writer:", cell) },
+        fn() int { return cell }
+}
+(fn() void) writer, (fn() int) reader = make()
+writer()
+writer()
+test "sibling escaped cell" { assert reader() == 2 @println("observed:", reader()) }
+"#,
+            "writer:1\nwriter:2\nobserved:2\n",
+        )],
+        &SlicingCliExpectation::Output,
+    );
+}
+
+#[test]
+fn test_slicing_escaped_cell_proxy_preserves_alias_and_replacement_histories() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    assert_slicing_cli_cases(
+        directory.path(),
+        &[(
+            r#"
+fn make(str name) (fn() int) {
+    mut int cell = 0
+    return fn() int { cell = cell + 1 @println(name, ":", cell) return cell }
+}
+mut (fn() int) action = make("original")
+(fn() int) alias = action
+_ = action()
+action = make("replacement")
+_ = alias()
+_ = action()
+test "escaped alias survives replacement" {
+    assert alias() == 3
+    assert action() == 2
+}
+"#,
+            "original:1\noriginal:2\nreplacement:1\noriginal:3\nreplacement:2\n",
+        )],
+        &SlicingCliExpectation::Output,
+    );
+}
+
+#[test]
+fn test_slicing_escaped_cell_proxy_preserves_async_mutex_sibling_history() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    assert_slicing_cli_cases(
+        directory.path(),
+        &[(
+            r#"
+fn make() ((fn() void), (fn() int)) {
+    mutex int cell = 0
+    return fn() void { lock cell { cell = cell + 1 @println("writer:", cell) } },
+        fn() int { lock cell { return cell } }
+}
+(fn() void) writer, (fn() int) reader = make()
+writer()
+fut void work = async writer()
+{ await work @println("waited") }
+test "async sibling escaped mutex" { assert reader() == 2 @println("observed:", reader()) }
+"#,
+            "writer:1\nwriter:2\nwaited\nobserved:2\n",
+        )],
+        &SlicingCliExpectation::Output,
+    );
+}
+
+#[test]
 fn test_slicing_unused_lambda_preserves_capture_initializers() {
     let directory = ncc::temp::Directory::new().unwrap();
     assert_slicing_cli_cases(
