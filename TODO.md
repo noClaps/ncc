@@ -4,9 +4,6 @@
   - [ ] Cover every part of the language and as many edge cases as possible.
   - [ ] Ask the user about unclear specification semantics, then capture the
         agreed behavior in tests.
-  - [ ] Clarify the environment example's hard-coded `HOME` value before using
-        it as an executable conformance fixture; environment values are
-        machine-dependent.
   - [ ] Expand top-level constant evaluation beyond its safely evaluatable
         execution prefix while preserving effects and unknown runtime state.
         Output with known arguments and test assertions with known conditions are

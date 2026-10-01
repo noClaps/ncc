@@ -2473,7 +2473,7 @@ This is a builtin function to get the environment variables as a `[str]str` map.
 ```nc
 test "environment variables" {
   [str]str env = @env()
-  assert "HOME" in env and env["HOME"] == "/usr/bin/cc"
+  assert "CC" in env and env["CC"] == "/usr/bin/cc"
 }
 ```
 
