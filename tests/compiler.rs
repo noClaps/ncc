@@ -536,6 +536,91 @@ test "dead recursive reference" { assert retained() == 7 @println(retained()) }
 }
 
 #[test]
+fn test_slicing_synchronization_excludes_waits_for_dead_helper_references() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    assert_slicing_cli_cases(
+        directory.path(),
+        &[
+            (
+                r#"
+mutex int value = 0
+fn read() int { lock value { return value } }
+fn produce() int { return 7 _ = read() }
+fut int work = async produce()
+@println("discarded wait:", await work)
+test "dead declaration edge" { lock value { assert value == 0 @println(value) } }
+"#,
+                "0\n",
+            ),
+            (
+                r#"
+mutex int value = 0
+fn read() int { lock value { return value } }
+fn produce() int { return 7 }
+fut int work = async produce()
+fn wait(fut int task) int { return await task _ = read() }
+@println("discarded wait:", wait(work))
+test "dead starting reference" { lock value { assert value == 0 @println(value) } }
+"#,
+                "0\n",
+            ),
+        ],
+        &SlicingCliExpectation::Output,
+    );
+}
+
+#[test]
+fn test_slicing_synchronization_preserves_wait_for_native_mutex_reader() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    fs::write(
+        directory.path().join("native.c"),
+        "nc_abi_invoke_result invoke(nc_abi_invoke_arg0 callback) { return callback.call(callback.env); }",
+    )
+    .unwrap();
+    assert_slicing_cli_cases(
+        directory.path(),
+        &[(
+            r#"
+extern "native.c" as native { fn invoke((fn() int) callback) int = "invoke" }
+mutex int value = 0
+fn change() { lock value { value = 9 } }
+fn read() int { lock value { return value } }
+fut void work = async change()
+fn wait(fut void task) { await task }
+{ wait(work) @println("waited") }
+test "native mutex reader" { @println("kept:", native.invoke(read)) }
+"#,
+            "waited\nkept:9\n",
+        )],
+        &SlicingCliExpectation::Output,
+    );
+}
+
+#[test]
+fn test_slicing_synchronization_preserves_wait_for_captured_mutex_state() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    assert_slicing_cli_cases(
+        directory.path(),
+        &[(
+            r#"
+fn make() (fn() int) {
+    mutex int cell = 0
+    return fn() int { lock cell { cell = cell + 1 return cell } }
+}
+(fn() int) counter = make()
+fn bump() { _ = counter() }
+fut void work = async bump()
+{ await work @println("waited") }
+fn read() int { return counter() }
+test "escaped mutex state" { @println("kept:", read()) }
+"#,
+            "waited\nkept:2\n",
+        )],
+        &SlicingCliExpectation::Output,
+    );
+}
+
+#[test]
 fn test_slicing_runtime_demand_preserves_direct_and_mutual_recursive_reads() {
     let directory = ncc::temp::Directory::new().unwrap();
     assert_slicing_cli_cases(

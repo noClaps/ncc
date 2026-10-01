@@ -49,6 +49,9 @@ preserve reached effects after loops, locks, labeled conditionals, and value
 expressions that consume jumps. Dead helper references preserve imported semantic
 error locations without retaining unrelated writers; direct and recursive reads,
 callback state, and syntax-selected initializers have runtime regressions.
+Synchronization traversal follows runtime references rather than dead syntax;
+regressions preserve outside waits for native readers and escaped mutex-protected
+closure state while discarding unrelated waits.
 Reachable dynamic/native calls, callable creation versus invocation, and more complex
 control flow remain conservative.
 

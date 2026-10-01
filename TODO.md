@@ -19,8 +19,8 @@
           including lambda arguments whose bodies are never called.
     - [ ] Extend exit tracking through loops, locks, labeled conditionals, and
           value expressions without losing reachable continuation.
-    - [ ] Refine callable-dependency promotion and synchronization traversal so
-          syntax-only references do not become runtime value demand.
+    - [ ] Refine callable-dependency promotion so syntax-only references do not
+          become runtime value demand.
     - [ ] Refine whole-statement/initializer retention.
 - [ ] Attempt to eliminate all undefined behavior from the language.
   - [ ] Identify potentially undefined cases.

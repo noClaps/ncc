@@ -256,7 +256,7 @@ fn select_dependencies(
                     || !effects[index].writes.is_disjoint(&runtime_needed)
                     || (effects[index].contains(EffectKind::Await)
                         && synchronization_depends_on(
-                            &effects[index].uses,
+                            &effects[index].runtime_uses,
                             &runtime_needed,
                             declarations,
                             effects,
@@ -270,12 +270,12 @@ fn select_dependencies(
 }
 
 fn synchronization_depends_on(
-    uses: &Names,
+    runtime_uses: &Names,
     needed: &Names,
     declarations: &HashMap<String, Vec<usize>>,
     effects: &[Effects],
 ) -> bool {
-    let mut pending: Vec<_> = uses.iter().cloned().collect();
+    let mut pending: Vec<_> = runtime_uses.iter().cloned().collect();
     let mut seen = Names::new();
     while let Some(name) = pending.pop() {
         if needed.contains(&name) {
@@ -285,7 +285,7 @@ fn synchronization_depends_on(
             && let Some(indices) = declarations.get(&name)
         {
             for &index in indices {
-                pending.extend(effects[index].uses.iter().cloned());
+                pending.extend(effects[index].runtime_uses.iter().cloned());
             }
         }
     }
