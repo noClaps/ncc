@@ -335,6 +335,13 @@ enum ValueOperation {
     Copy,
     Equal,
     String,
+    PrintString,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum StringUse {
+    Value,
+    // Transient formatting buffers expose bytes only, never character boundaries.
+    Output,
 }
 struct Emitter<'a> {
     // Pre-evaluated async arguments used when emitting a builtin worker body.
@@ -352,7 +359,7 @@ struct Emitter<'a> {
     value_targets: Vec<(String, String, Type)>,
     return_type: Type,
     enum_equalities: HashSet<Type>,
-    enum_strings: HashSet<Type>,
+    enum_strings: HashSet<(StringUse, Type)>,
     runtime_prototypes: Vec<String>,
     runtime_functions: Vec<String>,
     function_types: Vec<(Type, String)>,
@@ -380,7 +387,7 @@ impl Emitter<'_> {
         let (ret, params) = match operation {
             ValueOperation::Copy => (ct.clone(), format!("{ct} value")),
             ValueOperation::Equal => ("int".into(), format!("{ct} left, {ct} right")),
-            ValueOperation::String => (
+            ValueOperation::String | ValueOperation::PrintString => (
                 self.c_type(&Type::Named("str".into(), vec![]))?,
                 format!("{ct} value"),
             ),
@@ -392,7 +399,8 @@ impl Emitter<'_> {
         let result = match operation {
             ValueOperation::Copy => self.copy_body(ty, "value"),
             ValueOperation::Equal => self.equality_body("left", "right", ty),
-            ValueOperation::String => self.string_body("value", ty),
+            ValueOperation::String => self.string_body("value", ty, StringUse::Value),
+            ValueOperation::PrintString => self.string_body("value", ty, StringUse::Output),
         }?;
         self.line(format!("return {result}; }}"));
         let function = std::mem::replace(&mut self.out, saved);
@@ -1571,7 +1579,7 @@ impl Emitter<'_> {
             return self.string_array_cast(ty, element, &value);
         }
         if matches!(ty, Type::Named(n, _) if n == "str") {
-            return self.string_value(&value, &from);
+            return self.string_value(&value, &from, StringUse::Value);
         }
         if matches!((ty, &from), (Type::Array(_, None), Type::Array(_, Some(_)))) {
             return Ok(value);
@@ -1607,10 +1615,15 @@ impl Emitter<'_> {
         element: &Type,
         value: &str,
     ) -> Result<String, Diagnostics> {
-        self.unicode_support();
+        let bytes = *element == Type::Named("byte".into(), vec![]);
+        if bytes {
+            self.allocation_support();
+            self.headers.insert("string.h");
+        } else {
+            self.unicode_support();
+        }
         let ct = self.c_type(ty)?;
         let elem = self.c_type(element)?;
-        let bytes = *element == Type::Named("byte".into(), vec![]);
         let length = if bytes {
             format!("{value}.bytes")
         } else {
@@ -1743,6 +1756,16 @@ impl Emitter<'_> {
                 self.line(format!("{result}.vals[{offset} + {i}] = {copied};\n}}"));
             }
             return Ok(result);
+        }
+        if let Expr::Binary { left, right, .. } = e.unlocated() {
+            // Empty literals contribute no stored characters. Both operands
+            // have already been evaluated, so this preserves their effects.
+            if matches!(left.unlocated(), Expr::String(text) if text.is_empty()) {
+                return self.temp(e, r);
+            }
+            if matches!(right.unlocated(), Expr::String(text) if text.is_empty()) {
+                return self.temp(e, l);
+            }
         }
         self.unicode_support();
         self.temp(e, &format!("nc_str_concat({l}, {r})"))
@@ -1919,7 +1942,7 @@ impl Emitter<'_> {
                 || matches!(&ty,Type::Named(n,_) if matches!(self.checked.types.get(n),Some(TypeInfo::Alias(_))))
                 || matches!(&ty, Type::Named(n, _) if n == "float")
             {
-                let string = self.string_value(&value, &ty)?;
+                let string = self.string_value(&value, &ty, StringUse::Output)?;
                 let result = self.fresh();
                 self.line(format!("nc_string {result} = {string}; if ({result}.bytes) fwrite({result}.data, 1, {result}.bytes, {stream});"));
                 continue;
@@ -1971,6 +1994,12 @@ impl Emitter<'_> {
         self.allocation_support();
         self.headers.insert("pthread.h");
         self.helpers.insert("/* async runtime */".into());
+    }
+    fn output_string_support(&mut self) {
+        self.allocation_support();
+        self.headers.extend(["stdint.h", "string.h"]);
+        // Output buffers deliberately discard boundaries; only their bytes are consumed.
+        self.helpers.insert("static void *nc_alloc(size_t count, size_t size);\nstatic void nc_panic(const char *message);\nstatic nc_string nc_output_concat(nc_string left, nc_string right) { if (right.bytes > SIZE_MAX - left.bytes || left.bytes + right.bytes == SIZE_MAX) nc_panic(\"string length overflow\"); size_t bytes = left.bytes + right.bytes; char *data = nc_alloc(bytes + 1, 1); if (left.bytes) memcpy(data, left.data, left.bytes); if (right.bytes) memcpy(data + left.bytes, right.data, right.bytes); return (nc_string){bytes, data, 0, NULL}; }".into());
     }
     fn unicode_support(&mut self) {
         self.allocation_support();
@@ -2422,28 +2451,42 @@ impl Emitter<'_> {
         ));
         Ok(())
     }
-    fn string_value(&mut self, value: &str, ty: &Type) -> Result<String, Diagnostics> {
+    fn string_value(
+        &mut self,
+        value: &str,
+        ty: &Type,
+        usage: StringUse,
+    ) -> Result<String, Diagnostics> {
         self.c_type(&Type::Named("str".into(), vec![]))?;
         if self.fields(ty).is_some() || matches!(ty, Type::Array(_, _) | Type::Map(_, _)) {
-            return self.value_helper(ValueOperation::String, ty, &[value]);
+            let operation = match usage {
+                StringUse::Value => ValueOperation::String,
+                StringUse::Output => ValueOperation::PrintString,
+            };
+            return self.value_helper(operation, ty, &[value]);
         }
-        self.string_body(value, ty)
+        self.string_body(value, ty, usage)
     }
-    fn string_body(&mut self, value: &str, ty: &Type) -> Result<String, Diagnostics> {
+    fn string_body(
+        &mut self,
+        value: &str,
+        ty: &Type,
+        usage: StringUse,
+    ) -> Result<String, Diagnostics> {
         if let Type::Named(n, _) = ty
             && let Some(TypeInfo::Alias(base)) = self.checked.types.get(n)
         {
-            return self.string_value(value, &base.clone());
+            return self.string_value(value, &base.clone(), usage);
         }
         if let Some(declaration) = self.enum_decl(ty) {
-            return self.enum_string(value, ty, &declaration);
+            return self.enum_string(value, ty, &declaration, usage);
         }
         if let Type::Optional(inner) = ty {
             let result = self.fresh();
             self.line(format!(
                 "nc_string {result} = NC_STRING(\"none\"); if ({value}.present) {{"
             ));
-            let s = self.string_value(&format!("{value}.value"), inner)?;
+            let s = self.string_value(&format!("{value}.value"), inner, usage)?;
             self.line(format!("{result} = {s}; }}"));
             return Ok(result);
         }
@@ -2452,18 +2495,18 @@ impl Emitter<'_> {
             self.line(format!(
                 "nc_string {result} = NC_STRING(\"error: \"); if (({value}).failed) {{"
             ));
-            self.append_string(&result, &format!("({value}).error"));
+            self.append_string(&result, &format!("({value}).error"), usage);
             self.line("} else {");
-            let success = self.string_value(&format!("({value}).value"), inner)?;
+            let success = self.string_value(&format!("({value}).value"), inner, usage)?;
             self.line(format!("{result} = {success};"));
             self.line("}");
             return Ok(result);
         }
         if matches!(ty, Type::Array(_, _) | Type::Map(_, _)) {
-            return self.container_string(value, ty);
+            return self.container_string(value, ty, usage);
         }
         if let Some(fields) = self.fields(ty) {
-            return self.record_string(value, ty, &fields);
+            return self.record_string(value, ty, &fields, usage);
         }
         let Type::Named(name, _) = ty else {
             return unsupported("composite-to-string conversion");
@@ -2503,11 +2546,16 @@ impl Emitter<'_> {
         value: &str,
         ty: &Type,
         declaration: &EnumDecl,
+        usage: StringUse,
     ) -> Result<String, Diagnostics> {
-        let helper = format!("nc_string_{}", declaration.name);
+        let prefix = match usage {
+            StringUse::Value => "nc_string",
+            StringUse::Output => "nc_output_string",
+        };
+        let helper = format!("{prefix}_{}", declaration.name);
         let ct = self.c_type(ty)?;
         let call = format!("{helper}({value})");
-        if !self.enum_strings.insert(ty.clone()) {
+        if !self.enum_strings.insert((usage, ty.clone())) {
             return Ok(call);
         }
         self.runtime_prototypes
@@ -2526,22 +2574,26 @@ impl Emitter<'_> {
             ));
             if !variant.values.is_empty() {
                 let ct = self.c_type(&Type::Tuple(variant.values.clone()))?;
-                self.append_string(&result, "\"(\"");
+                self.append_string(&result, "\"(\"", usage);
                 for (i, ty) in variant.values.iter().enumerate() {
                     if i > 0 {
-                        self.append_string(&result, "\", \"");
+                        self.append_string(&result, "\", \"", usage);
                     }
-                    let s = self.string_value(&format!("(({ct}*)({value}).payload)->f_{i}"), ty)?;
+                    let s = self.string_value(
+                        &format!("(({ct}*)({value}).payload)->f_{i}"),
+                        ty,
+                        usage,
+                    )?;
                     let quoted = matches!(ty,Type::Named(n,_) if n == "str");
                     if quoted {
-                        self.append_string(&result, "\"\\\"\"");
+                        self.append_string(&result, "\"\\\"\"", usage);
                     }
-                    self.append_string(&result, &s);
+                    self.append_string(&result, &s, usage);
                     if quoted {
-                        self.append_string(&result, "\"\\\"\"");
+                        self.append_string(&result, "\"\\\"\"", usage);
                     }
                 }
-                self.append_string(&result, "\")\"");
+                self.append_string(&result, "\")\"", usage);
             }
             self.line("break; }");
         }
@@ -2551,35 +2603,40 @@ impl Emitter<'_> {
         self.runtime_functions.push(function);
         Ok(call)
     }
-    fn container_string(&mut self, value: &str, ty: &Type) -> Result<String, Diagnostics> {
+    fn container_string(
+        &mut self,
+        value: &str,
+        ty: &Type,
+        usage: StringUse,
+    ) -> Result<String, Diagnostics> {
         let result = self.fresh();
         let i = self.fresh();
         self.line(format!("nc_string {result} = NC_STRING(\"[\"); for (uint64_t {i} = 0; {i} < ({value}).len; ++{i}) {{\nif ({i}) {{"));
-        self.append_string(&result, "\", \"");
+        self.append_string(&result, "\", \"", usage);
         self.line("}");
         match ty {
             Type::Array(element, _) => {
-                let s = self.string_value(&format!("({value}).vals[{i}]"), element)?;
+                let s = self.string_value(&format!("({value}).vals[{i}]"), element, usage)?;
                 let quoted = matches!(&**element, Type::Named(n, _) if n == "str");
                 if quoted {
-                    self.append_string(&result, "\"\\\"\"");
+                    self.append_string(&result, "\"\\\"\"", usage);
                 }
-                self.append_string(&result, &s);
+                self.append_string(&result, &s, usage);
                 if quoted {
-                    self.append_string(&result, "\"\\\"\"");
+                    self.append_string(&result, "\"\\\"\"", usage);
                 }
             }
             Type::Map(key, val) => {
-                let k = self.string_value(&format!("({value}).vals[{i}].f_0"), key)?;
-                self.append_string(&result, &k);
-                self.append_string(&result, "\": \"");
-                let v = self.string_value(&format!("({value}).vals[{i}].f_1"), val)?;
-                self.append_string(&result, &v);
+                let k = self.string_value(&format!("({value}).vals[{i}].f_0"), key, usage)?;
+                self.append_string(&result, &k, usage);
+                self.append_string(&result, "\": \"", usage);
+                let v = self.string_value(&format!("({value}).vals[{i}].f_1"), val, usage)?;
+                self.append_string(&result, &v, usage);
             }
             _ => unreachable!(),
         }
         self.line("}");
-        self.append_string(&result, "\"]\"");
+        self.append_string(&result, "\"]\"", usage);
         Ok(result)
     }
     fn record_string(
@@ -2587,6 +2644,7 @@ impl Emitter<'_> {
         value: &str,
         ty: &Type,
         fields: &[(String, Type)],
+        usage: StringUse,
     ) -> Result<String, Diagnostics> {
         let (open, close) = if let Type::Named(n, _) = ty {
             (format!("{n}{{"), "}")
@@ -2597,22 +2655,32 @@ impl Emitter<'_> {
         self.line(format!("nc_string {result} = {};", nc_string(&open)));
         for (i, (field, ty_field)) in fields.iter().enumerate() {
             if i > 0 {
-                self.append_string(&result, "\", \"");
+                self.append_string(&result, "\", \"", usage);
             }
             if matches!(ty, Type::Named(_, _)) {
                 self.append_string(
                     &result,
                     &c_string(&format!(".{} = ", field.trim_start_matches("f_"))),
+                    usage,
                 );
             }
-            let s = self.string_value(&format!("({value}).{field}"), ty_field)?;
-            self.append_string(&result, &s);
+            let s = self.string_value(&format!("({value}).{field}"), ty_field, usage)?;
+            self.append_string(&result, &s, usage);
         }
-        self.append_string(&result, &c_string(close));
+        self.append_string(&result, &c_string(close), usage);
         Ok(result)
     }
-    fn append_string(&mut self, result: &str, suffix: &str) {
-        self.unicode_support();
+    fn append_string(&mut self, result: &str, suffix: &str, usage: StringUse) {
+        let helper = match usage {
+            StringUse::Value => {
+                self.unicode_support();
+                "nc_str_concat"
+            }
+            StringUse::Output => {
+                self.output_string_support();
+                "nc_output_concat"
+            }
+        };
         let suffix = if suffix.starts_with('"') {
             format!("NC_STRING({suffix})")
         } else {
@@ -2620,7 +2688,7 @@ impl Emitter<'_> {
         };
         let value = self.fresh();
         self.line(format!(
-            "nc_string {value} = {suffix}; {result} = nc_str_concat({result}, {value});"
+            "nc_string {value} = {suffix}; {result} = {helper}({result}, {value});"
         ));
     }
     fn enum_decl(&self, ty: &Type) -> Option<EnumDecl> {

@@ -29,6 +29,15 @@ following calls, closure creation, effects, or unknown state remain runtime code
 parameters, capture fields, shadowing, and imported globals, and executes its
 fixtures in both modes.
 
+`tests/unicode_dependencies.rs` checks emitted-C Unicode dependencies and execution
+in debug and release modes. Output-only formatting of nested and recursive values,
+active optional/error payloads, byte conversion, and empty-string concatenation
+identities avoid segmentation tables. Real character-aware operations and string
+conversions retain their required support. Tests keep output/value helper caches
+separate, preserve combining-character boundaries and embedded NULs, and check
+print-argument snapshots and single-interpolation effects. The strings workload is
+executed only in a reduced regression, not at its full example iteration count.
+
 ## Coverage map
 
 | Area                                                                                                                                                                  | Regression tests               |

@@ -92,6 +92,9 @@
 - Include C headers only when needed by the generated program. Preserve NC
   binding names in generated C variables, parameters, and capture fields, with
   collision-safe prefixes and suffixes; anonymous temporaries may remain numbered.
+  Emit Unicode tables and segmentation support only when needed by character-aware
+  operations, not solely for printing or byte-array conversion. Keep byte-only
+  output formatting helpers separate from boundary-preserving string conversions.
 - Preserve source locations through module loading, generic specialization, and
   optimization. Semantic errors should identify the failing expression or
   statement in its original file, including imported code.

@@ -92,7 +92,11 @@ dependencies. The Unicode reference package is test-only.
 
 Generated programs use C library facilities and, only for futures/mutexes,
 POSIX threads. Unicode grapheme segmentation uses checked-in Unicode 16 data
-and a small runtime, without ICU or another external Unicode library.
+and a small runtime, without ICU or another external Unicode library. These are
+emitted only when needed by character-aware operations; printing composite values
+and converting strings to `byte[]` do not themselves require the tables. Actual
+string conversions retain character boundaries, while internal output buffers
+only assemble bytes.
 `UNICODE-LICENSE` contains the data license. `scripts/unicode-tables.mjs` is an
 optional regeneration tool, not part of building or running the compiler.
 
