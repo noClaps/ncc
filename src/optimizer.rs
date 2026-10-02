@@ -10,6 +10,9 @@ use crate::{
 };
 use std::collections::{HashMap, HashSet};
 
+#[path = "optimizer_loops.rs"]
+mod loops;
+
 /// Embedding is mandatory compile-time evaluation, including in debug builds.
 ///
 /// # Errors
@@ -3311,12 +3314,15 @@ impl Evaluator<'_> {
         if matches!(condition.unlocated(), Expr::Bool(false)) {
             return Some(Flow::Next);
         }
-        // The certificate is checked without running the condition or body.
-        let certificate = crate::termination::counted_loop(condition, body)?;
-        let (start, min, max) = self.loop_integer(env.get(certificate.counter)?)?;
-        let bound = self.evaluate(certificate.bound, env)?;
-        let (bound, _, _) = self.loop_integer(&bound)?;
-        if !certificate.terminates(start, bound, min, max) {
+        // Neither preprocessing nor certification executes candidate helpers.
+        if let Some(certificate) = crate::termination::counted_loop(condition, body) {
+            let (start, min, max) = self.loop_integer(env.get(certificate.counter)?)?;
+            let bound = self.evaluate(certificate.bound, env)?;
+            let (bound, _, _) = self.loop_integer(&bound)?;
+            if !certificate.terminates(start, bound, min, max) {
+                return None;
+            }
+        } else if !self.helper_loop_proven(condition, body, env) {
             return None;
         }
         Some(loop {

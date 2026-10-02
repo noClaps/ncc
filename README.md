@@ -59,12 +59,19 @@ not memoized. Arithmetic uses each type's range. Unknown state and unsupported
 effects remain runtime code; futures and external calls are never executed by the
 optimiser. Loops and recursive cycles must have termination certificates before
 execution, with no artificial step or depth budgets for certified computation.
-Counted integer loops require invariant bounds, unconditional monotonic progress,
-and no overflow before their exit. Finite `for` traversals use their original
-snapshot. Direct self-recursion supports covering integer base cases and decreasing
+Counted integer loops require invariant bounds, monotonic progress on every path
+that continues the loop, and no overflow before their exit. Progress can come from
+conditional updates, known shared-state helpers, or pure scalar helper returns.
+Known condition wrappers may perform unrelated effects before their comparison;
+all checks, including the final false check, retain their original effects and order.
+Proof-only helper expansion distinguishes shared cells from copied captures and
+shadowed bindings, and rejects resets, changing bounds, and callable replacements.
+Finite `for` traversals use their original snapshot. Direct self-recursion supports
+covering integer base cases and decreasing
 arguments; exact integral floats through `2^53` also qualify. Certified recursion
-uses heap continuations. Other patterns, including mutual recursion and effectful
-loop conditions, conservatively stay at runtime rather than being tried with fuel.
+uses heap continuations. Other patterns, including mutual recursion, condition-side
+counter changes, and helpers with loops or early returns, conservatively stay at
+runtime rather than being tried with fuel.
 
 When an entire program is known, release mode records output argument snapshots
 without printing during compilation, then emits only constant-string output calls.

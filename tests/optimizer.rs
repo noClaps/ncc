@@ -2359,9 +2359,7 @@ fn reevaluate() (int, int, int) {
 @println(find(false))
 @println(reevaluate())
 ",
-        // The effectful condition needs an interprocedural loop certificate.
-        // It remains runtime code, with the same condition evaluation count.
-        &["for_labels", "while_labels", "find"],
+        &["for_labels", "while_labels", "find", "reevaluate"],
         "127\n152\n12\n-1\n(3, 4, 60)\n",
     );
 }

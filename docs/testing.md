@@ -31,10 +31,21 @@ retaining storage for a runtime suffix.
 execution beyond the former fuel/depth limits, counted-loop strides and overflow,
 skipped progress, invariant-bound violations, alias/callback cycles, covering
 recursive base cases, exact float ranks, heap continuations, and failure locations.
-Unproven loops/recursion are not entered speculatively. Current certificates are
-conservative: effectful conditions, mutual recursion, and more general ranking
-functions remain runtime code. Physical memory and compilation time still constrain
-large evaluations; there is no configurable or artificial evaluation budget.
+`tests/loop_proofs.rs` compares debug/release output for effectful condition wrappers,
+conditional strides, progress before continues, exiting branches, shared-state
+helper chains, scalar helper returns, aliases, copied bounds, and lexical shadows.
+Negative probes use variable-dependent arithmetic failures to detect speculative
+entry into candidates with resets, changing bounds, skipped progress, overflow,
+recursive helpers, or callable replacement. Condition effects retain their final
+false check and original diagnostic locations. Proof-only helper trees are never
+executed and do not replace source trees or their checked metadata.
+
+Unproven loops/recursion are not entered speculatively. Current certificates remain
+conservative for condition-side ranking changes, helper loops/early returns,
+mutual recursion, and more general ranking functions. Nested loops are separately
+proof-gated when reached; discharging their termination obligations before entering
+an enclosing iteration remains a follow-up. Physical memory and compilation time
+still constrain large evaluations; there is no artificial evaluation budget.
 `tests/c_names.rs` checks recognizable, collision-safe C names for bindings,
 parameters, capture fields, shadowing, and imported globals, and executes its
 fixtures in both modes.

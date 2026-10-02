@@ -1,5 +1,5 @@
 //! Conservative certificates for counted integer loops. Unknown is not infinite.
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use crate::ast::{BinaryOp, Block, Expr, Stmt, UnaryOp};
 
@@ -7,7 +7,10 @@ pub(crate) struct CountedLoop<'a> {
     pub(crate) counter: &'a str,
     pub(crate) bound: &'a Expr,
     pub(crate) comparison: BinaryOp,
-    pub(crate) step: i128,
+    pub(crate) step_min: i128,
+    pub(crate) step_max: i128,
+    // Include intermediate updates and paths which exit instead of looping.
+    excursion: Range,
 }
 
 pub(crate) fn counted_loop<'a>(condition: &'a Expr, body: &Block) -> Option<CountedLoop<'a>> {
@@ -27,22 +30,250 @@ pub(crate) fn counted_loop<'a>(condition: &'a Expr, body: &Block) -> Option<Coun
     if !bound_names(right, counter, &mut protected) {
         return None;
     }
-    let mut step = None;
-    for statement in &body.statements {
-        if let Some(delta) = update(statement, counter) {
-            if step.replace(delta).is_some() {
+    let mut analysis = Analysis {
+        counter,
+        protected,
+        direction: 0,
+        excursion: Range::ZERO,
+    };
+    let paths = analysis.block(body, Range::ZERO, true)?;
+    let mut progress: Option<Range> = None;
+    for (exit, range) in paths {
+        // Without the enclosing loop's label, an unresolved continue may target
+        // this loop. Requiring progress also for outer continues is conservative.
+        if matches!(exit, Exit::Next | Exit::Continue(_)) {
+            if range.min <= 0 && range.max >= 0 {
                 return None;
             }
-        } else if !safe_statement(statement, &protected, step.is_some()) {
-            return None;
+            progress = Some(progress.map_or(range, |prior| prior.union(range)));
         }
     }
+    let progress = progress.unwrap_or(Range::ZERO);
     Some(CountedLoop {
         counter,
         bound: right,
         comparison: *op,
-        step: step?,
+        step_min: progress.min,
+        step_max: progress.max,
+        excursion: analysis.excursion,
     })
+}
+
+#[derive(Clone, Copy)]
+struct Range {
+    min: i128,
+    max: i128,
+}
+
+impl Range {
+    const ZERO: Self = Self { min: 0, max: 0 };
+
+    fn union(self, other: Self) -> Self {
+        Self {
+            min: self.min.min(other.min),
+            max: self.max.max(other.max),
+        }
+    }
+
+    fn add(self, delta: i128) -> Option<Self> {
+        Some(Self {
+            min: self.min.checked_add(delta)?,
+            max: self.max.checked_add(delta)?,
+        })
+    }
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum Exit {
+    Next,
+    Break(Option<String>),
+    Continue(Option<String>),
+    Return,
+}
+
+type Paths = BTreeMap<Exit, Range>;
+
+fn merge(paths: &mut Paths, exit: Exit, range: Range) {
+    paths
+        .entry(exit)
+        .and_modify(|prior| *prior = prior.union(range))
+        .or_insert(range);
+}
+
+fn one(exit: Exit, range: Range) -> Paths {
+    BTreeMap::from([(exit, range)])
+}
+
+struct Analysis<'a> {
+    counter: &'a str,
+    protected: HashSet<&'a str>,
+    direction: i128,
+    excursion: Range,
+}
+
+impl Analysis<'_> {
+    fn block(&mut self, body: &Block, input: Range, updates: bool) -> Option<Paths> {
+        let mut paths = one(Exit::Next, input);
+        for statement in &body.statements {
+            let Some(input) = paths.remove(&Exit::Next) else {
+                break;
+            };
+            for (exit, range) in self.statement(statement, input, updates)? {
+                merge(&mut paths, exit, range);
+            }
+        }
+        Some(paths)
+    }
+
+    fn statement(&mut self, statement: &Stmt, input: Range, updates: bool) -> Option<Paths> {
+        if let Some(delta) = update(statement, self.counter) {
+            if !updates || (self.direction != 0 && self.direction != delta.signum()) {
+                return None;
+            }
+            self.direction = delta.signum();
+            let range = input.add(delta)?;
+            self.excursion = self.excursion.union(range);
+            return Some(one(Exit::Next, range));
+        }
+        match statement.unlocated() {
+            Stmt::Assign { target, value } => {
+                if root_name(target).is_none_or(|name| self.protected.contains(name))
+                    || !pure_expression(target)
+                {
+                    return None;
+                }
+                self.expression(value, input, updates)
+            }
+            Stmt::Var(declaration) => {
+                if declaration.mutex
+                    || declaration
+                        .binding_names()
+                        .iter()
+                        .any(|name| self.protected.contains(name))
+                {
+                    return None;
+                }
+                self.expression(&declaration.value, input, updates)
+            }
+            Stmt::Block(body) => self.block(body, input, updates),
+            Stmt::Expr(value) | Stmt::Assert(value) => self.expression(value, input, updates),
+            Stmt::LabeledIf { label, value } => {
+                let mut paths = self.expression(value, input, updates)?;
+                if let Some(range) = paths.remove(&Exit::Break(Some(label.clone()))) {
+                    merge(&mut paths, Exit::Next, range);
+                }
+                Some(paths)
+            }
+            Stmt::Return(value) => {
+                let mut paths = match value {
+                    Some(value) => self.expression(value, input, updates)?,
+                    None => one(Exit::Next, input),
+                };
+                if let Some(range) = paths.remove(&Exit::Next) {
+                    merge(&mut paths, Exit::Return, range);
+                }
+                Some(paths)
+            }
+            Stmt::Throw(value) => pure_expression(value).then(|| one(Exit::Return, input)),
+            // Value breaks depend on type metadata identifying the value scope.
+            Stmt::Break(Some(_), _) | Stmt::Lock { .. } => None,
+            Stmt::Break(None, label) => Some(one(Exit::Break(label.clone()), input)),
+            Stmt::Continue(label) => Some(one(Exit::Continue(label.clone()), input)),
+            Stmt::While {
+                label,
+                condition,
+                body,
+            } => self.nested_loop(label.as_deref(), condition, body, input),
+            Stmt::For {
+                label,
+                name,
+                iterable,
+                body,
+            } => {
+                if self.protected.contains(name.as_str()) {
+                    return None;
+                }
+                self.nested_loop(label.as_deref(), iterable, body, input)
+            }
+            Stmt::Located(_, _) => unreachable!(),
+        }
+    }
+
+    fn expression(&mut self, expression: &Expr, input: Range, updates: bool) -> Option<Paths> {
+        match expression.unlocated() {
+            Expr::If { subject, arms } => {
+                if !subject.as_deref().is_none_or(pure_expression) || arms.is_empty() {
+                    return None;
+                }
+                let mut paths = Paths::new();
+                // Checked NC conditionals are exhaustive. Pattern evaluation may
+                // not hide writes or jumps; all possible arms are retained.
+                for (patterns, body) in arms {
+                    let mut safe = true;
+                    for pattern in patterns {
+                        crate::visit::pattern(pattern, &mut |value| {
+                            safe &= leaf_expression(value);
+                        });
+                    }
+                    if !safe {
+                        return None;
+                    }
+                    for (exit, range) in self.block(body, input, updates)? {
+                        merge(&mut paths, exit, range);
+                    }
+                }
+                Some(paths)
+            }
+            Expr::Else { value, fallback } => self.fallback(value, fallback, input, updates),
+            Expr::Catch { value, name, body } => {
+                if self.protected.contains(name.as_str()) {
+                    return None;
+                }
+                self.fallback(value, body, input, updates)
+            }
+            _ => pure_expression(expression).then(|| one(Exit::Next, input)),
+        }
+    }
+
+    fn fallback(
+        &mut self,
+        value: &Expr,
+        body: &Block,
+        input: Range,
+        updates: bool,
+    ) -> Option<Paths> {
+        if !pure_expression(value) {
+            return None;
+        }
+        let mut paths = self.block(body, input, updates)?;
+        merge(&mut paths, Exit::Next, input);
+        Some(paths)
+    }
+
+    fn nested_loop(
+        &mut self,
+        label: Option<&str>,
+        condition: &Expr,
+        body: &Block,
+        input: Range,
+    ) -> Option<Paths> {
+        if !pure_expression(condition) {
+            return None;
+        }
+        // Its own evaluator certificate establishes nested-loop termination.
+        // It cannot change our ranking state, even on a locally exiting path.
+        let nested = self.block(body, input, false)?;
+        let mut paths = one(Exit::Next, input);
+        for (exit, range) in nested {
+            match &exit {
+                Exit::Next => {}
+                Exit::Break(target) | Exit::Continue(target)
+                    if target.is_none() || target.as_deref() == label => {}
+                _ => merge(&mut paths, exit, range),
+            }
+        }
+        Some(paths)
+    }
 }
 
 fn integer(expression: &Expr) -> Option<i128> {
@@ -96,42 +327,15 @@ fn bound_names<'a>(expression: &'a Expr, counter: &str, names: &mut HashSet<&'a 
     }
 }
 
-fn safe_expression(expression: &Expr, protected: &HashSet<&str>, progressed: bool) -> bool {
-    match expression.unlocated() {
-        Expr::If { subject, arms } => {
-            subject
-                .as_deref()
-                .is_none_or(|value| safe_expression(value, protected, progressed))
-                && arms.iter().all(|(patterns, body)| {
-                    let mut safe = true;
-                    for pattern in patterns {
-                        crate::visit::pattern(pattern, &mut |value| {
-                            safe &= leaf_expression(value);
-                        });
-                    }
-                    safe && safe_block(body, protected, progressed)
-                })
-        }
-        Expr::Else { value, fallback } => {
-            safe_expression(value, protected, progressed)
-                && safe_block(fallback, protected, progressed)
-        }
-        Expr::Catch { value, name, body } => {
-            !protected.contains(name.as_str())
-                && safe_expression(value, protected, progressed)
-                && safe_block(body, protected, progressed)
-        }
-        _ => {
-            let mut safe = true;
-            let item = crate::ast::Item::Statement(Stmt::Expr(expression.clone()));
-            crate::visit::item(&item, &mut |value| safe &= leaf_expression(value));
-            safe
-        }
-    }
+fn pure_expression(expression: &Expr) -> bool {
+    let mut safe = true;
+    let item = crate::ast::Item::Statement(Stmt::Expr(expression.clone()));
+    crate::visit::item(&item, &mut |value| safe &= leaf_expression(value));
+    safe
 }
 
 fn leaf_expression(expression: &Expr) -> bool {
-    match expression {
+    match expression.unlocated() {
         Expr::Call { callee, .. } => {
             matches!(callee.unlocated(), Expr::Name(name) if name.starts_with('@'))
         }
@@ -154,57 +358,6 @@ fn root_name(expression: &Expr) -> Option<&str> {
     }
 }
 
-fn safe_block(body: &Block, protected: &HashSet<&str>, progressed: bool) -> bool {
-    body.statements
-        .iter()
-        .all(|statement| safe_statement(statement, protected, progressed))
-}
-
-fn safe_statement(statement: &Stmt, protected: &HashSet<&str>, progressed: bool) -> bool {
-    match statement.unlocated() {
-        Stmt::Assign { target, value } => {
-            root_name(target).is_some_and(|name| !protected.contains(name))
-                && safe_expression(target, protected, progressed)
-                && safe_expression(value, protected, progressed)
-        }
-        Stmt::Var(declaration) => {
-            !declaration.mutex
-                && declaration
-                    .binding_names()
-                    .iter()
-                    .all(|name| !protected.contains(name))
-                && safe_expression(&declaration.value, protected, progressed)
-        }
-        Stmt::Block(body) => safe_block(body, protected, progressed),
-        Stmt::Expr(value)
-        | Stmt::Assert(value)
-        | Stmt::Throw(value)
-        | Stmt::LabeledIf { value, .. } => safe_expression(value, protected, progressed),
-        Stmt::Return(value) | Stmt::Break(value, _) => value
-            .as_ref()
-            .is_none_or(|value| safe_expression(value, protected, progressed)),
-        Stmt::Continue(_) => progressed,
-        Stmt::While {
-            condition, body, ..
-        } => {
-            safe_expression(condition, protected, progressed)
-                && safe_block(body, protected, progressed)
-        }
-        Stmt::For {
-            name,
-            iterable,
-            body,
-            ..
-        } => {
-            !protected.contains(name.as_str())
-                && safe_expression(iterable, protected, progressed)
-                && safe_block(body, protected, progressed)
-        }
-        Stmt::Lock { .. } => false,
-        Stmt::Located(_, _) => unreachable!(),
-    }
-}
-
 impl CountedLoop<'_> {
     pub(crate) fn terminates(&self, start: i128, bound: i128, min: i128, max: i128) -> bool {
         use BinaryOp::{Ge, Gt, Le, Lt, Ne};
@@ -219,23 +372,62 @@ impl CountedLoop<'_> {
         if !active {
             return true;
         }
-        let stop = match self.comparison {
-            Lt | Gt | Ne => bound,
-            Le => bound + 1,
-            Ge => bound - 1,
-            _ => return false,
+        if !(min..=max).contains(&start) {
+            return false;
+        }
+        if self.step_min == 0 && self.step_max == 0 {
+            return self.in_range(start, min, max);
+        }
+        let increasing = self.step_min > 0;
+        if !increasing && self.step_max >= 0 {
+            return false;
+        }
+        let last = if self.comparison == Ne || self.step_min == self.step_max {
+            self.fixed_last(start, bound)
+        } else {
+            // Before the last iteration, any active integer is at most bound-1
+            // (or bound for <=). Include the largest possible intermediate update.
+            match self.comparison {
+                Lt if increasing => bound.checked_sub(1).map(|last| last.max(start)),
+                Le if increasing => Some(bound.max(start)),
+                Gt if !increasing => bound.checked_add(1).map(|last| last.min(start)),
+                Ge if !increasing => Some(bound.min(start)),
+                _ => None,
+            }
         };
-        let distance = stop - start;
-        if distance.signum() != self.step.signum() {
-            return false;
+        last.is_some_and(|last| self.in_range(start, min, max) && self.in_range(last, min, max))
+    }
+
+    fn in_range(&self, value: i128, min: i128, max: i128) -> bool {
+        value
+            .checked_add(self.excursion.min)
+            .is_some_and(|low| low >= min)
+            && value
+                .checked_add(self.excursion.max)
+                .is_some_and(|high| high <= max)
+    }
+
+    fn fixed_last(&self, start: i128, bound: i128) -> Option<i128> {
+        if self.step_min != self.step_max {
+            return None;
         }
-        if self.comparison == Ne && distance % self.step != 0 {
-            return false;
+        let endpoint = match self.comparison {
+            BinaryOp::Lt | BinaryOp::Gt | BinaryOp::Ne => bound,
+            BinaryOp::Le => bound.checked_add(1)?,
+            BinaryOp::Ge => bound.checked_sub(1)?,
+            _ => return None,
+        };
+        let distance = endpoint.checked_sub(start)?;
+        let step = self.step_min;
+        if distance.signum() != step.signum() {
+            return None;
         }
-        let distance = distance.abs();
-        let stride = self.step.abs();
-        let iterations = distance / stride + i128::from(distance % stride != 0);
-        let final_value = start + iterations * self.step;
-        (min..=max).contains(&final_value)
+        if self.comparison == BinaryOp::Ne && distance.checked_rem(step)? != 0 {
+            return None;
+        }
+        let distance = distance.checked_abs()?;
+        let stride = step.checked_abs()?;
+        let iterations = (distance / stride).checked_add(i128::from(distance % stride != 0))?;
+        start.checked_add(iterations.checked_sub(1)?.checked_mul(step)?)
     }
 }

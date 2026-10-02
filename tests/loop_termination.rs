@@ -52,14 +52,14 @@ fn unknown_loops_are_not_entered_to_search_for_progress() {
     for source in [
         // The bound is missed by the stride.
         "mut int i=1 while i!=4 {i=1/(i-i) i=i+2} @println(i)",
-        // No unconditional progress, even though this particular input terminates.
+        // One branch has no progress, even though this particular input terminates.
         "mut int i=1 while i<4 {mut int fail=1/(i-i) if i<4 {true->{i=i+1} false->{}}} @println(i)",
         // A continue can bypass the increment.
         "mut int i=1 while i<4 {mut int fail=1/(i-i) if i==1 {true->{continue} false->{}} i=i+1} @println(i)",
         // The bound changes.
         "mut int i=1 mut int n=4 while i<n {mut int fail=1/(i-i) n=n+1 i=i+1} @println(i)",
-        // Shadowed bound names cannot be assumed invariant.
-        "mut int i=1 mut int n=4 while i<n {mut int fail=1/(i-i) mut int n=5 i=i+1} @println(i)",
+        // Shared bound mutations through helpers must also block proof.
+        "mut int i=1 mut int n=4 fn change(){n=n+1} while i<n {mut int fail=1/(i-i) change() i=i+1} @println(i)",
         // A closure can mutate shared induction storage.
         "mut int i=1 fn reset=fn() {i=0} while i<4 {mut int fail=1/(i-i) reset() i=i+1} @println(i)",
     ] {
