@@ -87,8 +87,11 @@
   Preserve effects, evaluation order, value semantics, and runtime failures.
 - Warn non-fatally for structurally infinite loops and unreachable code. Do not
   interpret proven infinite loops during constant evaluation; continue folding
-  independent expressions inside their bodies. Retain evaluation step/depth
-  safeguards for cases structural analysis cannot decide.
+  independent expressions inside their bodies. Precompute loops and recursion
+  only when termination is proved for the known inputs and the computation is
+  otherwise evaluatable. Certified execution has no artificial step/depth limit;
+  do not speculatively interpret unproven loops or recursive cycles. Use heap
+  continuations for certified recursion rather than relying on the Rust stack.
 - Include C headers only when needed by the generated program. Preserve NC
   binding names in generated C variables, parameters, and capture fields, with
   collision-safe prefixes and suffixes; anonymous temporaries may remain numbered.
@@ -109,14 +112,21 @@
   return requirement. Keep the defensive C fallthrough trap for non-void functions.
 - Compile-time mutable captures share evaluator-local storage. Do not memoize
   calls whose callable or arguments contain shared cells, or reuse stateful
-  closure results. Persistent outer mutable state must retain runtime evaluation.
+  closure results. Persistent outer mutable state must retain runtime storage
+  unless an entire known-program transaction removes all computation while
+  preserving its output snapshots and order.
   Release evaluation also analyses safely evaluatable top-level statements in
   source order to diagnose reached arithmetic failures, without removing effects.
   A successfully evaluated, call-free initial execution region may be replaced
   with final global initializers before any values or storage escape. Keep global
   runtime storage for later mutations and captures; roll back the entire region on
-  unsupported operations, failures, or evaluator limits. Do not resume this
-  precomputation past calls, closure creation, effects, or unknown state.
+  unsupported operations, failures, or unproven termination. Do not resume this
+  partial-prefix precomputation past calls, closure creation, effects, or unknown
+  state. Separately, an entirely known program may be replaced transactionally
+  with constant-string output calls, including computation through shared globals
+  and closures. Never execute output during evaluation; record exact argument
+  snapshots and nested-call order, and discard the transaction on any unknown
+  operation or failure.
   Known `@print`/`@println` arguments
   are analysed without executing output; runtime calls remain intact. Test-mode
   analysis follows retained test blocks and known-true assertions in source order;

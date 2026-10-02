@@ -44,7 +44,7 @@ compile-time `(OS, architecture)` tuple. `@args()` and `@env()` read the running
 program's arguments and environment, never the compiler's. Pass arguments with
 `ncc run program.nc -- one two --help`.
 
-Release builds perform bounded, memoized, type-aware constant evaluation of pure
+Release builds perform proof-gated, memoized, type-aware constant evaluation of pure
 functions and loops, remove unreachable functions, and use the C compiler's
 `-O3`. Debug builds preserve runtime evaluation and use `-O0 -g`. Integer
 overflow remains an error, including when detected during constant evaluation.
@@ -55,18 +55,25 @@ Constant evaluation supports signed/unsigned integers, bytes, floats, booleans,
 characters, strings, arrays, tuples, maps, structs, enums, optionals, successful
 and failed error unions, nominal types, and closures. Mutable captures share
 bindings within an evaluation, including returned closures; stateful calls are
-not memoized. Access to persistent outer mutable state remains runtime code.
-Arithmetic uses each type's range. Effects, unsupported operations, and exhausted evaluation budgets
-remain runtime code; futures and external calls are never executed by the
-optimiser. Top-level analysis can continue across `@print` and `@println` when
-their arguments are known, tracking argument effects without executing output or
-removing the runtime calls. The step budget resets for each top-level item;
-evaluation also has a stack-depth safeguard.
+not memoized. Arithmetic uses each type's range. Unknown state and unsupported
+effects remain runtime code; futures and external calls are never executed by the
+optimiser. Loops and recursive cycles must have termination certificates before
+execution, with no artificial step or depth budgets for certified computation.
+Counted integer loops require invariant bounds, unconditional monotonic progress,
+and no overflow before their exit. Finite `for` traversals use their original
+snapshot. Direct self-recursion supports covering integer base cases and decreasing
+arguments; exact integral floats through `2^53` also qualify. Certified recursion
+uses heap continuations. Other patterns, including mutual recursion and effectful
+loop conditions, conservatively stay at runtime rather than being tried with fuel.
 
-Release mode can precompute a bounded, call-free initial region containing mutable
-bindings and loops, replacing its work with final global initializers. It stops at
-calls, closure creation, effects, or unknown state and rolls back if evaluation
-fails or exceeds its budget. Global storage remains available for later mutations.
+When an entire program is known, release mode records output argument snapshots
+without printing during compilation, then emits only constant-string output calls.
+Known calls, shared-global mutations, and closures can disappear with their unused
+storage. Any unknown operation or failure rolls back the entire transaction.
+Otherwise, release mode can precompute a call-free initial region into final global
+initializers, stopping at calls, closure creation, effects, or unknown state. This
+fallback retains global storage for later mutations. Test-mode analysis keeps
+runtime output and assertions while following known state and successful assertions.
 Generated C binding names retain their NC names, such as `nc_var_buf_1`; unique
 suffixes distinguish shadowed bindings, and closure fields use `nc_capture_` names.
 

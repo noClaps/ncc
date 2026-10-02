@@ -176,7 +176,7 @@ fn blank() int! { throw "" }
 }
 
 #[test]
-fn evaluation_limits_keep_safe_runtime_fallbacks() {
+fn certified_evaluation_exceeds_former_limits() {
     let source = r#"
 fn depth(uint n) uint {
     if n { 0 -> { return 0 } _ -> { return 1 + depth(n - 1) } }
@@ -197,14 +197,8 @@ test "unreachable failures" {
 "#;
     let executable = executable_fixture(source);
     let c = compile_fixture(&executable, Path::new("limits.nc"), true).unwrap();
-    assert!(
-        c.contains("nc_fn_depth("),
-        "depth-limited evaluation must fall back"
-    );
-    assert!(
-        c.contains("nc_fn_fuel("),
-        "fuel-limited evaluation must fall back"
-    );
+    assert!(!c.contains("nc_fn_depth("), "certified recursion must fold");
+    assert!(!c.contains("nc_fn_fuel("), "certified loop must fold");
     folded(source, &[], "600\n100001\n");
 }
 
@@ -288,7 +282,7 @@ values[0][0] = 9
 }
 
 #[test]
-fn top_level_precomputation_stops_at_effects_unknown_state_and_closure_creation() {
+fn top_level_precomputation_crosses_known_output_calls_and_closures_but_not_unknown_state() {
     for (source, expected) in [
         (
             "mut int i=0 @print(\"before:\") while i<3 {i=i+1} @println(i)",
@@ -312,7 +306,11 @@ fn top_level_precomputation_stops_at_effects_unknown_state_and_closure_creation(
         ),
     ] {
         let c = compile_fixture(source, Path::new("barrier.nc"), true).unwrap();
-        assert!(c.contains("} goto "), "crossed a barrier: {source}");
+        assert_eq!(
+            c.contains("} goto "),
+            source.contains("@args()"),
+            "{source}"
+        );
         folded(source, &[], expected);
     }
 }
@@ -328,7 +326,7 @@ while i<5 {i=i+1}
 @println(read())
 ";
     let c = compile_fixture(source, Path::new("escaped.nc"), true).unwrap();
-    assert_eq!(c.matches("} goto ").count(), 1, "only the prefix folds");
+    assert!(!c.contains("} goto "), "fully known captured storage folds");
     folded(source, &[], "3\n5\n");
     let source = r"
 mut int i=0
@@ -345,10 +343,10 @@ while i<5 {i=i+1}
 }
 
 #[test]
-fn top_level_precomputation_rolls_back_exhausted_and_failed_regions() {
+fn top_level_precomputation_exceeds_former_budget_and_rolls_back_failures() {
     let source = "mut int i=0 while i<20000 {i=i+1} @println(i)";
     let c = compile_fixture(source, Path::new("budget.nc"), true).unwrap();
-    assert!(c.contains("} goto "), "exhausted region must remain intact");
+    assert!(!c.contains("} goto "), "certified region must precompute");
     folded(source, &[], "20000\n");
     for source in [
         "mut int[] values=[1] mut int i=0 while i<3 {i=i+1} values[2]=i @println(\"unreached\")",
@@ -2361,7 +2359,9 @@ fn reevaluate() (int, int, int) {
 @println(find(false))
 @println(reevaluate())
 ",
-        &["for_labels", "while_labels", "find", "reevaluate"],
+        // The effectful condition needs an interprocedural loop certificate.
+        // It remains runtime code, with the same condition evaluation count.
+        &["for_labels", "while_labels", "find"],
         "127\n152\n12\n-1\n(3, 4, 60)\n",
     );
 }

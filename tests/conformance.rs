@@ -1944,21 +1944,19 @@ fn release_evaluates_pure_functions_and_preserves_effects() {
     let scoped =
         "fn scoped() int { mut int x = 1 { x = 2 int x = 3 } return x } @println(scoped())";
     let c = compile_fixture(scoped, Path::new("scope.nc"), true).unwrap();
-    assert!(c.contains("2LL"));
+    assert!(c.contains("\"2\""), "known output should be constant bytes");
     assert!(!c.contains("nc_fn_scoped"));
     let source = r"fn fib(int n) int { if n { 0,1 -> { return n } _ -> { return fib(n-1)+fib(n-2) } } } @println(fib(10))";
     let c = compile_fixture(source, Path::new("fib.nc"), true).unwrap();
     let main = c.split("int main(void)").last().unwrap();
-    assert!(main.contains("55LL"));
+    assert!(main.contains("\"55\""));
     assert!(!main.contains("nc_fn_fib"));
     let effect = "fn effect() int { @println(\"keep\") return 2 } @println(effect())";
     let c = compile_fixture(effect, Path::new("effect.nc"), true).unwrap();
-    assert!(
-        c.split("int main(void)")
-            .last()
-            .unwrap()
-            .contains("nc_fn_effect")
-    );
+    assert!(!c.contains("nc_fn_effect"));
+    assert!(c.contains("\"keep\""));
+    assert!(c.contains("\"2\""));
+    success(effect, "keep\n2\n");
 }
 
 #[test]

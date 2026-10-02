@@ -1467,6 +1467,8 @@ while j > 0 {
 
 The compiler warns about structurally infinite loops, such as `while true {}` without a reachable exit, and about unreachable code following them. These warnings do not reject the program. Such loops remain runtime code in release mode, although expressions inside them can still be optimized. The analysis is conservative and does not attempt to decide whether every possible program terminates.
 
+Compile-time execution of loops and recursion requires proof of termination for the known inputs, as well as evaluatable operations and state. Proven cases are precomputed without artificial step or recursion-depth limits; unproven cases remain runtime code without speculative interpretation. Failure to prove termination does not mean that a program is infinite. Recursive compile-time execution uses heap continuations rather than the compiler's call stack.
+
 ### Labels, `break`, and `continue`
 
 There are `break` and `continue` keywords for breaking out of the loop, and skipping to the next iteration, respectively.

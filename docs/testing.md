@@ -20,11 +20,21 @@ Runtime assertions, output, and mutations remain intact. Regressions cover
 cross-test state, lexical shadowing, original diagnostic locations, and runtime
 fallback for process inputs, native calls, and futures.
 
-Release precomputation transactionally collapses a bounded, call-free initial
-execution region into final global initializers. Regressions compare debug/release
-array-building and numeric loops, value copies, later shared mutations and escaped
-closures, barriers, exhausted budgets, and runtime failure ordering. Computations
-following calls, closure creation, effects, or unknown state remain runtime code.
+Release precomputation transactionally reduces entirely known programs to output
+calls containing exact constant bytes. `tests/output_precomputation.rs` compares
+debug/release array-building, shared-global calls and closures, nested output order,
+argument snapshots, formatting, and rollback at unknown input or effects. The
+fallback call-free initial region still becomes final global initializers while
+retaining storage for a runtime suffix.
+
+`tests/loop_termination.rs` and `tests/recursion_termination.rs` cover proof-gated
+execution beyond the former fuel/depth limits, counted-loop strides and overflow,
+skipped progress, invariant-bound violations, alias/callback cycles, covering
+recursive base cases, exact float ranks, heap continuations, and failure locations.
+Unproven loops/recursion are not entered speculatively. Current certificates are
+conservative: effectful conditions, mutual recursion, and more general ranking
+functions remain runtime code. Physical memory and compilation time still constrain
+large evaluations; there is no configurable or artificial evaluation budget.
 `tests/c_names.rs` checks recognizable, collision-safe C names for bindings,
 parameters, capture fields, shadowing, and imported globals, and executes its
 fixtures in both modes.
@@ -40,17 +50,17 @@ executed only in a reduced regression, not at its full example iteration count.
 
 ## Coverage map
 
-| Area                                                                                                                                                                  | Regression tests               |
-| --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
-| Types, bindings, operators, patterns, loops, errors, optionals, generics, imports, closures, concurrency, value semantics                                             | `tests/conformance.rs`         |
-| Compile-time folding, numeric widths, cast table, closures, active error payloads, evaluation limits, sampled float formatting, evaluation order, Unicode/NUL strings | `tests/optimizer.rs`           |
-| Binary embedding, lexical/tuple/captured paths, empty files, symlink and runtime-dependency rejection                                                                 | `tests/embed.rs`               |
-| C ABI declarations, shared implementation files, inactive optional/error payloads                                                                                     | `tests/externs.rs`             |
-| CLI help/options, removed-command rejection, release mode, targets, runtime process state                                                                             | `tests/cli.rs`                 |
-| Non-fatal async race warnings, mutex-safe cases, indirect/recursive calls, imported specialization locations, build/run success                                       | `tests/warnings.rs`            |
-| Build formats, artifact isolation, required C headers, basic diagnostics                                                                                              | `tests/compiler.rs`            |
-| Escapes, multiline literals, graphemes, expression ranges, imported/specialized/constant-evaluation diagnostics                                                       | `tests/frontend.rs`            |
-| Grapheme boundaries against an independent oracle                                                                                                                     | Unit tests in `src/unicode.rs` |
+| Area                                                                                                                                                                         | Regression tests               |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
+| Types, bindings, operators, patterns, loops, errors, optionals, generics, imports, closures, concurrency, value semantics                                                    | `tests/conformance.rs`         |
+| Compile-time folding, numeric widths, cast table, closures, active error payloads, termination certificates, sampled float formatting, evaluation order, Unicode/NUL strings | `tests/optimizer.rs`           |
+| Binary embedding, lexical/tuple/captured paths, empty files, symlink and runtime-dependency rejection                                                                        | `tests/embed.rs`               |
+| C ABI declarations, shared implementation files, inactive optional/error payloads                                                                                            | `tests/externs.rs`             |
+| CLI help/options, removed-command rejection, release mode, targets, runtime process state                                                                                    | `tests/cli.rs`                 |
+| Non-fatal async race warnings, mutex-safe cases, indirect/recursive calls, imported specialization locations, build/run success                                              | `tests/warnings.rs`            |
+| Build formats, artifact isolation, required C headers, basic diagnostics                                                                                                     | `tests/compiler.rs`            |
+| Escapes, multiline literals, graphemes, expression ranges, imported/specialized/constant-evaluation diagnostics                                                              | `tests/frontend.rs`            |
+| Grapheme boundaries against an independent oracle                                                                                                                            | Unit tests in `src/unicode.rs` |
 
 Test-slicing regressions invoke `ncc test` directly in debug and release modes,
 without wrapping outside statements in synthetic test roots. Summaries exclude

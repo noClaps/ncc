@@ -12,6 +12,7 @@ pub mod parser;
 pub mod sema;
 pub mod target;
 pub mod temp;
+mod termination;
 mod test_slice;
 pub mod unicode;
 mod unicode_data;

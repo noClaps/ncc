@@ -1,4 +1,4 @@
-//! Fuel-bounded, type-aware evaluation of pure expressions, functions and loops.
+//! Proof-gated, type-aware evaluation of pure expressions, functions and loops.
 //! Failed/impure evaluation leaves the original program in place.
 use crate::{
     ast::{
@@ -69,11 +69,11 @@ fn embed_module(
         else {
             unreachable!()
         };
-        let value = evaluate(e, &HashMap::new(), &functions, &checked, &mut 100_000)
+        let value = evaluate(e, &HashMap::new(), &functions, &checked)
             .map_err(|error| error.at_source(source_path, span.clone()))?;
         let Some(Value::Array(bytes)) = value else {
             return Err(Diagnostics::one(
-                "@embed path must be a compile-time string; runtime values, side effects, or evaluation limits prevent evaluating this path", span.clone()
+                "@embed path must be a compile-time string; runtime values, side effects, or unproven termination prevent evaluating this path", span.clone()
             ).at_source(source_path, span.clone()));
         };
         let bytes = bytes
@@ -365,8 +365,8 @@ impl Value {
 /// Returns diagnostics for reached arithmetic failures, embedding failures, or
 /// a failure to start or complete the evaluator thread.
 pub fn optimize(checked: CheckedModule) -> Result<Module, Diagnostics> {
-    // The evaluator has an explicit depth limit. Give it a consistent stack
-    // budget instead of inheriting a small editor or test-runner thread stack.
+    // Certified recursion uses heap continuations. Ordinary syntax traversal
+    // still needs a consistent stack instead of a small test-runner thread stack.
     std::thread::scope(|scope| {
         std::thread::Builder::new()
             .name("ncc-constants".into())
@@ -392,6 +392,9 @@ fn optimize_module(checked: CheckedModule) -> Result<Module, Diagnostics> {
             }
         })
         .collect();
+    if let Some(items) = precompute_output(&checked, &functions) {
+        return Ok(Module { items });
+    }
     evaluate_top_level(&checked, &functions)?;
     let mut env = HashMap::new();
     let mut replacements = Vec::new();
@@ -406,7 +409,7 @@ fn optimize_module(checked: CheckedModule) -> Result<Module, Diagnostics> {
                     crate::flow::expression_reaches_next(&v.value, &checked.expression_types);
                 replacements.push((index, fold(&v.value, &env, &functions, &checked)?));
                 let constant = if !v.mutable && !v.mutex {
-                    evaluate(&v.value, &env, &functions, &checked, &mut 100_000)?
+                    evaluate(&v.value, &env, &functions, &checked)?
                 } else {
                     None
                 };
@@ -499,6 +502,77 @@ fn prune_unreachable_functions(module: &mut Module) {
         .retain(|item| !matches!(item, Item::Function(f) if !reachable.contains(&f.name)));
 }
 
+// Unlike prefix evaluation, this transaction discards all storage only after
+// the entire program is known. Recorded output is never published on failure.
+fn precompute_output(
+    checked: &CheckedModule,
+    functions: &HashMap<String, &Function>,
+) -> Option<Vec<Item>> {
+    if checked
+        .module
+        .items
+        .iter()
+        .any(|item| matches!(item, Item::Test { .. }))
+    {
+        return None;
+    }
+    let mut evaluator = Evaluator::new(functions, checked);
+    // Reuse lexical global storage and repeat every call's effects, rather than
+    // evaluating named functions against caller-local bindings or memoized state.
+    evaluator.analyse_output = true;
+    evaluator.recorded_output = Some(vec![]);
+    let mut env = HashMap::new();
+    for item in &checked.module.items {
+        evaluator.analysis_globals.clone_from(&env);
+        let flow = match item {
+            Item::Global(v) => evaluator
+                .declaration(v, &mut env, &mut Vec::new())
+                .map(|()| Flow::Next),
+            Item::Statement(statement) => {
+                evaluator.statements(std::slice::from_ref(statement), &mut env, false)
+            }
+            _ => continue,
+        };
+        if !matches!(flow, Some(Flow::Next)) || evaluator.failure().is_some() {
+            return None;
+        }
+    }
+    evaluator.recorded_output
+}
+
+fn precomputed_print(
+    evaluator: &mut Evaluator<'_>,
+    callee: &Expr,
+    args: &[Expr],
+    env: &mut HashMap<String, Value>,
+) -> Option<Value> {
+    let mut values = Vec::with_capacity(args.len());
+    for arg in args {
+        values.push(evaluator.evaluate(arg, env)?);
+    }
+    if evaluator.recorded_output.is_some() {
+        let mut bytes = String::new();
+        for (arg, value) in args.iter().zip(&values) {
+            // Preserve argument snapshots and active payload types. Only output
+            // flattens character boundaries; ordinary strings do not.
+            bytes.push_str(&evaluator.string(value, evaluator.expr_type(arg)?)?.concat());
+        }
+        let mut output = Expr::Call {
+            callee: Box::new(callee.clone()),
+            args: vec![Expr::String(bytes)],
+            generics: vec![],
+        };
+        if let Some(location) = callee.location() {
+            output = output.located(location.clone());
+        }
+        evaluator
+            .recorded_output
+            .as_mut()?
+            .push(Item::Statement(Stmt::Expr(output)));
+    }
+    Some(Value::Void(vec![]))
+}
+
 // Only the initial, call-free execution region can move into initializers:
 // nothing has observed these globals yet. Calls and closure creation are barriers
 // even if individually pure, since they can observe or export shared storage.
@@ -542,8 +616,7 @@ fn precompute_prefix(
     {
         return vec![];
     }
-    let mut fuel = 100_000;
-    let mut evaluator = Evaluator::new(functions, checked, &mut fuel);
+    let mut evaluator = Evaluator::new(functions, checked);
     let mut env = HashMap::new();
     for &index in &indices {
         let flow = match &checked.module.items[index] {
@@ -555,8 +628,7 @@ fn precompute_prefix(
             }
             _ => unreachable!(),
         };
-        // Evaluation is transactional: partial writes, failures and exhausted
-        // budgets must never become runtime initializers.
+        // Evaluation is transactional: partial writes and failures must never become runtime initializers.
         if !matches!(flow, Some(Flow::Next)) {
             return vec![];
         }
@@ -593,8 +665,7 @@ fn evaluate_top_level(
     functions: &HashMap<String, &Function>,
 ) -> Result<(), Diagnostics> {
     let mut env = HashMap::new();
-    let mut fuel = 100_000;
-    let mut evaluator = Evaluator::new(functions, checked, &mut fuel);
+    let mut evaluator = Evaluator::new(functions, checked);
     evaluator.analyse_output = true;
     for item in &checked.module.items {
         if !matches!(
@@ -603,7 +674,6 @@ fn evaluate_top_level(
         ) {
             continue;
         }
-        *evaluator.fuel = 100_000;
         evaluator.memo.clear();
         evaluator.analysis_globals.clone_from(&env);
         let flow = match item {
@@ -651,10 +721,8 @@ fn expression_constants(
         });
     }
     for item in &checked.module.items {
-        let mut fuel = 100_000;
         crate::visit::item(item, &mut |e| {
-            if fuel == 0
-                || preserved.contains(&e.id())
+            if preserved.contains(&e.id())
                 || !matches!(
                     e,
                     Expr::Call { .. }
@@ -672,7 +740,7 @@ fn expression_constants(
                 return;
             }
             // Failed evaluation may be unreachable at runtime: keep it intact.
-            if let Ok(Some(value)) = evaluate(e, &HashMap::new(), functions, checked, &mut fuel)
+            if let Ok(Some(value)) = evaluate(e, &HashMap::new(), functions, checked)
                 && value.materializable()
             {
                 replacements.insert(e.id(), materialize(value, e, checked));
@@ -689,9 +757,7 @@ fn fold(
 ) -> Result<Option<Expr>, Diagnostics> {
     // Only fold whole pure evaluations. Do not rewrite expressions inside a
     // short-circuited or potentially effectful expression independently.
-    if let Some(v) =
-        evaluate(e, env, functions, checked, &mut 100_000)?.filter(Value::materializable)
-    {
+    if let Some(v) = evaluate(e, env, functions, checked)?.filter(Value::materializable) {
         return Ok(Some(materialize(v, e, checked)));
     } else if let Expr::Call {
         callee,
@@ -703,7 +769,7 @@ fn fold(
         let mut reached = true;
         let mut folded_args = Vec::new();
         for arg in args {
-            let value = match evaluate(arg, env, functions, checked, &mut 100_000) {
+            let value = match evaluate(arg, env, functions, checked) {
                 Ok(value) => value,
                 Err(error) if reached => return Err(error),
                 Err(_) => None,
@@ -784,9 +850,8 @@ fn evaluate(
     env: &HashMap<String, Value>,
     functions: &HashMap<String, &Function>,
     checked: &CheckedModule,
-    fuel: &mut usize,
 ) -> Result<Option<Value>, Diagnostics> {
-    let mut evaluator = Evaluator::new(functions, checked, fuel);
+    let mut evaluator = Evaluator::new(functions, checked);
     let value = evaluator.evaluate(e, &mut env.clone());
     if let Some(error) = evaluator.failure() {
         Err(error)
@@ -798,14 +863,14 @@ fn evaluate(
 struct Evaluator<'a> {
     functions: &'a HashMap<String, &'a Function>,
     checked: &'a CheckedModule,
-    fuel: &'a mut usize,
     lambdas: HashMap<usize, &'a Function>,
     expressions: HashMap<usize, &'a Expr>,
     embed_error: Option<Diagnostics>,
     memo: HashMap<(Value, Vec<Value>), Value>,
     cells: Vec<Value>,
-    depth: usize,
+
     analyse_output: bool,
+    recorded_output: Option<Vec<Item>>,
     analysis_globals: HashMap<String, Value>,
     arithmetic_failure: bool,
     arithmetic_location: Option<SourceLocation>,
@@ -817,7 +882,6 @@ impl<'module> Evaluator<'module> {
     fn new(
         functions: &'module HashMap<String, &'module Function>,
         checked: &'module CheckedModule,
-        fuel: &'module mut usize,
     ) -> Self {
         let mut lambdas = HashMap::new();
         let mut expressions = HashMap::new();
@@ -832,14 +896,14 @@ impl<'module> Evaluator<'module> {
         Self {
             functions,
             checked,
-            fuel,
             lambdas,
             expressions,
             embed_error: None,
             memo: HashMap::new(),
             cells: Vec::new(),
-            depth: 0,
+
             analyse_output: false,
+            recorded_output: None,
             analysis_globals: HashMap::new(),
             arithmetic_failure: false,
             arithmetic_location: None,
@@ -1326,10 +1390,6 @@ impl<'module> Evaluator<'module> {
             .map(|ty| self.base_type(ty))
     }
     fn evaluate(&mut self, e: &Expr, env: &mut HashMap<String, Value>) -> Option<Value> {
-        if self.depth >= 512 {
-            return None;
-        }
-        self.depth += 1;
         let result = self.expression(e, env).and_then(|value| {
             if let Some(ty) = self.checked.expression_types.get(&e.id()) {
                 self.coerce(value, ty)
@@ -1337,7 +1397,7 @@ impl<'module> Evaluator<'module> {
                 Some(value)
             }
         });
-        self.depth -= 1;
+
         if self.arithmetic_failure && self.arithmetic_location.is_none() {
             self.arithmetic_location = e.location().cloned();
         }
@@ -1345,8 +1405,6 @@ impl<'module> Evaluator<'module> {
     }
     fn expression(&mut self, e: &Expr, env: &mut HashMap<String, Value>) -> Option<Value> {
         let e = e.unlocated();
-        let fuel = &mut *self.fuel;
-        *fuel = fuel.checked_sub(1)?;
         if let Expr::Unary {
             op: UnaryOp::Neg,
             value,
@@ -1632,10 +1690,7 @@ impl<'module> Evaluator<'module> {
         if self.analyse_output
             && matches!(callee.unlocated(), Expr::Name(name) if name == "@print" || name == "@println")
         {
-            for arg in args {
-                self.evaluate(arg, env)?;
-            }
-            return Some(Value::Void(vec![]));
+            return precomputed_print(self, callee, args, env);
         }
         if matches!(callee.unlocated(), Expr::Name(name) if name == "@target") {
             return Some(Value::Tuple(vec![
@@ -1670,12 +1725,21 @@ impl<'module> Evaluator<'module> {
             }
             _ => return None,
         };
+
         let mut values = vec![];
         for (p, arg) in f.params.iter().zip(args) {
             let value = self.evaluate(arg, env)?;
             let value = self.coerce(value, &p.ty)?;
             values.push(value.clone());
             scope.insert(p.name.clone(), value);
+        }
+        // Resolve callable arguments without executing any candidate body. Unknown
+        // edges and uncertified cycles must be rejected before entry, not by fuel.
+        if !self.recursion_graph_proven(f, &scope) {
+            return None;
+        }
+        if let Some(rank) = self.recursion_rank(f) {
+            return self.recursion_heap(f, &callable, &values, &scope, rank);
         }
         // Sequential analysis observes global mutations and must repeat call effects.
         let cacheable = !self.analyse_output
@@ -1719,6 +1783,1025 @@ impl<'module> Evaluator<'module> {
             _ => None,
         }
     }
+    fn recursion_identity(function: &Function) -> usize {
+        std::ptr::from_ref(function) as usize
+    }
+
+    /// Abstract values are sets of callable identities, flattened through
+    /// containers. Merging alternatives is conservative; no candidate is run.
+    fn recursion_targets(&self, value: &Value) -> HashSet<usize> {
+        let mut targets = HashSet::new();
+        let mut pending = vec![value];
+        let mut cells = HashSet::new();
+        while let Some(value) = pending.pop() {
+            match value {
+                Value::Function(name) => {
+                    targets.insert(Self::recursion_identity(self.functions[name]));
+                }
+                Value::Closure(key, _) => {
+                    targets.insert(Self::recursion_identity(self.lambdas[key]));
+                }
+                Value::Cell(index) if cells.insert(*index) => {
+                    pending.push(&self.cells[*index]);
+                }
+                Value::Array(values) | Value::Tuple(values) | Value::Enum(_, _, values) => {
+                    pending.extend(values);
+                }
+                Value::Struct(_, fields) => {
+                    pending.extend(fields.iter().map(|(_, value)| value));
+                }
+                Value::Map(entries) => {
+                    pending.extend(entries.iter().flat_map(|(key, value)| [key, value]));
+                }
+
+                Value::Optional(_, Some(value)) | Value::Success(_, value) => pending.push(value),
+                _ => {}
+            }
+        }
+        targets
+    }
+
+    fn recursion_merge(
+        scope: &mut HashMap<String, HashSet<usize>>,
+        name: &str,
+        targets: &HashSet<usize>,
+    ) -> bool {
+        let entry = scope.entry(name.to_owned()).or_default();
+        let before = entry.len();
+        entry.extend(targets);
+        entry.len() != before
+    }
+
+    fn recursion_seed(
+        &self,
+        values: &HashMap<String, Value>,
+        scopes: &mut HashMap<usize, HashMap<String, HashSet<usize>>>,
+    ) {
+        let mut pending: Vec<_> = values.values().collect();
+        let mut cells = HashSet::new();
+        while let Some(value) = pending.pop() {
+            match value {
+                Value::Closure(key, captures) => {
+                    let scope = scopes
+                        .entry(Self::recursion_identity(self.lambdas[key]))
+                        .or_default();
+                    for (name, value) in captures {
+                        Self::recursion_merge(scope, name, &self.recursion_targets(value));
+                        pending.push(value);
+                    }
+                }
+                Value::Cell(index) if cells.insert(*index) => pending.push(&self.cells[*index]),
+                Value::Array(values) | Value::Tuple(values) | Value::Enum(_, _, values) => {
+                    pending.extend(values);
+                }
+                Value::Struct(_, fields) => pending.extend(fields.iter().map(|(_, value)| value)),
+                Value::Map(entries) => {
+                    pending.extend(entries.iter().flat_map(|(key, value)| [key, value]));
+                }
+                Value::Optional(_, Some(value)) | Value::Success(_, value) => pending.push(value),
+                _ => {}
+            }
+        }
+    }
+
+    /// Collect only this callable's statements, not deferred lambda bodies.
+    fn recursion_statements(function: &Function) -> Vec<&Stmt> {
+        Self::recursion_block_statements(&function.body)
+    }
+
+    fn recursion_block_statements(body: &Block) -> Vec<&Stmt> {
+        let mut pending = vec![body];
+        let mut visited = HashSet::new();
+        let mut statements = Vec::new();
+        while let Some(block) = pending.pop() {
+            if !visited.insert(std::ptr::from_ref(block)) {
+                continue;
+            }
+            for statement in &block.statements {
+                statements.push(statement.unlocated());
+                match statement.unlocated() {
+                    Stmt::Block(body)
+                    | Stmt::For { body, .. }
+                    | Stmt::While { body, .. }
+                    | Stmt::Lock { body, .. } => pending.push(body),
+                    _ => {}
+                }
+            }
+            let mut deferred = HashSet::new();
+            crate::visit::block(block, &mut |expression| {
+                if deferred.contains(&expression.id()) {
+                    return;
+                }
+                match expression {
+                    Expr::Lambda(function) => crate::visit::block(&function.body, &mut |value| {
+                        deferred.insert(value.id());
+                    }),
+                    Expr::If { arms, .. } => pending.extend(arms.iter().map(|(_, body)| body)),
+                    Expr::Else { fallback, .. } => pending.push(fallback),
+                    Expr::Catch { body, .. } => pending.push(body),
+                    _ => {}
+                }
+            });
+        }
+        statements
+    }
+
+    fn recursion_expressions<'a>(&'a self, function: &'a Function) -> Vec<&'a Expr> {
+        let mut expressions = Vec::new();
+        let mut deferred = HashSet::new();
+        crate::visit::block(&function.body, &mut |expression| {
+            if deferred.contains(&expression.id()) {
+                return;
+            }
+            expressions.push(expression);
+            if let Expr::Lambda(function) = expression {
+                crate::visit::block(&function.body, &mut |value| {
+                    deferred.insert(value.id());
+                });
+            }
+        });
+        let mut pending = expressions;
+        let mut expressions = Vec::new();
+        let mut seen = HashSet::new();
+        while let Some(expression) = pending.pop() {
+            if !seen.insert(expression.id()) {
+                continue;
+            }
+            expressions.push(expression.unlocated());
+            if let Expr::Name(_) = expression.unlocated()
+                && let Some(Some(key)) = self.checked.constant_sources.get(&expression.id())
+                && let Some(initializer) = self.expressions.get(key)
+            {
+                pending.push(initializer);
+            }
+            Self::recursion_children(expression, &mut pending);
+        }
+        expressions
+    }
+
+    fn recursion_children<'a>(expression: &'a Expr, pending: &mut Vec<&'a Expr>) {
+        let mut blocks = Vec::new();
+        match expression.unlocated() {
+            Expr::Embed { path, .. } => pending.push(path),
+            Expr::Cast { value, .. }
+            | Expr::Unary { value, .. }
+            | Expr::Try(value)
+            | Expr::Async(value)
+            | Expr::Await(value) => pending.push(value),
+            Expr::Binary { left, right, .. } => pending.extend([&**left, &**right]),
+            Expr::Call { callee, args, .. } => {
+                pending.push(callee);
+                pending.extend(args);
+            }
+            Expr::Index { object, index } => pending.extend([&**object, &**index]),
+            Expr::Member { object, .. } => pending.push(object),
+            Expr::Array(values) | Expr::Tuple(values) => pending.extend(values),
+            Expr::Map(entries) => {
+                pending.extend(entries.iter().flat_map(|(key, value)| [key, value]));
+            }
+            Expr::StructInit { fields, .. } => {
+                pending.extend(fields.iter().map(|(_, value)| value));
+            }
+            Expr::If { subject, arms } => {
+                pending.extend(subject.as_deref());
+                blocks.extend(arms.iter().map(|(_, body)| body));
+            }
+            Expr::Else { value, fallback } => {
+                pending.push(value);
+                blocks.push(fallback);
+            }
+            Expr::Catch { value, body, .. } => {
+                pending.push(value);
+                blocks.push(body);
+            }
+            _ => {}
+        }
+        for block in blocks {
+            let mut deferred = HashSet::new();
+            crate::visit::block(block, &mut |value| {
+                if deferred.contains(&value.id()) {
+                    return;
+                }
+                pending.push(value);
+                if let Expr::Lambda(function) = value {
+                    crate::visit::block(&function.body, &mut |value| {
+                        deferred.insert(value.id());
+                    });
+                }
+            });
+        }
+    }
+
+    fn recursion_abstract(
+        &self,
+        expression: &Expr,
+        scope: &HashMap<String, HashSet<usize>>,
+        returns: &HashMap<usize, HashSet<usize>>,
+        visiting: &mut HashSet<usize>,
+    ) -> HashSet<usize> {
+        if !visiting.insert(expression.id()) {
+            return HashSet::from([usize::MAX]);
+        }
+        let result = self.recursion_abstract_inner(expression, scope, returns, visiting);
+        visiting.remove(&expression.id());
+        result
+    }
+
+    fn recursion_abstract_inner(
+        &self,
+        expression: &Expr,
+        scope: &HashMap<String, HashSet<usize>>,
+        returns: &HashMap<usize, HashSet<usize>>,
+        visiting: &mut HashSet<usize>,
+    ) -> HashSet<usize> {
+        let mut result = HashSet::new();
+        match expression.unlocated() {
+            Expr::Name(name) => {
+                // A semantically resolved function symbol is not a caller-local
+                // shadow. Binding alternatives, including lexical initializers,
+                // are merged rather than letting a same-named scope hide an edge.
+                if !self.checked.constant_sources.contains_key(&expression.id())
+                    && let Some(function) = self.functions.get(name)
+                {
+                    return HashSet::from([Self::recursion_identity(function)]);
+                }
+                if let Some(targets) = scope.get(name) {
+                    result.extend(targets);
+                }
+                if let Some(Some(key)) = self.checked.constant_sources.get(&expression.id())
+                    && let Some(value) = self.expressions.get(key)
+                {
+                    result.extend(self.recursion_abstract(value, scope, returns, visiting));
+                }
+                if !scope.contains_key(name)
+                    && matches!(
+                        self.checked.constant_sources.get(&expression.id()),
+                        Some(None)
+                    )
+                    && self.recursion_callable_type(expression)
+                {
+                    result.insert(usize::MAX);
+                }
+            }
+            Expr::Lambda(function) => {
+                result.insert(Self::recursion_identity(function));
+            }
+            Expr::Call { callee, args, .. } => {
+                if matches!(callee.unlocated(), Expr::Member { .. })
+                    && self.recursion_leaf_call(callee)
+                {
+                    for arg in args {
+                        result.extend(self.recursion_abstract(arg, scope, returns, visiting));
+                    }
+                }
+                for target in self.recursion_abstract(callee, scope, returns, visiting) {
+                    if target == usize::MAX {
+                        result.insert(target);
+                    }
+                    if let Some(values) = returns.get(&target) {
+                        result.extend(values);
+                    }
+                }
+            }
+            Expr::Array(values) | Expr::Tuple(values) => {
+                for value in values {
+                    result.extend(self.recursion_abstract(value, scope, returns, visiting));
+                }
+            }
+            Expr::StructInit { fields, .. } => {
+                for (_, value) in fields {
+                    result.extend(self.recursion_abstract(value, scope, returns, visiting));
+                }
+            }
+            Expr::Map(entries) => {
+                for (key, value) in entries {
+                    result.extend(self.recursion_abstract(key, scope, returns, visiting));
+                    result.extend(self.recursion_abstract(value, scope, returns, visiting));
+                }
+            }
+            Expr::Index { object, .. }
+            | Expr::Member { object, .. }
+            | Expr::Cast { value: object, .. }
+            | Expr::Try(object) => {
+                result.extend(self.recursion_abstract(object, scope, returns, visiting));
+            }
+            Expr::Binary {
+                left,
+                op: BinaryOp::Concat,
+                right,
+            } => {
+                result.extend(self.recursion_abstract(left, scope, returns, visiting));
+                result.extend(self.recursion_abstract(right, scope, returns, visiting));
+            }
+            Expr::If { arms, .. } => {
+                for (_, body) in arms {
+                    result.extend(self.recursion_block_targets(body, scope, returns, visiting));
+                }
+            }
+            Expr::Else { value, fallback }
+            | Expr::Catch {
+                value,
+                body: fallback,
+                ..
+            } => {
+                result.extend(self.recursion_abstract(value, scope, returns, visiting));
+                result.extend(self.recursion_block_targets(fallback, scope, returns, visiting));
+            }
+            Expr::None => {}
+            _ if self.recursion_callable_type(expression) => {
+                result.insert(usize::MAX);
+            }
+            _ => {}
+        }
+        result
+    }
+
+    fn recursion_block_targets(
+        &self,
+        body: &Block,
+        scope: &HashMap<String, HashSet<usize>>,
+        returns: &HashMap<usize, HashSet<usize>>,
+        visiting: &mut HashSet<usize>,
+    ) -> HashSet<usize> {
+        let mut targets = HashSet::new();
+        for statement in Self::recursion_block_statements(body) {
+            if let Stmt::Expr(value) | Stmt::Return(Some(value)) | Stmt::Break(Some(value), _) =
+                statement
+            {
+                targets.extend(self.recursion_abstract(value, scope, returns, visiting));
+            }
+        }
+        targets
+    }
+
+    fn recursion_pattern_names(pattern: &Pattern) -> Vec<&str> {
+        let mut pending = vec![pattern];
+        let mut names = Vec::new();
+        while let Some(pattern) = pending.pop() {
+            match pattern {
+                Pattern::Name(name) => names.push(name.as_str()),
+                Pattern::Tuple(patterns)
+                | Pattern::Array(patterns)
+                | Pattern::Variant {
+                    values: patterns, ..
+                } => pending.extend(patterns),
+                Pattern::Struct { fields, .. } => {
+                    pending.extend(fields.iter().map(|(_, pattern)| pattern));
+                }
+                _ => {}
+            }
+        }
+        names
+    }
+
+    fn recursion_callable_type(&self, expression: &Expr) -> bool {
+        let mut pending: Vec<_> = self.expr_type(expression).into_iter().collect();
+        let mut named = HashSet::new();
+        while let Some(ty) = pending.pop() {
+            match ty {
+                Type::Function(_, _) => return true,
+                Type::Array(inner, _)
+                | Type::Optional(inner)
+                | Type::ErrorUnion(inner)
+                | Type::Future(inner) => pending.push(inner),
+                Type::Map(key, value) => pending.extend([&**key, &**value]),
+                Type::Tuple(types) => pending.extend(types),
+                Type::Named(name, _) if named.insert(name) => match self.checked.types.get(name) {
+                    Some(TypeInfo::Alias(base)) => pending.push(base),
+                    Some(TypeInfo::Struct(declaration)) => {
+                        pending.extend(declaration.fields.iter().map(|field| &field.ty));
+                    }
+                    Some(TypeInfo::Enum(declaration)) => pending.extend(
+                        declaration
+                            .variants
+                            .iter()
+                            .flat_map(|variant| &variant.values),
+                    ),
+                    _ => {}
+                },
+                Type::Named(..) => {}
+            }
+        }
+        false
+    }
+
+    fn recursion_leaf_call(&self, callee: &Expr) -> bool {
+        match callee.unlocated() {
+            Expr::Name(name) => name.starts_with('@'),
+            Expr::Member { object, .. } => {
+                matches!(object.unlocated(), Expr::Name(owner)
+                    if matches!(self.checked.types.get(owner), Some(TypeInfo::Enum(_))))
+            }
+            _ => false,
+        }
+    }
+
+    /// Monotone callable-flow analysis reaches a finite fixed point. Unknown
+    /// targets never become permission to execute; only the reachable graph is
+    /// checked, including callbacks returned by factories and stored in containers.
+    fn recursion_graph_proven(&self, root: &Function, values: &HashMap<String, Value>) -> bool {
+        let mut functions: HashMap<_, _> = self
+            .functions
+            .values()
+            .chain(self.lambdas.values())
+            .map(|function| (Self::recursion_identity(function), *function))
+            .collect();
+        let root_id = Self::recursion_identity(root);
+        functions.insert(root_id, root);
+        let mut scopes = HashMap::new();
+        self.recursion_seed(values, &mut scopes);
+        let mut root_scope = HashMap::new();
+        for (name, value) in values {
+            root_scope.insert(name.clone(), self.recursion_targets(value));
+        }
+        scopes.insert(root_id, root_scope);
+        let mut returns = HashMap::<usize, HashSet<usize>>::new();
+        let mut graph = HashMap::<usize, HashSet<usize>>::new();
+        let mut active = HashSet::from([root_id]);
+        loop {
+            let mut changed = false;
+            for id in active.clone() {
+                let function = functions[&id];
+                let mut scope = scopes.get(&id).cloned().unwrap_or_default();
+                changed |= self.recursion_bindings(function, &mut scope, &returns);
+                scopes.insert(id, scope.clone());
+                for expression in self.recursion_expressions(function) {
+                    if let Expr::Lambda(child) = expression {
+                        let child_scope =
+                            scopes.entry(Self::recursion_identity(child)).or_default();
+                        for (name, targets) in &scope {
+                            changed |= Self::recursion_merge(child_scope, name, targets);
+                        }
+                    }
+                    if let Expr::Call { callee, args, .. } = expression {
+                        if self.recursion_leaf_call(callee) {
+                            continue;
+                        }
+                        let targets =
+                            self.recursion_abstract(callee, &scope, &returns, &mut HashSet::new());
+                        for target in targets {
+                            if target == usize::MAX {
+                                return false;
+                            }
+                            changed |= graph.entry(id).or_default().insert(target);
+                            changed |= active.insert(target);
+                            let Some(child) = functions.get(&target) else {
+                                return false;
+                            };
+                            let child_scope = scopes.entry(target).or_default();
+                            for (param, arg) in child.params.iter().zip(args) {
+                                let targets = self.recursion_abstract(
+                                    arg,
+                                    &scope,
+                                    &returns,
+                                    &mut HashSet::new(),
+                                );
+                                changed |=
+                                    Self::recursion_merge(child_scope, &param.name, &targets);
+                            }
+                        }
+                    }
+                }
+                for statement in Self::recursion_statements(function) {
+                    if let Stmt::Return(Some(value)) = statement {
+                        let targets =
+                            self.recursion_abstract(value, &scope, &returns, &mut HashSet::new());
+                        let entry = returns.entry(id).or_default();
+                        let before = entry.len();
+                        entry.extend(targets);
+                        changed |= entry.len() != before;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        for id in active {
+            let function = functions[&id];
+            let scope = scopes.get(&id).cloned().unwrap_or_default();
+            if !self.recursion_calls_known(function, &scope, &returns) {
+                return false;
+            }
+            for target in graph.get(&id).into_iter().flatten() {
+                if *target == id {
+                    if self.recursion_rank(function).is_none() {
+                        return false;
+                    }
+                } else if Self::recursion_reaches(&graph, *target, id) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn recursion_bindings(
+        &self,
+        function: &Function,
+        scope: &mut HashMap<String, HashSet<usize>>,
+        returns: &HashMap<usize, HashSet<usize>>,
+    ) -> bool {
+        let mut changed = false;
+        for expression in self.recursion_expressions(function) {
+            if let Expr::If {
+                subject: Some(subject),
+                arms,
+            } = expression
+            {
+                let targets = self.recursion_abstract(subject, scope, returns, &mut HashSet::new());
+                for (patterns, _) in arms {
+                    for pattern in patterns {
+                        for name in Self::recursion_pattern_names(pattern) {
+                            changed |= Self::recursion_merge(scope, name, &targets);
+                        }
+                    }
+                }
+            }
+        }
+        for statement in Self::recursion_statements(function) {
+            match statement {
+                Stmt::Var(declaration) => {
+                    let targets = self.recursion_abstract(
+                        &declaration.value,
+                        scope,
+                        returns,
+                        &mut HashSet::new(),
+                    );
+                    for name in declaration.binding_names() {
+                        changed |= Self::recursion_merge(scope, name, &targets);
+                    }
+                }
+                Stmt::Assign { target, value } => {
+                    let mut root = target.unlocated();
+                    while let Expr::Index { object, .. } | Expr::Member { object, .. } = root {
+                        root = object.unlocated();
+                    }
+                    if let Expr::Name(name) = root {
+                        let targets =
+                            self.recursion_abstract(value, scope, returns, &mut HashSet::new());
+                        changed |= Self::recursion_merge(scope, name, &targets);
+                    }
+                }
+                _ => {}
+            }
+        }
+        changed
+    }
+
+    fn recursion_calls_known(
+        &self,
+        function: &Function,
+        scope: &HashMap<String, HashSet<usize>>,
+        returns: &HashMap<usize, HashSet<usize>>,
+    ) -> bool {
+        for statement in Self::recursion_statements(function) {
+            if let Stmt::Assign { target, value } = statement
+                && self.recursion_callable_write(function, target, value, scope, returns)
+            {
+                return false;
+            }
+        }
+        self.recursion_expressions(function)
+            .iter()
+            .all(|expression| {
+                let Expr::Call { callee, .. } = expression else {
+                    return true;
+                };
+                if self.recursion_leaf_call(callee) {
+                    return true;
+                }
+                let targets = self.recursion_abstract(callee, scope, returns, &mut HashSet::new());
+                !targets.is_empty() && !targets.contains(&usize::MAX)
+            })
+    }
+
+    fn recursion_callable_write(
+        &self,
+        function: &Function,
+        target: &Expr,
+        value: &Expr,
+        scope: &HashMap<String, HashSet<usize>>,
+        returns: &HashMap<usize, HashSet<usize>>,
+    ) -> bool {
+        let mut root = target.unlocated();
+        while let Expr::Index { object, .. } | Expr::Member { object, .. } = root {
+            root = object.unlocated();
+        }
+        let Expr::Name(name) = root else {
+            return true;
+        };
+        if !self.recursion_callable_type(root)
+            && !self.recursion_callable_type(value)
+            && self
+                .recursion_abstract(value, scope, returns, &mut HashSet::new())
+                .is_empty()
+        {
+            return false;
+        }
+        // Callable writes through shared captures/globals need cross-call storage
+        // provenance. Until that is represented, reject rather than miss an edge.
+        if self.checked.shared_accesses.contains(&root.id())
+            || self.lambdas.iter().any(|(key, lambda)| {
+                std::ptr::eq(*lambda, function)
+                    && self.checked.captures.get(key).is_some_and(|captures| {
+                        captures
+                            .iter()
+                            .any(|capture| capture.mutable && capture.name == *name)
+                    })
+            })
+        {
+            return true;
+        }
+        !function.params.iter().any(|param| param.name == *name)
+            && !Self::recursion_statements(function).iter().any(|statement| {
+                matches!(statement, Stmt::Var(declaration) if declaration.binding_names().contains(&name.as_str()))
+            })
+    }
+
+    fn recursion_reaches(
+        graph: &HashMap<usize, HashSet<usize>>,
+        start: usize,
+        target: usize,
+    ) -> bool {
+        let mut pending = vec![start];
+        let mut visited = HashSet::new();
+        while let Some(id) = pending.pop() {
+            if id == target {
+                return true;
+            }
+            if visited.insert(id)
+                && let Some(edges) = graph.get(&id)
+            {
+                pending.extend(edges);
+            }
+        }
+        false
+    }
+
+    /// Certificate domain: nonnegative primitive integers, or exact integral
+    /// floats through 2^53. Every value below `coverage` returns without calls;
+    /// every remaining call reduces this unchanged parameter by 1..=coverage.
+    /// No mutations, loops, captured reads or hidden invocations are admitted.
+    fn recursion_rank(&self, function: &Function) -> Option<usize> {
+        if !self
+            .functions
+            .get(&function.name)
+            .is_some_and(|named| std::ptr::eq(*named, function))
+        {
+            return None;
+        }
+        let [statement] = function.body.statements.as_slice() else {
+            return None;
+        };
+        let Stmt::Expr(expression) = statement.unlocated() else {
+            return None;
+        };
+        let Expr::If {
+            subject: Some(subject),
+            arms,
+        } = expression.unlocated()
+        else {
+            return None;
+        };
+        let Expr::Name(name) = subject.unlocated() else {
+            return None;
+        };
+        let rank = function
+            .params
+            .iter()
+            .position(|param| param.name == *name)?;
+        if !matches!(&function.params[rank].ty, Type::Named(name, args)
+            if args.is_empty() && matches!(name.as_str(), "int" | "uint" | "byte" | "float"))
+        {
+            return None;
+        }
+        let mut bases = HashSet::new();
+        let (fallback, base_arms) = arms.split_last()?;
+        if !matches!(fallback.0.as_slice(), [Pattern::Wildcard]) {
+            return None;
+        }
+        for (patterns, body) in base_arms {
+            let value = Self::recursion_return(body)?;
+            if !self.recursion_expression(value, function, rank, 0) {
+                return None;
+            }
+            for pattern in patterns {
+                let Pattern::Literal(value) = pattern else {
+                    return None;
+                };
+                bases.insert(Self::recursion_rank_literal(function, rank, value)?);
+            }
+        }
+        let coverage = u64::try_from(bases.len()).ok()?;
+        if coverage == 0 || !(0..coverage).all(|value| bases.contains(&value)) {
+            return None;
+        }
+        let recursive = Self::recursion_return(&fallback.1)?;
+        (!Self::recursion_call_free(recursive)
+            && self.recursion_expression(recursive, function, rank, coverage))
+        .then_some(rank)
+    }
+
+    fn recursion_return(block: &Block) -> Option<&Expr> {
+        let [statement] = block.statements.as_slice() else {
+            return None;
+        };
+        match statement.unlocated() {
+            Stmt::Return(Some(value)) => Some(value),
+            _ => None,
+        }
+    }
+
+    fn recursion_rank_literal(function: &Function, rank: usize, expression: &Expr) -> Option<u64> {
+        let floating = matches!(&function.params[rank].ty, Type::Named(name, _) if name == "float");
+        if matches!(expression.unlocated(), Expr::Float(_)) != floating
+            || !matches!(expression.unlocated(), Expr::Int(_) | Expr::Float(_))
+        {
+            return None;
+        }
+        Self::recursion_integer(expression)
+    }
+
+    fn recursion_integer(expression: &Expr) -> Option<u64> {
+        match expression.unlocated() {
+            Expr::Int(text) => crate::lexer::integer(text).ok(),
+            Expr::Float(text) => {
+                let value: f64 = text.parse().ok()?;
+                if (0.0..=9_007_199_254_740_992.0).contains(&value)
+                    && value.fract().abs().to_bits() == 0
+                {
+                    value.to_string().parse().ok()
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn recursion_expression(
+        &self,
+        expression: &Expr,
+        function: &Function,
+        rank: usize,
+        coverage: u64,
+    ) -> bool {
+        match expression.unlocated() {
+            Expr::Name(name) => function.params.iter().any(|param| param.name == *name),
+            Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) => true,
+            Expr::Unary { value, .. } => {
+                self.recursion_expression(value, function, rank, coverage)
+            }
+            Expr::Binary { left, right, .. } => {
+                self.recursion_expression(left, function, rank, coverage)
+                    && self.recursion_expression(right, function, rank, coverage)
+            }
+            Expr::Call { callee, args, .. } if coverage > 0 => {
+                matches!(callee.unlocated(), Expr::Name(name) if *name == function.name)
+                    && !self.checked.constant_sources.contains_key(&callee.id())
+                    && args.len() == function.params.len()
+                    && args.iter().enumerate().all(|(index, arg)| {
+                        if index == rank {
+                            matches!(arg.unlocated(), Expr::Binary { left, op: BinaryOp::Sub, right }
+                                if matches!(left.unlocated(), Expr::Name(name) if *name == function.params[rank].name)
+                                && Self::recursion_rank_literal(function, rank, right).is_some_and(|step| step > 0 && step <= coverage))
+                        } else {
+                            self.recursion_expression(arg, function, rank, 0)
+                        }
+                    })
+            }
+            _ => false,
+        }
+    }
+
+    /// Integer-valued floats through 2^53 form an exact subtraction domain:
+    /// every admitted decrement is positive, integral, and cannot round away.
+    fn recursion_domain(value: &Value) -> bool {
+        match value {
+            Value::Int(value) => *value >= 0,
+            Value::Uint(_) | Value::Byte(_) => true,
+            Value::Float(bits) => {
+                let value = f64::from_bits(*bits);
+                (0.0..=9_007_199_254_740_992.0).contains(&value)
+                    && value.fract().abs().to_bits() == 0
+            }
+            _ => false,
+        }
+    }
+
+    fn recursion_body<'a>(function: &'a Function, value: &Value) -> Option<&'a Expr> {
+        if !Self::recursion_domain(value) {
+            return None;
+        }
+        let Stmt::Expr(expression) = function.body.statements.first()?.unlocated() else {
+            return None;
+        };
+        let Expr::If {
+            subject: Some(subject),
+            arms,
+        } = expression.unlocated()
+        else {
+            return None;
+        };
+        let Expr::Name(name) = subject.unlocated() else {
+            return None;
+        };
+        let ty = &function.params.iter().find(|param| param.name == *name)?.ty;
+        if !matches!((ty, value),
+            (Type::Named(name, _), Value::Int(_)) if name == "int")
+            && !matches!((ty, value), (Type::Named(name, _), Value::Uint(_)) if name == "uint")
+            && !matches!((ty, value), (Type::Named(name, _), Value::Byte(_)) if name == "byte")
+            && !matches!((ty, value), (Type::Named(name, _), Value::Float(_)) if name == "float")
+        {
+            return None;
+        }
+        for (patterns, body) in arms {
+            for pattern in patterns {
+                let matched = match pattern {
+                    Pattern::Wildcard => true,
+                    Pattern::Literal(expression) => {
+                        let literal = Self::recursion_integer(expression)?;
+                        match value {
+                            Value::Int(value) => u64::try_from(*value).ok()? == literal,
+                            Value::Uint(value) => *value == literal,
+                            Value::Byte(value) => u64::from(*value) == literal,
+                            Value::Float(bits) => {
+                                f64::from_bits(*bits)
+                                    .abs()
+                                    .to_string()
+                                    .parse::<u64>()
+                                    .ok()?
+                                    == literal
+                            }
+                            _ => false,
+                        }
+                    }
+                    _ => false,
+                };
+                if matched {
+                    return Self::recursion_return(body);
+                }
+            }
+        }
+        None
+    }
+
+    fn recursion_call_free(expression: &Expr) -> bool {
+        let mut pending = vec![expression];
+        while let Some(expression) = pending.pop() {
+            match expression.unlocated() {
+                Expr::Call { .. } => return false,
+                Expr::Unary { value, .. } => pending.push(value),
+                Expr::Binary { left, right, .. } => pending.extend([&**left, &**right]),
+                _ => {}
+            }
+        }
+        true
+    }
+
+    fn recursion_result(&mut self, expression: &Expr, value: Option<Value>) -> Option<Value> {
+        if self.arithmetic_failure && self.arithmetic_location.is_none() {
+            self.arithmetic_location = expression.location().cloned();
+        }
+        let value = value?;
+        if let Some(ty) = self.checked.expression_types.get(&expression.id()) {
+            self.coerce(value, ty)
+        } else {
+            Some(value)
+        }
+    }
+
+    fn recursion_binary(&mut self, expression: &Expr, left: Value, right: Value) -> Option<Value> {
+        let Expr::Binary { op, .. } = expression.unlocated() else {
+            return None;
+        };
+        let value = if matches!(op, BinaryOp::Eq | BinaryOp::Ne) && !matches!(left, Value::Float(_))
+        {
+            let equal = left.equals(&right);
+            Some(Value::Bool(if *op == BinaryOp::Eq {
+                equal
+            } else {
+                !equal
+            }))
+        } else {
+            self.binary_operands(left, *op, right)
+        };
+        self.recursion_result(expression, value)
+    }
+
+    fn recursion_unary(&mut self, expression: &Expr, value: Value) -> Option<Value> {
+        let Expr::Unary { op, .. } = expression.unlocated() else {
+            return None;
+        };
+        // Reuse the ordinary unary semantics without re-evaluating its operand.
+        let operand = Expr::Name("recursion_operand".into());
+        let mut scope = HashMap::from([("recursion_operand".into(), value)]);
+        let value = self.unary_value(*op, &operand, &mut scope);
+        self.recursion_result(expression, value)
+    }
+
+    /// Only certified expression grammar enters this machine. Recursive calls
+    /// push heap tasks and scopes, never evaluator/Rust stack frames. Leaves use
+    /// the normal evaluator for typing, arithmetic diagnostics and source spans.
+    fn recursion_heap(
+        &mut self,
+        function: &Function,
+        callable: &Value,
+        arguments: &[Value],
+        scope: &HashMap<String, Value>,
+        rank: usize,
+    ) -> Option<Value> {
+        enum Task<'a> {
+            Eval(&'a Expr, usize),
+            Left(&'a Expr, usize),
+            Right(&'a Expr, Value),
+            Unary(&'a Expr),
+            Leave(usize),
+        }
+        // The certificate permits only parameter reads and pure self calls, so
+        // sequential analysis may memoize these calls too without losing effects.
+        let cacheable = !callable.contains_cell() && !arguments.iter().any(Value::contains_cell);
+        let body = Self::recursion_body(function, arguments.get(rank)?)?;
+        let mut frames = vec![(scope.clone(), arguments.to_vec())];
+        let mut tasks = vec![Task::Leave(0), Task::Eval(body, 0)];
+        let mut values = Vec::new();
+        while let Some(task) = tasks.pop() {
+            match task {
+                Task::Eval(expression, frame) => {
+                    if Self::recursion_call_free(expression) {
+                        values.push(self.evaluate(expression, &mut frames[frame].0)?);
+                        continue;
+                    }
+                    match expression.unlocated() {
+                        Expr::Binary { left, .. } => {
+                            tasks.extend([Task::Left(expression, frame), Task::Eval(left, frame)]);
+                        }
+                        Expr::Unary { value, .. } => {
+                            tasks.extend([Task::Unary(expression), Task::Eval(value, frame)]);
+                        }
+                        Expr::Call { args, .. } => {
+                            let arguments = args
+                                .iter()
+                                .zip(&function.params)
+                                .map(|(arg, param)| {
+                                    let value = self.evaluate(arg, &mut frames[frame].0)?;
+                                    self.coerce(value, &param.ty)
+                                })
+                                .collect::<Option<Vec<_>>>()?;
+                            let body = Self::recursion_body(function, arguments.get(rank)?)?;
+                            let key = (callable.clone(), arguments.clone());
+                            if cacheable && let Some(value) = self.memo.get(&key) {
+                                values.push(value.clone());
+                            } else {
+                                let mut scope = scope.clone();
+                                for (param, value) in function.params.iter().zip(&arguments) {
+                                    scope.insert(param.name.clone(), value.clone());
+                                }
+                                let next = frames.len();
+                                frames.push((scope, arguments));
+                                tasks.extend([Task::Leave(next), Task::Eval(body, next)]);
+                            }
+                        }
+                        _ => return None,
+                    }
+                }
+                Task::Left(expression, frame) => {
+                    let left = values.pop()?;
+                    let Expr::Binary { op, right, .. } = expression.unlocated() else {
+                        return None;
+                    };
+                    if (*op == BinaryOp::And && left == Value::Bool(false))
+                        || (*op == BinaryOp::Or && left == Value::Bool(true))
+                    {
+                        values.push(self.recursion_result(expression, Some(left))?);
+                    } else {
+                        tasks.extend([Task::Right(expression, left), Task::Eval(right, frame)]);
+                    }
+                }
+                Task::Right(expression, left) => {
+                    let right = values.pop()?;
+                    values.push(self.recursion_binary(expression, left, right)?);
+                }
+                Task::Unary(expression) => {
+                    let value = values.pop()?;
+                    values.push(self.recursion_unary(expression, value)?);
+                }
+                Task::Leave(frame) => {
+                    let value = self.coerce(values.pop()?, &function.return_type)?;
+                    debug_assert_eq!(frame + 1, frames.len());
+                    let (_, arguments) = frames.pop()?;
+                    if cacheable && !value.contains_cell() {
+                        self.memo
+                            .insert((callable.clone(), arguments), value.clone());
+                    }
+                    values.push(value);
+                }
+            }
+        }
+        values.pop()
+    }
+
     fn unary_value(
         &mut self,
         op: UnaryOp,
@@ -2107,7 +3190,6 @@ impl Evaluator<'_> {
         let mut declared = vec![];
         let mut result = Flow::Next;
         for (index, s) in statements.iter().enumerate() {
-            *self.fuel = self.fuel.checked_sub(1)?;
             let flow = self
                 .statement_flow(
                     s,
@@ -2226,6 +3308,17 @@ impl Evaluator<'_> {
         if crate::flow::infinite_loop(condition, body, label, &self.checked.expression_types) {
             return None;
         }
+        if matches!(condition.unlocated(), Expr::Bool(false)) {
+            return Some(Flow::Next);
+        }
+        // The certificate is checked without running the condition or body.
+        let certificate = crate::termination::counted_loop(condition, body)?;
+        let (start, min, max) = self.loop_integer(env.get(certificate.counter)?)?;
+        let bound = self.evaluate(certificate.bound, env)?;
+        let (bound, _, _) = self.loop_integer(&bound)?;
+        if !certificate.terminates(start, bound, min, max) {
+            return None;
+        }
         Some(loop {
             if self.evaluate(condition, env)? != Value::Bool(true) {
                 break Flow::Next;
@@ -2239,6 +3332,19 @@ impl Evaluator<'_> {
                 flow => break flow,
             }
         })
+    }
+    fn loop_integer(&self, value: &Value) -> Option<(i128, i128, i128)> {
+        match value {
+            Value::Cell(index) => self.loop_integer(self.cells.get(*index)?),
+            Value::Int(value) => Some((
+                i128::from(*value),
+                i128::from(i64::MIN),
+                i128::from(i64::MAX),
+            )),
+            Value::Uint(value) => Some((i128::from(*value), 0, i128::from(u64::MAX))),
+            Value::Byte(value) => Some((i128::from(*value), 0, i128::from(u8::MAX))),
+            _ => None,
+        }
     }
     fn for_loop(
         &mut self,
@@ -2259,7 +3365,6 @@ impl Evaluator<'_> {
         let previous = env.remove(name);
         let mut flow = Flow::Next;
         for key in traversal {
-            *self.fuel = self.fuel.checked_sub(1)?;
             env.insert(name.to_owned(), key);
             match self.block(body, env)? {
                 Flow::Break(target) if target.is_none() || target.as_deref() == label => break,

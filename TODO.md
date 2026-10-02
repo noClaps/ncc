@@ -6,16 +6,23 @@
         agreed behavior in tests.
   - [ ] Expand top-level constant evaluation beyond its safely evaluatable
         execution prefix while preserving effects and unknown runtime state.
-        Output with known arguments and test assertions with known conditions are
-        already analysable. False assertions retain their runtime failure and stop
-        sequential analysis; other remaining barriers are:
-    - [ ] Extend safe top-level precomputation beyond the initial call-free region,
-          including pure calls and multi-binding declarations without losing effects
+        Entirely known programs already reduce to constant-string output calls;
+        known output arguments and successful test assertions are also analysable.
+        False assertions retain their runtime failure and stop sequential analysis;
+        remaining partial-program barriers are:
+    - [ ] Extend partial-program precomputation beyond the initial call-free region,
+          including known calls and multi-binding declarations without losing effects
           or escaped-storage dependencies.
     - [ ] Unknown runtime inputs.
     - [ ] Other unsupported effects.
-    - [ ] Evaluator limits; consider configurable evaluation budgets for large
-          individual computations.
+
+    - [ ] Expand conservative termination proof coverage.
+      - [ ] Prove effectful loop conditions and progress through conditional updates
+            or helper calls without assuming invariant shared state.
+      - [ ] Prove additional recursive ranking patterns, mutual recursion, and
+            recursive closures without speculative execution.
+    - [ ] Emit compact constant aggregate data when runtime containers must remain,
+          preserving independent writable storage and nested value copies.
   - [ ] Refine test-dependency slicing precision.
     - [ ] Refine conservative retention caused by dynamic/native calls.
     - [ ] Distinguish callable creation from invocation in effect summaries.

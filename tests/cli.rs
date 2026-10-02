@@ -174,7 +174,10 @@ fn release_changes_generated_code_and_detects_overflow() {
             .success()
     );
     let release = fs::read_to_string(output).unwrap();
-    assert!(release.contains("1134903170LL"));
+    assert!(
+        release.contains("1134903170"),
+        "final output must be precomputed"
+    );
     assert!(!release.contains("nc_fn_fib"));
     assert!(release.len() < debug.len());
     fs::write(file, source.replace("fib(45)", "fib(100)")).unwrap();
