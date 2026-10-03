@@ -1,4 +1,16 @@
-//! Conservative certificates for counted integer loops. Unknown is not infinite.
+//! Conservative certificates for integer loops. Unknown is not infinite.
+#[path = "termination_ranks.rs"]
+mod ranks;
+pub(crate) use ranks::varying_loop;
+#[path = "termination_affine.rs"]
+mod affine;
+#[path = "termination_growth.rs"]
+mod growth;
+#[path = "termination_reset.rs"]
+mod reset;
+pub(crate) use affine::affine_loop;
+pub(crate) use growth::growth_loop;
+pub(crate) use reset::reset_loop;
 use std::collections::{BTreeMap, HashSet};
 
 use crate::ast::{BinaryOp, Block, Expr, Stmt, UnaryOp};
@@ -32,6 +44,7 @@ pub(crate) fn counted_loop<'a>(condition: &'a Expr, body: &Block) -> Option<Coun
     }
     let mut analysis = Analysis {
         counter,
+        bound: None,
         protected,
         direction: 0,
         excursion: Range::ZERO,
@@ -91,28 +104,48 @@ enum Exit {
     Return,
 }
 
-type Paths = BTreeMap<Exit, Range>;
+trait Displacement: Copy {
+    const ZERO: Self;
 
-fn merge(paths: &mut Paths, exit: Exit, range: Range) {
+    fn union(self, other: Self) -> Self;
+    fn shifted(self, binding: usize, delta: i128) -> Option<Self>;
+}
+
+impl Displacement for Range {
+    const ZERO: Self = Self::ZERO;
+
+    fn union(self, other: Self) -> Self {
+        self.union(other)
+    }
+
+    fn shifted(self, _binding: usize, delta: i128) -> Option<Self> {
+        self.add(delta)
+    }
+}
+
+type Paths<S> = BTreeMap<Exit, S>;
+
+fn merge<S: Displacement>(paths: &mut Paths<S>, exit: Exit, range: S) {
     paths
         .entry(exit)
         .and_modify(|prior| *prior = prior.union(range))
         .or_insert(range);
 }
 
-fn one(exit: Exit, range: Range) -> Paths {
+fn one<S>(exit: Exit, range: S) -> Paths<S> {
     BTreeMap::from([(exit, range)])
 }
 
-struct Analysis<'a> {
+struct Analysis<'a, S> {
     counter: &'a str,
+    bound: Option<&'a str>,
     protected: HashSet<&'a str>,
     direction: i128,
-    excursion: Range,
+    excursion: S,
 }
 
-impl Analysis<'_> {
-    fn block(&mut self, body: &Block, input: Range, updates: bool) -> Option<Paths> {
+impl<S: Displacement> Analysis<'_, S> {
+    fn block(&mut self, body: &Block, input: S, updates: bool) -> Option<Paths<S>> {
         let mut paths = one(Exit::Next, input);
         for statement in &body.statements {
             let Some(input) = paths.remove(&Exit::Next) else {
@@ -125,13 +158,18 @@ impl Analysis<'_> {
         Some(paths)
     }
 
-    fn statement(&mut self, statement: &Stmt, input: Range, updates: bool) -> Option<Paths> {
-        if let Some(delta) = update(statement, self.counter) {
-            if !updates || (self.direction != 0 && self.direction != delta.signum()) {
+    fn statement(&mut self, statement: &Stmt, input: S, updates: bool) -> Option<Paths<S>> {
+        let change = update(statement, self.counter)
+            .map(|delta| (0, delta))
+            .or_else(|| update(statement, self.bound?).map(|delta| (1, delta)));
+        if let Some((binding, delta)) = change {
+            if !updates
+                || (self.bound.is_none() && self.direction != 0 && self.direction != delta.signum())
+            {
                 return None;
             }
             self.direction = delta.signum();
-            let range = input.add(delta)?;
+            let range = input.shifted(binding, delta)?;
             self.excursion = self.excursion.union(range);
             return Some(one(Exit::Next, range));
         }
@@ -199,13 +237,13 @@ impl Analysis<'_> {
         }
     }
 
-    fn expression(&mut self, expression: &Expr, input: Range, updates: bool) -> Option<Paths> {
+    fn expression(&mut self, expression: &Expr, input: S, updates: bool) -> Option<Paths<S>> {
         match expression.unlocated() {
             Expr::If { subject, arms } => {
                 if !subject.as_deref().is_none_or(pure_expression) || arms.is_empty() {
                     return None;
                 }
-                let mut paths = Paths::new();
+                let mut paths = Paths::<S>::new();
                 // Checked NC conditionals are exhaustive. Pattern evaluation may
                 // not hide writes or jumps; all possible arms are retained.
                 for (patterns, body) in arms {
@@ -239,9 +277,9 @@ impl Analysis<'_> {
         &mut self,
         value: &Expr,
         body: &Block,
-        input: Range,
+        input: S,
         updates: bool,
-    ) -> Option<Paths> {
+    ) -> Option<Paths<S>> {
         if !pure_expression(value) {
             return None;
         }
@@ -255,9 +293,11 @@ impl Analysis<'_> {
         label: Option<&str>,
         condition: &Expr,
         body: &Block,
-        input: Range,
-    ) -> Option<Paths> {
-        if !pure_expression(condition) {
+        input: S,
+    ) -> Option<Paths<S>> {
+        // The new relational path cannot assume a nested-loop certificate will
+        // be available later, after entering the enclosing iteration.
+        if self.bound.is_some() || !pure_expression(condition) {
             return None;
         }
         // Its own evaluator certificate establishes nested-loop termination.

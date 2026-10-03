@@ -94,8 +94,15 @@
   continuations for certified recursion rather than relying on the Rust stack.
   Helper-expanded loop proofs must distinguish shared storage identities from
   copied captures and lexical shadows. Require progress on every continuing path;
-  reject protected-state resets, bound changes, and callable replacements. Keep
-  condition effects and the final false check in their original evaluation order.
+  reject unproven protected-state resets, bound changes, and callable replacements.
+  Varying-bound and calculated-limit certificates must track relational progress
+  and each binding's intermediate excursions across a proven finite horizon, not
+  assume invariant bounds. Substitute known immutable scalar steps in proof trees
+  without erasing intermediate arithmetic or confusing shared mutable captures.
+  Resetting counters require bounded secondary state and progress in the primary
+  counter on reset paths. Multiplicative growth requires a positive seed, a known
+  factor greater than one, proved finite recurrence bounds, and safe final updates.
+  Keep condition effects and the final false check in their original evaluation order.
   Condition-side progress must account for both the first condition prefix and the
   final false-check prefix, including overflow; breaks skip the next prefix.
 - Include C headers only when needed by the generated program. Preserve NC

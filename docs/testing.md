@@ -35,14 +35,40 @@ recursive base cases, exact float ranks, heap continuations, and failure locatio
 conditional strides, progress before continues, exiting branches, shared-state
 helper chains, scalar helper returns, aliases, copied bounds, and lexical shadows.
 Negative probes use variable-dependent arithmetic failures to detect speculative
-entry into candidates with resets, changing bounds, skipped progress, overflow,
+entry into candidates with resets, unproven bound changes, skipped progress, overflow,
 recursive helpers, or callable replacement. Condition effects retain their final
 false check and original diagnostic locations. Proof-only helper trees are never
 executed and do not replace source trees or their checked metadata.
 
+`tests/varying_bounds.rs` compares debug/release behavior for converging and
+same-direction counter/bound updates, correlated conditional strides, labeled
+continues, shared helpers, lexical shadows, all supported comparisons, and fixed
+condition-prefix updates. Negative arithmetic probes cover diverging ranks, resets,
+skipped progress, nonexact inequality strides, and overflow of either binding,
+including intermediate updates and exiting branches. Certificate unit tests also
+check each binding's limits and horizons beyond former execution budgets.
+The new relational certificate rejects nested loops until their termination
+obligations can be discharged before entering an enclosing iteration.
+
+`tests/compound_loop_ranks.rs` covers calculated limits with several changing
+bindings, known constant and calculated steps, conditional progress, helpers,
+shared captures, copied constants, local shadows, and original error locations.
+It compares debug/release output for resetting counters and multiplied counters,
+including output order, breaks, labeled continues, unsigned strides, and fixed
+condition prefixes. Negative probes check missing progress, changing steps,
+unproven resets, nested loops, unreachable inequality targets, intermediate
+arithmetic overflow, and overflow on the final update or condition check.
+Unit tests exercise large proof horizons without executing candidate loops,
+branch correlation, per-expression integer ranges, outer-counter stride residues,
+and bounded reset invariants. Multiplication unit tests also compare small
+recurrences against independent arithmetic safety calculations.
+
 Unproven loops/recursion are not entered speculatively. Current certificates remain
-conservative for varying bounds, conditional condition-side updates, helper loops/
-early returns, mutual recursion, and more general ranking functions. Nested loops are separately
+conservative for nonlinear calculated limits, conditional condition-side updates,
+helper loops/early returns, mutual recursion, and more general ranking functions.
+Reset proofs currently track two counters; multiplication proofs require a positive
+seed and identical continuing-path updates against a fixed or additive limit.
+The new certificates reject nested loops. On the older counted-loop path, nested loops are separately
 proof-gated when reached; discharging their termination obligations before entering
 an enclosing iteration remains a follow-up. `tests/condition_ranks.rs` covers fixed
 condition-side counter updates, empty bodies, first and final checks, nested output

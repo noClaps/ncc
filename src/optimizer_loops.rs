@@ -73,7 +73,7 @@ impl<'module> Proof<'_, 'module> {
         env: &HashMap<String, Value>,
     ) -> Option<()> {
         let scope = self.scope(env);
-        let (prefix, comparison) = if matches!(condition.unlocated(), Expr::Call { .. }) {
+        let (mut prefix, mut comparison) = if matches!(condition.unlocated(), Expr::Call { .. }) {
             self.return_call(condition, &scope)?
         } else {
             (
@@ -85,6 +85,10 @@ impl<'module> Proof<'_, 'module> {
         if !self.writes.is_disjoint(&self.callable_names) {
             return None;
         }
+        self.substitute_constants(&mut comparison, &mut prefix, &mut body);
+        if self.generalized_proven(&comparison, &body, &prefix) {
+            return Some(());
+        }
         let Expr::Binary { left, right, .. } = comparison.unlocated() else {
             return None;
         };
@@ -95,6 +99,9 @@ impl<'module> Proof<'_, 'module> {
         expression_names(right, &mut protected_bounds);
         let mut prefix_writes = HashSet::new();
         block_writes(&prefix, &mut prefix_writes);
+        if self.varying_proven(&comparison, &body, &prefix, &prefix_writes) {
+            return Some(());
+        }
         if !prefix_writes.is_disjoint(&protected_bounds) {
             return None;
         }
@@ -108,6 +115,95 @@ impl<'module> Proof<'_, 'module> {
         let certificate = crate::termination::counted_loop(&comparison, &body)?;
         let bound = self.bound_integer(certificate.bound)?;
         certificate.terminates(start, bound, min, max).then_some(())
+    }
+
+    fn substitute_constants(&self, comparison: &mut Expr, prefix: &mut Block, body: &mut Block) {
+        let constants: HashMap<_, _> = self
+            .values
+            .iter()
+            .filter(|(name, value)| {
+                !self.writes.contains(*name) && !matches!(value, Value::Cell(_))
+            })
+            .filter_map(|(name, value)| {
+                let (value, min, max) = self.evaluator.loop_integer(value)?;
+                let suffix = if min == 0 && max == i128::from(u64::MAX) {
+                    "u"
+                } else {
+                    ""
+                };
+                let expression = if value < 0 {
+                    Expr::Unary {
+                        op: UnaryOp::Neg,
+                        value: Box::new(Expr::Int(value.checked_neg()?.to_string())),
+                    }
+                } else {
+                    Expr::Int(format!("{value}{suffix}"))
+                };
+                Some((name.clone(), expression))
+            })
+            .collect();
+        if let Stmt::Expr(value) =
+            substitute_proof_statement(Stmt::Expr(comparison.clone()), &constants)
+        {
+            *comparison = value;
+        }
+        for block in [prefix, body] {
+            if let Stmt::Block(rewritten) =
+                substitute_proof_statement(Stmt::Block(block.clone()), &constants)
+            {
+                *block = rewritten;
+            }
+        }
+    }
+
+    fn generalized_proven(&self, comparison: &Expr, body: &Block, prefix: &Block) -> bool {
+        let mut values: HashMap<_, _> = self
+            .values
+            .iter()
+            .filter_map(|(name, value)| {
+                self.evaluator
+                    .loop_integer(value)
+                    .map(|range| (name.clone(), range))
+            })
+            .collect();
+        let mut body = body.clone();
+        if general_prefix(&mut body, prefix, &mut values).is_none() {
+            return false;
+        }
+        crate::termination::affine_loop(comparison, &body, &values)
+            || crate::termination::growth_loop(comparison, &body, &values)
+            || crate::termination::reset_loop(comparison, &body, &values)
+    }
+
+    fn varying_proven(
+        &self,
+        comparison: &Expr,
+        body: &Block,
+        prefix: &Block,
+        prefix_writes: &HashSet<String>,
+    ) -> bool {
+        let Expr::Binary { left, right, .. } = comparison.unlocated() else {
+            return false;
+        };
+        let (Expr::Name(counter), Expr::Name(bound)) = (left.unlocated(), right.unlocated()) else {
+            return false;
+        };
+        let ranges = [counter, bound].map(|name| {
+            self.values
+                .get(name)
+                .and_then(|value| self.evaluator.loop_integer(value))
+        });
+        let [Some(counter_range), Some(bound_range)] = ranges else {
+            return false;
+        };
+        let mut body = body.clone();
+        let mut ranges = [counter_range, bound_range];
+        if (prefix_writes.contains(counter) || prefix_writes.contains(bound))
+            && ranking_prefix(&mut body, prefix, [counter, bound], &mut ranges).is_none()
+        {
+            return false;
+        }
+        crate::termination::varying_loop(comparison, &body, ranges[0], ranges[1])
     }
 
     fn bound_integer(&self, expression: &Expr) -> Option<i128> {
@@ -500,6 +596,131 @@ impl<'module> Proof<'_, 'module> {
             _ => return None,
         })
     }
+}
+
+fn substitute_proof_statement(statement: Stmt, constants: &HashMap<String, Expr>) -> Stmt {
+    let mut item = super::Item::Statement(statement);
+    crate::visit::rewrite(&mut item, &mut |expression| {
+        if let Expr::Name(name) = expression.unlocated()
+            && let Some(value) = constants.get(name)
+        {
+            *expression = value.clone();
+        }
+    });
+    let super::Item::Statement(statement) = item else {
+        unreachable!();
+    };
+    statement
+}
+
+fn general_prefix(
+    body: &mut Block,
+    prefix: &Block,
+    values: &mut HashMap<String, (i128, i128, i128)>,
+) -> Option<()> {
+    let mut writes = HashSet::new();
+    block_writes(prefix, &mut writes);
+    if writes.iter().all(|name| !values.contains_key(name)) {
+        return Some(());
+    }
+    if !normal_back_edges(body) {
+        return None;
+    }
+    let mut updates = Vec::new();
+    collect_general_updates(prefix, values, &mut updates)?;
+    let mut directions = HashMap::new();
+    for statement in &updates {
+        let Stmt::Assign { target, .. } = statement.unlocated() else {
+            return None;
+        };
+        let name = root_name(target)?;
+        let delta = counter_delta(statement, name)?;
+        if directions
+            .insert(name, delta.signum())
+            .is_some_and(|prior| prior != delta.signum())
+        {
+            return None;
+        }
+        let (start, min, max) = values.get_mut(name)?;
+        *start = start.checked_add(delta)?;
+        if !(*min..=*max).contains(start) {
+            return None;
+        }
+    }
+    body.statements.extend(updates);
+    Some(())
+}
+
+fn collect_general_updates(
+    prefix: &Block,
+    values: &HashMap<String, (i128, i128, i128)>,
+    updates: &mut Vec<Stmt>,
+) -> Option<()> {
+    for statement in &prefix.statements {
+        match statement.unlocated() {
+            Stmt::Block(body) => collect_general_updates(body, values, updates)?,
+            Stmt::Assign { target, .. }
+                if root_name(target).is_some_and(|name| values.contains_key(name)) =>
+            {
+                counter_delta(statement, root_name(target)?)?;
+                updates.push(statement.clone());
+            }
+            Stmt::Assign { .. } | Stmt::Var(_) | Stmt::Assert(_) => {}
+            Stmt::Expr(value) if !matches!(value.unlocated(), Expr::If { .. }) => {}
+            _ => return None,
+        }
+    }
+    Some(())
+}
+
+fn ranking_prefix(
+    body: &mut Block,
+    prefix: &Block,
+    names: [&str; 2],
+    ranges: &mut [(i128, i128, i128); 2],
+) -> Option<()> {
+    if !normal_back_edges(body) {
+        return None;
+    }
+    let mut updates = Vec::new();
+    collect_ranking_updates(prefix, names, &mut updates)?;
+    // Check the first prefix in source order; the certificate includes the
+    // appended next prefix, including the final false check but excluding breaks.
+    for statement in &updates {
+        for (name, (start, min, max)) in names.into_iter().zip(ranges.iter_mut()) {
+            if let Some(delta) = counter_delta(statement, name) {
+                *start = start.checked_add(delta)?;
+                if !(*min..=*max).contains(start) {
+                    return None;
+                }
+            }
+        }
+    }
+    body.statements.extend(updates);
+    Some(())
+}
+
+fn collect_ranking_updates(
+    prefix: &Block,
+    names: [&str; 2],
+    updates: &mut Vec<Stmt>,
+) -> Option<()> {
+    for statement in &prefix.statements {
+        match statement.unlocated() {
+            Stmt::Block(body) => collect_ranking_updates(body, names, updates)?,
+            Stmt::Assign { target, .. }
+                if root_name(target).is_some_and(|name| names.contains(&name)) =>
+            {
+                let name = root_name(target)?;
+                counter_delta(statement, name)?;
+                updates.push(statement.clone());
+            }
+            Stmt::Assign { .. } | Stmt::Var(_) | Stmt::Assert(_) => {}
+            Stmt::Expr(value) if !matches!(value.unlocated(), Expr::If { .. }) => {}
+            _ => return None,
+        }
+    }
+    Some(())
 }
 
 fn condition_counter_start(

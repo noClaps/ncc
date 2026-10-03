@@ -59,22 +59,32 @@ not memoized. Arithmetic uses each type's range. Unknown state and unsupported
 effects remain runtime code; futures and external calls are never executed by the
 optimiser. Loops and recursive cycles must have termination certificates before
 execution, with no artificial step or depth budgets for certified computation.
-Counted integer loops require invariant bounds, monotonic progress on every path
-that continues the loop, and no overflow before their exit. Progress can come from
+Integer loop proofs support fixed limits and calculated, changing limits such as
+`i < 2*n + extra`, including several changing bindings. Known immutable values
+such as `step = 3` are substituted in proof expressions; unchanged mutable values
+can also supply known steps. Every path that continues must make progress, and
+intermediate arithmetic—including the final condition check—must stay in range.
+Proofs also support two counters where one resets only when the other makes
+progress, and positive counters multiplied by a known factor greater than one
+against fixed or additively changing limits. Multiplication proofs require the
+same counter/bound updates on every continuing path. Progress can come from
 conditional updates, known shared-state helpers, or pure scalar helper returns.
 Known condition wrappers may perform effects before their comparison, including
-fixed monotonic counter updates. Certificates account for the first update and the
+fixed counter or bound updates. Certificates account for the first update and the
 final false-check update, including their overflow bounds. All checks retain their
 original effects and order; a body break skips the next condition update.
 Proof-only helper expansion distinguishes shared cells from copied captures and
-shadowed bindings, and rejects resets, changing bounds, and callable replacements.
+shadowed bindings, and rejects unproven resets, bound changes, and callable replacements.
 Finite `for` traversals use their original snapshot. Direct self-recursion supports
 covering integer base cases and decreasing
 arguments; exact integral floats through `2^53` also qualify. Certified recursion
-uses heap continuations. Other patterns, including mutual recursion, varying bounds,
-conditional condition-side updates, and helpers with loops or early returns,
-conservatively stay at runtime rather than being tried with fuel. Condition-side
-counter progress currently requires a body without continues or nested loops.
+uses heap continuations. Other patterns, including mutual recursion, nonlinear
+calculated limits, conditional condition-side updates, and helpers with loops or
+early returns, conservatively stay at runtime rather than being tried with fuel.
+The new varying-bound, calculated-limit, reset, and multiplication certificates
+reject nested loops. Condition-side counter progress currently requires a body
+without continues or nested loops. Unsupported operations or uncertain arithmetic
+types also leave the loop at runtime.
 
 When an entire program is known, release mode records output argument snapshots
 without printing during compilation, then emits only constant-string output calls.

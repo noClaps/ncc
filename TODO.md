@@ -18,8 +18,6 @@
 
     - [ ] Expand conservative termination proof coverage.
 
-      - [ ] Prove varying bounds with explicit ranking-state analysis rather than
-            invariant-bound assumptions.
       - [ ] Extend condition-side progress proofs to conditional prefix updates,
             continues, and nested loops without skipping or duplicating checks.
       - [ ] Extend helper proofs through early returns, helper loops, and effectful
