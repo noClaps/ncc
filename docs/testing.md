@@ -41,10 +41,14 @@ false check and original diagnostic locations. Proof-only helper trees are never
 executed and do not replace source trees or their checked metadata.
 
 Unproven loops/recursion are not entered speculatively. Current certificates remain
-conservative for condition-side ranking changes, helper loops/early returns,
-mutual recursion, and more general ranking functions. Nested loops are separately
+conservative for varying bounds, conditional condition-side updates, helper loops/
+early returns, mutual recursion, and more general ranking functions. Nested loops are separately
 proof-gated when reached; discharging their termination obligations before entering
-an enclosing iteration remains a follow-up. Physical memory and compilation time
+an enclosing iteration remains a follow-up. `tests/condition_ranks.rs` covers fixed
+condition-side counter updates, empty bodies, first and final checks, nested output
+order, breaks, resets, missed strides, and overflow/underflow. Continue paths and
+nested loops remain unsupported on this new condition-progress proof path.
+Physical memory and compilation time
 still constrain large evaluations; there is no artificial evaluation budget.
 `tests/c_names.rs` checks recognizable, collision-safe C names for bindings,
 parameters, capture fields, shadowing, and imported globals, and executes its

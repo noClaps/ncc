@@ -96,6 +96,8 @@
   copied captures and lexical shadows. Require progress on every continuing path;
   reject protected-state resets, bound changes, and callable replacements. Keep
   condition effects and the final false check in their original evaluation order.
+  Condition-side progress must account for both the first condition prefix and the
+  final false-check prefix, including overflow; breaks skip the next prefix.
 - Include C headers only when needed by the generated program. Preserve NC
   binding names in generated C variables, parameters, and capture fields, with
   collision-safe prefixes and suffixes; anonymous temporaries may remain numbered.

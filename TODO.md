@@ -17,8 +17,11 @@
     - [ ] Other unsupported effects.
 
     - [ ] Expand conservative termination proof coverage.
-      - [ ] Prove condition-side counter changes and varying bounds with explicit
-            ranking-state analysis rather than invariant-bound assumptions.
+
+      - [ ] Prove varying bounds with explicit ranking-state analysis rather than
+            invariant-bound assumptions.
+      - [ ] Extend condition-side progress proofs to conditional prefix updates,
+            continues, and nested loops without skipping or duplicating checks.
       - [ ] Extend helper proofs through early returns, helper loops, and effectful
             arguments while preserving copied parameters and lexical scopes.
       - [ ] Discharge nested-loop termination obligations before interpreting

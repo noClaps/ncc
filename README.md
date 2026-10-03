@@ -62,16 +62,19 @@ execution, with no artificial step or depth budgets for certified computation.
 Counted integer loops require invariant bounds, monotonic progress on every path
 that continues the loop, and no overflow before their exit. Progress can come from
 conditional updates, known shared-state helpers, or pure scalar helper returns.
-Known condition wrappers may perform unrelated effects before their comparison;
-all checks, including the final false check, retain their original effects and order.
+Known condition wrappers may perform effects before their comparison, including
+fixed monotonic counter updates. Certificates account for the first update and the
+final false-check update, including their overflow bounds. All checks retain their
+original effects and order; a body break skips the next condition update.
 Proof-only helper expansion distinguishes shared cells from copied captures and
 shadowed bindings, and rejects resets, changing bounds, and callable replacements.
 Finite `for` traversals use their original snapshot. Direct self-recursion supports
 covering integer base cases and decreasing
 arguments; exact integral floats through `2^53` also qualify. Certified recursion
-uses heap continuations. Other patterns, including mutual recursion, condition-side
-counter changes, and helpers with loops or early returns, conservatively stay at
-runtime rather than being tried with fuel.
+uses heap continuations. Other patterns, including mutual recursion, varying bounds,
+conditional condition-side updates, and helpers with loops or early returns,
+conservatively stay at runtime rather than being tried with fuel. Condition-side
+counter progress currently requires a body without continues or nested loops.
 
 When an entire program is known, release mode records output argument snapshots
 without printing during compilation, then emits only constant-string output calls.

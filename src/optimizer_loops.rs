@@ -1,7 +1,8 @@
 //! Non-executing helper expansion for counted-loop certificates.
 //! These trees never reach the evaluator: source trees retain their IDs and locations.
 use super::{
-    Block, Evaluator, Expr, Function, HashMap, HashSet, Pattern, Stmt, Type, UnaryOp, Value,
+    BinaryOp, Block, Evaluator, Expr, Function, HashMap, HashSet, Pattern, Stmt, Type, UnaryOp,
+    Value,
 };
 
 #[derive(Clone)]
@@ -80,23 +81,31 @@ impl<'module> Proof<'_, 'module> {
                 self.expression(condition, &scope)?,
             )
         };
-        let body = self.block(body, &scope)?;
+        let mut body = self.block(body, &scope)?;
         if !self.writes.is_disjoint(&self.callable_names) {
             return None;
         }
-        let certificate = crate::termination::counted_loop(&comparison, &body)?;
-        // Condition effects also occur on the final, false check. They must not
-        // change ranking state, even if a body path would exit before updating it.
-        let mut protected = HashSet::from([certificate.counter.to_owned()]);
-        expression_names(certificate.bound, &mut protected);
+        let Expr::Binary { left, right, .. } = comparison.unlocated() else {
+            return None;
+        };
+        let Expr::Name(counter) = left.unlocated() else {
+            return None;
+        };
+        let mut protected_bounds = HashSet::new();
+        expression_names(right, &mut protected_bounds);
         let mut prefix_writes = HashSet::new();
         block_writes(&prefix, &mut prefix_writes);
-        if !prefix_writes.is_disjoint(&protected) {
+        if !prefix_writes.is_disjoint(&protected_bounds) {
             return None;
         }
-        let (start, min, max) = self
-            .evaluator
-            .loop_integer(self.values.get(certificate.counter)?)?;
+        let range = self.evaluator.loop_integer(self.values.get(counter)?)?;
+        let (initial, min, max) = range;
+        let start = if prefix_writes.contains(counter) {
+            condition_counter_start(&mut body, &prefix, counter, range)?
+        } else {
+            initial
+        };
+        let certificate = crate::termination::counted_loop(&comparison, &body)?;
         let bound = self.bound_integer(certificate.bound)?;
         certificate.terminates(start, bound, min, max).then_some(())
     }
@@ -491,6 +500,112 @@ impl<'module> Proof<'_, 'module> {
             _ => return None,
         })
     }
+}
+
+fn condition_counter_start(
+    body: &mut Block,
+    prefix: &Block,
+    counter: &str,
+    (start, min, max): (i128, i128, i128),
+) -> Option<i128> {
+    // In this slice, only normal fallthrough reaches the next condition. In
+    // particular, a continue must not bypass the proof-only appended updates.
+    if !normal_back_edges(body) {
+        return None;
+    }
+    let mut updates = Vec::new();
+    collect_condition_updates(prefix, counter, &mut updates)?;
+    let mut delta: i128 = 0;
+    for update in &updates {
+        let step = counter_delta(update, counter)?;
+        if delta != 0 && delta.signum() != step.signum() {
+            return None;
+        }
+        delta = delta.checked_add(step)?;
+    }
+    if delta == 0 {
+        return None;
+    }
+    // Sample the comparison after the first prefix. Same-direction updates
+    // make its endpoints sufficient to bound all first-prefix intermediates.
+    let first = start.checked_add(delta)?;
+    if !(min..=max).contains(&first) {
+        return None;
+    }
+    // From a sampled true comparison, the next sample is body then prefix.
+    // Counted-loop excursions include the entire next prefix, even when its
+    // comparison is false. Break paths never reach these appended statements.
+    body.statements.extend(updates);
+    Some(first)
+}
+
+fn collect_condition_updates(prefix: &Block, counter: &str, updates: &mut Vec<Stmt>) -> Option<()> {
+    for statement in &prefix.statements {
+        match statement.unlocated() {
+            Stmt::Block(body) => collect_condition_updates(body, counter, updates)?,
+            Stmt::Assign { target, .. } if root_name(target) == Some(counter) => {
+                counter_delta(statement, counter)?;
+                updates.push(statement.clone());
+            }
+            Stmt::Assign { .. } | Stmt::Var(_) | Stmt::Assert(_) => {}
+            Stmt::Expr(value) if !matches!(value.unlocated(), Expr::If { .. }) => {}
+            // Do not assume that a conditional write, jump, or nested loop
+            // executes a fixed prefix on every check, including the last one.
+            _ => return None,
+        }
+    }
+    Some(())
+}
+
+fn counter_delta(statement: &Stmt, counter: &str) -> Option<i128> {
+    let Stmt::Assign { target, value } = statement.unlocated() else {
+        return None;
+    };
+    if !matches!(target.unlocated(), Expr::Name(name) if name == counter) {
+        return None;
+    }
+    let Expr::Binary { left, op, right } = value.unlocated() else {
+        return None;
+    };
+    if !matches!(left.unlocated(), Expr::Name(name) if name == counter) {
+        return None;
+    }
+    let literal = match right.unlocated() {
+        Expr::Int(text) => crate::lexer::integer(text).ok().map(i128::from)?,
+        Expr::Unary {
+            op: UnaryOp::Neg,
+            value,
+        } => {
+            let Expr::Int(text) = value.unlocated() else {
+                return None;
+            };
+            i128::from(crate::lexer::integer(text).ok()?).checked_neg()?
+        }
+        _ => return None,
+    };
+    let delta = match op {
+        BinaryOp::Add => literal,
+        BinaryOp::Sub => literal.checked_neg()?,
+        _ => return None,
+    };
+    (delta != 0).then_some(delta)
+}
+
+fn normal_back_edges(body: &Block) -> bool {
+    body.statements
+        .iter()
+        .all(|statement| match statement.unlocated() {
+            Stmt::Continue(_) | Stmt::While { .. } | Stmt::For { .. } => false,
+            Stmt::Block(body) => normal_back_edges(body),
+            Stmt::Expr(value) | Stmt::LabeledIf { value, .. } => {
+                if let Expr::If { arms, .. } = value.unlocated() {
+                    arms.iter().all(|(_, body)| normal_back_edges(body))
+                } else {
+                    true
+                }
+            }
+            _ => true,
+        })
 }
 
 fn root_name(value: &Expr) -> Option<&str> {
