@@ -12,6 +12,10 @@ struct Binding {
 }
 type Scope = HashMap<String, Binding>;
 
+#[cfg(test)]
+#[path = "optimizer_loops_tests.rs"]
+mod tests;
+
 struct Proof<'e, 'module> {
     evaluator: &'e Evaluator<'module>,
     values: HashMap<String, Value>,
@@ -26,6 +30,7 @@ impl Evaluator<'_> {
         &self,
         condition: &Expr,
         body: &Block,
+        label: Option<&str>,
         env: &HashMap<String, Value>,
     ) -> bool {
         let mut proof = Proof {
@@ -36,7 +41,7 @@ impl Evaluator<'_> {
             callable_names: HashSet::new(),
             writes: HashSet::new(),
         };
-        proof.prepare(condition, body, env).is_some()
+        proof.prepare(condition, body, label, env).is_some()
     }
 }
 
@@ -70,6 +75,7 @@ impl<'module> Proof<'_, 'module> {
         &mut self,
         condition: &Expr,
         body: &Block,
+        label: Option<&str>,
         env: &HashMap<String, Value>,
     ) -> Option<()> {
         let scope = self.scope(env);
@@ -86,35 +92,41 @@ impl<'module> Proof<'_, 'module> {
             return None;
         }
         self.substitute_constants(&mut comparison, &mut prefix, &mut body);
-        if self.generalized_proven(&comparison, &body, &prefix) {
+        if self.counted_proven(&comparison, &body, &prefix, label)
+            || self.generalized_proven(&comparison, &body, &prefix)
+        {
             return Some(());
         }
-        let Expr::Binary { left, right, .. } = comparison.unlocated() else {
-            return None;
-        };
-        let Expr::Name(counter) = left.unlocated() else {
-            return None;
-        };
-        let mut protected_bounds = HashSet::new();
-        expression_names(right, &mut protected_bounds);
         let mut prefix_writes = HashSet::new();
         block_writes(&prefix, &mut prefix_writes);
-        if self.varying_proven(&comparison, &body, &prefix, &prefix_writes) {
-            return Some(());
-        }
-        if !prefix_writes.is_disjoint(&protected_bounds) {
-            return None;
-        }
-        let range = self.evaluator.loop_integer(self.values.get(counter)?)?;
-        let (initial, min, max) = range;
-        let start = if prefix_writes.contains(counter) {
-            condition_counter_start(&mut body, &prefix, counter, range)?
-        } else {
-            initial
+        self.varying_proven(&comparison, &body, &prefix, &prefix_writes)
+            .then_some(())
+    }
+
+    fn counted_proven(
+        &self,
+        comparison: &Expr,
+        body: &Block,
+        prefix: &Block,
+        label: Option<&str>,
+    ) -> bool {
+        let Expr::Binary { left, right, .. } = comparison.unlocated() else {
+            return false;
         };
-        let certificate = crate::termination::counted_loop(&comparison, &body)?;
-        let bound = self.bound_integer(certificate.bound)?;
-        certificate.terminates(start, bound, min, max).then_some(())
+        let Expr::Name(counter) = left.unlocated() else {
+            return false;
+        };
+        let Some(range) = self
+            .values
+            .get(counter)
+            .and_then(|value| self.evaluator.loop_integer(value))
+        else {
+            return false;
+        };
+        let Some(bound) = self.bound_integer(right) else {
+            return false;
+        };
+        crate::termination::condition_loop(comparison, prefix, body, label, range, bound)
     }
 
     fn substitute_constants(&self, comparison: &mut Expr, prefix: &mut Block, body: &mut Block) {
@@ -382,6 +394,16 @@ impl<'module> Proof<'_, 'module> {
             | Expr::None
             | Expr::Bytes(_)
             | Expr::Discard => expression.unlocated().clone(),
+            Expr::Array(values) => Expr::Array(self.expressions(values, scope)?),
+            Expr::Tuple(values) => Expr::Tuple(self.expressions(values, scope)?),
+            Expr::Map(entries) => Expr::Map(
+                entries
+                    .iter()
+                    .map(|(key, value)| {
+                        Some((self.expression(key, scope)?, self.expression(value, scope)?))
+                    })
+                    .collect::<Option<_>>()?,
+            ),
             Expr::Unary { op, value } => Expr::Unary {
                 op: *op,
                 value: Box::new(self.expression(value, scope)?),
@@ -419,6 +441,13 @@ impl<'module> Proof<'_, 'module> {
             // cannot be hidden inside arguments or value expressions.
             _ => return None,
         })
+    }
+
+    fn expressions(&mut self, values: &[Expr], scope: &Scope) -> Option<Vec<Expr>> {
+        values
+            .iter()
+            .map(|value| self.expression(value, scope))
+            .collect()
     }
 
     fn block(&mut self, block: &Block, scope: &Scope) -> Option<Block> {
@@ -723,61 +752,6 @@ fn collect_ranking_updates(
     Some(())
 }
 
-fn condition_counter_start(
-    body: &mut Block,
-    prefix: &Block,
-    counter: &str,
-    (start, min, max): (i128, i128, i128),
-) -> Option<i128> {
-    // In this slice, only normal fallthrough reaches the next condition. In
-    // particular, a continue must not bypass the proof-only appended updates.
-    if !normal_back_edges(body) {
-        return None;
-    }
-    let mut updates = Vec::new();
-    collect_condition_updates(prefix, counter, &mut updates)?;
-    let mut delta: i128 = 0;
-    for update in &updates {
-        let step = counter_delta(update, counter)?;
-        if delta != 0 && delta.signum() != step.signum() {
-            return None;
-        }
-        delta = delta.checked_add(step)?;
-    }
-    if delta == 0 {
-        return None;
-    }
-    // Sample the comparison after the first prefix. Same-direction updates
-    // make its endpoints sufficient to bound all first-prefix intermediates.
-    let first = start.checked_add(delta)?;
-    if !(min..=max).contains(&first) {
-        return None;
-    }
-    // From a sampled true comparison, the next sample is body then prefix.
-    // Counted-loop excursions include the entire next prefix, even when its
-    // comparison is false. Break paths never reach these appended statements.
-    body.statements.extend(updates);
-    Some(first)
-}
-
-fn collect_condition_updates(prefix: &Block, counter: &str, updates: &mut Vec<Stmt>) -> Option<()> {
-    for statement in &prefix.statements {
-        match statement.unlocated() {
-            Stmt::Block(body) => collect_condition_updates(body, counter, updates)?,
-            Stmt::Assign { target, .. } if root_name(target) == Some(counter) => {
-                counter_delta(statement, counter)?;
-                updates.push(statement.clone());
-            }
-            Stmt::Assign { .. } | Stmt::Var(_) | Stmt::Assert(_) => {}
-            Stmt::Expr(value) if !matches!(value.unlocated(), Expr::If { .. }) => {}
-            // Do not assume that a conditional write, jump, or nested loop
-            // executes a fixed prefix on every check, including the last one.
-            _ => return None,
-        }
-    }
-    Some(())
-}
-
 fn counter_delta(statement: &Stmt, counter: &str) -> Option<i128> {
     let Stmt::Assign { target, value } = statement.unlocated() else {
         return None;
@@ -835,17 +809,6 @@ fn root_name(value: &Expr) -> Option<&str> {
         Expr::Index { object, .. } | Expr::Member { object, .. } => root_name(object),
         _ => None,
     }
-}
-
-fn expression_names(value: &Expr, names: &mut HashSet<String>) {
-    crate::visit::item(
-        &super::Item::Statement(Stmt::Expr(value.clone())),
-        &mut |value| {
-            if let Expr::Name(name) = value.unlocated() {
-                names.insert(name.clone());
-            }
-        },
-    );
 }
 
 fn block_writes(block: &Block, names: &mut HashSet<String>) {

@@ -64,16 +64,22 @@ and bounded reset invariants. Multiplication unit tests also compare small
 recurrences against independent arithmetic safety calculations.
 
 Unproven loops/recursion are not entered speculatively. Current certificates remain
-conservative for nonlinear calculated limits, conditional condition-side updates,
-helper loops/early returns, mutual recursion, and more general ranking functions.
+conservative for nonlinear calculated limits, helper loops/early returns,
+mutual recursion, and more general ranking functions.
 Reset proofs currently track two counters; multiplication proofs require a positive
 seed and identical continuing-path updates against a fixed or additive limit.
-The new certificates reject nested loops. On the older counted-loop path, nested loops are separately
-proof-gated when reached; discharging their termination obligations before entering
-an enclosing iteration remains a follow-up. `tests/condition_ranks.rs` covers fixed
-condition-side counter updates, empty bodies, first and final checks, nested output
-order, breaks, resets, missed strides, and overflow/underflow. Continue paths and
-nested loops remain unsupported on this new condition-progress proof path.
+The compound and varying-bound certificates reject nested loops. Counted proofs,
+including condition-side progress, separately proof-gate nested loops when reached;
+discharging their termination obligations before entering an enclosing iteration
+remains a follow-up. `tests/condition_ranks.rs` covers fixed and conditional prefix
+updates, optional prefix progress combined with body strides, empty bodies, first
+and final checks, nested output order, labeled and unlabeled continues, nested
+`while`/literal `for` traversals, outward breaks, resets, missed strides, and
+overflow/underflow. Negative cases compile in both modes without entering unproven
+candidates; certified continues diagnose reached arithmetic failures at the original
+expression. Certificate unit tests exercise full proof horizons, label routing,
+conditional first-sample ranges, intermediate excursions, and nonexact inequality
+rejection without executing candidate loops.
 Physical memory and compilation time
 still constrain large evaluations; there is no artificial evaluation budget.
 `tests/c_names.rs` checks recognizable, collision-safe C names for bindings,

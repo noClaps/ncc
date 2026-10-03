@@ -11,6 +11,9 @@ mod reset;
 pub(crate) use affine::affine_loop;
 pub(crate) use growth::growth_loop;
 pub(crate) use reset::reset_loop;
+#[path = "termination_condition.rs"]
+mod condition;
+pub(crate) use condition::condition_loop;
 use std::collections::{BTreeMap, HashSet};
 
 use crate::ast::{BinaryOp, Block, Expr, Stmt, UnaryOp};
@@ -25,7 +28,7 @@ pub(crate) struct CountedLoop<'a> {
     excursion: Range,
 }
 
-pub(crate) fn counted_loop<'a>(condition: &'a Expr, body: &Block) -> Option<CountedLoop<'a>> {
+fn counted_comparison(condition: &Expr) -> Option<CountedLoop<'_>> {
     let Expr::Binary { left, op, right } = condition.unlocated() else {
         return None;
     };
@@ -38,12 +41,24 @@ pub(crate) fn counted_loop<'a>(condition: &'a Expr, body: &Block) -> Option<Coun
     let Expr::Name(counter) = left.unlocated() else {
         return None;
     };
-    let mut protected = HashSet::from([counter.as_str()]);
-    if !bound_names(right, counter, &mut protected) {
+    Some(CountedLoop {
+        counter,
+        bound: right,
+        comparison: *op,
+        step_min: 0,
+        step_max: 0,
+        excursion: Range::ZERO,
+    })
+}
+
+pub(crate) fn counted_loop<'a>(condition: &'a Expr, body: &Block) -> Option<CountedLoop<'a>> {
+    let mut certificate = counted_comparison(condition)?;
+    let mut protected = HashSet::from([certificate.counter]);
+    if !bound_names(certificate.bound, certificate.counter, &mut protected) {
         return None;
     }
     let mut analysis = Analysis {
-        counter,
+        counter: certificate.counter,
         bound: None,
         protected,
         direction: 0,
@@ -62,14 +77,10 @@ pub(crate) fn counted_loop<'a>(condition: &'a Expr, body: &Block) -> Option<Coun
         }
     }
     let progress = progress.unwrap_or(Range::ZERO);
-    Some(CountedLoop {
-        counter,
-        bound: right,
-        comparison: *op,
-        step_min: progress.min,
-        step_max: progress.max,
-        excursion: analysis.excursion,
-    })
+    certificate.step_min = progress.min;
+    certificate.step_max = progress.max;
+    certificate.excursion = analysis.excursion;
+    Some(certificate)
 }
 
 #[derive(Clone, Copy)]

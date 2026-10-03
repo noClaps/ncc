@@ -70,21 +70,25 @@ against fixed or additively changing limits. Multiplication proofs require the
 same counter/bound updates on every continuing path. Progress can come from
 conditional updates, known shared-state helpers, or pure scalar helper returns.
 Known condition wrappers may perform effects before their comparison, including
-fixed counter or bound updates. Certificates account for the first update and the
-final false-check update, including their overflow bounds. All checks retain their
-original effects and order; a body break skips the next condition update.
+fixed counter or bound updates, or conditional additive counter updates against
+an invariant limit. Condition-side counter proofs combine body and prefix progress
+on every path reaching the next check, including labeled continues and outward
+continues from rank-neutral nested loops. Certificates account for the first update
+and final false-check update, including their overflow bounds. All checks retain
+their original effects and order; breaks and outward exits skip the next update.
 Proof-only helper expansion distinguishes shared cells from copied captures and
 shadowed bindings, and rejects unproven resets, bound changes, and callable replacements.
 Finite `for` traversals use their original snapshot. Direct self-recursion supports
 covering integer base cases and decreasing
 arguments; exact integral floats through `2^53` also qualify. Certified recursion
 uses heap continuations. Other patterns, including mutual recursion, nonlinear
-calculated limits, conditional condition-side updates, and helpers with loops or
-early returns, conservatively stay at runtime rather than being tried with fuel.
-The new varying-bound, calculated-limit, reset, and multiplication certificates
-reject nested loops. Condition-side counter progress currently requires a body
-without continues or nested loops. Unsupported operations or uncertain arithmetic
-types also leave the loop at runtime.
+calculated limits and helpers with loops or early returns, conservatively stay at
+runtime rather than being tried with fuel. The varying-bound, calculated-limit,
+reset, and multiplication certificates reject nested loops. Counted condition-side
+proofs allow nested loops that leave the ranking state unchanged; nested termination
+is separately certified when reached. Conditional prefixes with no guaranteed net
+progress, mixed-direction updates, and nonexact inequality strides remain unproven.
+Unsupported operations or uncertain arithmetic types also leave the loop at runtime.
 
 When an entire program is known, release mode records output argument snapshots
 without printing during compilation, then emits only constant-string output calls.

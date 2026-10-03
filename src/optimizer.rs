@@ -3322,7 +3322,7 @@ impl Evaluator<'_> {
             if !certificate.terminates(start, bound, min, max) {
                 return None;
             }
-        } else if !self.helper_loop_proven(condition, body, env) {
+        } else if !self.helper_loop_proven(condition, body, label, env) {
             return None;
         }
         Some(loop {
