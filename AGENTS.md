@@ -4,6 +4,9 @@
 
 - Implement the full language and compiler toolchain described in `docs/design.md`.
   Read the relevant specification and recent documentation changes before editing.
+- Never edit `docs/design.md` without asking the user first and receiving explicit
+  approval. An explicit user request to edit it grants approval for that request
+  only; compiler work does not implicitly authorize specification changes.
 - Follow the priorities in `TODO.md`: comprehensive language and edge-case tests,
   undefined-behavior clarification and elimination, then compiler simplification.
   Tree-sitter, LSP, and formatter work follows the compiler work.
