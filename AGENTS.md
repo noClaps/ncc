@@ -12,11 +12,13 @@
   Tree-sitter, LSP, and formatter work follows the compiler work.
 - A task being listed in `TODO.md` is not an instruction to start it during a
   documentation-only request. Respect the user's current scope and stop requests.
-- Maintain the root `TODO.md` as a nested checklist. Check off each task when it
-  is completed; before committing, remove checked items so the committed list
-  contains remaining work only. Narrow partially completed items and add new
-  checklist items whenever new tasks or gaps are discovered. Do not treat passing
-  tests as proof that the specification is fully implemented.
+- Maintain the root `TODO.md` as a nested checklist. After completing the specified
+  task, always check off and remove its completed checklist items, then commit the
+  task changes together with the updated `TODO.md`. Remove any other checked items
+  before committing so the committed list contains remaining work only. Narrow
+  partially completed items and add new checklist items whenever new tasks or gaps
+  are discovered. Do not treat passing tests as proof that the specification is
+  fully implemented.
 - The current CLI provides `build`, `run`, and `test`. Test blocks are checked and
   executed only in test mode; normal builds/runs ignore them after parsing,
   including imported tests. Test mode retains only tests and their transitive
