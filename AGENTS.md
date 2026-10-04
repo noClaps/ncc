@@ -124,8 +124,11 @@
   final false-check prefix, including overflow; breaks skip the next prefix.
   Conditional prefix paths combine with body progress only on fallthrough and
   continues targeting that loop. Outward exits skip its next prefix; rank-neutral
-  nested loops consume local jumps and propagate outward jumps. Nested termination
-  remains separately proof-gated when reached, pending ahead-of-entry discharge.
+  nested loops consume local jumps and propagate outward jumps. Discharge nested
+  termination obligations before enclosing iterations or iterable effects execute,
+  including hidden helper loops. Certificates must hold at every repeated entry;
+  never borrow an outer mutable cell's first-entry value or a shadowed iterator.
+  Unknown obligations leave entry bindings, cells, and recorded output untouched.
 - Include C headers only when needed by the generated program. Preserve NC
   binding names in generated C variables, parameters, and capture fields, with
   collision-safe prefixes and suffixes; anonymous temporaries may remain numbered.

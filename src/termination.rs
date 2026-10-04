@@ -311,8 +311,8 @@ impl<S: Displacement> Analysis<'_, S> {
         if self.bound.is_some() || !pure_expression(condition) {
             return None;
         }
-        // Its own evaluator certificate establishes nested-loop termination.
-        // It cannot change our ranking state, even on a locally exiting path.
+        // The caller must discharge nested termination before execution.
+        // This analysis only protects ranking state, including exiting paths.
         let nested = self.block(body, input, false)?;
         let mut paths = one(Exit::Next, input);
         for (exit, range) in nested {

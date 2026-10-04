@@ -18,8 +18,6 @@
 
     - [ ] Expand conservative termination proof coverage.
 
-      - [ ] Discharge nested-loop termination obligations before interpreting
-            enclosing loop iterations, not only when the nested loop is reached.
       - [ ] Prove additional recursive ranking patterns, mutual recursion, and
             recursive closures without speculative execution.
 

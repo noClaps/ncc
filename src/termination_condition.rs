@@ -4,7 +4,7 @@ use crate::ast::{BinaryOp, Block, Expr};
 use std::collections::HashSet;
 
 /// Input is a checked, storage-renamed proof tree. Nested loops must obtain their
-/// own evaluator certificates when reached; this certificate only protects rank.
+/// own certificates before enclosing entry; this certificate only protects rank.
 /// Neither the prefix nor the body is executed while constructing this proof.
 pub(crate) fn condition_loop(
     comparison: &Expr,

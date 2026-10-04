@@ -75,8 +75,8 @@ condition-prefix updates. Negative arithmetic probes cover diverging ranks, rese
 skipped progress, nonexact inequality strides, and overflow of either binding,
 including intermediate updates and exiting branches. Certificate unit tests also
 check each binding's limits and horizons beyond former execution budgets.
-The new relational certificate rejects nested loops until their termination
-obligations can be discharged before entering an enclosing iteration.
+The relational certificate rejects unsummarized nested loops. Supported nested
+loops are certified and summarized in proof-only trees before enclosing entry.
 
 `tests/compound_loop_ranks.rs` covers calculated limits with several changing
 bindings, known constant and calculated steps, conditional progress, helpers,
@@ -104,10 +104,16 @@ the object binding also remain barriers pending resolution of an existing C
 backend/evaluator discrepancy; no intended semantics are assumed here.
 Reset proofs currently track two counters; multiplication proofs require a positive
 seed and identical continuing-path updates against a fixed or additive limit.
-The compound and varying-bound certificates reject nested loops. Counted proofs,
-including condition-side progress, separately proof-gate nested loops when reached;
-discharging their termination obligations before entering an enclosing iteration
-remains a follow-up. `tests/condition_ranks.rs` covers fixed and conditional prefix
+Nested-loop obligations are discharged before interpreting enclosing iterations,
+condition-prefix effects, or `for` iterable effects. `tests/nested_loop_obligations.rs`
+covers multi-level local counters, finite traversals, iterator shadowing, local and
+outward labeled exits, hidden helper loops, final false checks, and reached failure
+locations. Negative arithmetic probes compile in both modes; evaluator unit tests
+also check that rejected candidates leave bindings, shared cells, and recorded
+output untouched. Repeated-entry certificates use local initializers or universal
+input ranges, never an outer mutable cell's current value. Unsupported obligations
+remain runtime code. Compound and varying-bound certificates still reject
+unsummarized nested loops. `tests/condition_ranks.rs` covers fixed and conditional prefix
 updates, optional prefix progress combined with body strides, empty bodies, first
 and final checks, nested output order, labeled and unlabeled continues, nested
 `while`/literal `for` traversals, outward breaks, resets, missed strides, and

@@ -93,6 +93,12 @@ fn proof_routes(source: &str) -> (bool, bool, bool) {
     let (mut prefix, mut comparison) = proof.return_call(condition, &scope).unwrap();
     let mut body = proof.block(body, &scope).unwrap();
     proof.substitute_constants(&mut comparison, &mut prefix, &mut body);
+    let (Some(prefix), Some(body)) = (
+        proof.certify_helper_loops(&prefix),
+        proof.certify_helper_loops(&body),
+    ) else {
+        return (false, false, false);
+    };
     let mut writes = HashSet::new();
     block_writes(&prefix, &mut writes);
     (
@@ -329,7 +335,7 @@ while condition() {
 }
 
 #[test]
-fn reached_nested_loop_still_requires_its_own_certificate() {
+fn nested_loop_requires_a_certificate_before_enclosing_entry() {
     let source = r"
 mut int i = 0
 fn condition() bool {
@@ -339,5 +345,74 @@ fn condition() bool {
 while condition() { while true {} }
 @println(i)
 ";
+    assert_eq!(proof_routes(source), (false, false, false));
     assert!(output(source).is_none());
+}
+
+fn assert_no_candidate_execution(source: &str) {
+    let module = crate::parser::parse(crate::lexer::lex(source).unwrap()).unwrap();
+    let checked = crate::sema::check(module, std::path::Path::new("nested-proof.nc")).unwrap();
+    let functions = checked
+        .module
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Function(function) => Some((function.name.clone(), function)),
+            _ => None,
+        })
+        .collect();
+    let mut evaluator = Evaluator::new(&functions, &checked);
+    evaluator.analyse_output = true;
+    evaluator.recorded_output = Some(vec![]);
+    let mut env = HashMap::new();
+    for item in &checked.module.items {
+        if let Item::Global(declaration) = item {
+            evaluator
+                .declaration(declaration, &mut env, &mut Vec::new())
+                .unwrap();
+        }
+    }
+    evaluator.analysis_globals.clone_from(&env);
+    let cells = evaluator.cells.clone();
+    let bindings = env.clone();
+    let statement = checked
+        .module
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::Statement(statement) => Some(statement),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        evaluator
+            .statement_flow(statement, &mut env, &mut Vec::new(), false)
+            .is_none(),
+        "{source}"
+    );
+    assert_eq!(evaluator.cells, cells, "candidate cells changed: {source}");
+    assert_eq!(env, bindings, "candidate bindings changed: {source}");
+    assert!(
+        evaluator.recorded_output.as_ref().unwrap().is_empty(),
+        "candidate emitted output: {source}"
+    );
+    assert!(
+        !evaluator.arithmetic_failure,
+        "candidate arithmetic ran: {source}"
+    );
+}
+
+#[test]
+fn failed_nested_obligations_leave_entry_state_and_output_untouched() {
+    for source in [
+        "mut int i=0;mut int effects=0;while i<3 {effects=effects+1;@println(effects);while true {};i=i+1}",
+        "mut int i=0;mut int effects=0;fn condition() bool {effects=effects+1;@println(effects);return i<3};while condition() {while true {};i=i+1}",
+        "mut int effects=0;for key in [1,2] {effects=effects+1;@println(effects);while true {}}",
+        "mut int effects=0;fn values() int[] {effects=effects+1;@println(effects);return [1,2]};for key in values() {while true {}}",
+        "mut int effects=0;fn hidden() {while true {}};for key in [1,2] {effects=effects+1;@println(effects);hidden()}",
+        "mut int effects=0;mut int i=1;while i<3 {int fail=1/(i-i);while true {};i=i+1}",
+        "mut int effects=0;fn values() int[] {effects=effects+1;@println(effects);while effects>0 {};return [1,2]};for key in values() {}",
+    ] {
+        assert_no_candidate_execution(source);
+    }
 }

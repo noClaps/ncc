@@ -3316,6 +3316,9 @@ impl Evaluator<'_> {
         }
         // Neither preprocessing nor certification executes candidate helpers.
         if let Some(certificate) = crate::termination::counted_loop(condition, body) {
+            if !self.nested_loops_proven(body, None, env) {
+                return None;
+            }
             let (start, min, max) = self.loop_integer(env.get(certificate.counter)?)?;
             let bound = self.evaluate(certificate.bound, env)?;
             let (bound, _, _) = self.loop_integer(&bound)?;
@@ -3360,6 +3363,9 @@ impl Evaluator<'_> {
         label: Option<&str>,
         env: &mut HashMap<String, Value>,
     ) -> Option<Flow> {
+        if !self.nested_loops_proven(body, Some((name, iterable)), env) {
+            return None;
+        }
         let traversal = match self.evaluate(iterable, env)? {
             Value::Array(elements) => (0..elements.len())
                 .map(|i| Value::Uint(i as u64))

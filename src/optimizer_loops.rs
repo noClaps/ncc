@@ -28,6 +28,9 @@ mod summaries;
 #[path = "optimizer_loops_arguments.rs"]
 mod arguments;
 
+#[path = "optimizer_loops_nested.rs"]
+mod nested;
+
 struct Proof<'e, 'module> {
     evaluator: &'e Evaluator<'module>,
     values: HashMap<String, Value>,
@@ -104,6 +107,8 @@ impl<'module> Proof<'_, 'module> {
             return None;
         }
         self.substitute_constants(&mut comparison, &mut prefix, &mut body);
+        let prefix = self.certify_helper_loops(&prefix)?;
+        let body = self.certify_helper_loops(&body)?;
         if self.counted_proven(&comparison, &body, &prefix, label)
             || self.generalized_proven(&comparison, &body, &prefix)
         {
@@ -453,7 +458,12 @@ impl<'module> Proof<'_, 'module> {
             }
             Stmt::Break(None, label) => Stmt::Break(None, label.clone()),
             Stmt::Continue(label) => Stmt::Continue(label.clone()),
-            // Early helper returns cannot become exits from the caller's loop.
+            // Source returns exit the containing function. Expanded helper
+            // returns are handled separately and must not exit the caller.
+            Stmt::Return(value) if self.active.is_empty() => Stmt::Return(match value {
+                Some(value) => Some(self.expression(value, scope)?),
+                None => None,
+            }),
             Stmt::Return(_) | Stmt::Throw(_) | Stmt::Break(Some(_), _) | Stmt::Lock { .. } => {
                 return None;
             }
