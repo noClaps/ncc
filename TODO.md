@@ -18,8 +18,6 @@
 
     - [ ] Expand conservative termination proof coverage.
 
-      - [ ] Generalize helper ranking summaries beyond constant trip counts and
-            uniform scalar results, including container and short-circuit arguments.
       - [ ] Discharge nested-loop termination obligations before interpreting
             enclosing loop iterations, not only when the nested loop is reached.
       - [ ] Prove additional recursive ranking patterns, mutual recursion, and
@@ -39,6 +37,10 @@
     - [ ] Extend exit tracking through loops, locks, labeled conditionals, and
           value expressions without losing reachable continuation.
     - [ ] Refine whole-statement/initializer retention.
+- [ ] Resolve the debug/release discrepancy for indexed reads whose index
+      evaluation replaces the object binding; clarify the intended read-index
+      semantics before changing the C backend or evaluator. These cases remain
+      barriers to the generalized helper termination proof.
 - [ ] Attempt to eliminate all undefined behavior from the language.
   - [ ] Identify potentially undefined cases.
   - [ ] Clarify intended behavior with the user and let the user document those

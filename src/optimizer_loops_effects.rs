@@ -1,5 +1,6 @@
 //! Ordered proof-only statement effects and immutable helper-loop inputs.
-use super::helpers::{integer, scalar, snapshot, summarize_loop};
+use super::arguments::{literal, value_type};
+use super::helpers::{snapshot, summarize_loop};
 use super::{Binding, Block, Expr, Pattern, Proof, Scope, Stmt};
 use crate::ast::VarDecl;
 
@@ -17,7 +18,7 @@ impl Proof<'_, '_> {
             return Some(value);
         }
         let ty = self.evaluator.expr_type(original)?;
-        if !scalar(ty) {
+        if !value_type(ty) {
             return None;
         }
         let name = self.fresh();
@@ -113,14 +114,25 @@ impl Proof<'_, '_> {
             return None;
         }
         // Initializers use the old scope, even for a same-spelled declaration.
-        let (mut prefix, value) = self.effect_expression(&declaration.value, scope)?;
+        let (mut prefix, mut value) = self.effect_expression(&declaration.value, scope)?;
+        if value_type(&declaration.ty)
+            && self.evaluator.expr_type(&declaration.value)? != &declaration.ty
+        {
+            // Keep declaration coercions explicit in proof-only copies. A shape
+            // projection must not mistake converted keys/elements for literals.
+            value = Expr::Cast {
+                ty: declaration.ty.clone(),
+                value: Box::new(value),
+                implicit: true,
+            };
+        }
         let mut rewritten = declaration.clone();
         rewritten.value = value.clone();
         rewritten.pattern = self.declaration_pattern(&declaration.pattern, scope)?;
         if !declaration.mutable
-            && scalar(&declaration.ty)
+            && value_type(&declaration.ty)
             && self.evaluator.expr_type(&declaration.value)? == &declaration.ty
-            && (integer(&value).is_some() || matches!(value, Expr::Bool(_)))
+            && literal(&value)
             && let Pattern::Name(name) = &declaration.pattern
             && name != "_"
         {
@@ -209,7 +221,7 @@ impl Proof<'_, '_> {
     }
 }
 
-fn stable_expression(value: &Expr, suffix: &Block) -> bool {
+pub(super) fn stable_expression(value: &Expr, suffix: &Block) -> bool {
     let mut writes = super::HashSet::new();
     super::block_writes(suffix, &mut writes);
     let mut stable = true;

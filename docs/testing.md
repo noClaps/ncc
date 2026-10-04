@@ -54,6 +54,20 @@ unproven helper loops, changing bounds, arithmetic overflow, and short-circuit
 argument effects. Unit tests also assert that proof construction leaves evaluator
 cells unchanged and defensively protects writable parameter copies.
 
+`tests/helper_loop_summaries.rs` covers variable trip counts and nonuniform
+monotonic helper-loop updates. Checked input ranges bound iteration counts and
+all intermediate excursions without evaluating a helper. Displacement envelopes
+are termination-only and must never become executable replacements.
+`tests/helper_results.rs` covers exact branch-dependent scalar and container
+returns, return-site snapshots, direct and nested consumers, early exits, copied
+arguments, and invalidation after writes. Proof continuations keep every possible
+return path rather than choosing a representative value.
+`tests/helper_arguments.rs` covers array, tuple, map, nested-container, and string
+arguments, ordered aggregate effects, copied projections, assignment RHS copies,
+and known and unknown short-circuit paths. Lifted RHS effects remain conditional;
+conditional-only progress cannot establish termination. All three suites compare
+debug/release output and compile unsafe arithmetic probes in both modes.
+
 `tests/varying_bounds.rs` compares debug/release behavior for converging and
 same-direction counter/bound updates, correlated conditional strides, labeled
 continues, shared helpers, lexical shadows, all supported comparisons, and fixed
@@ -79,11 +93,15 @@ recurrences against independent arithmetic safety calculations.
 
 Unproven loops/recursion are not entered speculatively. Current certificates remain
 conservative for nonlinear calculated limits, mutual recursion, and more general
-ranking functions. Helper summaries require provable constant trip counts for
-progress-carrying loops; certified rank-neutral helper loops may retain their
-control flow. Nonuniform scalar results other than compatible monotonic Boolean
-condition returns, container parameters, and effectful short-circuit operands
-remain runtime fallbacks.
+ranking functions. Helper summaries support literal trip counts and universally
+bounded variable trip counts with monotonic additive updates; resets, mixed-direction
+excursions, and unbounded or overflowing helper updates remain conservative.
+Certified rank-neutral helper loops may retain their control flow. Exact
+branch-dependent scalar and structural container results use return-site samples.
+Callables/futures inside containers, unsupported nominal coercions, and
+loop-carried samples remain barriers. Indexed reads whose index effects replace
+the object binding also remain barriers pending resolution of an existing C
+backend/evaluator discrepancy; no intended semantics are assumed here.
 Reset proofs currently track two counters; multiplication proofs require a positive
 seed and identical continuing-path updates against a fixed or additive limit.
 The compound and varying-bound certificates reject nested loops. Counted proofs,

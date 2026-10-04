@@ -680,18 +680,18 @@ while i < 6 { advance() }
 }
 
 #[test]
-fn effectful_short_circuit_operands_remain_unproven() {
-    assert!(
+fn known_short_circuit_operands_skip_effects() {
+    assert_eq!(
         output(
             r"
 mut int i = 0
 mut int checks = 0
 fn check() bool { checks = checks + 1;return true }
 while i < 3 { bool ignored = false and check();i = i + 1 }
-@println(i)
+@println(i, checks)
 "
-        )
-        .is_none()
+        ),
+        Some(vec!["30".into()])
     );
 }
 

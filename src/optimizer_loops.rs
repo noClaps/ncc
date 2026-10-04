@@ -22,6 +22,12 @@ mod helpers;
 #[path = "optimizer_loops_effects.rs"]
 mod effects;
 
+#[path = "optimizer_loops_summaries.rs"]
+mod summaries;
+
+#[path = "optimizer_loops_arguments.rs"]
+mod arguments;
+
 struct Proof<'e, 'module> {
     evaluator: &'e Evaluator<'module>,
     values: HashMap<String, Value>,
@@ -93,7 +99,7 @@ impl<'module> Proof<'_, 'module> {
                 self.expression(condition, &scope)?,
             )
         };
-        let mut body = self.block(body, &scope)?;
+        let mut body = helpers::consume_results(&self.block(body, &scope)?);
         if !self.writes.is_disjoint(&self.callable_names) {
             return None;
         }

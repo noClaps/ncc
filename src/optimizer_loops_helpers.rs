@@ -1,6 +1,15 @@
-//! Proof-only call frames, scalar snapshots, and closed-form helper loops.
+//! Proof-only call frames, value snapshots, and certified helper-loop summaries.
 use super::{Binding, Block, Expr, Function, HashMap, Pattern, Proof, Scope, Stmt, Type};
 use crate::ast::{BinaryOp, UnaryOp, VarDecl};
+
+#[path = "optimizer_loops_results.rs"]
+mod results;
+pub(super) use results::consume_results;
+
+struct ReturnSamples {
+    name: String,
+    values: Vec<Expr>,
+}
 
 #[cfg(test)]
 #[path = "optimizer_loops_helpers_tests.rs"]
@@ -79,7 +88,9 @@ impl Proof<'_, '_> {
         for (parameter, original) in function.params.iter().zip(args) {
             // Different types require evaluator coercion. Do not erase it in a
             // proof tree with no expression-type metadata.
-            if !scalar(&parameter.ty) || self.evaluator.expr_type(original)? != &parameter.ty {
+            if !super::arguments::value_type(&parameter.ty)
+                || self.evaluator.expr_type(original)? != &parameter.ty
+            {
                 return None;
             }
             let (effects, argument) = self.effect_expression(original, caller)?;
@@ -89,7 +100,7 @@ impl Proof<'_, '_> {
                 .statements
                 .push(snapshot(&name, &parameter.ty, argument.clone()));
             if !parameter_written(&function.body, &parameter.name)
-                && (integer(&argument).is_some() || matches!(argument, Expr::Bool(_)))
+                && super::arguments::literal(&argument)
             {
                 scope.insert(
                     parameter.name.clone(),
@@ -121,8 +132,19 @@ impl Proof<'_, '_> {
     ) -> Option<(Block, Expr)> {
         // This spelling cannot collide with a source-language label.
         let label = format!("<helper-exit:{}>", self.fresh());
-        let mut returns = Vec::new();
+        let mut returns = ReturnSamples {
+            name: format!("<helper-result:{}>", self.fresh()),
+            values: Vec::new(),
+        };
         let body = self.helper_block(&function.body, scope, function, &label, &mut returns)?;
+        let body = super::arguments::project_frame(body, &prefix, &snapshots, &mut returns.values);
+        let uniform = helper_result(&returns.values, result_use);
+        let body = if uniform.is_some() || result_use != ResultUse::Exact {
+            results::remove_samples(body, &returns.name)
+        } else {
+            body
+        };
+        let body = consume_results(&body);
         // Collect the entire frame's writes before using known immutable values
         // in loop certificates, including writes occurring after a nested loop.
         let mut body = self.certify_helper_loops(&body)?;
@@ -144,9 +166,13 @@ impl Proof<'_, '_> {
         let mut result = if function.return_type == Type::void() {
             Expr::None
         } else {
-            // Sampling follows a call-local exit, with no intervening effects.
-            // Only the outer loop condition may use a nonexact envelope.
-            helper_result(&returns, result_use)?
+            // Exact nonuniform results retain their return-site storage. Only
+            // outer conditions may use a termination-only Boolean envelope.
+            uniform.or_else(|| {
+                (result_use == ResultUse::Exact
+                    && super::arguments::value_type(&function.return_type))
+                .then(|| Expr::Name(returns.name.clone()))
+            })?
         };
         for (start, name, argument) in snapshots.into_iter().rev() {
             let suffix = Block {
@@ -167,8 +193,10 @@ impl Proof<'_, '_> {
             );
             if stable {
                 let substitutions = HashMap::from([(name, argument)]);
-                let rewritten =
-                    super::substitute_proof_statement(Stmt::Block(prefix), &substitutions);
+                let rewritten = super::arguments::simplify(super::substitute_proof_statement(
+                    Stmt::Block(prefix),
+                    &substitutions,
+                ));
                 let Stmt::Block(block) = rewritten else {
                     unreachable!()
                 };
@@ -177,9 +205,9 @@ impl Proof<'_, '_> {
                 // Its pure value computation cannot affect a termination rank;
                 // the original evaluator still performs it and checks failures.
                 prefix.statements.remove(start - 1);
-                let Stmt::Expr(value) =
-                    super::substitute_proof_statement(Stmt::Expr(result), &substitutions)
-                else {
+                let Stmt::Expr(value) = super::arguments::simplify(
+                    super::substitute_proof_statement(Stmt::Expr(result), &substitutions),
+                ) else {
                     unreachable!()
                 };
                 result = value;
@@ -220,26 +248,12 @@ impl Proof<'_, '_> {
                     },
                 ))
             }
-            Expr::Binary { left, op, right } => {
-                let (mut prefix, mut left_value) = self.effect_expression(left, scope)?;
-                let (suffix, right) = self.effect_expression(right, scope)?;
-                if !suffix.statements.is_empty() {
-                    // Short-circuit operators must not execute a lifted RHS.
-                    if matches!(op, BinaryOp::And | BinaryOp::Or) {
-                        return None;
-                    }
-                    left_value = self.capture_before(&mut prefix, left, left_value, &suffix)?;
-                }
-                prefix.statements.extend(suffix.statements);
-                Some((
-                    prefix,
-                    Expr::Binary {
-                        left: Box::new(left_value),
-                        op: *op,
-                        right: Box::new(right),
-                    },
-                ))
-            }
+            Expr::Binary { left, op, right } => self.binary_effects(left, *op, right, scope),
+            Expr::Array(_)
+            | Expr::Tuple(_)
+            | Expr::Map(_)
+            | Expr::Index { .. }
+            | Expr::Member { .. } => self.aggregate_expression(value, scope),
             _ => Some((Block { statements: vec![] }, self.expression(value, scope)?)),
         }
     }
@@ -250,7 +264,7 @@ impl Proof<'_, '_> {
         scope: &Scope,
         function: &Function,
         label: &str,
-        returns: &mut Vec<Expr>,
+        returns: &mut ReturnSamples,
     ) -> Option<Block> {
         let mut scope = scope.clone();
         let mut statements = Vec::new();
@@ -263,7 +277,12 @@ impl Proof<'_, '_> {
                         }
                         let (effects, value) = self.effect_expression(value, &scope)?;
                         statements.extend(effects.statements);
-                        returns.push(value);
+                        statements.push(snapshot(
+                            &returns.name,
+                            &function.return_type,
+                            value.clone(),
+                        ));
+                        returns.values.push(value);
                     } else if function.return_type != Type::void() {
                         return None;
                     }
@@ -319,7 +338,7 @@ impl Proof<'_, '_> {
         scope: &Scope,
         function: &Function,
         exit_label: &str,
-        returns: &mut Vec<Expr>,
+        returns: &mut ReturnSamples,
     ) -> Option<Vec<Stmt>> {
         let Stmt::For {
             label,
@@ -354,7 +373,7 @@ impl Proof<'_, '_> {
         scope: &Scope,
         function: &Function,
         label: &str,
-        returns: &mut Vec<Expr>,
+        returns: &mut ReturnSamples,
     ) -> Option<Expr> {
         let Expr::If { subject, arms } = value.unlocated() else {
             return None;
@@ -489,11 +508,6 @@ fn has_exit(statements: &[Stmt], label: &str) -> bool {
         })
 }
 
-pub(super) fn scalar(ty: &Type) -> bool {
-    matches!(ty, Type::Named(name, args) if args.is_empty()
-        && matches!(name.as_str(), "int" | "uint" | "byte" | "bool"))
-}
-
 pub(super) fn snapshot(name: &str, ty: &Type, value: Expr) -> Stmt {
     Stmt::Var(VarDecl {
         source_path: "<proof>".into(),
@@ -508,6 +522,11 @@ pub(super) fn snapshot(name: &str, ty: &Type, value: Expr) -> Stmt {
 }
 
 pub(super) fn summarize_loop(statement: &Stmt, prefix: &[Stmt]) -> Option<Vec<Stmt>> {
+    literal_summary(statement, prefix)
+        .or_else(|| super::summaries::summarize_loop(statement, prefix))
+}
+
+fn literal_summary(statement: &Stmt, prefix: &[Stmt]) -> Option<Vec<Stmt>> {
     let Stmt::While {
         condition, body, ..
     } = statement.unlocated()

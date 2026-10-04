@@ -103,7 +103,15 @@
   and never substitute a written parameter copy with caller storage. Certify helper
   loops without executing them; closed-form progress summaries must preserve
   intermediate excursions. Nonexact Boolean envelopes are termination-only and
-  must never replace actual helper values or source conditions.
+  must never replace actual helper values or source conditions. Variable-trip
+  displacement envelopes are also termination-only: bound every intermediate
+  excursion and include zero-trip paths. Exact nonuniform results retain
+  return-site snapshots and all branch continuations; invalidate substitutions
+  when their storage dependencies change. Structural container arguments copy
+  before later operand effects. Keep lifted short-circuit RHS effects guarded,
+  and never count conditional-only progress as unconditional progress. Indexed
+  reads whose index effects replace the object remain proof barriers until the
+  existing evaluator/C backend discrepancy and intended semantics are resolved.
   Varying-bound and calculated-limit certificates must track relational progress
   and each binding's intermediate excursions across a proven finite horizon, not
   assume invariant bounds. Substitute known immutable scalar steps in proof trees
