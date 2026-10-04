@@ -6,6 +6,9 @@ use crate::{
     lexer::integer,
     sema::{Capture, CheckedModule, TypeInfo},
 };
+#[path = "c_backend_constants.rs"]
+mod constants;
+
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     fmt::Write as _,
@@ -41,6 +44,8 @@ pub fn emit(checked: &CheckedModule) -> Result<String, Diagnostics> {
         mutex_types: vec![],
         value_helpers: HashMap::new(),
         expression_values: HashMap::new(),
+        constant_data: vec![],
+        constant_names: HashMap::new(),
     };
     let (declarations, global_slots) = emit_declarations(&mut e)?;
     emit_functions(&mut e)?;
@@ -238,6 +243,10 @@ fn emit_translation_unit(
         }
         output.push('\n');
     }
+    for data in &e.constant_data {
+        output.push_str(data);
+        output.push('\n');
+    }
     output.push_str(declarations);
     if e.helpers.contains("/* arguments */") {
         output.push_str("static int nc_argc; static char **nc_argv;\n");
@@ -333,6 +342,7 @@ struct TypeDefinition {
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum ValueOperation {
     Copy,
+    ConstantCopy,
     Equal,
     String,
     PrintString,
@@ -367,6 +377,8 @@ struct Emitter<'a> {
     locked_mutexes: HashMap<String, String>,
     mutex_types: Vec<(Type, String)>,
     value_helpers: HashMap<(ValueOperation, Type), String>,
+    constant_data: Vec<String>,
+    constant_names: HashMap<(String, String), String>,
 }
 impl Emitter<'_> {
     /// Generate one recursive runtime helper per operation/type, rather than
@@ -385,7 +397,9 @@ impl Emitter<'_> {
         self.value_helpers.insert(key, name.clone());
         let ct = self.c_type(ty)?;
         let (ret, params) = match operation {
-            ValueOperation::Copy => (ct.clone(), format!("{ct} value")),
+            ValueOperation::Copy | ValueOperation::ConstantCopy => {
+                (ct.clone(), format!("{ct} value"))
+            }
             ValueOperation::Equal => ("int".into(), format!("{ct} left, {ct} right")),
             ValueOperation::String | ValueOperation::PrintString => (
                 self.c_type(&Type::Named("str".into(), vec![]))?,
@@ -397,7 +411,9 @@ impl Emitter<'_> {
         let saved = std::mem::take(&mut self.out);
         self.line(format!("{signature} {{"));
         let result = match operation {
-            ValueOperation::Copy => self.copy_body(ty, "value"),
+            ValueOperation::Copy | ValueOperation::ConstantCopy => {
+                self.copy_body(operation, ty, "value")
+            }
             ValueOperation::Equal => self.equality_body("left", "right", ty),
             ValueOperation::String => self.string_body("value", ty, StringUse::Value),
             ValueOperation::PrintString => self.string_body("value", ty, StringUse::Output),
@@ -661,16 +677,29 @@ impl Emitter<'_> {
         self.helpers.insert("static void nc_panic(const char *message);\ntypedef struct nc_allocation { void *data; struct nc_allocation *next; } nc_allocation;\nstatic nc_allocation *nc_allocations;\nstatic void nc_cleanup(void) { while (nc_allocations) { nc_allocation *next = nc_allocations->next; free(nc_allocations->data); free(nc_allocations); nc_allocations = next; } }\nstatic void *nc_alloc(size_t count, size_t size) { if (size && count > (size_t)-1 / size) nc_panic(\"allocation overflow\"); void *data = calloc(count ? count : 1, size); nc_allocation *node = malloc(sizeof(*node)); if (!data || !node) nc_panic(\"out of memory\"); node->data = data; node->next = nc_allocations; nc_allocations = node; return data; }".into());
     }
     fn copy(&mut self, ty: &Type, value: &str) -> Result<String, Diagnostics> {
+        self.copy_with(ValueOperation::Copy, ty, value)
+    }
+    fn copy_with(
+        &mut self,
+        operation: ValueOperation,
+        ty: &Type,
+        value: &str,
+    ) -> Result<String, Diagnostics> {
         if let Type::Named(n, _) = ty
             && let Some(TypeInfo::Alias(base)) = self.checked.types.get(n)
         {
-            return self.copy(&base.clone(), value);
+            return self.copy_with(operation, &base.clone(), value);
         }
-        if let Type::Map(key, inner) = ty {
+        if let Type::Map(key, inner) = ty
+            && operation == ValueOperation::Copy
+        {
             return self.copy(&map_array(key, inner), value);
         }
-        if self.fields(ty).is_some() || matches!(ty, Type::Array(_, _)) {
-            let call = self.value_helper(ValueOperation::Copy, ty, &[value])?;
+        if self.fields(ty).is_some()
+            || matches!(ty, Type::Array(_, _) | Type::Map(_, _))
+            || (operation == ValueOperation::ConstantCopy && self.enum_decl(ty).is_some())
+        {
+            let call = self.value_helper(operation, ty, &[value])?;
             let ct = self.c_type(ty)?;
             let result = self.fresh();
             self.line(format!("{ct} {result} = {call};"));
@@ -678,7 +707,18 @@ impl Emitter<'_> {
         }
         Ok(value.into())
     }
-    fn copy_body(&mut self, ty: &Type, value: &str) -> Result<String, Diagnostics> {
+    fn copy_body(
+        &mut self,
+        operation: ValueOperation,
+        ty: &Type,
+        value: &str,
+    ) -> Result<String, Diagnostics> {
+        if let Type::Map(key, inner) = ty {
+            return self.constant_map_copy(key, inner, value);
+        }
+        if operation == ValueOperation::ConstantCopy && self.enum_decl(ty).is_some() {
+            return self.constant_enum_copy(ty, value);
+        }
         if let Type::Optional(inner) | Type::ErrorUnion(inner) = ty {
             let ct = self.c_type(ty)?;
             let copy = self.fresh();
@@ -692,7 +732,7 @@ impl Emitter<'_> {
                 if optional { "" } else { "!" }
             ));
             if **inner != Type::void() {
-                let contents = self.copy(inner, &format!("({value}).value"))?;
+                let contents = self.copy_with(operation, inner, &format!("({value}).value"))?;
                 self.line(format!("{copy}.value = {contents};"));
             }
             self.line("}");
@@ -706,7 +746,7 @@ impl Emitter<'_> {
             let copy = self.fresh();
             self.line(format!("{ct} {copy} = {value};"));
             for (field, ty) in fields {
-                let v = self.copy(&ty, &format!("({value}).{field}"))?;
+                let v = self.copy_with(operation, &ty, &format!("({value}).{field}"))?;
                 self.line(format!("{copy}.{field} = {v};"));
             }
             return Ok(copy);
@@ -721,7 +761,7 @@ impl Emitter<'_> {
             self.line(format!(
                 "for (uint64_t {index} = 0; {index} < ({value}).len; ++{index}) {{"
             ));
-            let child = self.copy(element, &format!("({value}).vals[{index}]"))?;
+            let child = self.copy_with(operation, element, &format!("({value}).vals[{index}]"))?;
             self.line(format!("{copy}.vals[{index}] = {child};\n}}"));
             Ok(copy)
         } else {
@@ -1218,6 +1258,17 @@ impl Emitter<'_> {
         if let Some(value) = self.expression_values.get(&e.id()) {
             return Ok(value.clone());
         }
+        if matches!(
+            e,
+            Expr::Array(_) | Expr::Map(_) | Expr::Tuple(_) | Expr::StructInit { .. }
+        ) && self.constant_expression(e)?
+        {
+            let ty = self.ty(e)?;
+            let initializer = self.constant_initializer(e, &ty)?;
+            let ct = self.c_type(&ty)?;
+            let name = self.constant_object(&ct, &initializer);
+            return self.copy_with(ValueOperation::ConstantCopy, &ty, &name);
+        }
         match e {
             Expr::Map(entries) => self.map_literal(e, entries),
             Expr::Try(value) => self.try_expression(e, value),
@@ -1490,6 +1541,10 @@ impl Emitter<'_> {
         self.temp(e, &value)
     }
     fn atom_expression(&mut self, e: &Expr) -> Result<String, Diagnostics> {
+        let value = self.atom_value(e)?;
+        self.temp(e, &value)
+    }
+    fn atom_value(&mut self, e: &Expr) -> Result<String, Diagnostics> {
         let value = match e {
             Expr::None => {
                 let ct = self.c_type(&self.ty(e)?)?;
@@ -1537,7 +1592,7 @@ impl Emitter<'_> {
             }
             _ => return unsupported("this expression"),
         };
-        self.temp(e, &value)
+        Ok(value)
     }
     fn cast_expression(
         &mut self,

@@ -160,16 +160,31 @@
   A successfully evaluated, call-free initial execution region may be replaced
   with final global initializers before any values or storage escape. Keep global
   runtime storage for later mutations and captures; roll back the entire region on
-  unsupported operations, failures, or unproven termination. Do not resume this
-  partial-prefix precomputation past calls, closure creation, effects, or unknown
-  state. Separately, an entirely known program may be replaced transactionally
+  unsupported operations, failures, or unproven termination. Beyond that prefix,
+  use statement-sized transactions: emit constant output snapshots and explicit
+  updates to existing runtime storage at the original execution position. Known
+  calls and multi-binding declarations may participate; nonmaterializable escaped
+  storage stays runtime. Unknown input/effects retain their original statements,
+  invalidate shared mutable facts, and permit independent later computations.
+  Preserve cell identities across invalidation and reject writes to hidden cells
+  that cannot be represented through a visible runtime binding. Potential async
+  exposure persists across assignments and discarded futures; without a join
+  proof, never fold reads or coalesce writes to exposed storage. Indexed reads
+  whose index changes existing storage remain barriers in every evaluator path
+  that can publish constants, pending resolution of the read-index discrepancy.
+  Separately, an entirely known program may be replaced transactionally
   with constant-string output calls, including computation through shared globals
   and closures. Never execute output during evaluation; record exact argument
   snapshots and nested-call order, and discard the transaction on any unknown
   operation or failure.
   Known `@print`/`@println` arguments
-  are analysed without executing output; runtime calls remain intact. Test-mode
-  analysis follows retained test blocks and known-true assertions in source order;
+  are analysed without executing output; replace only fully known transactions.
+  Constant aggregate materialization must restore each constituent's expected
+  type, including nominal alias chains and inactive optional/error variants.
+  Emit deduplicated read-only C templates for constant aggregates, but recursively
+  materialize fresh writable runtime containers and preserve map overwrites.
+  Test-mode analysis follows retained test blocks and known-true assertions in
+  source order;
   false or unknown assertions stop analysis and retain runtime checks. Named calls
   use known lexical global storage, never caller-local shadows, and analysis must
   repeat call effects rather than memoizing them.

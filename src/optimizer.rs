@@ -16,6 +16,12 @@ mod loops;
 #[path = "optimizer_recursion.rs"]
 mod recursion;
 
+#[path = "optimizer_partial.rs"]
+mod partial;
+
+#[path = "optimizer_constants.rs"]
+mod constants;
+
 /// Embedding is mandatory compile-time evaluation, including in debug builds.
 ///
 /// # Errors
@@ -148,6 +154,7 @@ enum Value {
     Function(String),
     Closure(usize, Vec<(String, Value)>),
     Cell(usize),
+    Unknown,
 }
 // Only literal text is segmented; subsequent operations preserve char-array elements.
 fn string_parts(text: &str) -> Vec<String> {
@@ -235,7 +242,7 @@ impl Value {
     }
     fn materializable(&self) -> bool {
         match self {
-            Self::Closure(..) | Self::Cell(_) => false,
+            Self::Closure(..) | Self::Cell(_) | Self::Unknown => false,
             Self::String(parts) | Self::Failure(_, parts) => parts
                 .iter()
                 .all(|part| crate::unicode::boundaries(part).len() == 1),
@@ -359,7 +366,7 @@ impl Value {
                 Stmt::Throw(string_expr(message)),
                 Type::ErrorUnion(Box::new(inner)),
             ),
-            Self::Closure(..) | Self::Cell(_) => {
+            Self::Closure(..) | Self::Cell(_) | Self::Unknown => {
                 unreachable!("closure constants retain their original source")
             }
         }
@@ -443,6 +450,7 @@ fn optimize_module(checked: CheckedModule) -> Result<Module, Diagnostics> {
         }
     }
     let prefix = precompute_prefix(&checked, &functions);
+    let partial = partial::precompute(&checked, &functions, &prefix);
     let mut body_replacements = expression_constants(&checked, &functions);
     let mut module = checked.module;
     for item in &mut module.items {
@@ -472,6 +480,9 @@ fn optimize_module(checked: CheckedModule) -> Result<Module, Diagnostics> {
             }
             _ => unreachable!(),
         }
+    }
+    for (index, items) in partial.into_iter().rev() {
+        module.items.splice(index..=index, items);
     }
     prune_unreachable_functions(&mut module);
     Ok(module)
@@ -799,36 +810,14 @@ fn fold(
     Ok(None)
 }
 fn materialize(value: Value, original: &Expr, checked: &CheckedModule) -> Expr {
-    if matches!(value, Value::Void(_))
-        || matches!(value, Value::Success(ref inner, _) if *inner == Type::void())
-    {
-        return value.expr();
-    }
-    let expr = value.expr();
-    let ty = checked.expression_types.get(&original.id());
-    // A typed constant thunk supplies context for empty arrays, optionals, and
-    // nominal values even when the caller (e.g. @println) supplies no type.
-    if let Some(ty) = ty
-        && !matches!(ty, Type::Named(name, _) if matches!(name.as_str(), "int" | "uint" | "byte" | "float" | "str" | "char" | "bool"))
-    {
-        let mut base = ty;
-        let mut aliases = Vec::new();
-        while let Type::Named(name, _) = base
-            && let Some(TypeInfo::Alias(inner)) = checked.types.get(name)
-        {
-            aliases.push(base.clone());
-            base = inner;
-        }
-        return aliases
-            .into_iter()
-            .rev()
-            .fold(constant_thunk(expr, base.clone()), |value, ty| Expr::Cast {
-                ty,
-                value: Box::new(value),
-                implicit: false,
-            });
-    }
-    expr
+    let expr = if let Some(ty) = checked.expression_types.get(&original.id()) {
+        constants::expression(value, ty, checked)
+    } else {
+        value.expr()
+    };
+    let mut result = original.clone();
+    *result.unlocated_mut() = expr;
+    result
 }
 fn constant_thunk(expr: Expr, ty: Type) -> Expr {
     constant_statement(Stmt::Return(Some(expr)), ty)
@@ -874,6 +863,8 @@ struct Evaluator<'a> {
     embed_error: Option<Diagnostics>,
     memo: HashMap<(Value, Vec<Value>), Value>,
     cells: Vec<Value>,
+    volatile_cells: HashSet<usize>,
+    index_writes: Vec<HashSet<usize>>,
 
     analyse_output: bool,
     recorded_output: Option<Vec<Item>>,
@@ -908,6 +899,8 @@ impl<'module> Evaluator<'module> {
             memo: HashMap::new(),
             cells: Vec::new(),
 
+            volatile_cells: HashSet::new(),
+            index_writes: vec![],
             analyse_output: false,
             recorded_output: None,
             analysis_globals: HashMap::new(),
@@ -940,12 +933,20 @@ impl<'module> Evaluator<'module> {
         env: &mut HashMap<String, Value>,
         declared: &mut Vec<(String, Option<Value>)>,
     ) -> Option<()> {
+        self.declaration_snapshot(v, env, declared).map(|_| ())
+    }
+    fn declaration_snapshot(
+        &mut self,
+        v: &VarDecl,
+        env: &mut HashMap<String, Value>,
+        declared: &mut Vec<(String, Option<Value>)>,
+    ) -> Option<Value> {
         if v.mutex {
             return None;
         }
         let value = self.evaluate(&v.value, env)?;
         let value = self.coerce(declaration_value(&v.pattern, &v.ty, value)?, &v.ty)?;
-        bind_declaration(&v.pattern, value, env, declared)?;
+        bind_declaration(&v.pattern, value.clone(), env, declared)?;
         if v.mutable {
             for name in v.binding_names() {
                 let value = env.get_mut(name)?;
@@ -954,7 +955,7 @@ impl<'module> Evaluator<'module> {
                     .push(std::mem::replace(value, Value::Cell(index)));
             }
         }
-        Some(())
+        Some(value)
     }
     fn constant_binding(&mut self, key: usize, name: &str) -> Option<Value> {
         let initializer = *self.expressions.get(&key)?;
@@ -1641,7 +1642,24 @@ impl<'module> Evaluator<'module> {
         env: &mut HashMap<String, Value>,
     ) -> Option<Value> {
         let object = self.evaluate(object, env)?;
-        let index = self.index(index, &object, env)?;
+        // Index-side mutations have unresolved read snapshot semantics. Refuse
+        // to publish constants from any evaluator path when existing storage
+        // changes; pure calls and new function-local cells remain evaluatable.
+        let snapshot = partial::effectful_index(index).then(|| (env.clone(), self.cells.len()));
+        if snapshot.is_some() {
+            self.index_writes.push(HashSet::new());
+        }
+        let index = self.index(index, &object, env);
+        if let Some((bindings, cell_count)) = snapshot {
+            let writes = self
+                .index_writes
+                .pop()
+                .expect("active indexed-read observation");
+            if bindings != *env || writes.iter().any(|index| *index < cell_count) {
+                return None;
+            }
+        }
+        let index = index?;
         if let Value::Map(entries) = object {
             return entries
                 .into_iter()
@@ -1675,10 +1693,11 @@ impl<'module> Evaluator<'module> {
     }
     fn name_value(&mut self, e: &Expr, n: &str, env: &HashMap<String, Value>) -> Option<Value> {
         if let Some(value) = env.get(n) {
-            return match value {
-                Value::Cell(index) => self.cells.get(*index).cloned(),
-                value => Some(value.clone()),
+            let value = match value {
+                Value::Cell(index) => self.cells.get(*index)?,
+                value => value,
             };
+            return (!matches!(value, Value::Unknown)).then(|| value.clone());
         }
         if let Some(key) = self.checked.constant_sources.get(&e.id()) {
             return self.constant_binding((*key)?, n);
@@ -3135,8 +3154,16 @@ impl Evaluator<'_> {
             let ty = self.checked.expression_types.get(&target.id())?;
             let v = self.coerce(v, ty)?;
             let binding = env.get_mut(&name)?;
+            if matches!(binding, Value::Cell(index) if self.volatile_cells.contains(index)) {
+                return None;
+            }
             let storage = match binding {
-                Value::Cell(index) => self.cells.get_mut(*index)?,
+                Value::Cell(index) => {
+                    for writes in &mut self.index_writes {
+                        writes.insert(*index);
+                    }
+                    self.cells.get_mut(*index)?
+                }
                 value => value,
             };
             assign(storage, &path, v)?;

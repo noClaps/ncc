@@ -84,7 +84,7 @@ pub(crate) fn uses_index_length(e: &Expr) -> bool {
     found
 }
 
-fn expr<'a>(e: &'a Expr, f: &mut impl FnMut(&'a Expr)) {
+pub(crate) fn expr<'a>(e: &'a Expr, f: &mut impl FnMut(&'a Expr)) {
     let e = e.unlocated();
     f(e);
     match e {
