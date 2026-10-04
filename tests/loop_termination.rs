@@ -51,17 +51,17 @@ fn exact() int {
 fn unknown_loops_are_not_entered_to_search_for_progress() {
     for source in [
         // The bound is missed by the stride.
-        "mut int i=1 while i!=4 {i=1/(i-i) i=i+2} @println(i)",
+        "mut int i=1;while i!=4 {i=1/(i-i);i=i+2};@println(i)",
         // One branch has no progress, even though this particular input terminates.
-        "mut int i=1 while i<4 {mut int fail=1/(i-i) if i<4 {true->{i=i+1} false->{}}} @println(i)",
+        "mut int i=1;while i<4 {mut int fail=1/(i-i);if i<4 {true->{i=i+1} false->{}}};@println(i)",
         // A continue can bypass the increment.
-        "mut int i=1 while i<4 {mut int fail=1/(i-i) if i==1 {true->{continue} false->{}} i=i+1} @println(i)",
+        "mut int i=1;while i<4 {mut int fail=1/(i-i);if i==1 {true->{continue} false->{}};i=i+1};@println(i)",
         // The bound changes.
-        "mut int i=1 mut int n=4 while i<n {mut int fail=1/(i-i) n=n+1 i=i+1} @println(i)",
+        "mut int i=1;mut int n=4;while i<n {mut int fail=1/(i-i);n=n+1;i=i+1};@println(i)",
         // Shared bound mutations through helpers must also block proof.
-        "mut int i=1 mut int n=4 fn change(){n=n+1} while i<n {mut int fail=1/(i-i) change() i=i+1} @println(i)",
+        "mut int i=1;mut int n=4;fn change(){n=n+1};while i<n {mut int fail=1/(i-i);change();i=i+1};@println(i)",
         // A closure can mutate shared induction storage.
-        "mut int i=1 fn reset=fn() {i=0} while i<4 {mut int fail=1/(i-i) reset() i=i+1} @println(i)",
+        "mut int i=1;fn reset=fn() {i=0};while i<4 {mut int fail=1/(i-i);reset();i=i+1};@println(i)",
     ] {
         for release in [false, true] {
             let c = compile(source, release).unwrap();
@@ -73,10 +73,10 @@ fn unknown_loops_are_not_entered_to_search_for_progress() {
 #[test]
 fn nondividing_stride_and_overflow_do_not_receive_certificates() {
     for source in [
-        "mut uint i=1 while i!=4 {i=i+2} @println(i)",
-        "mut uint i=18446744073709551614u while i<=18446744073709551615u {i=i+1} @println(i)",
-        "mut byte i=254 while i<255 {i=i+2} @println(i)",
-        "mut int i=1 while i<4 {i=i-1} @println(i)",
+        "mut uint i=1;while i!=4 {i=i+2};@println(i)",
+        "mut uint i=18446744073709551614u;while i<=18446744073709551615u {i=i+1};@println(i)",
+        "mut byte i=254;while i<255 {i=i+2};@println(i)",
+        "mut int i=1;while i<4 {i=i-1};@println(i)",
     ] {
         assert!(compile(source, true).unwrap().contains("} goto "));
     }
@@ -84,7 +84,7 @@ fn nondividing_stride_and_overflow_do_not_receive_certificates() {
 
 #[test]
 fn certified_loop_failures_keep_original_source_locations() {
-    let source = "mut int i=1 while i<4 {mut int fail=1/(i-i) i=i+1} @println(i)";
+    let source = "mut int i=1;while i<4 {mut int fail=1/(i-i);i=i+1};@println(i)";
     assert!(compile(source, false).is_ok());
     let error = compile(source, true).unwrap_err();
     assert!(format!("{error:?}").contains("division by zero"));
@@ -94,13 +94,13 @@ fn certified_loop_failures_keep_original_source_locations() {
 fn finite_for_snapshots_have_no_iteration_budget() {
     let values = vec!["0"; 12000].join(",");
     let source = format!(
-        "fn total() uint {{int[] values=[{values}] mut uint sum=0 for key in values {{sum=sum+1}} return sum}} @println(total())"
+        "fn total() uint {{int[] values=[{values}];mut uint sum=0;for key in values {{sum=sum+1}};return sum}};@println(total())"
     );
     assert!(!compile(&source, true).unwrap().contains("nc_fn_total("));
 }
 
 #[test]
 fn literal_false_conditions_do_not_require_body_progress() {
-    let source = "mut int i=1 while false {i=1/(i-i)} @println(i)";
+    let source = "mut int i=1;while false {i=1/(i-i)};@println(i)";
     assert!(!compile(source, true).unwrap().contains("} goto "));
 }

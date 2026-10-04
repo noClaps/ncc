@@ -1,6 +1,6 @@
 // NC's parser is the authority for syntax; see src/parser.rs and docs/design.md.
-// The stateless scanner preserves the compiler's newline-sensitive optional
-// values and ordinary call/index/struct continuation; other whitespace is extra.
+// The stateless scanner distinguishes statement separators from multiline
+// expression continuations and newline-sensitive optional values/postfix forms.
 const KEYWORDS = [
   "as",
   "assert",
@@ -41,14 +41,59 @@ const KEYWORDS = [
 
 const commaSep1 = (rule) => seq(rule, repeat(seq(",", rule)));
 const commaSep = (rule) => optional(seq(commaSep1(rule), optional(",")));
+const statements = ($, rule) =>
+  seq(
+    repeat($._separator),
+    optional(
+      seq(rule, repeat(seq(repeat1($._separator), rule)), repeat($._separator)),
+    ),
+  );
+
+// External continuation tokens take priority over newline separators only when
+// the current expression can consume them. Keep this order in sync with scanner.c.
+const CONTINUATIONS = [
+  ["or", "or"],
+  ["and", "and"],
+  ["eq", "=="],
+  ["ne", "!="],
+  ["lt", "<"],
+  ["le", "<="],
+  ["gt", ">"],
+  ["ge", ">="],
+  ["in", "in"],
+  ["bit_or", "|"],
+  ["xor", "^"],
+  ["bit_and", "&"],
+  ["shl", "<<"],
+  ["shr", ">>"],
+  ["plus", "+"],
+  ["minus", "-"],
+  ["concat", "<>"],
+  ["mul", "*"],
+  ["div", "/"],
+  ["mod", "%"],
+  ["pow", "**"],
+  ["member", "."],
+  ["assign", "="],
+  ["else", "else"],
+  ["catch", "catch"],
+];
+const continuationToken = ($, op) =>
+  choice(
+    op,
+    alias(
+      $[`_continue_${CONTINUATIONS.find((entry) => entry[1] === op)[0]}`],
+      op,
+    ),
+  );
 // The scanner may select an angle while both comparison and type-application
 // branches are live. Keep that token usable by either interpretation.
 const operatorToken = ($, op) =>
   op === "<"
-    ? choice("<", alias($._type_lt, "<"))
+    ? choice(continuationToken($, op), alias($._type_lt, "<"))
     : op === ">"
-      ? choice(">", alias($._comparison_gt, ">"))
-      : op;
+      ? choice(continuationToken($, op), alias($._comparison_gt, ">"))
+      : continuationToken($, op);
 
 module.exports = grammar({
   name: "nc",
@@ -58,6 +103,8 @@ module.exports = grammar({
   reserved: { global: (_) => KEYWORDS },
   inline: ($) => [$._path, $._lparen, $._lbracket, $._lbrace],
   externals: ($) => [
+    $._newline,
+    ...CONTINUATIONS.map(([name]) => $[`_continue_${name}`]),
     $._same_line,
     $._call_lparen,
     $._index_lbracket,
@@ -89,7 +136,8 @@ module.exports = grammar({
   ],
 
   rules: {
-    source_file: ($) => repeat($._item),
+    source_file: ($) => statements($, $._item),
+    _separator: ($) => choice(";", $._newline),
     // The external punctuation must also be usable by non-postfix branches on
     // the same line: lexical selection happens before GLR chooses type/value.
     _lparen: ($) => choice("(", alias($._call_lparen, "(")),
@@ -276,7 +324,7 @@ module.exports = grammar({
         field("name", alias($._metadata_string, $.string)),
         field("body", $.block),
       ),
-    block: ($) => seq($._lbrace, repeat($._statement), "}"),
+    block: ($) => seq($._lbrace, statements($, $._statement), "}"),
     _statement: ($) =>
       choice(
         alias($._local_binding, $.binding_declaration),
@@ -325,7 +373,11 @@ module.exports = grammar({
         $.labeled_statement,
       ),
     assignment_statement: ($) =>
-      seq(field("target", $._expression), "=", field("value", $._expression)),
+      seq(
+        field("target", $._expression),
+        continuationToken($, "="),
+        field("value", $._expression),
+      ),
     expression_statement: ($) => $._expression,
     return_statement: ($) =>
       prec.right(
@@ -396,7 +448,7 @@ module.exports = grammar({
         13,
         seq(
           field("object", $._labeled_if_expression),
-          ".",
+          continuationToken($, "."),
           field("member", $.identifier),
         ),
       ),
@@ -421,9 +473,7 @@ module.exports = grammar({
               field("left", $._labeled_if_expression),
               field(
                 "operator",
-                operators.length === 1
-                  ? operators[0]
-                  : choice(...operators.map((op) => operatorToken($, op))),
+                choice(...operators.map((op) => operatorToken($, op))),
               ),
               field("right", $._expression),
             ),
@@ -435,7 +485,7 @@ module.exports = grammar({
         0,
         seq(
           field("value", $._labeled_if_expression),
-          "else",
+          continuationToken($, "else"),
           field("fallback", choice($.block, $._expression)),
         ),
       ),
@@ -444,7 +494,7 @@ module.exports = grammar({
         0,
         seq(
           field("value", $._labeled_if_expression),
-          "catch",
+          continuationToken($, "catch"),
           field("name", $.identifier),
           field("body", $.block),
         ),
@@ -524,7 +574,11 @@ module.exports = grammar({
         alias($._parenthesized_path, $.parenthesized_expression),
       ),
     _qualified_path: ($) =>
-      seq(field("object", $._path), ".", field("member", $.identifier)),
+      seq(
+        field("object", $._path),
+        continuationToken($, "."),
+        field("member", $.identifier),
+      ),
     _parenthesized_path: ($) => seq($._lparen, $._path, ")"),
     field_initializer: ($) =>
       seq(".", field("name", $.identifier), "=", field("value", $._expression)),
@@ -554,7 +608,11 @@ module.exports = grammar({
     member_expression: ($) =>
       prec.left(
         13,
-        seq(field("object", $._expression), ".", field("member", $.identifier)),
+        seq(
+          field("object", $._expression),
+          continuationToken($, "."),
+          field("member", $.identifier),
+        ),
       ),
     unary_expression: ($) =>
       prec.right(
@@ -585,9 +643,7 @@ module.exports = grammar({
               field("left", $._expression),
               field(
                 "operator",
-                operators.length === 1
-                  ? operators[0]
-                  : choice(...operators.map((op) => operatorToken($, op))),
+                choice(...operators.map((op) => operatorToken($, op))),
               ),
               field("right", $._expression),
             ),
@@ -599,7 +655,7 @@ module.exports = grammar({
         0,
         seq(
           field("value", $._expression),
-          "else",
+          continuationToken($, "else"),
           field("fallback", choice($.block, $._expression)),
         ),
       ),
@@ -608,7 +664,7 @@ module.exports = grammar({
         0,
         seq(
           field("value", $._expression),
-          "catch",
+          continuationToken($, "catch"),
           field("name", $.identifier),
           field("body", $.block),
         ),

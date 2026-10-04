@@ -1,0 +1,527 @@
+==================
+Newline and semicolon separators at module and block scope
+==================
+mut int a = 1
+a = 2
+mut int b = 1; b = 2
+fn work() { int c = 1; c = 2; return }
+
+---
+
+(source_file
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (integer))
+  (assignment_statement
+    (identifier)
+    (integer))
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (integer))
+  (assignment_statement
+    (identifier)
+    (integer))
+  (function_declaration
+    (identifier)
+    (parameters)
+    (block
+      (binding_declaration
+        (typed_binding
+          (named_type
+            (identifier))
+          (identifier))
+        (integer))
+      (assignment_statement
+        (identifier)
+        (integer))
+      (return_statement))))
+
+==================
+Leading repeated and trailing separators and empty blocks
+==================
+;;
+; fn empty() { ;
+;; };;
+{;;};
+
+---
+
+(source_file
+  (function_declaration
+    (identifier)
+    (parameters)
+    (block))
+  (block))
+
+==================
+Comments and CRLF separate statements
+==================
+int a = 1 // comment
+// between
+int b = 2; // semicolon
+@println(b)
+
+---
+
+(source_file
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (integer))
+  (comment)
+  (comment)
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (integer))
+  (comment)
+  (expression_statement
+    (call_expression
+      (builtin
+        (identifier))
+      (arguments
+        (identifier)))))
+
+==================
+Adjacent same line module bindings are invalid
+==================
+int a = 1 int b = 2
+
+---
+
+(source_file
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (integer))
+  (ERROR
+    (identifier)
+    (identifier)
+    (integer)))
+
+==================
+Adjacent same line calls are invalid
+==================
+first() second()
+
+---
+
+(source_file
+  (ERROR
+    (call_expression
+      (identifier)
+      (arguments)))
+  (expression_statement
+    (call_expression
+      (identifier)
+      (arguments))))
+
+==================
+Adjacent same line declarations after a block are invalid
+==================
+fn first() {} fn second() {}
+
+---
+
+(source_file
+  (ERROR
+    (function_declaration
+      (identifier)
+      (parameters)
+      (block)))
+  (function_declaration
+    (identifier)
+    (parameters)
+    (block)))
+
+==================
+Adjacent same line block statements are invalid
+==================
+fn work() { int a = 1 a = 2 }
+
+---
+
+(source_file
+  (function_declaration
+    (identifier)
+    (parameters)
+    (block
+      (binding_declaration
+        (typed_binding
+          (named_type
+            (identifier))
+          (identifier))
+        (integer))
+      (ERROR
+        (identifier)
+        (integer)))))
+
+==================
+Adjacent same line control statements are invalid
+==================
+while true { break continue }
+
+---
+
+(source_file
+  (while_statement
+    (boolean)
+    (block
+      (ERROR)
+      (continue_statement))))
+
+==================
+Semicolon terminates optional return and break values
+==================
+fn stop() { return; 1 }
+while true { break; 2 }
+
+---
+
+(source_file
+  (function_declaration
+    (identifier)
+    (parameters)
+    (block
+      (return_statement)
+      (expression_statement
+        (integer))))
+  (while_statement
+    (boolean)
+    (block
+      (break_statement)
+      (expression_statement
+        (integer)))))
+
+==================
+Semicolon stops binary continuation
+==================
+1; -2
+
+---
+
+(source_file
+  (expression_statement
+    (integer))
+  (expression_statement
+    (unary_expression
+      (integer))))
+
+==================
+Operators members assignments and fallbacks continue across lines
+==================
+int value = 1
+ + 2
+ * 3
+record
+ .field
+value
+ = 4
+none
+ else 1
+result
+ catch message { @println(message) }
+
+---
+
+(source_file
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (binary_expression
+      (integer)
+      (binary_expression
+        (integer)
+        (integer))))
+  (expression_statement
+    (member_expression
+      (identifier)
+      (identifier)))
+  (assignment_statement
+    (identifier)
+    (integer))
+  (expression_statement
+    (else_expression
+      (none)
+      (integer)))
+  (expression_statement
+    (catch_expression
+      (identifier)
+      (identifier)
+      (block
+        (expression_statement
+          (call_expression
+            (builtin
+              (identifier))
+            (arguments
+              (identifier))))))))
+
+==================
+Comments retain multiline operator and member continuation
+==================
+int value = 1 // first
+// middle
+ + 2
+ // next
+ * 3
+record // object
+ // member
+ .field
+
+---
+
+(source_file
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (binary_expression
+      (integer)
+      (comment)
+      (comment)
+      (binary_expression
+        (integer)
+        (comment)
+        (integer))))
+  (expression_statement
+    (member_expression
+      (identifier)
+      (comment)
+      (comment)
+      (identifier))))
+
+==================
+Multiline delimiters declarations types and explicit generics
+==================
+fn identity(
+ int value
+)
+ int
+{ return value }
+int value
+ = identity
+ <int>
+ (
+ 1,
+ )
+Box<int> box = Box
+ <int>
+ { .value = value }
+int[] values = [
+ 1,
+ 2,
+]
+
+---
+
+(source_file
+  (function_declaration
+    (identifier)
+    (parameters
+      (parameter
+        (named_type
+          (identifier))
+        (identifier)))
+    (named_type
+      (identifier))
+    (block
+      (return_statement
+        (identifier))))
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (call_expression
+      (identifier)
+      (type_arguments
+        (named_type
+          (identifier)))
+      (arguments
+        (integer))))
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier)
+        (type_arguments
+          (named_type
+            (identifier))))
+      (identifier))
+    (struct_expression
+      (identifier)
+      (type_arguments
+        (named_type
+          (identifier)))
+      (field_initializer
+        (identifier)
+        (identifier))))
+  (binding_declaration
+    (typed_binding
+      (array_type
+        (named_type
+          (identifier)))
+      (identifier))
+    (array_expression
+      (integer)
+      (integer))))
+
+==================
+Operators with shared prefixes remain whole across lines
+==================
+a
+ <= b
+a
+ >= b
+a
+ << b
+a
+ >> b
+a
+ <> b
+a
+ ** b
+a
+ != b
+a
+ == b
+a
+ and b
+a
+ or b
+a
+ in b
+
+---
+
+(source_file
+  (expression_statement
+    (binary_expression
+      (identifier)
+      (identifier)))
+  (expression_statement
+    (binary_expression
+      (identifier)
+      (identifier)))
+  (expression_statement
+    (binary_expression
+      (identifier)
+      (identifier)))
+  (expression_statement
+    (binary_expression
+      (identifier)
+      (identifier)))
+  (expression_statement
+    (binary_expression
+      (identifier)
+      (identifier)))
+  (expression_statement
+    (binary_expression
+      (identifier)
+      (identifier)))
+  (expression_statement
+    (binary_expression
+      (identifier)
+      (identifier)))
+  (expression_statement
+    (binary_expression
+      (identifier)
+      (identifier)))
+  (expression_statement
+    (binary_expression
+      (identifier)
+      (identifier)))
+  (expression_statement
+    (binary_expression
+      (identifier)
+      (identifier)))
+  (expression_statement
+    (binary_expression
+      (identifier)
+      (identifier))))
+
+==================
+Declaration member lists remain whitespace separated
+==================
+import { "a.nc" as a "b.nc" as b }
+extern "native.c" as native { fn first() = "first" fn second() = "second" }
+struct Pair { int first int second }
+enum Status { First Second }
+
+---
+
+(source_file
+  (import_declaration
+    (import_entry
+      (string
+        (quoted_string
+          (string_content)))
+      (identifier))
+    (import_entry
+      (string
+        (quoted_string
+          (string_content)))
+      (identifier)))
+  (extern_declaration
+    (string
+      (quoted_string
+        (string_content)))
+    (identifier)
+    (extern_function
+      (identifier)
+      (parameters)
+      (string
+        (quoted_string
+          (string_content))))
+    (extern_function
+      (identifier)
+      (parameters)
+      (string
+        (quoted_string
+          (string_content)))))
+  (struct_declaration
+    (identifier)
+    (field_declaration
+      (named_type
+        (identifier))
+      (identifier))
+    (field_declaration
+      (named_type
+        (identifier))
+      (identifier)))
+  (enum_declaration
+    (identifier)
+    (enum_variant
+      (identifier))
+    (enum_variant
+      (identifier))))
+
+==================
+Semicolon allows ordinary empty braces as a separate block
+==================
+Empty empty = Empty; {}
+
+---
+
+(source_file
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
+    (identifier))
+  (block))

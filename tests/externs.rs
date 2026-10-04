@@ -349,7 +349,7 @@ test "inactive ABI payloads" {
 @println(optional == native.absent())
 @println(failure == native.failed())
 }
-int[] fallback = failure catch message { @println(message) break [9] }
+int[] fallback = failure catch message { @println(message);break [9] }
 test "inactive ABI formatting" {
 @println(fallback)
 @println(failure, ":", native.succeeded())

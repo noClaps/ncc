@@ -46,10 +46,11 @@ int recovered = 2
 (source_file
   (comment)
   (comment)
-  (expression_statement
-    (identifier))
-  (assignment_statement
-    (identifier)
+  (binding_declaration
+    (typed_binding
+      (named_type
+        (identifier))
+      (identifier))
     (integer))
   (ERROR
     (UNEXPECTED '`'))

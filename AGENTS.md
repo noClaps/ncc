@@ -43,6 +43,9 @@
 ## Resolved semantics and compiler invariants
 
 - Previously resolved decisions (consult `docs/design.md` for the full language):
+  - Module and block statements require newline or semicolon separators, including
+    after block-bodied declarations and control statements. Preserve multiline
+    expressions and whitespace-separated declaration member lists.
   - Bit shifts are arithmetic: signed right shifts round toward negative infinity.
     Generate portable C without relying on negative signed right shifts.
   - Functions share surrounding mutable bindings, including nested/anonymous

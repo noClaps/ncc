@@ -42,11 +42,11 @@ mut int i=0
 fn advance(int step) {
     @print("a",i,":")
     i=i+step
-    if i {1->{@print("r|") return} _->{}}
+    if i {1->{@print("r|");return} _->{}}
     @print("b|")
     i=i+1
 }
-while i<5 {advance(1) @print("c",i,"|")}
+while i<5 {advance(1);@print("c",i,"|")}
 @println(i)
 "#,
         "a0:r|c1|a1:b|c3|a3:b|c5|5\n",
@@ -84,7 +84,7 @@ fn advance() {
     inside: if i {1->{return} _->{break :inside}}
     i=i+1
 }
-inside: while i<5 {advance() continue :inside}
+inside: while i<5 {advance();continue :inside}
 @println(i)
 ",
         "5\n",
@@ -98,7 +98,7 @@ fn counted_and_array_helper_loops_supply_progress_with_copied_steps() {
 mut int i=0
 fn advance(int step) {
     mut int j=4
-    while j>=0 {j=j-2 i=i+step}
+    while j>=0 {j=j-2;i=i+step}
 }
 while i<6 {advance(1)}
 fn array_advance() {for key in [10,20,30] {i=i+1}}
@@ -142,10 +142,10 @@ fn effectful_arguments_are_ordered_and_parameter_snapshots_are_independent() {
         r#"
 mut int i=0
 mut int calls=0
-fn argument() int {calls=calls+1 i=i+1 @print("a",calls,"|") return 1}
+fn argument() int {calls=calls+1;i=i+1;@print("a",calls,"|");return 1}
 fn advance(int before, int step, int after) {
     @print(before,":",after,"|")
-    {mut int step=100 step=step+after}
+    {mut int step=100;step=step+after}
     i=i+step
 }
 while i<4 {advance(i,argument(),i)}
@@ -165,11 +165,11 @@ fn calculate() (int,int) {
     int copied=bound
     fn condition(int other) bool {
         if i {0->{return i<copied} _->{}}
-        {int copied=100 int other=copied}
+        {int copied=100;int other=copied}
         return i<copied
     }
     fn advance(int step) {
-        {mut int i=100 i=i+step}
+        {mut int i=100;i=i+step}
         bound=bound+1
         i=i+step
     }
@@ -185,10 +185,10 @@ fn calculate() (int,int) {
 #[test]
 fn parameter_copies_and_early_returns_cannot_manufacture_progress() {
     for source in [
-        "mut int i=1 fn argument() int {i=i+1 return 1} fn reset(int saved,int ignored) {i=saved} while i<4 {int fail=1/(i-i) reset(i,argument())} @println(i)",
-        "mut int i=1 fn advance(int saved) {if i {1->{return} _->{}} i=i+saved} while i<4 {int fail=1/(i-i) advance(1)} @println(i)",
-        "mut int i=1 fn advance(int i) {mut int copy=i copy=copy+1} while i<4 {int fail=1/(i-i) advance(i)} @println(i)",
-        "mut int i=1 fn condition(int saved) bool {i=i+1 return saved<4} while condition(i) {int fail=1/(i-i)} @println(i)",
+        "mut int i=1;fn argument() int {i=i+1;return 1};fn reset(int saved,int ignored) {i=saved};while i<4 {int fail=1/(i-i);reset(i,argument())};@println(i)",
+        "mut int i=1;fn advance(int saved) {if i {1->{return} _->{}};i=i+saved};while i<4 {int fail=1/(i-i);advance(1)};@println(i)",
+        "mut int i=1;fn advance(int i) {mut int copy=i;copy=copy+1};while i<4 {int fail=1/(i-i);advance(i)};@println(i)",
+        "mut int i=1;fn condition(int saved) bool {i=i+1;return saved<4};while condition(i) {int fail=1/(i-i)};@println(i)",
     ] {
         unproven(source);
     }
@@ -197,12 +197,12 @@ fn parameter_copies_and_early_returns_cannot_manufacture_progress() {
 #[test]
 fn unproven_helper_loops_resets_and_overflow_do_not_execute() {
     for source in [
-        "mut int i=1 fn advance() {while true {} i=i+1} while i<4 {int fail=1/(i-i) advance()} @println(i)",
-        "mut int i=1 fn advance() {mut int j=0 while j<2 {j=0 j=j+1} i=i+1} while i<4 {int fail=1/(i-i) advance()} @println(i)",
-        "mut int i=1 fn advance() {mut int j=0 while j<2 {j=j+1 i=0} i=i+1} while i<4 {int fail=1/(i-i) advance()} @println(i)",
-        "mut int i=1 fn advance() {mut byte j=254 while j<255 {j=j+2} i=i+1} while i<4 {int fail=1/(i-i) advance()} @println(i)",
-        "mut byte i=254 fn advance() {for key in [1,2] {i=i+1}} while i<255 {int fail=1/(@as(int,i)-@as(int,i)) advance()} @println(i)",
-        "mut int i=1 fn condition() bool {if i {1->{return true} _->{}} return i<4} while condition() {int fail=1/(i-i) i=i+1} @println(i)",
+        "mut int i=1;fn advance() {while true {};i=i+1};while i<4 {int fail=1/(i-i);advance()};@println(i)",
+        "mut int i=1;fn advance() {mut int j=0;while j<2 {j=0;j=j+1};i=i+1};while i<4 {int fail=1/(i-i);advance()};@println(i)",
+        "mut int i=1;fn advance() {mut int j=0;while j<2 {j=j+1;i=0};i=i+1};while i<4 {int fail=1/(i-i);advance()};@println(i)",
+        "mut int i=1;fn advance() {mut byte j=254;while j<255 {j=j+2};i=i+1};while i<4 {int fail=1/(i-i);advance()};@println(i)",
+        "mut byte i=254;fn advance() {for key in [1,2] {i=i+1}};while i<255 {int fail=1/(@as(int,i)-@as(int,i));advance()};@println(i)",
+        "mut int i=1;fn condition() bool {if i {1->{return true} _->{}};return i<4};while condition() {int fail=1/(i-i);i=i+1};@println(i)",
     ] {
         unproven(source);
     }
@@ -214,10 +214,10 @@ fn effectful_value_arguments_supply_progress_through_assignments_and_declaration
         r#"
 mut int i=0
 mut int checks=0
-fn argument() int {checks=checks+1 @print("a",checks,"|") return 1}
+fn argument() int {checks=checks+1;@print("a",checks,"|");return 1}
 fn next(int step) int {return step}
 while i<3 {i=i+next(argument())}
-fn advance() {int step=next(argument()) i=i+step}
+fn advance() {int step=next(argument());i=i+step}
 while i<6 {advance()}
 @println(i,":",checks)
 "#,
@@ -231,8 +231,8 @@ fn output_operands_and_assignment_indices_keep_their_snapshots() {
         r#"
 mut int i=0
 mut int[] values=[0]
-fn argument() int {i=i+1 @print("a|") return i}
-fn key() uint {i=i+1 @print("k|") return 0u}
+fn argument() int {i=i+1;@print("a|");return i}
+fn key() uint {i=i+1;@print("k|");return 0u}
 while i<4 {
     @println(i,":",argument(),":",i)
     values[key()]=i
@@ -249,14 +249,14 @@ fn helper_loop_bounds_use_immutable_globals_and_captured_copies() {
         r"
 int limit=2
 mut int i=0
-fn advance() {mut int j=0 while j<limit {j=j+1 i=i+1}}
+fn advance() {mut int j=0;while j<limit {j=j+1;i=i+1}}
 while i<4 {advance()}
 fn calculate() int {
     mut int source=2
     int bound=source
     fn local_advance() {
         mut int j=0
-        while j<bound {j=j+1 i=i+1}
+        while j<bound {j=j+1;i=i+1}
         source=source+1
     }
     while i<8 {local_advance()}
@@ -271,7 +271,7 @@ fn calculate() int {
 #[test]
 fn effectful_short_circuit_operands_do_not_become_unconditional_progress() {
     unproven(
-        "mut int i=1 fn argument() bool {i=i+1 return true} fn ignore(bool value) {} while i<4 {int fail=1/(i-i) ignore(false and argument())} @println(i)",
+        "mut int i=1;fn argument() bool {i=i+1;return true};fn ignore(bool value) {};while i<4 {int fail=1/(i-i);ignore(false and argument())};@println(i)",
     );
 }
 
@@ -279,7 +279,7 @@ fn effectful_short_circuit_operands_do_not_become_unconditional_progress() {
 fn test_mode_assertion_arguments_retain_effects_and_failure_locations() {
     let source = r#"
 mut int calls=0
-fn condition() bool {calls=calls+1 return true}
+fn condition() bool {calls=calls+1;return true}
 test "helper assertion" {
     mut int i=0
     while i<3 {
@@ -302,7 +302,7 @@ test "helper assertion" {
 
 #[test]
 fn effectful_argument_failure_keeps_its_original_expression_location() {
-    let source = "mut int i=0 mut int calls=0 fn argument() int {calls=calls+1 int fail=1/(calls-calls) return 1} fn advance(int step) {i=i+step} while i<3 {advance(argument())} @println(i)";
+    let source = "mut int i=0;mut int calls=0;fn argument() int {calls=calls+1;int fail=1/(calls-calls);return 1};fn advance(int step) {i=i+step};while i<3 {advance(argument())};@println(i)";
     assert!(compile(source, false).is_ok());
     let error = compile(source, true).unwrap_err();
     assert!(format!("{error:?}").contains("division by zero"));

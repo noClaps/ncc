@@ -31,7 +31,7 @@ fn empty_bodies_can_progress_in_the_condition_and_retain_the_final_update() {
         r#"
 mut int i=0
 mut int checks=0
-fn condition() bool {checks=checks+1 i=i+1 return i<5}
+fn condition() bool {checks=checks+1;i=i+1;return i<5}
 while condition() {}
 @println(i,":",checks)
 "#,
@@ -46,8 +46,8 @@ fn body_and_condition_progress_keep_nested_output_order() {
 mut int i=0
 mut int checks=0
 fn increment() {i=i+1}
-fn condition() bool {checks=checks+1 @print("a",i,":") increment() @print("b",i,"|") return i<6}
-while condition() {@print("body",i,"|") i=i+1}
+fn condition() bool {checks=checks+1;@print("a",i,":");increment();@print("b",i,"|");return i<6}
+while condition() {@print("body",i,"|");i=i+1}
 @println(i,":",checks)
 "#,
         "a0:b1|body1|a2:b3|body3|a4:b5|body5|a6:b7|7:4\n",
@@ -60,7 +60,7 @@ fn negative_condition_progress_and_multiple_updates_are_certified() {
         r#"
 mut int i=10
 mut int checks=0
-fn condition() bool {checks=checks+1 i=i-1 i=i-2 return i>0}
+fn condition() bool {checks=checks+1;i=i-1;i=i-2;return i>0}
 while condition() {}
 @println(i,":",checks)
 "#,
@@ -74,8 +74,8 @@ fn break_is_not_followed_by_an_extra_condition_update() {
         r#"
 mut int i=0
 mut int checks=0
-fn condition() bool {checks=checks+1 i=i+1 return i<10}
-while condition() {i=i+2 break}
+fn condition() bool {checks=checks+1;i=i+1;return i<10}
+while condition() {i=i+2;break}
 @println(i,":",checks)
 "#,
         "3:1\n",
@@ -88,7 +88,7 @@ fn initially_false_conditions_still_run_their_first_update() {
         r#"
 mut byte i=254
 mut int checks=0
-fn condition() bool {checks=checks+1 i=i+1 return i<255}
+fn condition() bool {checks=checks+1;i=i+1;return i<255}
 while condition() {}
 @println(i,":",checks)
 "#,
@@ -99,10 +99,10 @@ while condition() {}
 #[test]
 fn first_and_final_condition_overflow_are_not_interpreted() {
     for source in [
-        "mut byte i=255 fn condition() bool {i=i+1 return i<255} while condition(){} @println(i)",
-        "mut byte i=253 fn condition() bool {i=i+1 return i<=255} while condition(){} @println(i)",
-        "mut byte i=0 fn condition() bool {i=i-1 return i>0} while condition(){} @println(i)",
-        "mut byte i=2 fn condition() bool {i=i-1 return i>=0} while condition(){} @println(i)",
+        "mut byte i=255;fn condition() bool {i=i+1;return i<255};while condition(){};@println(i)",
+        "mut byte i=253;fn condition() bool {i=i+1;return i<=255};while condition(){};@println(i)",
+        "mut byte i=0;fn condition() bool {i=i-1;return i>0};while condition(){};@println(i)",
+        "mut byte i=2;fn condition() bool {i=i-1;return i>=0};while condition(){};@println(i)",
     ] {
         for release in [false, true] {
             assert!(
@@ -116,10 +116,10 @@ fn first_and_final_condition_overflow_are_not_interpreted() {
 #[test]
 fn resets_mixed_prefix_direction_and_nonexact_strides_do_not_fake_progress() {
     for source in [
-        "mut int i=1 fn condition() bool {i=0 return i<3} while condition(){int fail=1/(i-i) i=i+1} @println(i)",
-        "mut int i=1 fn condition() bool {i=i-1 i=i+2 return i<3} while condition(){int fail=1/(i-i)} @println(i)",
-        "mut int i=0 fn condition() bool {i=i+2 return i!=5} while condition(){int fail=1/(i-i)} @println(i)",
-        "mut int i=0 mut int n=5 fn condition() bool {i=i+1 n=n+2 return i<n} while condition(){int fail=1/(i-i)} @println(i)",
+        "mut int i=1;fn condition() bool {i=0;return i<3};while condition(){int fail=1/(i-i);i=i+1};@println(i)",
+        "mut int i=1;fn condition() bool {i=i-1;i=i+2;return i<3};while condition(){int fail=1/(i-i)};@println(i)",
+        "mut int i=0;fn condition() bool {i=i+2;return i!=5};while condition(){int fail=1/(i-i)};@println(i)",
+        "mut int i=0;mut int n=5;fn condition() bool {i=i+1;n=n+2;return i<n};while condition(){int fail=1/(i-i)};@println(i)",
     ] {
         for release in [false, true] {
             assert!(
@@ -132,7 +132,7 @@ fn resets_mixed_prefix_direction_and_nonexact_strides_do_not_fake_progress() {
 
 #[test]
 fn certified_continues_diagnose_reached_arithmetic_failures() {
-    let source = "mut int i=1 fn condition() bool {i=i+1 return i<5} while condition(){int fail=1/(i-i) continue} @println(i)";
+    let source = "mut int i=1;fn condition() bool {i=i+1;return i<5};while condition(){int fail=1/(i-i);continue};@println(i)";
     assert!(compile(source, false).unwrap().contains("} goto "));
     let diagnostics = compile(source, true).unwrap_err();
     let error = diagnostics.to_string();
@@ -185,7 +185,7 @@ fn condition() bool {
     if i%2==0 {true -> {i=i+1} false -> {}}
     return i<6
 }
-while condition() {i=i+1 continue}
+while condition() {i=i+1;continue}
 @println(i,":",checks)
 "#,
         "7:4\n",
@@ -212,7 +212,7 @@ while condition() {continue}
         r"
 mut uint i=0u
 fn condition() bool {
-    if i%4u==0u {true -> {i=i+1u i=i+1u} false -> {i=i+2u}}
+    if i%4u==0u {true -> {i=i+1u;i=i+1u} false -> {i=i+2u}}
     return i!=10u
 }
 outer: while condition() {continue :outer}
@@ -228,7 +228,7 @@ fn nested_for_jumps_preserve_outer_checks_and_breaks() {
         r#"
 mut int i=0
 mut int checks=0
-fn condition() bool {checks=checks+1 i=i+1 return i<5}
+fn condition() bool {checks=checks+1;i=i+1;return i<5}
 outer: while condition() {
     for key in [10,20] {
         @print(i,":",key,"|")
@@ -245,9 +245,9 @@ outer: while condition() {
 #[test]
 fn conditional_prefix_first_and_final_overflow_remain_runtime() {
     for source in [
-        "mut byte i=254 fn condition() bool {if i%2==0 {true -> {i=i+2} false -> {i=i+1}} return i<255} while condition(){continue} @println(i)",
-        "mut byte i=252 fn condition() bool {if i%2==0 {true -> {i=i+1} false -> {i=i+2}} return i<=255} while condition(){continue} @println(i)",
-        "mut byte i=2 fn condition() bool {if i%2==0 {true -> {i=i-1} false -> {i=i-2}} return i>0} while condition(){continue} @println(i)",
+        "mut byte i=254;fn condition() bool {if i%2==0 {true -> {i=i+2} false -> {i=i+1}};return i<255};while condition(){continue};@println(i)",
+        "mut byte i=252;fn condition() bool {if i%2==0 {true -> {i=i+1} false -> {i=i+2}};return i<=255};while condition(){continue};@println(i)",
+        "mut byte i=2;fn condition() bool {if i%2==0 {true -> {i=i-1} false -> {i=i-2}};return i>0};while condition(){continue};@println(i)",
     ] {
         for release in [false, true] {
             assert!(
@@ -261,11 +261,11 @@ fn conditional_prefix_first_and_final_overflow_remain_runtime() {
 #[test]
 fn missing_conditional_progress_and_nested_rank_mutations_are_not_entered() {
     for source in [
-        "mut int i=0 fn condition() bool {if i%2==0 {true -> {i=i+1} false -> {}} return i<5} while condition(){int fail=1/(i-i) continue} @println(i)",
-        "mut int i=0 fn condition() bool {if i%2==0 {true -> {i=i+1} false -> {i=i+2}} return i!=6} while condition(){int fail=1/(i-i) continue} @println(i)",
-        "mut int i=0 fn condition() bool {i=i+1 return i<5} while condition(){int fail=1/(i-i) mut int j=0 while j<2 {j=j+1 i=0}} @println(i)",
-        "mut int i=0 mut int n=5 fn condition() bool {i=i+1 return i<n} while condition(){int fail=1/(i-i) for key in [0] {n=n+1}} @println(i)",
-        "mut int i=0 fn condition() bool {i=i+1 return i<5} while condition(){while true {}} @println(i)",
+        "mut int i=0;fn condition() bool {if i%2==0 {true -> {i=i+1} false -> {}};return i<5};while condition(){int fail=1/(i-i);continue};@println(i)",
+        "mut int i=0;fn condition() bool {if i%2==0 {true -> {i=i+1} false -> {i=i+2}};return i!=6};while condition(){int fail=1/(i-i);continue};@println(i)",
+        "mut int i=0;fn condition() bool {i=i+1;return i<5};while condition(){int fail=1/(i-i);mut int j=0;while j<2 {j=j+1;i=0}};@println(i)",
+        "mut int i=0;mut int n=5;fn condition() bool {i=i+1;return i<n};while condition(){int fail=1/(i-i);for key in [0] {n=n+1}};@println(i)",
+        "mut int i=0;fn condition() bool {i=i+1;return i<5};while condition(){while true {}};@println(i)",
     ] {
         for release in [false, true] {
             assert!(

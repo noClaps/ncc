@@ -85,8 +85,30 @@ impl Parser {
             )),
         }
     }
+    fn skip_semicolons(&mut self) {
+        while self.at(&TokenKind::Semicolon) {
+            self.bump();
+        }
+    }
+
+    fn statement_separator(&mut self, end: &TokenKind) -> Result<(), Diagnostics> {
+        if self.at(&TokenKind::Semicolon) {
+            self.skip_semicolons();
+            return Ok(());
+        }
+        if self.current().newline_before || self.at(end) {
+            return Ok(());
+        }
+        Err(Diagnostics::one(
+            "expected newline or `;` between statements",
+            self.current().span.clone(),
+        )
+        .at_source(&self.path, self.current().span.clone()))
+    }
+
     fn module(&mut self) -> Result<Module, Diagnostics> {
         let mut items = vec![];
+        self.skip_semicolons();
         while !self.at(&TokenKind::Eof) {
             if self.keyword(Keyword::Import) {
                 self.expect(&TokenKind::LBrace)?;
@@ -101,9 +123,11 @@ impl Parser {
                     items.push(Item::Import { path, alias });
                 }
                 self.bump();
+                self.statement_separator(&TokenKind::Eof)?;
                 continue;
             }
             items.push(self.item()?);
+            self.statement_separator(&TokenKind::Eof)?;
         }
         Ok(Module { items })
     }
@@ -472,8 +496,10 @@ impl Parser {
     fn block(&mut self) -> Result<Block, Diagnostics> {
         self.expect(&TokenKind::LBrace)?;
         let mut statements = vec![];
+        self.skip_semicolons();
         while !self.at(&TokenKind::RBrace) {
             statements.push(self.stmt()?);
+            self.statement_separator(&TokenKind::RBrace)?;
         }
         self.bump();
         Ok(Block { statements })
@@ -632,6 +658,8 @@ impl Parser {
         };
         let value = if label_target.is_some()
             || self.at(&TokenKind::RBrace)
+            || self.at(&TokenKind::Semicolon)
+            || self.at(&TokenKind::Eof)
             || self.current().newline_before
         {
             None
@@ -642,7 +670,11 @@ impl Parser {
     }
 
     fn return_stmt(&mut self) -> Result<Stmt, Diagnostics> {
-        if self.at(&TokenKind::RBrace) || self.current().newline_before {
+        if self.at(&TokenKind::RBrace)
+            || self.at(&TokenKind::Semicolon)
+            || self.at(&TokenKind::Eof)
+            || self.current().newline_before
+        {
             return Ok(Stmt::Return(None));
         }
         let mut value = self.expr(0)?;
@@ -1312,7 +1344,7 @@ mod tests {
     #[test]
     fn statement_helpers_preserve_newline_and_function_forms() {
         let mut parser = parser(
-            "{ fn named() int { return 1 } fn inferred = fn() int { return 2 } return\n(1, 2) break :outer\nbreak 3 }",
+            "{ fn named() int { return 1 }; fn inferred = fn() int { return 2 }; return\n(1, 2); break :outer\nbreak 3 }",
         );
         let block = parser.block().unwrap();
         assert_eq!(block.statements.len(), 6);

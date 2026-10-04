@@ -231,22 +231,22 @@ test "constant expressions" {
 
 #[test]
 fn top_level_pure_prefix_precomputes_array_and_numeric_loops() {
-    let strings = "mut str[] buf=[] mut int i=0 while i<1024 {buf=buf<>[\"\"] i=i+1} @println(buf)";
+    let strings = "mut str[] buf=[];mut int i=0;while i<1024 {buf=buf<>[\"\"];i=i+1};@println(buf)";
     let mut expected = String::from("[");
     expected.push_str(&vec!["\"\""; 1024].join(", "));
     expected.push_str("]\n");
     for (source, expected) in [
         (strings, expected.as_str()),
         (
-            "mut int sum=0 mut int i=0 while i<100 {sum=sum+i i=i+1} @println(sum,\":\",i)",
+            "mut int sum=0;mut int i=0;while i<100 {sum=sum+i;i=i+1};@println(sum,\":\",i)",
             "4950:100\n",
         ),
         (
-            "mut int sum=0 for i in [2,4,6] {sum=sum+@as(int,i)} @println(sum)",
+            "mut int sum=0;for i in [2,4,6] {sum=sum+@as(int,i)};@println(sum)",
             "3\n",
         ),
         (
-            "mut float sum=0.0 mut uint i=0 while i<4 {sum=sum+0.5 i=i+1} @println(sum)",
+            "mut float sum=0.0;mut uint i=0;while i<4 {sum=sum+0.5;i=i+1};@println(sum)",
             "2.0\n",
         ),
     ] {
@@ -269,9 +269,9 @@ fn top_level_precomputation_preserves_copies_and_later_shared_storage() {
 mut int[][] values = [[1]]
 int[][] original = values
 mut int i = 0
-while i < 3 { values[0][0] = values[0][0] + 1 i = i + 1 }
+while i < 3 { values[0][0] = values[0][0] + 1;i = i + 1 }
 fn read() int { return values[0][0] }
-fn update = fn() int { values[0][0] = values[0][0] + 1 return read() }
+fn update = fn() int { values[0][0] = values[0][0] + 1;return read() }
 @println(original, ":", read(), ":", update(), ":", values)
 values[0][0] = 9
 @println(update(), ":", values)
@@ -285,23 +285,23 @@ values[0][0] = 9
 fn top_level_precomputation_crosses_known_output_calls_and_closures_but_not_unknown_state() {
     for (source, expected) in [
         (
-            "mut int i=0 @print(\"before:\") while i<3 {i=i+1} @println(i)",
+            "mut int i=0;@print(\"before:\");while i<3 {i=i+1};@println(i)",
             "before:3\n",
         ),
         (
-            "mut int i=0 fn read=fn() int {return i} while i<3 {i=i+1} @println(read())",
+            "mut int i=0;fn read=fn() int {return i};while i<3 {i=i+1};@println(read())",
             "3\n",
         ),
         (
-            "mut int i=0 fn update() {i=1} update() while i<3 {i=i+1} @println(i)",
+            "mut int i=0;fn update() {i=1};update();while i<3 {i=i+1};@println(i)",
             "3\n",
         ),
         (
-            "mut int i=@as(int,@args().len) while i<3 {i=i+1} @println(i)",
+            "mut int i=@as(int,@args().len);while i<3 {i=i+1};@println(i)",
             "3\n",
         ),
         (
-            "mut int i=0 while i<3 {@print(i) i=i+1} @println(i)",
+            "mut int i=0;while i<3 {@print(i);i=i+1};@println(i)",
             "0123\n",
         ),
     ] {
@@ -344,13 +344,13 @@ while i<5 {i=i+1}
 
 #[test]
 fn top_level_precomputation_exceeds_former_budget_and_rolls_back_failures() {
-    let source = "mut int i=0 while i<20000 {i=i+1} @println(i)";
+    let source = "mut int i=0;while i<20000 {i=i+1};@println(i)";
     let c = compile_fixture(source, Path::new("budget.nc"), true).unwrap();
     assert!(!c.contains("} goto "), "certified region must precompute");
     folded(source, &[], "20000\n");
     for source in [
-        "mut int[] values=[1] mut int i=0 while i<3 {i=i+1} values[2]=i @println(\"unreached\")",
-        "mut int i=0 @println(\"before\") mut int[] values=[1] values[2]=i @println(\"unreached\")",
+        "mut int[] values=[1];mut int i=0;while i<3 {i=i+1};values[2]=i;@println(\"unreached\")",
+        "mut int i=0;@println(\"before\");mut int[] values=[1];values[2]=i;@println(\"unreached\")",
     ] {
         let directory = ncc::temp::Directory::new().unwrap();
         let input = directory.path().join("failure.nc");
@@ -467,10 +467,10 @@ fn top_level_evaluation_does_not_execute_effects_or_assume_runtime_state() {
     folded(
         r#"
 mut int value = 1
-fn change() int { @print("effect:") value = 4 return 3 }
+fn change() int { @print("effect:");value = 4;return 3 }
 value = change()
 @println(value)
-fn runtime() int[] { @print("array:") return [7] }
+fn runtime() int[] { @print("array:");return [7] }
 mut int[] values = runtime()
 values[0] = value
 @println(values)
@@ -483,12 +483,12 @@ values[0] = value
 #[test]
 fn top_level_output_analysis_preserves_known_state_and_argument_effects() {
     for source in [
-        "mut int value = 1 @println(\"hello\") value = 1 / 0",
-        "fn output() { @print(\"hello\") } mut int value = 1 output() value = 1 / 0",
-        "mut int value = 0 fn update = fn() int { @print(\"effect\") value = value + 1 return value } @println(update()) @println(update()) value = value / (value - 2)",
-        "mut int value = 0 fn update = fn() int { value = 2 return value } @println(update()) value = 1 / (value - 2)",
-        "mut int value = 0 while value < 2 { @println(value) value = value + 1 } value = 1 / (value - 2)",
-        "mut int value = 0 @println(1 / 0) value = 2",
+        "mut int value = 1;@println(\"hello\");value = 1 / 0",
+        "fn output() { @print(\"hello\") };mut int value = 1;output();value = 1 / 0",
+        "mut int value = 0;fn update = fn() int { @print(\"effect\");value = value + 1;return value };@println(update());@println(update());value = value / (value - 2)",
+        "mut int value = 0;fn update = fn() int { value = 2;return value };@println(update());value = 1 / (value - 2)",
+        "mut int value = 0;while value < 2 { @println(value);value = value + 1 };value = 1 / (value - 2)",
+        "mut int value = 0;@println(1 / 0);value = 2",
     ] {
         let path = Path::new("after-output.nc");
         ncc::compile_source(source, path).unwrap();
@@ -502,7 +502,7 @@ fn top_level_output_analysis_preserves_known_state_and_argument_effects() {
     folded(
         r#"
 mut int count = 0
-fn increment = fn() int { @print("effect:") count = count + 1 return count }
+fn increment = fn() int { @print("effect:");count = count + 1;return count }
 @println(increment(), ":", increment())
 @println(count)
 "#,
@@ -514,9 +514,9 @@ fn increment = fn() int { @print("effect:") count = count + 1 return count }
 #[test]
 fn output_with_unknown_arguments_does_not_assume_later_execution() {
     for source in [
-        "mut int value = 1 @println(@args()) value = 1 / 0",
-        "mut int value = 1 @println(@env()) value = 1 / 0",
-        "fn unknown() { @println(@args()) } mut int value = 1 unknown() value = 1 / 0",
+        "mut int value = 1;@println(@args());value = 1 / 0",
+        "mut int value = 1;@println(@env());value = 1 / 0",
+        "fn unknown() { @println(@args()) };mut int value = 1;unknown();value = 1 / 0",
     ] {
         ncc::compile_source_with_options(source, Path::new("unknown-output.nc"), true).unwrap();
     }
@@ -545,7 +545,7 @@ fn test_analysis_reached_failure(source: &str, failing_expression: &str) {
 fn test_analysis_tracks_known_true_assertion_side_effects() {
     let source = r#"
 mut int value = 0
-fn advance() bool { value = value + 1 return value == 1 }
+fn advance() bool { value = value + 1;return value == 1 }
 test "assertion effects" {
     assert advance()
     value = 1 / (value - 1)
@@ -562,7 +562,7 @@ fn test_analysis_repeats_named_calls_without_inheriting_caller_shadows() {
     test_analysis_reached_failure(
         r#"
 mut int value = 0
-fn next() int { value = value + 1 return value }
+fn next() int { value = value + 1;return value }
 test "lexical global scope" {
     {
         mut int value = 99
@@ -621,7 +621,7 @@ test "outer binding" {
 fn test_analysis_preserves_assertions_output_and_mutations_at_runtime() {
     let source = r#"
 mut int value = 0
-fn advance() bool { @print("effect:") value = value + 1 return value == 1 }
+fn advance() bool { @print("effect:");value = value + 1;return value == 1 }
 test "first" {
     @println("before:", value)
     assert advance()
@@ -650,7 +650,7 @@ test "second" {
 fn test_analysis_false_assertion_stops_before_variable_dependent_arithmetic() {
     let source = r#"
 mut int value = 0
-fn reject() bool { value = value + 1 return false }
+fn reject() bool { value = value + 1;return false }
 test "fails at runtime" {
     @println("before assertion")
     assert reject()
@@ -693,9 +693,9 @@ fn test_analysis_unknown_assertions_do_not_assume_later_execution() {
     )
     .unwrap();
     for source in [
-        r#"mut int value = 1 test "unknown args" { assert @args().len == 0 value = 1 / (value - 1) } test "later" { value = 1 / (value - 1) }"#,
-        r#"extern "unknown.c" as native { fn ready() bool = "ready" } mut int value = 1 test "unknown native" { assert native.ready() value = 1 / (value - 1) } test "later" { value = 1 / (value - 1) }"#,
-        r#"fn ready() bool { return true } mut int value = 1 test "unknown future" { fut bool work = async ready() assert await work value = 1 / (value - 1) } test "later" { value = 1 / (value - 1) }"#,
+        r#"mut int value = 1;test "unknown args" { assert @args().len == 0;value = 1 / (value - 1) };test "later" { value = 1 / (value - 1) }"#,
+        r#"extern "unknown.c" as native { fn ready() bool = "ready" };mut int value = 1;test "unknown native" { assert native.ready();value = 1 / (value - 1) };test "later" { value = 1 / (value - 1) }"#,
+        r#"fn ready() bool { return true };mut int value = 1;test "unknown future" { fut bool work = async ready();assert await work;value = 1 / (value - 1) };test "later" { value = 1 / (value - 1) }"#,
     ] {
         for release in [false, true] {
             ncc::compile_test_source_with_options(source, &input, release).unwrap();
@@ -707,7 +707,7 @@ fn test_analysis_unknown_assertions_do_not_assume_later_execution() {
 fn test_analysis_diagnoses_reached_output_arguments_without_executing_output() {
     let source = r#"
 mut int value = 0
-fn advance() bool { @println("assertion effect") value = 2 return true }
+fn advance() bool { @println("assertion effect");value = 2;return true }
 test "reached output" {
     @println("before assertion")
     assert advance()
@@ -768,8 +768,8 @@ int unreachable = 1 / 0
 #[test]
 fn infinite_loop_proofs_use_value_block_types_and_builtin_argument_order() {
     for source in [
-        "while true { int value = if true { true -> { break 1 } false -> { break 2 } } _ = 1 / 0 }",
-        "fn maybe_spin(bool spin) int { if spin { true -> { while true {} } false -> { return 1 } } } @println(maybe_spin(true), 1 / 0)",
+        "while true { int value = if true { true -> { break 1 } false -> { break 2 } };_ = 1 / 0 }",
+        "fn maybe_spin(bool spin) int { if spin { true -> { while true {} } false -> { return 1 } } };@println(maybe_spin(true), 1 / 0)",
         "@println(@args(), 1 / 0)",
     ] {
         for release in [false, true] {
@@ -777,7 +777,7 @@ fn infinite_loop_proofs_use_value_block_types_and_builtin_argument_order() {
                 .unwrap();
         }
     }
-    let source = "test \"spin\" { while true {} } test \"unreachable\" { @println(1 / 0) }";
+    let source = "test \"spin\" { while true {} };test \"unreachable\" { @println(1 / 0) }";
     for release in [false, true] {
         let output = ncc::compile_test_source_with_diagnostics(
             source,
@@ -797,7 +797,7 @@ fn infinite_loop_proofs_use_value_block_types_and_builtin_argument_order() {
 
 #[test]
 fn normal_compilation_ignores_tests_during_top_level_analysis() {
-    let source = "mut int value = 1 test \"ignored\" { value = 2 assert false } @println(\"hello\") value = 1 / (value - 1)";
+    let source = "mut int value = 1;test \"ignored\" { value = 2;assert false };@println(\"hello\");value = 1 / (value - 1)";
     let error =
         ncc::compile_source_with_options(source, Path::new("ignored-test.nc"), true).unwrap_err();
     assert_eq!(&source[error.0[0].span.clone()], "1 / (value - 1)");
@@ -1113,7 +1113,7 @@ return convert()
             ),
         ] {
             let source = format!(
-                "fn cast_negative(float value) uint {{ {body} }} @println(cast_negative({value}))",
+                "fn cast_negative(float value) uint {{ {body} }};@println(cast_negative({value}))",
             );
             compile_fixture(&source, path, false).unwrap();
             let error = compile_fixture(&source, path, true).unwrap_err();
@@ -1144,7 +1144,7 @@ fn finite_out_of_range_numeric_casts_are_rejected_during_folding() {
         ("uint", "int", "18446744073709551615u"),
     ] {
         let source = format!(
-            "fn cast({from} value) {to} {{ return @as({to}, value) }} @println(cast({value}))",
+            "fn cast({from} value) {to} {{ return @as({to}, value) }};@println(cast({value}))",
         );
         compile_fixture(&source, Path::new("cast.nc"), false).unwrap();
         let error = compile_fixture(&source, Path::new("cast.nc"), true).unwrap_err();
@@ -1160,7 +1160,7 @@ fn nonfinite_float_integer_casts_remain_rejected_during_folding() {
     for value in ["0.0 / 0.0", "1.0 / 0.0", "-1.0 / 0.0"] {
         for ty in ["int", "uint"] {
             let source =
-                format!("fn cast(float n) {ty} {{ return @as({ty}, n) }} @println(cast({value}))");
+                format!("fn cast(float n) {ty} {{ return @as({ty}, n) }};@println(cast({value}))");
             let error = compile_fixture(&source, Path::new("bad.nc"), true).unwrap_err();
             assert!(
                 error.to_string().contains("constant evaluation failed"),
@@ -1178,8 +1178,8 @@ type Text = str
 struct Record { str name int[] values }
 enum Choice { Empty Data(str, int?[]) }
 fn array() str { return @as(str, ["a", "b\u{0}🍪"]) }
-fn alias() str { Text value = "plain" return @as(str, [@as(str, value)]) }
-fn optional() str { int?[3] values = [none, 2, none] return @as(str, values) }
+fn alias() str { Text value = "plain";return @as(str, [@as(str, value)]) }
+fn optional() str { int?[3] values = [none, 2, none];return @as(str, values) }
 fn tuple() str { return @as(str, ("hi", [true, false], 9u)) }
 fn map() str { return @as(str, ["key": [1, 2]]) }
 fn record() str { return @as(str, Record{.values = [3, 4], .name = "x"}) }
@@ -1230,13 +1230,13 @@ fn pure_void_calls_fold_without_hiding_effects() {
         r#"
 fn noop() {}
 fn early(bool stop) { if stop { true -> { return } _ -> {} } }
-fn checked(bool fail) void! { if fail { true -> { throw "failed" } _ -> {} } noop() }
+fn checked(bool fail) void! { if fail { true -> { throw "failed" } _ -> {} };noop() }
 fn forwarded() void! { return noop() }
 fn invoke((fn() void) callback) { callback() }
 fn total() int! {
-    noop() early(false) early(true)
+    noop();early(false);early(true)
     invoke(fn() { return })
-    try checked(false) try forwarded()
+    try checked(false);try forwarded()
     return 42
 }
 noop()
@@ -1245,13 +1245,13 @@ fn recovered() { checked(true) catch message { @println(message) } }
 recovered()
 fn effect() { @print("effect:") }
 fn effect_forwarded() void! { return effect() }
-fn runtime() int! { try effect_forwarded() noop() return 7 }
+fn runtime() int! { try effect_forwarded();noop();return 7 }
 @println(try runtime())
 "#,
         &["noop", "early", "checked", "forwarded", "invoke", "total"],
         "42\nfailed\neffect:7\n",
     );
-    let source = "fn loop() { while true {} } loop()";
+    let source = "fn loop() { while true {} };loop()";
     let c = compile_fixture(source, Path::new("void.nc"), true).unwrap();
     assert!(c.contains("nc_fn_loop("));
 }
@@ -1263,7 +1263,7 @@ fn pure_subexpressions_fold_inside_effectful_functions() {
 fn total(uint n) uint {
     mut uint result = 0
     mut uint i = 0
-    while i < n { result = result + i i = i + 1 }
+    while i < n { result = result + i;i = i + 1 }
     return result
 }
 fn runtime(uint input) uint {
@@ -1277,17 +1277,17 @@ fn runtime(uint input) uint {
         "effect:7:52\n",
     );
     folded(
-        "fn pure() int { return 42 } fn runtime() { fut int work = async pure() @println(await work) } runtime()",
+        "fn pure() int { return 42 };fn runtime() { fut int work = async pure();@println(await work) };runtime()",
         &[],
         "42\n",
     );
     folded(
-        "fn runtime(bool fail) int { @print(\"effect:\") return if fail { true -> { 1 / 0 } false -> { 9 } } } @println(runtime(false))",
+        "fn runtime(bool fail) int { @print(\"effect:\");return if fail { true -> { 1 / 0 } false -> { 9 } } };@println(runtime(false))",
         &[],
         "effect:9\n",
     );
     folded(
-        "fn runtime() int { @print(\"effect:\") mut int n = 1 int result = if true { true -> { n = 2 3 } false -> { 4 } } return n + result } @println(runtime())",
+        "fn runtime() int { @print(\"effect:\");mut int n = 1;int result = if true { true -> { n = 2;3 } false -> { 4 } };return n + result };@println(runtime())",
         &[],
         "effect:5\n",
     );
@@ -1301,12 +1301,12 @@ fn checked(int n) int! { if n { 0 -> { throw "zero" } _ -> { return n } } }
 fn forwarded(int n) int! { return try checked(n) }
 fn recovered(int n) int {
     mut int changes = 0
-    int value = forwarded(n) catch message { changes = 10 break @as(int, @as(str, message).len) }
+    int value = forwarded(n) catch message { changes = 10;break @as(int, @as(str, message).len) }
     return value + changes
 }
-fn early() int { int n = checked(0) catch _ { return 42 } return n }
-fn optional() int { int? n = none return n else { return 7 } }
-fn conditional() int { int n = if true { true -> { return 8 } false -> { break 0 } } return n }
+fn early() int { int n = checked(0) catch _ { return 42 };return n }
+fn optional() int { int? n = none;return n else { return 7 } }
+fn conditional() int { int n = if true { true -> { return 8 } false -> { break 0 } };return n }
 @println(recovered(0), recovered(3), early(), optional())
 @println(conditional())
 int! stored = checked(0)
@@ -1323,7 +1323,7 @@ int! stored = checked(0)
         "143427\n8\n9\n",
     );
     folded(
-        "fn effect() int! { @print(\"effect:\") throw \"bad\" } @println(effect() catch _ { 5 })",
+        "fn effect() int! { @print(\"effect:\");throw \"bad\" };@println(effect() catch _ { 5 })",
         &[],
         "effect:5\n",
     );
@@ -1387,7 +1387,7 @@ fn assignment_jumps() (int, int, int) {
     mut int[] values = [0]
     mut int changes = 0
     mut int target_calls = 0
-    fn target() uint { target_calls = target_calls + 1 return 0 }
+    fn target() uint { target_calls = target_calls + 1;return 0 }
     rows: for i in [10, 20, 30] {
         for j in [0] {
             values[target()] = failed() catch _ {
@@ -1516,13 +1516,13 @@ fn value_branches_preserve_mutations_of_surrounding_locals() {
         r"
 fn branch() int {
     mut int n = 0
-    int value = if true { true -> { n = 5 break 1 } false -> { break 0 } }
+    int value = if true { true -> { n = 5;break 1 } false -> { break 0 } }
     return n + value
 }
 fn fallback() int {
     mut int n = 0
     int? absent = none
-    int value = absent else { n = 7 break 2 }
+    int value = absent else { n = 7;break 2 }
     return n + value
 }
 @println(branch())
@@ -1546,7 +1546,7 @@ fn compute() int {
 }
 fn collection() int {
     int[] values = [1, 2, 3]
-    fn sum() int { mut int total = 0 for i in values { total = total + values[i] } return total }
+    fn sum() int { mut int total = 0;for i in values { total = total + values[i] };return total }
     return sum()
 }
 @println(compute())
@@ -1556,7 +1556,7 @@ fn collection() int {
         "46\n6\n",
     );
     folded(
-        "fn make(int n) (fn(int) int) { return fn(int x) int { @print(\"effect:\") return n + x } }\n(fn(int) int) closure = make(4)\n@println(closure(2))",
+        "fn make(int n) (fn(int) int) { return fn(int x) int { @print(\"effect:\");return n + x } }\n(fn(int) int) closure = make(4)\n@println(closure(2))",
         &[],
         "effect:6\n",
     );
@@ -1675,7 +1675,7 @@ int[]? present = [1, 2]
 
 #[test]
 fn specified_cast_table_matches_in_debug_and_release() {
-    let mut source = String::from("enum E { Value(int) } struct S { int value }\n");
+    let mut source = String::from("enum E { Value(int) };struct S { int value }\n");
     let mut expected = String::new();
     for (i, (from, to, value, output)) in [
         ("int[2]", "int[]", "[1, 2]", "[1, 2]"),
@@ -1767,8 +1767,8 @@ fut Data work = async construct([4])
     );
     for source in [
         "@println(int)",
-        "struct S { int n } @println(S)",
-        "enum E { A } E e = E",
+        "struct S { int n };@println(S)",
+        "enum E { A };E e = E",
     ] {
         assert!(compile_fixture(source, Path::new("types.nc"), false).is_err());
     }
@@ -1779,7 +1779,7 @@ fn async_builtins_evaluate_arguments_once_and_keep_runtime_process_state() {
     folded(
         r"
 mut int calls = 0
-fn next() int { calls = calls + 1 return calls }
+fn next() int { calls = calls + 1;return calls }
 fut void printed = async @println(next(), next())
 await printed
 @println(calls)
@@ -1806,7 +1806,7 @@ fn builtin_arguments_follow_function_call_evaluation_order() {
     folded(
         r#"
 mut int[] values = [1]
-fn update() str { values[0] = 2 @print("effect:") return "done" }
+fn update() str { values[0] = 2;@print("effect:");return "done" }
 @println(values, update(), values)
 "#,
         &[],
@@ -1873,7 +1873,7 @@ fn octet(byte n) char { return @as(char, n) }
 #[test]
 fn target_is_a_compile_time_value() {
     folded(
-        "fn platform() (str, str) { return @target() } @println(platform())",
+        "fn platform() (str, str) { return @target() };@println(platform())",
         &["platform"],
         "(macos, arm64)\n",
     );
@@ -1885,7 +1885,7 @@ fn nested_assignment_indices_are_evaluated_once_during_folding() {
         r"
 fn nested_places() (int, int) {
     mut int calls = 0
-    fn index() int { calls = calls + 1 return 0 }
+    fn index() int { calls = calls + 1;return 0 }
     mut int[][] grid = [[1]]
     grid[index()][index()] = 7
     return calls, grid[0][0]
@@ -1907,7 +1907,7 @@ fn snapshot() (int, int[], int[], int) {
         [Payload{.rows = ["k": [1, 2]]}, Payload{.rows = ["k": [3]]}], 10
     )
     mut int trace = 0
-    fn rhs() Payload { trace = trace * 10 + 1 return state[0][0] }
+    fn rhs() Payload { trace = trace * 10 + 1;return state[0][0] }
     fn target() int {
         trace = trace * 10 + 2
         state[0][0].rows["k"][0] = 99
@@ -1961,9 +1961,9 @@ fn mixed_nested_assignment_places_preserve_folding_effect_order() {
 struct Bucket { int[] values str text }
 fn mixed_places() (int, int, str, int) {
     mut int trace = 0
-    fn index(int marker) int { trace = trace * 10 + marker return 0 }
-    fn key() str { trace = trace * 10 + 1 return "item" }
-    fn replacement() int { trace = trace * 10 + 3 return 9 }
+    fn index(int marker) int { trace = trace * 10 + marker;return 0 }
+    fn key() str { trace = trace * 10 + 1;return "item" }
+    fn replacement() int { trace = trace * 10 + 3;return 9 }
     mut [str]Bucket buckets = ["item": Bucket{.values = [1], .text = "X"}]
     buckets[key()].values[index(2)] = replacement()
     buckets[key()].text[index(4)] = 'Z'
@@ -1973,7 +1973,7 @@ fn mixed_places() (int, int, str, int) {
 }
 fn deep_places() (int, int, int, int) {
     mut int calls = 0
-    fn index() int { calls = calls + 1 return 0 }
+    fn index() int { calls = calls + 1;return 0 }
     mut int[][][] cube = [[[1, 2]]]
     int[][][] original = cube
     cube[index()][index()][index()] = 9
@@ -1995,8 +1995,8 @@ fn nested_map_insertions_still_fold_and_evaluate_rhs_before_target() {
 struct Holder { [str]int entries }
 fn insert() (int, int) {
     mut int trace = 0
-    fn index() int { trace = trace * 10 + 1 return 0 }
-    fn replacement() int { trace = trace * 10 + 2 return 7 }
+    fn index() int { trace = trace * 10 + 1;return 0 }
+    fn replacement() int { trace = trace * 10 + 2;return 7 }
     mut Holder[] holders = [Holder{.entries = []}]
     holders[index()].entries["new"] = replacement()
     return trace, holders[0].entries["new"]
@@ -2015,16 +2015,16 @@ fn assignment_binding_replacements_fold_without_stale_storage() {
 struct Bucket { int[] values }
 fn replacements() (int[], int[][], str, int) {
     mut int[] values = [1]
-    fn replace() int { values = [2, 3] return 7 }
+    fn replace() int { values = [2, 3];return 7 }
     values[1] = replace()
     mut int[][] rows = [[1]]
-    fn index() int { rows = [[2, 3]] return 1 }
+    fn index() int { rows = [[2, 3]];return 1 }
     rows[0][index()] = 8
     mut str text = "x"
-    fn character() char { text = "ab" return 'Z' }
+    fn character() char { text = "ab";return 'Z' }
     text[$] = character()
     mut [str]Bucket buckets = ["item": Bucket{.values = [1]}]
-    fn insert() int { buckets = ["item": Bucket{.values = [2]}, "new": Bucket{.values = [3]}] return 0 }
+    fn insert() int { buckets = ["item": Bucket{.values = [2]}, "new": Bucket{.values = [3]}];return 0 }
     buckets["item"].values[insert()] = 9
     return values, rows, text, buckets["item"].values[0]
 }
@@ -2042,13 +2042,13 @@ fn later_assignment_indices_can_repair_missing_ancestors() {
 struct Bucket { int[] values }
 fn repairs() (int[][], int[]) {
     mut int[][] rows = []
-    fn repair() int { rows = [[1]] return 0 }
+    fn repair() int { rows = [[1]];return 0 }
     rows[0][repair()] = 7
     int[][] original = rows
     rows = []
     rows[0][[repair()][$]] = 8
     mut [str]Bucket buckets = []
-    fn restore() int { buckets = ["item": Bucket{.values = [1]}] return 0 }
+    fn restore() int { buckets = ["item": Bucket{.values = [1]}];return 0 }
     buckets["item"].values[restore()] = 9
     return original <> rows, buckets["item"].values
 }
@@ -2057,7 +2057,7 @@ fn repairs() (int[][], int[]) {
         &["repairs"],
         "([[7], [8]], [9])\n",
     );
-    let source = "mut int[][] rows = [] fn fail() int { return 1 / 0 } rows[0][fail()] = 7";
+    let source = "mut int[][] rows = [];fn fail() int { return 1 / 0 };rows[0][fail()] = 7";
     let error = compile_fixture(source, Path::new("index-failure.nc"), true).unwrap_err();
     assert!(error.to_string().contains("constant evaluation failed"));
     assert_eq!(&source[error.0[0].span.clone()], "1 / 0");
@@ -2070,7 +2070,7 @@ fn loops_labels_and_local_places_are_evaluated() {
 struct State { int sum int[] values }
 fn compute() int {
     mut State s = State{.sum = 0, .values = [1, 2, 3]}
-    for i in s.values { s.values[i] = s.values[i] + 1 s.sum = s.sum + s.values[i] }
+    for i in s.values { s.values[i] = s.values[i] + 1;s.sum = s.sum + s.values[i] }
     s.values[$] = 10
     mut [str]int counts = ["a": 2]
     counts["b"] = 3
@@ -2385,10 +2385,10 @@ fn typed_operations_match_runtime_semantics() {
         "42\n7\n5\n2\n2\n🍪\ntrue\n[2, 1, 0, 0, 0, 0, 0, 0]\n12\n18446744073709551615\n-9223372036854775808\n1\n",
     );
     for source in [
-        "fn f(uint n) uint { return n - 1 } @println(f(0))",
-        "fn f(byte n) byte { return n << 8 } @println(f(1))",
-        "fn f(float n) byte { return @as(byte, n) } @println(f(-0.5))",
-        "fn f(int n) int { return -n } @println(f(-9223372036854775808))",
+        "fn f(uint n) uint { return n - 1 };@println(f(0))",
+        "fn f(byte n) byte { return n << 8 };@println(f(1))",
+        "fn f(float n) byte { return @as(byte, n) };@println(f(-0.5))",
+        "fn f(int n) int { return -n };@println(f(-9223372036854775808))",
     ] {
         let error = compile_fixture(source, Path::new("bad.nc"), true).unwrap_err();
         assert!(
@@ -2406,7 +2406,7 @@ struct Wrapped { int? value }
 enum Choice { Value(int?) }
 fn optional(int? n) int? { return n }
 fn nested(int? n) int?? { return n }
-fn present(int?? n) bool { int? inner = n else { return false } return true }
+fn present(int?? n) bool { int? inner = n else { return false };return true }
 fn field(Wrapped n) int { return n.value else 10 }
 fn entry([str]int? n) int { return n["a"] else 10 }
 fn variant(Choice c) int { if c { Choice.Value(n) -> { return n else 10 } } }
@@ -2453,7 +2453,7 @@ fn tuple_bindings_shadow_and_discard_without_stale_constants() {
         r#"
 int first = 99
 int first, str second = (2, "three")
-fn sum((int, int) pair) int { int a, int b = pair return a + b }
+fn sum((int, int) pair) int { int a, int b = pair;return a + b }
 int _, int last = (3, 4)
 @println(first)
 @println(second)
@@ -2487,7 +2487,7 @@ fn real(float n) float { if n { 0.0, 1.0 -> { return n } _ -> { return real(n-1.
         ("byte", "255"),
     ] {
         let source =
-            format!("fn overflow({ty} n) {ty} {{ return n + 1 }} @println(overflow({maximum}))");
+            format!("fn overflow({ty} n) {ty} {{ return n + 1 }};@println(overflow({maximum}))");
         let error = compile_fixture(&source, Path::new("overflow.nc"), true).unwrap_err();
         assert!(
             error.to_string().contains("constant evaluation failed"),
@@ -2585,7 +2585,7 @@ fn counter(int initial) Counter {
     return Counter{
         .read = fn() int { return n },
         .write = fn(int value) { n = value },
-        .next = fn() int { n = n + 1 return n }
+        .next = fn() int { n = n + 1;return n }
     }
 }
 fn apply((fn() int) callback) int { return callback() }
@@ -2605,7 +2605,7 @@ fn branches() int {
     mut int a, int b = (1, 2)
     fn add() { a = a + b }
     if true { true -> { add() } false -> {} }
-    { mut int a = 100 fn local() { a = a + 1 } local() }
+    { mut int a = 100;fn local() { a = a + 1 };local() }
     b = 4
     add()
     return a + b
@@ -2634,14 +2634,14 @@ fn shared_closures_preserve_runtime_state_and_effects() {
         r#"
 fn make() (fn() int) {
     mut int n = 0
-    return fn() int { n = n + 1 return n }
+    return fn() int { n = n + 1;return n }
 }
 (fn() int) global = make()
 @println(global())
 @println(global())
 fn effectful() int {
     mut int n = 0
-    fn next() int { @print("effect:") n = n + 1 return n }
+    fn next() int { @print("effect:");n = n + 1;return n }
     return next() + next()
 }
 @println(effectful())
@@ -2659,13 +2659,13 @@ fn loops() int {
     mut (fn() int)[] callbacks = []
     for i in [1, 2, 3] {
         mut int n = @as(int, i)
-        callbacks = callbacks <> [fn() int { n = n + 1 return n }]
+        callbacks = callbacks <> [fn() int { n = n + 1;return n }]
     }
     return callbacks[0]() * 100 + callbacks[0]() * 10 + callbacks[1]()
 }
 fn errors() int {
     mut int n = 0
-    fn fail() int! { n = n + 1 throw "failure" }
+    fn fail() int! { n = n + 1;throw "failure" }
     int a = fail() catch _ { n }
     int b = fail() catch _ { n }
     return a * 10 + b
@@ -2674,7 +2674,7 @@ struct Box { (fn() int) next }
 fn step(Box box) int { return box.next() }
 fn boxed() int {
     mut int n = 0
-    Box box = Box{.next = fn() int { n = n + 1 return n }}
+    Box box = Box{.next = fn() int { n = n + 1;return n }}
     return step(box) * 10 + step(box)
 }
 fn pattern() int {

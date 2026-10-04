@@ -30,7 +30,7 @@ The optional `--compiler-parity` check additionally requires Rust/Cargo. It buil
 `scripts/parser-check.rs` under `target`, compares every corpus case with the
 compiler lexer/parser, and parses every compiler-accepted `nc` code fence in
 `docs/design.md`. It does not load imports, evaluate `@embed`, type-check, generate
-C, or execute programs. Currently 151 design snippets are checked; 13 rejected
+C, or execute programs. Currently 152 design snippets are checked; 13 rejected
 snippets are excluded because they contain illustrative templates, pseudocode, or
 intentional syntax errors. This is a syntax check, not semantic conformance.
 
@@ -56,14 +56,22 @@ No editor plugins, setup files, language-server bindings, or formatter are inclu
   lock scopes, assertions, and test blocks.
 - Escape-decoded literal braces and backslashes in quoted, multiline, and nested
   strings, including mixed literal text and interpolation.
+- Newline or semicolon separators between module/block statements; adjacent
+  same-line statements are invalid. Leading, repeated, and trailing separators
+  are accepted, and the final statement needs no separator before `}` or EOF.
 - Newline-sensitive optional return/break values and ordinary postfix forms via
-  a stateless scanner. Binary expressions, member access, and explicit generic
-  continuation follow the compiler's different multiline rules.
+  a stateless scanner. Binary expressions, assignments, member access, fallbacks,
+  and explicit generic applications retain multiline continuation, including
+  through comments. Delimited expressions and declaration syntax remain multiline.
+  Import entries, extern signatures, struct fields, and enum variants are member
+  lists rather than statement lists and retain their whitespace-separated syntax.
 
-The suite contains 70 structural corpus cases, 75 incremental edit steps, and
-81 highlighting assertions. Recovery cases check missing delimiters, incomplete
+The suite contains 86 structural corpus cases, 86 incremental edit steps, and
+86 highlighting assertions. Recovery cases check missing delimiters, incomplete
 generics and postfix expressions, unterminated strings, and invalid tokens.
-Incremental checks compare node kinds, fields, token text, and ranges with fresh
+Recovery after a missing call/array closer can absorb the following declaration;
+those cases are still rejected, but its declaration/highlighting shape is not
+preserved. Incremental checks compare node kinds, fields, token text, and ranges with fresh
 parses, including UTF-8 edits and damage/repair sequences. Highlighting assertions
 check exact byte spans and exclude code-like text in comments and literal strings.
 These tests are regression coverage, not proof of exhaustive language conformance.
@@ -77,8 +85,9 @@ and single-grapheme validation, and other semantic checks.
   as in `\\{literal}` or `\u{5c}{literal}`. The grammar keeps these out of
   interpolation nodes and includes the protected brace in the escape node.
 - Ordinary struct initializers require at least one `.field = value`. `Empty{}`
-  parses as a name expression followed by a separate block, just as in the
-  compiler; explicit generic initializers such as `Empty<int>{}` can be empty.
+  is a name expression followed by a block without a required statement separator,
+  so it is invalid; `Empty; {}` separates them. Explicit generic initializers such
+  as `Empty<int>{}` can be empty.
 - Named functions accept bare `!` returns. Anonymous functions require an explicit
   type, such as `fn() void! { ... }`; bare `!` is recovered as invalid syntax.
   Inferred function bindings may parenthesize their anonymous function.

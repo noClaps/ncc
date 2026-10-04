@@ -95,6 +95,29 @@ def parse_tree(path, edits=()):
 # exercise reuse of already edited (including recovered) trees, not just the base.
 edit_cases = [
     (
+        "statement separator damage and repair",
+        "mut int value = 1; value = 2\nfn work() { first(); second() }\n",
+        [
+            ("1; value", "1 value", True),
+            ("1 value", "1\nvalue", False),
+            ("first(); second()", "first() second()", True),
+            ("first() second()", "first()\nsecond()", False),
+            ("first()\nsecond()", "first(); // café\nsecond()", False),
+            ("1\nvalue", "1\r\nvalue", False),
+        ],
+    ),
+    (
+        "multiline operator and comment continuations",
+        "int value = 1\n + 2\n // café\n * 3\nint after = 4\n",
+        [
+            ("\n +", "; +", True),
+            ("; +", "\n +", False),
+            ("// café\n *", "// café\n // 茶\n *", False),
+            ("\nint after", " int after", True),
+            (" int after", "; int after", False),
+        ],
+    ),
+    (
         "metadata strings versus interpolation",
         'test "茶 {not code ???}" {}\n',
         [
@@ -208,7 +231,7 @@ edit_cases = [
         "empty initializer parity",
         "Empty<int> empty = Empty<int>{}\n",
         [
-            ("= Empty<int>", "= Empty", False),
+            ("= Empty<int>", "= Empty", True),
             ("= Empty", "= Empty<int>", False),
             ("{}", "{.value = 1}", False),
         ],
@@ -485,8 +508,8 @@ fn outer() { fn local() {} }
     ],
 )
 highlight_count += highlight_case(
-    "recovered call and following binding",
-    "@println(1\nint after = 2\n",
+    "invalid call argument and following binding",
+    "@println(1, `, 2)\nint after = 2\n",
     [
         ("function.builtin", "@println"),
         ("number", "1"),
@@ -495,6 +518,17 @@ highlight_count += highlight_case(
         ("number", "2"),
     ],
     incomplete=True,
+)
+highlight_count += highlight_case(
+    "multiline continuation token spans and semicolons",
+    "1\n+2; record\n.field\nnone\nelse 1\na\n<= b\n",
+    [
+        ("operator", "+"),
+        ("operator", "<="),
+        ("punctuation.delimiter", "."),
+        ("punctuation.delimiter", ";"),
+        ("keyword", "else"),
+    ],
 )
 if "--compiler-parity" in sys.argv:
     # Build a syntax-only oracle separately from the standalone grammar tests.

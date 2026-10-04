@@ -34,7 +34,7 @@ test "map collisions" {
 fn nonfinite_float_literals_arithmetic_and_formatting() {
     success(
         r#"
-fn runtime(float n) float { @print("") return n }
+fn runtime(float n) float { @print("");return n }
 float zero = runtime(0.0)
 float one = runtime(1.0)
 float huge = runtime(10.0) ** 200.0
@@ -71,7 +71,7 @@ fn nonfinite_float_integer_casts_fail_at_runtime() {
         for ty in ["int", "uint"] {
             runtime_failure(
                 &format!(
-                    "fn runtime() float {{ @print(\"\") return {value} }} _ = @as({ty}, runtime())"
+                    "fn runtime() float {{ @print(\"\");return {value} }};_ = @as({ty}, runtime())"
                 ),
                 "cast out of range",
             );
@@ -82,9 +82,9 @@ fn nonfinite_float_integer_casts_fail_at_runtime() {
 #[test]
 fn numeric_byte_encodings_preserve_boundaries_and_ieee_bits() {
     let mut source = String::from(
-        "fn signed(int value) int { @print(\"\") return value }\n\
-         fn unsigned(uint value) uint { @print(\"\") return value }\n\
-         fn floating(float value) float { @print(\"\") return value }\n",
+        "fn signed(int value) int { @print(\"\");return value }\n\
+         fn unsigned(uint value) uint { @print(\"\");return value }\n\
+         fn floating(float value) float { @print(\"\");return value }\n",
     );
     source.push_str("test \"numeric bytes\" {\n");
     let mut cases = Vec::new();
@@ -146,7 +146,7 @@ fn every_byte_converts_to_a_char_with_matching_utf8_bytes() {
     success(
         &format!(
             r#"
-fn runtime(byte value) byte {{ @print("") return value }}
+fn runtime(byte value) byte {{ @print("");return value }}
 test "all byte characters" {{
     char[] characters = [{characters}]
     byte[][] encodings = [{encodings}]
@@ -178,7 +178,7 @@ test "all byte characters" {{
 fn finite_float_integer_casts_cover_exact_representable_boundaries() {
     success(
         r#"
-fn runtime(float value) float { @print("") return value }
+fn runtime(float value) float { @print("");return value }
 test "finite casts" {
 assert @as(int, runtime(-9223372036854775808.0)) == -9223372036854775808
 assert @as(int, runtime(-9223372036854774784.0)) == -9223372036854774784
@@ -201,8 +201,8 @@ assert @as(int, runtime(-0.75)) == 0
 #[test]
 fn signed_unsigned_runtime_casts_preserve_the_shared_integer_range() {
     let mut source = String::from(
-        "fn runtime_signed(int value) int { @print(\"\") return value }\n\
-         fn runtime_unsigned(uint value) uint { @print(\"\") return value }\n\
+        "fn runtime_signed(int value) int { @print(\"\");return value }\n\
+         fn runtime_unsigned(uint value) uint { @print(\"\");return value }\n\
          test \"exact integer casts\" {\n",
     );
     for value in [
@@ -233,7 +233,7 @@ fn negative_fractional_float_to_uint_panics_before_truncation() {
     for value in ["-0.75", "-0.5", "-0.0001", tiny.as_str()] {
         let source = format!(
             r#"
-fn argument() float {{ _ = @args() @println("argument") return {value} }}
+fn argument() float {{ _ = @args();@println("argument");return {value} }}
 @println(@as(uint, argument()))
 @println("after")
 "#,
@@ -265,7 +265,7 @@ fn finite_out_of_range_numeric_casts_panic_before_c_conversion() {
     ] {
         runtime_failure(
             &format!(
-                "fn runtime({from} value) {from} {{ @print(\"\") return value }} \
+                "fn runtime({from} value) {from} {{ @print(\"\");return value }};\
                  _ = @as({to}, runtime({value}))",
             ),
             "cast out of range",
@@ -342,12 +342,12 @@ test "string inclusion" {
 fn inclusion_evaluates_each_operand_once_in_source_order() {
     success(
         r#"
-fn needle() int { @print("needle ") return 2 }
-fn numbers() int[] { @print("array ") return [1, 2, 3] }
-fn names() [int]str { @print("map ") return [2: "two"] }
-fn letter() char { @print("char ") return '🍪' }
-fn word() str { @print("word ") return "café" }
-fn text() str { @print("text ") return "🍪 café" }
+fn needle() int { @print("needle ");return 2 }
+fn numbers() int[] { @print("array ");return [1, 2, 3] }
+fn names() [int]str { @print("map ");return [2: "two"] }
+fn letter() char { @print("char ");return '🍪' }
+fn word() str { @print("word ");return "café" }
+fn text() str { @print("text ");return "🍪 café" }
 @println(needle() in numbers())
 @println(needle() in names())
 @println(letter() in text())
@@ -369,11 +369,11 @@ fn inclusion_rejects_mismatched_elements_and_noncontainers() {
         rejects(source, "in requires a compatible container and element");
     }
     for source in [
-        "float[] values = [1.0] _ = 1 in values",
-        "int[] values = [1] _ = 1.0 in values",
-        "int[1] values = [1] _ = true in values",
-        "[str]int values = [\"a\": 1] _ = 1 in values",
-        "[int]str values = [1: \"a\"] _ = \"a\" in values",
+        "float[] values = [1.0];_ = 1 in values",
+        "int[] values = [1];_ = 1.0 in values",
+        "int[1] values = [1];_ = true in values",
+        "[str]int values = [\"a\": 1];_ = 1 in values",
+        "[int]str values = [1: \"a\"];_ = \"a\" in values",
     ] {
         rejects(source, "expected `");
     }
@@ -382,10 +382,10 @@ fn inclusion_rejects_mismatched_elements_and_noncontainers() {
 #[test]
 fn maps_require_bare_if_comparisons() {
     for source in [
-        "[str]int values = [] if values { _ -> {} }",
-        "[str]int values = [\"a\": 1] if values { values -> {} _ -> {} }",
-        "fn values() [str]int { return [] } if values() { _ -> {} }",
-        "fn choose<T>(T value) { if value { _ -> {} } } choose<[str]int>([])",
+        "[str]int values = [];if values { _ -> {} }",
+        "[str]int values = [\"a\": 1];if values { values -> {} _ -> {} }",
+        "fn values() [str]int { return [] };if values() { _ -> {} }",
+        "fn choose<T>(T value) { if value { _ -> {} } };choose<[str]int>([])",
     ] {
         rejects(source, "maps cannot be matched directly");
     }
@@ -471,7 +471,7 @@ int fallback = native.sum([]) catch err { 42 }
         "C identifier",
     );
     rejects(
-        "struct S { int n } bool b = S{.n = 1} < S{.n = 2}",
+        "struct S { int n };bool b = S{.n = 1} < S{.n = 2}",
         "ordered comparisons require numeric",
     );
 }
@@ -516,11 +516,11 @@ fn duplicate_generic_and_record_declarations_are_not_silently_overwritten() {
         "struct Box { int value int value }",
         "enum Either<T> { Value(T) Value }",
         "enum Either { Value(int) Value }",
-        "fn f<T>(T value) T { return value } fn f<T>(T value) T { return value }",
-        "fn f<T>(T value) T { return value } fn f() {}",
-        "struct Box<T> { T value } struct Box<T> { T other }",
-        "enum Box<T> { Value(T) } struct Box<T> { T value }",
-        "type Box = int struct Box<T> { T value }",
+        "fn f<T>(T value) T { return value };fn f<T>(T value) T { return value }",
+        "fn f<T>(T value) T { return value };fn f() {}",
+        "struct Box<T> { T value };struct Box<T> { T other }",
+        "enum Box<T> { Value(T) };struct Box<T> { T value }",
+        "type Box = int;struct Box<T> { T value }",
         "struct int<T> { T value }",
         "enum bool<T> { Value(T) }",
         "fn str<T>(T value) T { return value }",
@@ -532,9 +532,9 @@ fn duplicate_generic_and_record_declarations_are_not_silently_overwritten() {
 #[test]
 fn expanding_generic_recursion_reports_a_limit_instead_of_crashing() {
     for source in [
-        "fn grow<T>(T value) int { return grow<T[]>([value]) } _ = grow<int>(1)",
-        "struct Grow<T> { Grow<T[]>[] next } fn use(Grow<int> value) {}",
-        "enum Grow<T> { Next(Grow<T[]>) } fn use(Grow<int> value) {}",
+        "fn grow<T>(T value) int { return grow<T[]>([value]) };_ = grow<int>(1)",
+        "struct Grow<T> { Grow<T[]>[] next };fn use(Grow<int> value) {}",
+        "enum Grow<T> { Next(Grow<T[]>) };fn use(Grow<int> value) {}",
     ] {
         for release in [false, true] {
             let output = run_mode(source, release);
@@ -601,20 +601,20 @@ enum Either { Left(int) Right(int) }
 fn value(Either e) int {
     if e { Either.Left(n), Either.Right(n) -> { return n } }
 }
-test "alternatives" { assert value(Either.Left(3)) == 3 assert value(Either.Right(4)) == 4 }
+test "alternatives" { assert value(Either.Left(3)) == 3;assert value(Either.Right(4)) == 4 }
 "#,
         "",
     );
     rejects(
-        "enum E { A(int) B(int) } fn f(E e) int { if e { E.A(a), E.B(b) -> { return a } } }",
+        "enum E { A(int) B(int) };fn f(E e) int { if e { E.A(a), E.B(b) -> { return a } } }",
         "alternative patterns must bind",
     );
     rejects(
-        "enum E { A(int) B(str) } fn f(E e) int { if e { E.A(a), E.B(a) -> { return 0 } } }",
+        "enum E { A(int) B(str) };fn f(E e) int { if e { E.A(a), E.B(a) -> { return 0 } } }",
         "alternative patterns must bind",
     );
     rejects(
-        "enum E { A(int) B } fn f(E e) int { if e { E.A(a), E.B -> { return a } } }",
+        "enum E { A(int) B };fn f(E e) int { if e { E.A(a), E.B -> { return a } } }",
         "alternative patterns must bind",
     );
 }
@@ -622,27 +622,27 @@ test "alternatives" { assert value(Either.Left(3)) == 3 assert value(Either.Righ
 #[test]
 fn futures_cannot_escape_through_nominal_types_or_captures() {
     rejects(
-        "type Hidden = fut int fn escape() Hidden { throw \"no\" }",
+        "type Hidden = fut int;fn escape() Hidden { throw \"no\" }",
         "futures cannot be returned",
     );
     rejects(
-        "struct Hidden { fut int value } fn escape() Hidden { throw \"no\" }",
+        "struct Hidden { fut int value };fn escape() Hidden { throw \"no\" }",
         "futures cannot be returned",
     );
     rejects(
-        "enum Hidden { Value(fut int) } fn escape() Hidden { throw \"no\" }",
+        "enum Hidden { Value(fut int) };fn escape() Hidden { throw \"no\" }",
         "futures cannot be returned",
     );
     rejects(
-        "fn one() int { return 1 } fut int value = async one() fn later = fn() int { return await value }",
+        "fn one() int { return 1 };fut int value = async one();fn later = fn() int { return await value }",
         "cannot capture futures",
     );
     rejects(
-        "fn one() int { return 1 } fut int value = async one() fut int[] values = [value]",
+        "fn one() int { return 1 };fut int value = async one();fut int[] values = [value]",
         "future must be initialized",
     );
     rejects(
-        "fn one() int { return 1 } fut int value = async one() struct Hidden { fut int value } Hidden hidden = Hidden{.value = value}",
+        "fn one() int { return 1 };fut int value = async one();struct Hidden { fut int value };Hidden hidden = Hidden{.value = value}",
         "not stored in composite",
     );
 }
@@ -656,21 +656,21 @@ fn functions_and_futures_reject_equality_and_string_conversion_recursively() {
         ("[str](fn() int) values = [\"f\": value]", "values"),
         ("((fn() int), int) values = (value, 1)", "values"),
         (
-            "struct Holder { (fn() int) f } Holder holder = Holder{.f = value}",
+            "struct Holder { (fn() int) f };Holder holder = Holder{.f = value}",
             "holder",
         ),
         (
-            "enum Callback { Value((fn() int)) Empty } Callback c = Callback.Empty",
+            "enum Callback { Value((fn() int)) Empty };Callback c = Callback.Empty",
             "c",
         ),
         (
-            "type Callback = (fn() int) Callback c = @as(Callback, value)",
+            "type Callback = (fn() int);Callback c = @as(Callback, value)",
             "c",
         ),
         ("(fn() int)? c = none", "c"),
         ("fut int pending = async value()", "pending"),
         (
-            "enum Recursive { Children(Recursive[]) Callback((fn() int)) Empty } Recursive r = Recursive.Empty",
+            "enum Recursive { Children(Recursive[]) Callback((fn() int)) Empty };Recursive r = Recursive.Empty",
             "r",
         ),
     ] {
@@ -701,8 +701,8 @@ fn functions_and_futures_reject_equality_and_string_conversion_recursively() {
     ] {
         rejects(&format!("{function}{operation}"), "equality is not defined");
     }
-    rejects("fn empty() {} @println(empty())", "not void");
-    rejects("fn empty() {} _ = empty() == empty()", "not void");
+    rejects("fn empty() {};@println(empty())", "not void");
+    rejects("fn empty() {};_ = empty() == empty()", "not void");
 }
 
 #[test]
@@ -710,7 +710,7 @@ fn partial_tuple_destructuring_evaluates_once_and_copies() {
     success(
         r#"
 mut int calls = 0
-fn values() (int, int[], int) { calls = calls + 1 return (1, [2], 3) }
+fn values() (int, int[], int) { calls = calls + 1;return (1, [2], 3) }
 int a, (int[], int) b = values()
 test "partial tuple" {
     assert calls == 1
@@ -744,7 +744,7 @@ int one, str two = (1, "two")
 mut int three, int four = (3, 4)
 fn sum() int { return one + three + four }
 three = three + 1
-test "globals" { assert sum() == 9 assert two == "two" }
+test "globals" { assert sum() == 9;assert two == "two" }
 "#,
         "",
     );
@@ -776,18 +776,18 @@ test "recursive values" {
     );
     rejects("struct Loop { Loop value }", "infinite size");
     rejects(
-        "struct A { B value } struct B { A? value }",
+        "struct A { B value };struct B { A? value }",
         "infinite size",
     );
     rejects("type Cycle = Cycle[]", "cyclic nominal");
-    rejects("type A = [str]B type B = A?", "cyclic nominal");
+    rejects("type A = [str]B;type B = A?", "cyclic nominal");
 }
 
 #[test]
 fn for_traversal_retains_original_indices_when_bindings_change_size() {
     success(
         r#"
-fn runtime(int value) int { @print("") return value }
+fn runtime(int value) int { @print("");return value }
 test "original indices" {
     mut int[] values = [runtime(1), 2, 3, 4, 5]
     for i in values {
@@ -841,7 +841,7 @@ test "original indices" {
 fn nested_traversals_keep_independent_snapshots_after_ancestor_replacement() {
     success(
         r#"
-fn runtime(int value) int { _ = @args() @print("") return value }
+fn runtime(int value) int { _ = @args();@print("");return value }
 test "independent nested traversal snapshots" {
     mut int[][] rows = [[runtime(1), 2], [3]]
     mut uint[] visited = []
@@ -878,7 +878,7 @@ test "independent nested traversal snapshots" {
 fn for_traversal_retains_original_map_keys_under_insertion_and_replacement() {
     success(
         r#"
-fn runtime(int value) int { @print("") return value }
+fn runtime(int value) int { @print("");return value }
 test "original keys" {
     mut [str]int values = ["a": runtime(1), "b": 2]
     mut uint visits = 0
@@ -911,7 +911,7 @@ test "original keys" {
 fn original_traversal_does_not_hide_invalid_current_binding_lookups() {
     runtime_failure(
         r#"
-fn runtime() int { @print("") return 1 }
+fn runtime() int { @print("");return 1 }
 mut int[] values = [runtime(), 2]
 for i in values {
     if i { 0 -> { values = [9] } _ -> {} }
@@ -922,7 +922,7 @@ for i in values {
     );
     runtime_failure(
         r#"
-fn runtime() int { @print("") return 1 }
+fn runtime() int { @print("");return 1 }
 mut [str]int values = ["original": runtime()]
 for key in values {
     values = ["new": 9]
@@ -933,7 +933,7 @@ for key in values {
     );
     runtime_failure(
         r#"
-fn runtime() str { @print("") return "a🍪" }
+fn runtime() str { @print("");return "a🍪" }
 mut str text = runtime()
 for i in text {
     if i { 0 -> { text = "x" } _ -> {} }
@@ -948,9 +948,9 @@ for i in text {
 fn for_loops_use_indices_and_map_keys_and_skip_empty_containers() {
     success(
         r#"
-fn array_source() int[] { @print("array ") return [10, 20, 30] }
-fn string_source() str { @print("string ") return "a🍪界" }
-fn map_source() [int]str { @print("map ") return [7: "seven", 11: "eleven"] }
+fn array_source() int[] { @print("array ");return [10, 20, 30] }
+fn string_source() str { @print("string ");return "a🍪界" }
+fn map_source() [int]str { @print("map ");return [7: "seven", 11: "eleven"] }
 for index in array_source() { @print(index, " ") }
 @println("")
 for index in string_source() { @print(index, " ") }
@@ -1024,7 +1024,7 @@ rows: for row in table {
 @println("end")
 mut int checks = 0
 mut int bodies = 0
-fn condition() bool { checks = checks + 1 @print("c", checks, " ") return checks < 4 }
+fn condition() bool { checks = checks + 1;@print("c", checks, " ");return checks < 4 }
 while condition() {
     bodies = bodies + 1
     if bodies { 2 -> { continue } _ -> {} }
@@ -1050,21 +1050,21 @@ fn loop_bindings_types_scopes_and_jump_targets_are_checked() {
     for source in [
         "for index in [1] { index = 1 }",
         "for index in \"a\" { index = 1 }",
-        "[str]int values = [\"a\": 1] for key in values { key = \"b\" }",
+        "[str]int values = [\"a\": 1];for key in values { key = \"b\" }",
     ] {
         rejects(source, "cannot mutate immutable");
     }
     for source in [
         "for index in [1] { int signed = index }",
         "for index in \"a\" { int signed = index }",
-        "[str]int values = [\"a\": 1] for key in values { uint index = key }",
+        "[str]int values = [\"a\": 1];for key in values { uint index = key }",
     ] {
         rejects(source, "expected `");
     }
     for source in [
-        "for index in [1] {} _ = index",
-        "[str]int values = [] for key in values {} _ = key",
-        "while false { int local = 1 } _ = local",
+        "for index in [1] {};_ = index",
+        "[str]int values = [];for key in values {};_ = key",
+        "while false { int local = 1 };_ = local",
     ] {
         rejects(source, "unknown name");
     }
@@ -1081,7 +1081,7 @@ fn loop_bindings_types_scopes_and_jump_targets_are_checked() {
     for source in [
         "while false { break :missing }",
         "for index in [1] { continue :missing }",
-        "done: while false {} break :done",
+        "done: while false {};break :done",
         "outer: while false { fn nested() { break :outer } }",
         "outer: for index in [1] { fn nested = fn() { continue :outer } }",
     ] {
@@ -1120,7 +1120,7 @@ test "labels" {
     mutex int value = 0
     mut int i = 0
     while i < 2 {
-        lock value { value = value + 1 i = i + 1 continue }
+        lock value { value = value + 1;i = i + 1;continue }
     }
     lock value { assert value == 2 }
 }
@@ -1153,21 +1153,21 @@ fn invalid_labels_value_breaks_and_pattern_comparisons_are_rejected() {
         "while true { break 1 }",
         "for i in [1] { break missing }",
         "label: if true { true -> { break 1 } false -> {} }",
-        "mutex int x = 0 lock x { break 1 }",
-        "int x = if true { true -> { fn nested() { break 1 } 1 } false -> { 2 } }",
+        "mutex int x = 0;lock x { break 1 }",
+        "int x = if true { true -> { fn nested() { break 1 };1 } false -> { 2 } }",
     ] {
         rejects(source, "break with a value requires");
     }
     for source in [
-        "fn f() {} (fn() void) value = f if value { value -> {} _ -> {} }",
-        "fn f() {} (fn() void) value = f if [value] { [value] -> {} _ -> {} }",
-        "fn f() {} fut void value = async f() if value { value -> {} _ -> {} }",
-        "fn f() {} struct Box { (fn() void) value } Box box = Box{.value = f} if box { box -> {} _ -> {} }",
+        "fn f() {};(fn() void) value = f;if value { value -> {} _ -> {} }",
+        "fn f() {};(fn() void) value = f;if [value] { [value] -> {} _ -> {} }",
+        "fn f() {};fut void value = async f();if value { value -> {} _ -> {} }",
+        "fn f() {};struct Box { (fn() void) value };Box box = Box{.value = f};if box { box -> {} _ -> {} }",
     ] {
         rejects(source, "pattern equality is not defined");
     }
     rejects(
-        "struct S { int x } S s = S{.x = 1} if s { S{.x = a, .x = b} -> {} _ -> {} }",
+        "struct S { int x };S s = S{.x = 1};if s { S{.x = a, .x = b} -> {} _ -> {} }",
         "duplicate field",
     );
 }
@@ -1187,7 +1187,7 @@ fn string_char_elements_remain_separate_after_replacement_and_concatenation() {
 fn string_iteration_preserves_slots_while_neighboring_characters_change() {
     success(
         r#"
-fn runtime(str text) str { @print("") return text }
+fn runtime(str text) str { @print("");return text }
 test "iteration elements" {
     mut str text = runtime("\rX")
     for i in text {
@@ -1216,7 +1216,7 @@ fn unicode_string_length_indexing_and_iteration() {
         include_str!("fixtures/unicode/unicode_string_length_indexing_and_iteration.nc"),
         "cookie 🍪\n",
     );
-    runtime_failure("str empty = \"\" @println(empty[0])", "out of bounds");
+    runtime_failure("str empty = \"\";@println(empty[0])", "out of bounds");
 }
 
 #[test]
@@ -1241,7 +1241,7 @@ test "mutexes" {
     assert await second
     lock numbers { assert numbers == [4,5,6] }
     escape: lock numbers {
-        for i in numbers { numbers[i] = 10 break :escape }
+        for i in numbers { numbers[i] = 10;break :escape }
     }
     lock numbers { assert numbers[0] == 10 }
     fn fail() int! { lock numbers { throw "failed" } }
@@ -1253,8 +1253,8 @@ test "mutexes" {
 "#,
         "",
     );
-    rejects("int value = 1 lock value {}", "lock requires a mutex");
-    rejects("mutex int value = 1 value = 2", "immutable");
+    rejects("int value = 1;lock value {}", "lock requires a mutex");
+    rejects("mutex int value = 1;value = 2", "immutable");
 }
 
 #[test]
@@ -1290,19 +1290,19 @@ test "futures" {
 #[test]
 fn return_paths_do_not_count_statements_after_jumps() {
     for source in [
-        "fn bad(bool b) int { label: if b { true -> { break :label return 1 } false -> { return 2 } } }",
-        "fn bad(bool b) int { label: if b { true -> { { break :label } return 1 } false -> { return 2 } } }",
-        "fn bad(bool b) int { outer: if b { true -> { inner: if b { true -> { break :outer return 1 } false -> { return 2 } } return 3 } false -> { return 4 } } }",
-        "fn bad(bool b) int { outer: if b { true -> { int n = if b { true -> { break :outer return 1 } false -> { 2 } } return n } false -> { return 3 } } }",
-        "fn bad(bool b) int { label: if b { true -> { int? maybe = none int n = maybe else { break :label return 1 } return n } false -> { return 2 } } }",
-        "fn bad = fn(bool b) int { label: if b { true -> { break :label return 1 } false -> { return 2 } } }",
+        "fn bad(bool b) int { label: if b { true -> { break :label;return 1 } false -> { return 2 } } }",
+        "fn bad(bool b) int { label: if b { true -> { { break :label };return 1 } false -> { return 2 } } }",
+        "fn bad(bool b) int { outer: if b { true -> { inner: if b { true -> { break :outer;return 1 } false -> { return 2 } };return 3 } false -> { return 4 } } }",
+        "fn bad(bool b) int { outer: if b { true -> { int n = if b { true -> { break :outer;return 1 } false -> { 2 } };return n } false -> { return 3 } } }",
+        "fn bad(bool b) int { label: if b { true -> { int? maybe = none;int n = maybe else { break :label;return 1 };return n } false -> { return 2 } } }",
+        "fn bad = fn(bool b) int { label: if b { true -> { break :label;return 1 } false -> { return 2 } } }",
     ] {
         rejects(source, "may finish without returning");
     }
     success(
         r#"
 fn escaped(bool b) int {
-    label: if b { true -> { break :label return 1 } false -> { return 2 } }
+    label: if b { true -> { break :label;return 1 } false -> { return 2 } }
     return 3
 }
 fn expression_returns(bool b) int {
@@ -1311,7 +1311,7 @@ fn expression_returns(bool b) int {
 fn loop_exits() int {
     mutex int value = 0
     outer: while true {
-        lock value { value = 6 break :outer }
+        lock value { value = 6;break :outer }
     }
     lock value { return value }
 }
@@ -1329,57 +1329,57 @@ test "return paths" {
 fn string_conversion_requires_convertible_constituents_and_explicit_custom_unwrapping() {
     for (declaration, expression, diagnostic) in [
         (
-            "type Number = int Number n = 1",
+            "type Number = int;Number n = 1",
             "n",
             "underlying base types",
         ),
         (
-            "type Text = str Text n = \"text\"",
+            "type Text = str;Text n = \"text\"",
             "n",
             "underlying base types",
         ),
         (
-            "type Number = int Number[] n = []",
+            "type Number = int;Number[] n = []",
             "n",
             "underlying base types",
         ),
         (
-            "type Number = int fn table() [str]Number { return [] }",
+            "type Number = int;fn table() [str]Number { return [] }",
             "table()",
             "underlying base types",
         ),
         (
-            "type Text = str fn table() [Text]int { return [] }",
+            "type Text = str;fn table() [Text]int { return [] }",
             "table()",
             "underlying base types",
         ),
         (
-            "type Number = int Number? n = none",
+            "type Number = int;Number? n = none",
             "n",
             "underlying base types",
         ),
         (
-            "type Number = int (Number, int) n = (1, 2)",
+            "type Number = int;(Number, int) n = (1, 2)",
             "n",
             "underlying base types",
         ),
         (
-            "type Number = int struct Box { Number value } Box n = Box{.value = 1}",
+            "type Number = int;struct Box { Number value };Box n = Box{.value = 1}",
             "n",
             "underlying base types",
         ),
         (
-            "type Number = int enum Box { Empty Value(Number) } Box n = Box.Empty",
+            "type Number = int;enum Box { Empty Value(Number) };Box n = Box.Empty",
             "n",
             "underlying base types",
         ),
         (
-            "type Number = int fn result() Number! { throw \"bad\" }",
+            "type Number = int;fn result() Number! { throw \"bad\" }",
             "result()",
             "underlying base types",
         ),
         (
-            "enum Recursive { Children(Recursive[]) Value(void) Empty } Recursive n = Recursive.Empty",
+            "enum Recursive { Children(Recursive[]) Value(void) Empty };Recursive n = Recursive.Empty",
             "n",
             "not defined for void",
         ),
@@ -1399,7 +1399,7 @@ fn string_conversion_requires_convertible_constituents_and_explicit_custom_unwra
             format!("_ = @as(str, {expression})"),
         ] {
             // A custom string can be explicitly unwrapped directly to str.
-            if declaration.starts_with("type Text = str Text") && operation.starts_with("_ = @as") {
+            if declaration.starts_with("type Text = str;Text") && operation.starts_with("_ = @as") {
                 continue;
             }
             rejects(&format!("{declaration}\n{operation}"), diagnostic);
@@ -1504,19 +1504,19 @@ test "closures" {
 "#,
         "",
     );
-    rejects("int a = 1 fn f = fn() { a = 2 }", "immutable");
+    rejects("int a = 1;fn f = fn() { a = 2 }", "immutable");
 }
 
 #[test]
 fn indirect_calls_evaluate_callable_then_arguments_once_in_order() {
     success(
         r#"
-fn mark(int value) int { @print(value, " ") return value }
-fn add(int left, int right) int { @print("call ") return left + right }
-fn choose() (fn(int, int) int) { @print("choose ") return add }
-fn index() uint { @print("index ") return 0 }
+fn mark(int value) int { @print(value, " ");return value }
+fn add(int left, int right) int { @print("call ");return left + right }
+fn choose() (fn(int, int) int) { @print("choose ");return add }
+fn index() uint { @print("index ");return 0 }
 struct Holder { (fn(int, int) int) operation }
-fn holder() Holder { @print("holder ") return Holder{.operation = add} }
+fn holder() Holder { @print("holder ");return Holder{.operation = add} }
 (fn(int, int) int)[] operations = [add]
 @println(choose()(mark(1), mark(2)))
 @println(operations[index()](mark(3), mark(4)))
@@ -1548,7 +1548,7 @@ fn changed_tuple((int[], str) input) (int[], str) {
     input[1][0] = 'b'
     return input
 }
-fn runtime(int value) int { @print("") return value }
+fn runtime(int value) int { @print("");return value }
 test "parameter copies" {
     Payload original = Payload{.numbers = [runtime(1)], .table = ["key": [2]], .text = "aX"}
     mut Payload result = changed(original)
@@ -1580,29 +1580,29 @@ fn function_parameters_and_callback_signatures_are_strict() {
         "fn bad([str]int values) { values[\"key\"] = 2 }",
         "fn bad(str value) { value[0] = 'a' }",
         "fn bad((int, int) value) { value[0] = 2 }",
-        "struct Item { int value } fn bad(Item item) { item.value = 2 }",
+        "struct Item { int value };fn bad(Item item) { item.value = 2 }",
         "fn bad(int[] values) { fn mutate() { values[0] = 2 } }",
     ] {
         rejects(source, "cannot mutate immutable");
     }
     for source in [
-        "fn bad(uint value) int { return @as(int, value) } (fn(int) int) callback = bad",
-        "fn bad(int value) uint { return @as(uint, value) } (fn(int) int) callback = bad",
-        "fn bad(int left, int right) int { return left + right } (fn(int) int) callback = bad",
-        "fn bad(int value) {} (fn(int) int) callback = bad",
-        "fn apply((fn(int) int) callback) int { return callback(1) } fn bad(str value) int { return 1 } _ = apply(bad)",
-        "(fn(int) int) callback = fn(int value) int { return value } _ = callback(true)",
+        "fn bad(uint value) int { return @as(int, value) };(fn(int) int) callback = bad",
+        "fn bad(int value) uint { return @as(uint, value) };(fn(int) int) callback = bad",
+        "fn bad(int left, int right) int { return left + right };(fn(int) int) callback = bad",
+        "fn bad(int value) {};(fn(int) int) callback = bad",
+        "fn apply((fn(int) int) callback) int { return callback(1) };fn bad(str value) int { return 1 };_ = apply(bad)",
+        "(fn(int) int) callback = fn(int value) int { return value };_ = callback(true)",
     ] {
         rejects(source, "expected `");
     }
     for source in [
-        "fn value() int { return 1 } value()",
-        "fn value() int { return 1 } (fn() int) callback = value callback()",
-        "fn value() int { return 1 } (fn() int)[] callbacks = [value] callbacks[0]()",
+        "fn value() int { return 1 };value()",
+        "fn value() int { return 1 };(fn() int) callback = value;callback()",
+        "fn value() int { return 1 };(fn() int)[] callbacks = [value];callbacks[0]()",
     ] {
         rejects(source, "not used");
     }
-    rejects("fn value(int input) {} _ = input", "unknown name");
+    rejects("fn value(int input) {};_ = input", "unknown name");
 }
 
 #[test]
@@ -1632,9 +1632,9 @@ fn nested_assignment_places_evaluate_indices_and_rhs_once_in_order() {
 struct Bucket { int[] values str text }
 fn nested_places() (int, int, str, int, int) {
     mut int trace = 0
-    fn index(int marker) int { @print("") trace = trace * 10 + marker return 0 }
-    fn key() str { @print("") trace = trace * 10 + 1 return "item" }
-    fn replacement() int { @print("") trace = trace * 10 + 3 return 9 }
+    fn index(int marker) int { @print("");trace = trace * 10 + marker;return 0 }
+    fn key() str { @print("");trace = trace * 10 + 1;return "item" }
+    fn replacement() int { @print("");trace = trace * 10 + 3;return 9 }
     mut [str]Bucket buckets = ["item": Bucket{.values = [1], .text = "X"}]
     [str]Bucket original = buckets
     buckets[key()].values[index(2)] = replacement()
@@ -1654,7 +1654,7 @@ fn composite_assignment_rhs_is_copied_before_index_replaces_tuple_ancestor() {
     success(
         r#"
 struct Payload { [str]int[] rows }
-fn runtime(int value) int { _ = @args() @print("") return value }
+fn runtime(int value) int { _ = @args();@print("");return value }
 test "RHS copy before tuple ancestor replacement" {
     mut (Payload[], int) state = (
         [
@@ -1714,15 +1714,15 @@ test "RHS copy before tuple ancestor replacement" {
 fn nested_assignment_failures_are_preserved_in_release() {
     for (source, message) in [
         (
-            "fn invalid() int { mut int[][] rows = [[1]] rows[1][0] = 7 return 9 } @println(invalid())",
+            "fn invalid() int { mut int[][] rows = [[1]];rows[1][0] = 7;return 9 };@println(invalid())",
             "out of bounds",
         ),
         (
-            "struct Bucket { int[] values } fn invalid() int { mut [str]Bucket buckets = [\"present\": Bucket{.values = [1]}] buckets[\"missing\"].values[0] = 7 return 9 } @println(invalid())",
+            "struct Bucket { int[] values };fn invalid() int { mut [str]Bucket buckets = [\"present\": Bucket{.values = [1]}];buckets[\"missing\"].values[0] = 7;return 9 };@println(invalid())",
             "map key not found",
         ),
         (
-            "fn invalid() str { mut str[] texts = [\"x\"] texts[0][1] = 'y' return texts[0] } @println(invalid())",
+            "fn invalid() str { mut str[] texts = [\"x\"];texts[0][1] = 'y';return texts[0] };@println(invalid())",
             "out of bounds",
         ),
     ] {
@@ -1735,19 +1735,19 @@ fn assignment_rhs_failures_precede_invalid_targets() {
     for source in [
         "mut int[] values = [1]\nvalues[1] = 1 / 0",
         "mut int[][] rows = [[1]]\nrows[0][1] = 1 / 0",
-        "struct Entry { int value } mut [str]Entry entries = [\"present\": Entry{.value = 1}] entries[\"missing\"].value = 1 / 0",
-        "fn runtime() int[] { @print(\"\") return [1] } mut int[] values = runtime() values[1] = 1 / 0",
-        "mut int[] values = [1] fn shrink() { @print(\"\") values = [] } shrink() values[0] = 1 / 0",
-        "fn invalid() int { mut int[] values = [1] values[-1] = 1 / 0 return 9 } @println(invalid())",
-        "fn invalid() int { mut int[][] rows = [[1]] rows[1][0] = 1 / 0 return 9 } @println(invalid())",
-        "fn invalid() int { mut int[][] rows = [[1]] rows[0][1] = 1 / 0 return 9 } @println(invalid())",
-        "struct Entry { int value } fn invalid() int { mut [str]Entry entries = [\"present\": Entry{.value = 1}] entries[\"missing\"].value = 1 / 0 return 9 } @println(invalid())",
-        "fn invalid() uint { mut uint[][] rows = [[1]] rows[0][1] = @as(uint, -0.75) return 9 } @println(invalid())",
+        "struct Entry { int value };mut [str]Entry entries = [\"present\": Entry{.value = 1}];entries[\"missing\"].value = 1 / 0",
+        "fn runtime() int[] { @print(\"\");return [1] };mut int[] values = runtime();values[1] = 1 / 0",
+        "mut int[] values = [1];fn shrink() { @print(\"\");values = [] };shrink();values[0] = 1 / 0",
+        "fn invalid() int { mut int[] values = [1];values[-1] = 1 / 0;return 9 };@println(invalid())",
+        "fn invalid() int { mut int[][] rows = [[1]];rows[1][0] = 1 / 0;return 9 };@println(invalid())",
+        "fn invalid() int { mut int[][] rows = [[1]];rows[0][1] = 1 / 0;return 9 };@println(invalid())",
+        "struct Entry { int value };fn invalid() int { mut [str]Entry entries = [\"present\": Entry{.value = 1}];entries[\"missing\"].value = 1 / 0;return 9 };@println(invalid())",
+        "fn invalid() uint { mut uint[][] rows = [[1]];rows[0][1] = @as(uint, -0.75);return 9 };@println(invalid())",
     ] {
         let source = source
             .replace("1 / 0", "fail()")
             .replace("@as(uint, -0.75)", "@as(uint, fail())");
-        let source = format!("fn fail() int {{ @print(\"\") return 1 / 0 }}\n{source}");
+        let source = format!("fn fail() int {{ @print(\"\");return 1 / 0 }}\n{source}");
         runtime_failure(&source, "division by zero");
     }
 }
@@ -1759,20 +1759,20 @@ fn assignment_targets_use_bindings_after_rhs_and_index_effects() {
 struct Bucket { int[] values str text }
 fn assignments() (int[], int[][], str, int, int) {
     mut int[] values = [1]
-    fn replace() int { @print("") values = [2, 3] return 7 }
+    fn replace() int { @print("");values = [2, 3];return 7 }
     values[1] = replace()
     mut int[][] rows = [[1]]
-    fn resize() int { @print("") rows = [[2, 3]] return 1 }
+    fn resize() int { @print("");rows = [[2, 3]];return 1 }
     rows[0][resize()] = 8
     mut str text = "x"
-    fn character() char { @print("") text = "ab" return 'Z' }
+    fn character() char { @print("");text = "ab";return 'Z' }
     text[$] = character()
     mut [str]Bucket buckets = ["item": Bucket{.values = [1], .text = "x"}]
-    fn insert() int { @print("") buckets = ["item": Bucket{.values = [2], .text = "y"}, "new": Bucket{.values = [3], .text = "z"}] return 0 }
+    fn insert() int { @print("");buckets = ["item": Bucket{.values = [2], .text = "y"}, "new": Bucket{.values = [3], .text = "z"}];return 0 }
     buckets["item"].values[insert()] = 9
     mut int trace = 0
-    fn index() int { @print("") trace = trace * 10 + 1 return 0 }
-    fn replacement() int { @print("") trace = trace * 10 + 2 return 4 }
+    fn index() int { @print("");trace = trace * 10 + 1;return 0 }
+    fn replacement() int { @print("");trace = trace * 10 + 2;return 4 }
     values[index()] = replacement()
     return values, rows, text, buckets["item"].values[0], trace
 }
@@ -1784,29 +1784,29 @@ fn assignments() (int[], int[][], str, int, int) {
         r#"
 struct Bucket { int[] values }
 mut int[][] rows = []
-fn repair() int { @print("repair:") rows = [[1]] return 0 }
+fn repair() int { @print("repair:");rows = [[1]];return 0 }
 rows[0][repair()] = 7
 @println(rows)
 rows = []
 rows[0][[repair()][$]] = 8
 @println(rows)
 mut [str]Bucket buckets = []
-fn restore() int { @print("restore:") buckets = ["item": Bucket{.values = [1]}] return 0 }
+fn restore() int { @print("restore:");buckets = ["item": Bucket{.values = [1]}];return 0 }
 buckets["item"].values[restore()] = 9
 @println(buckets["item"].values)
 "#,
         "repair:[[7]]\nrepair:[[8]]\nrestore:[9]\n",
     );
     runtime_failure(
-        "mut int[][] rows = [] fn fail() int { @print(\"\") return 1 / 0 } rows[0][fail()] = 7",
+        "mut int[][] rows = [];fn fail() int { @print(\"\");return 1 / 0 };rows[0][fail()] = 7",
         "division by zero",
     );
     for source in [
-        "mut int[] values = [1, 2] fn replace() int { @print(\"\") values = [] return 7 } values[1] = replace()",
-        "mut int[][] rows = [[1]] fn index() int { @print(\"\") rows = [] return 0 } rows[0][index()] = 7",
-        "mut int[][] rows = [[1]] fn index() int { @print(\"\") rows = [[]] return 0 } rows[0][index()] = 7",
-        "struct Bucket { int[] values } mut [str]Bucket buckets = [\"item\": Bucket{.values = [1]}] fn index() int { @print(\"\") buckets = [] return 0 } buckets[\"item\"].values[index()] = 7",
-        "mut str text = \"ab\" fn replace() char { @print(\"\") text = \"\" return 'Z' } text[1] = replace()",
+        "mut int[] values = [1, 2];fn replace() int { @print(\"\");values = [];return 7 };values[1] = replace()",
+        "mut int[][] rows = [[1]];fn index() int { @print(\"\");rows = [];return 0 };rows[0][index()] = 7",
+        "mut int[][] rows = [[1]];fn index() int { @print(\"\");rows = [[]];return 0 };rows[0][index()] = 7",
+        "struct Bucket { int[] values };mut [str]Bucket buckets = [\"item\": Bucket{.values = [1]}];fn index() int { @print(\"\");buckets = [];return 0 };buckets[\"item\"].values[index()] = 7",
+        "mut str text = \"ab\";fn replace() char { @print(\"\");text = \"\";return 'Z' };text[1] = replace()",
     ] {
         runtime_failure(
             source,
@@ -1826,7 +1826,7 @@ fn writable_places_and_evaluation_order() {
 struct Inner { int x }
 struct Outer { Inner inner [str]int counts }
 mut int counter = 1
-fn update() int { counter = 9 return 2 }
+fn update() int { counter = 9;return 2 }
 fn pair(int a, int b) int { return a * 10 + b }
 int shadow = 2
 int shadow = shadow + 3
@@ -1884,11 +1884,11 @@ test "generic data" {
         "",
     );
     rejects(
-        "struct Data<type T> { T data } Data<int,str> bad = Data<int>{.data = 1}",
+        "struct Data<type T> { T data };Data<int,str> bad = Data<int>{.data = 1}",
         "incorrect number",
     );
     rejects(
-        "struct Data<type T> { T data } Data<int> bad = Data<int>{.data = \"bad\"}",
+        "struct Data<type T> { T data };Data<int> bad = Data<int>{.data = \"bad\"}",
         "expected",
     );
 }
@@ -1917,7 +1917,7 @@ test "nominal" {
         "",
     );
     rejects(
-        "type Name = str fn plain(str s) {} Name n = \"hello\" plain(n)",
+        "type Name = str;fn plain(str s) {};Name n = \"hello\";plain(n)",
         "expected",
     );
     runtime_failure("@println(@as(uint, -@as(int, @args().len)))", "panic:");
@@ -1942,16 +1942,16 @@ test "recursive" {
 #[test]
 fn release_evaluates_pure_functions_and_preserves_effects() {
     let scoped =
-        "fn scoped() int { mut int x = 1 { x = 2 int x = 3 } return x } @println(scoped())";
+        "fn scoped() int { mut int x = 1;{ x = 2;int x = 3 };return x };@println(scoped())";
     let c = compile_fixture(scoped, Path::new("scope.nc"), true).unwrap();
     assert!(c.contains("\"2\""), "known output should be constant bytes");
     assert!(!c.contains("nc_fn_scoped"));
-    let source = r"fn fib(int n) int { if n { 0,1 -> { return n } _ -> { return fib(n-1)+fib(n-2) } } } @println(fib(10))";
+    let source = r"fn fib(int n) int { if n { 0,1 -> { return n } _ -> { return fib(n-1)+fib(n-2) } } };@println(fib(10))";
     let c = compile_fixture(source, Path::new("fib.nc"), true).unwrap();
     let main = c.split("int main(void)").last().unwrap();
     assert!(main.contains("\"55\""));
     assert!(!main.contains("nc_fn_fib"));
-    let effect = "fn effect() int { @println(\"keep\") return 2 } @println(effect())";
+    let effect = "fn effect() int { @println(\"keep\");return 2 };@println(effect())";
     let c = compile_fixture(effect, Path::new("effect.nc"), true).unwrap();
     assert!(!c.contains("nc_fn_effect"));
     assert!(c.contains("\"keep\""));
@@ -1990,7 +1990,7 @@ test "all bytes" {{
         .join(", ");
     success(
         &format!(
-            "fn covered(byte value) bool {{ return if value {{ {alternatives} -> {{ true }} }} }} @println(covered(0), covered(255))"
+            "fn covered(byte value) bool {{ return if value {{ {alternatives} -> {{ true }} }} }};@println(covered(0), covered(255))"
         ),
         "truetrue\n",
     );
@@ -2064,7 +2064,7 @@ test "exact patterns" {
 fn float_patterns_use_ieee_equality_for_nonfinite_values_and_signed_zero() {
     success(
         r#"
-fn runtime(float value) float { @print("") return value }
+fn runtime(float value) float { @print("");return value }
 fn classify(float value) str {
     return if value {
         NaN -> { "unreachable" }
@@ -2088,9 +2088,9 @@ fn classify(float value) str {
 #[test]
 fn enum_patterns_with_partial_payload_coverage_are_not_exhaustive() {
     for source in [
-        "enum Choice { Empty Number(int) } fn missing(Choice value) { if value { Choice.Empty -> {} Choice.Number(0) -> {} } }",
-        "enum Choice { Empty Number(int) } fn missing(Choice value, int expected) { if value { Choice.Empty -> {} Choice.Number(expected) -> {} } }",
-        "enum Choice { Empty Numbers(int[]) } fn missing(Choice value) { if value { Choice.Empty -> {} Choice.Numbers([]) -> {} Choice.Numbers([x]) -> {} } }",
+        "enum Choice { Empty Number(int) };fn missing(Choice value) { if value { Choice.Empty -> {} Choice.Number(0) -> {} } }",
+        "enum Choice { Empty Number(int) };fn missing(Choice value, int expected) { if value { Choice.Empty -> {} Choice.Number(expected) -> {} } }",
+        "enum Choice { Empty Numbers(int[]) };fn missing(Choice value) { if value { Choice.Empty -> {} Choice.Numbers([]) -> {} Choice.Numbers([x]) -> {} } }",
     ] {
         rejects(source, "not exhaustive");
     }
@@ -2113,11 +2113,11 @@ fn number(Choice value) int {
 #[test]
 fn enum_payloads_and_binding_patterns() {
     rejects(
-        "enum E { A B } E value = E.A E bad = value.B",
+        "enum E { A B };E value = E.A;E bad = value.B",
         "through the enum type",
     );
     rejects(
-        "enum E { A B } fn value() E { @println(\"effect\") return E.A } E bad = value().B",
+        "enum E { A B };fn value() E { @println(\"effect\");return E.A };E bad = value().B",
         "through the enum type",
     );
     success(
@@ -2145,7 +2145,7 @@ test "patterns" {
         "Node.Text(\"quoted\")\n",
     );
     rejects(
-        "enum E { A B } E v = E.A if v { E.A -> {} }",
+        "enum E { A B };E v = E.A;if v { E.A -> {} }",
         "not exhaustive",
     );
 }
@@ -2200,7 +2200,7 @@ test "strings" {
 
 #[test]
 fn generic_declarations_require_explicit_correct_type_arguments() {
-    let function = "fn identity<T>(T value) T { return value } ";
+    let function = "fn identity<T>(T value) T { return value };";
     rejects(
         &format!("{function}_ = identity(1)"),
         "requires explicit type arguments",
@@ -2221,7 +2221,7 @@ fn generic_declarations_require_explicit_correct_type_arguments() {
         "fn result() Box<int, str> {}",
     ] {
         rejects(
-            &format!("struct Box<T> {{ T value }} {use_site}"),
+            &format!("struct Box<T> {{ T value }};{use_site}"),
             "incorrect number of type arguments",
         );
     }
@@ -2232,14 +2232,14 @@ fn generic_declarations_require_explicit_correct_type_arguments() {
         "fn result() Choice<int, str> {}",
     ] {
         rejects(
-            &format!("enum Choice<T> {{ Value(T) Empty }} {use_site}"),
+            &format!("enum Choice<T> {{ Value(T) Empty }};{use_site}"),
             "incorrect number of type arguments",
         );
     }
     for source in [
         format!("{function}_ = identity<int>(\"wrong\")"),
-        "struct Box<T> { T value } Box<int> value = Box<int>{.value = \"wrong\"}".into(),
-        "enum Choice<T> { Value(T) Empty } Choice<int> value = Choice.Value(\"wrong\")".into(),
+        "struct Box<T> { T value };Box<int> value = Box<int>{.value = \"wrong\"}".into(),
+        "enum Choice<T> { Value(T) Empty };Choice<int> value = Choice.Value(\"wrong\")".into(),
     ] {
         rejects(&source, "expected `int`, found `str`");
     }
@@ -2264,7 +2264,7 @@ test "generic" {
         "",
     );
     rejects(
-        "fn bad<type T>(T x) int { return x.missing } int x = bad<int>(1)",
+        "fn bad<type T>(T x) int { return x.missing };int x = bad<int>(1)",
         "member",
     );
 }
@@ -2334,10 +2334,10 @@ test "namespaces" {
             "right.Point value = left.Point{.x = 1}",
             "right.Box<int> value = left.wrap<int>(1)",
             "right.Choice<int> value = left.choose<int>(1)",
-            "fn accept(right.Point value) {} accept(left.Point{.x = 1})",
+            "fn accept(right.Point value) {};accept(left.Point{.x = 1})",
         ] {
             let error = compile_fixture(
-                &format!("import {{ \"left\" as left \"right\" as right }} {invalid}"),
+                &format!("import {{ \"left\" as left \"right\" as right }};{invalid}"),
                 &main,
                 release,
             )
@@ -2354,7 +2354,7 @@ test "namespaces" {
             "right.private_add(1)",
         ] {
             let error = compile_fixture(
-                &format!("import {{ \"left\" as left \"right\" as right }} _ = {private}"),
+                &format!("import {{ \"left\" as left \"right\" as right }};_ = {private}"),
                 &main,
                 release,
             )
@@ -2422,7 +2422,7 @@ test "nested imports" {
         );
         assert_eq!(output.stdout.as_slice(), b"");
         let error = compile_fixture(
-            "import { \"library/facade\" as facade } _ = facade.helper.answer(1)",
+            "import { \"library/facade\" as facade };_ = facade.helper.answer(1)",
             &main,
             release,
         )
@@ -2436,7 +2436,7 @@ fn modules_exports_and_external_functions() {
     let dir = ncc::temp::Directory::new().unwrap();
     fs::write(
         dir.path().join("one.nc"),
-        "pub int value = 7 pub fn square(int n) int { return n * n } int hidden = 9\n\
+        "pub int value = 7;pub fn square(int n) int { return n * n };int hidden = 9\n\
          pub int first, str second = (3, \"four\")\n\
          pub int head, (int, int) tail = (5, 6, 7)\n\
          int private_first, int private_second = (5, 6)",
@@ -2477,7 +2477,7 @@ extern "native.c" as native { fn add(int a, int b) int = "native_add" }
         for name in ["private_first", "private_second"] {
             assert!(
                 compile_fixture(
-                    &format!("import {{ \"one\" as one }} @println(one.{name})"),
+                    &format!("import {{ \"one\" as one }};@println(one.{name})"),
                     &main,
                     release
                 )
@@ -2488,7 +2488,7 @@ extern "native.c" as native { fn add(int a, int b) int = "native_add" }
         }
         assert!(
             compile_fixture(
-                "import { \"one\" as one } @println(one.hidden)",
+                "import { \"one\" as one };@println(one.hidden)",
                 &main,
                 release
             )
@@ -2565,20 +2565,20 @@ fn checked(bool succeeds) int! {
     @print("checked ")
     if succeeds { true -> { return 8 } false -> { throw "failure" } }
 }
-fn fallback() int { @print("fallback ") return 9 }
+fn fallback() int { @print("fallback ");return 9 }
 @println(optional(true) else fallback())
 @println(optional(false) else fallback())
-@println(optional(true) else { @print("wrong ") break fallback() })
-@println(optional(false) else { @print("block ") break fallback() })
-@println(checked(true) catch message { @print(message, " ") break fallback() })
-@println(checked(false) catch message { @print(message, " ") break fallback() })
+@println(optional(true) else { @print("wrong ");break fallback() })
+@println(optional(false) else { @print("block ");break fallback() })
+@println(checked(true) catch message { @print(message, " ");break fallback() })
+@println(checked(false) catch message { @print(message, " ");break fallback() })
 fn forward(bool succeeds) int! {
     int value = try checked(succeeds)
     @print("after ")
     return value + 1
 }
-@println(forward(true) catch message { @print("wrong ") break 0 })
-@println(forward(false) catch message { @print(message, " ") break 0 })
+@println(forward(true) catch message { @print("wrong ");break 0 })
+@println(forward(false) catch message { @print(message, " ");break 0 })
 "#,
         "optional 7\noptional fallback 9\noptional 7\noptional block fallback 9\nchecked 8\nchecked failure fallback 9\nchecked after 9\nchecked failure 0\n",
     );
@@ -2604,7 +2604,7 @@ fn fallback_branches_still_require_values_or_valid_nonlocal_exits() {
 fn nested_fallback_loop_jumps_skip_assignment_targets_and_preserve_mutations() {
     success(
         r#"
-fn failed() int! { _ = @args() @print("") throw "outer" }
+fn failed() int! { _ = @args();@print("");throw "outer" }
 fn assignment_jumps() (int, int, int) {
     mut int[] values = [0]
     mut int changes = 0
@@ -2644,7 +2644,7 @@ fn assignment_jumps() (int, int, int) {
 fn nested_fallback_try_and_return_skip_recovery_tails_and_preserve_mutations() {
     success(
         r#"
-fn failed() int! { _ = @args() @print("") throw "outer" }
+fn failed() int! { _ = @args();@print("");throw "outer" }
 fn nested_recovery(bool fail, bool early) (int, int) {
     mut int changes = 0
     fn step() int! {
@@ -2730,7 +2730,7 @@ fn top_level_error_propagation_preserves_messages_and_skips_later_effects() {
     for handler in ["try fail()", "fail() catch message { throw message }"] {
         let source = format!(
             r#"
-fn fail() int! {{ @println("before") throw "bad\u{{0}}🍪" }}
+fn fail() int! {{ @println("before");throw "bad\u{{0}}🍪" }}
 int value = {handler}
 @println("unreachable", value)
 "#
@@ -2748,17 +2748,17 @@ int value = {handler}
 #[test]
 fn optional_and_error_operations_require_explicit_unwrapping() {
     for source in [
-        "int? value = 1 int result = value",
-        "fn take(int value) {} int? value = 1 take(value)",
-        "fn result() int { int? value = 1 return value }",
-        "int? value = 1 _ = value + 1",
-        "int? value = 1 _ = value else false",
-        "int? value = 1 _ = value else { break false }",
-        "int! value = 1 int result = value",
-        "fn take(int value) {} int! value = 1 take(value)",
-        "fn result() int { int! value = 1 return value }",
-        "int! value = 1 _ = value + 1",
-        "int! value = 1 _ = value catch message { break false }",
+        "int? value = 1;int result = value",
+        "fn take(int value) {};int? value = 1;take(value)",
+        "fn result() int { int? value = 1;return value }",
+        "int? value = 1;_ = value + 1",
+        "int? value = 1;_ = value else false",
+        "int? value = 1;_ = value else { break false }",
+        "int! value = 1;int result = value",
+        "fn take(int value) {};int! value = 1;take(value)",
+        "fn result() int { int! value = 1;return value }",
+        "int! value = 1;_ = value + 1",
+        "int! value = 1;_ = value catch message { break false }",
     ] {
         rejects(
             source,
@@ -2776,12 +2776,12 @@ fn optional_and_error_operations_require_explicit_unwrapping() {
     );
     rejects("_ = try 1", "try requires an error union");
     rejects(
-        "fn failure() int! { throw \"failure\" } fn invalid() int { return try failure() }",
+        "fn failure() int! { throw \"failure\" };fn invalid() int { return try failure() }",
         "try requires a throwing function",
     );
-    rejects("int! value = 1 _ = message", "unknown name");
+    rejects("int! value = 1;_ = message", "unknown name");
     rejects(
-        "int! value = 1 _ = value catch message { break 0 } _ = message",
+        "int! value = 1;_ = value catch message { break 0 };_ = message",
         "unknown name",
     );
 }
@@ -2806,7 +2806,7 @@ test "errors" {
     );
     rejects("fn bad() int { throw \"bad\" }", "throwing function");
     runtime_failure(
-        "fn bad() int! { throw \"failure\" } int n = try bad()",
+        "fn bad() int! { throw \"failure\" };int n = try bad()",
         "failure\n",
     );
 }
@@ -2838,7 +2838,7 @@ test "values" {
         "",
     );
     rejects("int value = none", "cannot infer");
-    rejects("int? value = 1 int result = value", "expected");
+    rejects("int? value = 1;int result = value", "expected");
 }
 
 #[test]
@@ -2861,9 +2861,9 @@ fn checked_integer_arithmetic() {
         "",
     );
     for source in [
-        "int n = 9223372036854775807 @println(n + @as(int, @args().len))",
-        "byte b = 255 @println(b + @as(byte, @args().len))",
-        "int n = @as(int, @args().len) - 1 @println(1 / n)",
+        "int n = 9223372036854775807;@println(n + @as(int, @args().len))",
+        "byte b = 255;@println(b + @as(byte, @args().len))",
+        "int n = @as(int, @args().len) - 1;@println(1 / n)",
         "@println(@as(int, @args().len) << 64)",
         "@println((@as(int, @args().len) + 1) ** 63)",
     ] {
@@ -2890,8 +2890,8 @@ test "records" {
 "#,
         "",
     );
-    rejects("struct A { int x } A a = A{.x = true}", "expected");
-    rejects("struct A { int x } A a = A{.y = 1}", "unknown field");
+    rejects("struct A { int x };A a = A{.x = true}", "expected");
+    rejects("struct A { int x };A a = A{.y = 1}", "unknown field");
 }
 
 #[test]
@@ -2900,7 +2900,7 @@ fn fixture_modes_preserve_execution_and_module_declaration_scopes() {
     assert!(!fixture_has_tests(ordinary));
     assert_eq!(executable_fixture(ordinary), ordinary);
     success(ordinary, "test body\n");
-    rejects("str text = \"test\" _ = missing", "unknown name");
+    rejects("str text = \"test\";_ = missing", "unknown name");
     rejects("test \"negative root\" { _ = missing }", "unknown name");
 
     let mixed = r#"
@@ -2911,7 +2911,7 @@ counter = counter + 1
 int value = counter
 int value = value + 10
 @println(counter, ":", value)
-test "module bindings" { assert read() == 2 assert value == 12 }
+test "module bindings" { assert read() == 2;assert value == 12 }
 "#;
     let rooted = executable_fixture(mixed);
     let module = fixture_module(&rooted).unwrap();
@@ -2946,7 +2946,7 @@ fn imported_only_test_roots_use_explicit_test_mode() {
     let dir = ncc::temp::Directory::new().unwrap();
     fs::write(
         dir.path().join("dependency.nc"),
-        "mut int value = 1 value = value + 1 pub fn read() int { return value }",
+        "mut int value = 1;value = value + 1;pub fn read() int { return value }",
     )
     .unwrap();
     fs::write(
@@ -2954,7 +2954,7 @@ fn imported_only_test_roots_use_explicit_test_mode() {
         r#"
 import { "dependency" as dependency }
 @println("unrelated imported output")
-test "imported root" { @println("imported test") assert dependency.read() == 2 }
+test "imported root" { @println("imported test");assert dependency.read() == 2 }
 "#,
     )
     .unwrap();
@@ -3113,7 +3113,7 @@ test "shadow" {
     int x = 1
     mut int x = x + 1
     x = x + 1
-    { str x = "inner" @println(x) }
+    { str x = "inner";@println(x) }
     @println(x)
     bool b = true
     float f = 2.5
@@ -3136,7 +3136,7 @@ fn functions_cannot_be_used_as_type_names() {
         "function[] values = []",
     ] {
         rejects(
-            &format!("fn function() int {{ return 1 }} {declaration}"),
+            &format!("fn function() int {{ return 1 }};{declaration}"),
             "not a type",
         );
     }
@@ -3179,9 +3179,9 @@ fn invalid_operator_type_matrix_is_rejected_in_both_modes() {
         }
     }
     for source in [
-        "fn identity<T>(T value) T { return value } fn f() int { return 1 } fut int work = async f() _ = identity<fut int>(work)",
-        "enum Hidden<T> { Value(T) } fn bad() Hidden<fut int> {}",
-        "struct Hidden<T> { T value } fn bad() Hidden<fut int>[] {}",
+        "fn identity<T>(T value) T { return value };fn f() int { return 1 };fut int work = async f();_ = identity<fut int>(work)",
+        "enum Hidden<T> { Value(T) };fn bad() Hidden<fut int> {}",
+        "struct Hidden<T> { T value };fn bad() Hidden<fut int>[] {}",
     ] {
         rejects(source, "futures cannot be returned");
     }
@@ -3193,7 +3193,7 @@ fn scalar_semantic_errors() {
     rejects("fn bad() int {}", "without returning");
     rejects("bool x = 1 and 2", "expected");
     rejects("float x = 1.0 & 2.0", "integers");
-    rejects("fn value() int { return 1 } value()", "not used");
+    rejects("fn value() int { return 1 };value()", "not used");
     rejects("if 1 { 1 -> {} }", "not exhaustive");
     rejects("assert true", "only available");
     rejects("byte b = 256", "does not fit");
@@ -3203,7 +3203,7 @@ fn scalar_semantic_errors() {
 fn short_circuit_and_labels() {
     success(
         r#"
-fn noisy() bool { @println("wrong") return true }
+fn noisy() bool { @println("wrong");return true }
 test "control" {
     bool a = false and noisy()
     bool b = true or noisy()
@@ -3224,7 +3224,7 @@ fn void_values_can_be_stored_and_passed_without_losing_effects() {
     success(
         r#"
 fn unit() { @print("u") }
-fn take(void value) void { @print("t") return value }
+fn take(void value) void { @print("t");return value }
 fn identity<T>(T value) T { return value }
 struct Holder { void value }
 enum Choice { Value(void) Empty }
@@ -3285,9 +3285,9 @@ Unit[2] values = [value, wrapped()]
 fn fixed_and_dynamic_array_concatenation_preserves_sizes_and_value_copies() {
     success(
         r#"
-fn fixed() int[2] { @print("fixed ") return [1, 2] }
-fn dynamic() int[] { @print("dynamic ") return [3, 4] }
-fn nothing() int[0] { @print("empty ") return [] }
+fn fixed() int[2] { @print("fixed ");return [1, 2] }
+fn dynamic() int[] { @print("dynamic ");return [3, 4] }
+fn nothing() int[0] { @print("empty ");return [] }
 @println(fixed() <> dynamic())
 @println(dynamic() <> fixed())
 @println(nothing() <> fixed() <> nothing())
@@ -3328,18 +3328,18 @@ test "array concatenation" {
 #[test]
 fn fixed_array_conversions_and_concatenations_reject_incompatible_sizes() {
     for source in [
-        "int[] values = [1, 2] int[2] fixed = values",
-        "int[] values = [1, 2] int[2] fixed = @as(int[2], values)",
-        "int[] values = [] int[0] fixed = values",
-        "int[] values = [] int[0] fixed = @as(int[0], values)",
-        "int[1] a = [1] int[] b = [2] int[2] joined = a <> b",
-        "int[] a = [1] int[1] b = [2] int[2] joined = a <> b",
-        "int[] a = [1] int[] b = [2] int[2] joined = a <> b",
-        "int[0] a = [] int[] b = [] int[0] joined = a <> b",
-        "int[1] a = [1] int[2] b = [2, 3] int[2] joined = a <> b",
-        "fn take(int[2] values) {} int[] values = [1, 2] take(values)",
-        "fn wrong() int[2] { int[] values = [1, 2] return values }",
-        "int[]? values = [1, 2] int[2] fixed = values else [0, 0]",
+        "int[] values = [1, 2];int[2] fixed = values",
+        "int[] values = [1, 2];int[2] fixed = @as(int[2], values)",
+        "int[] values = [];int[0] fixed = values",
+        "int[] values = [];int[0] fixed = @as(int[0], values)",
+        "int[1] a = [1];int[] b = [2];int[2] joined = a <> b",
+        "int[] a = [1];int[1] b = [2];int[2] joined = a <> b",
+        "int[] a = [1];int[] b = [2];int[2] joined = a <> b",
+        "int[0] a = [];int[] b = [];int[0] joined = a <> b",
+        "int[1] a = [1];int[2] b = [2, 3];int[2] joined = a <> b",
+        "fn take(int[2] values) {};int[] values = [1, 2];take(values)",
+        "fn wrong() int[2] { int[] values = [1, 2];return values }",
+        "int[]? values = [1, 2];int[2] fixed = values else [0, 0]",
     ] {
         rejects(
             source,
@@ -3394,7 +3394,7 @@ test "array lengths" {
 fn composite_construction_preserves_effect_order_and_deep_copies() {
     success(
         r#"
-fn mark(int n) int { @print(n) return n }
+fn mark(int n) int { @print(n);return n }
 struct Pair { int first int second }
 enum Choice { Pair(int, int) }
 int[] array = [mark(1), mark(2)]
@@ -3469,9 +3469,9 @@ test "arrays" {
 "#,
         "[99, 2, 3, 4, 5]\n",
     );
-    rejects("test \"bad\" { int[] a = [1] a[0] = 2 }", "immutable");
+    rejects("test \"bad\" { int[] a = [1];a[0] = 2 }", "immutable");
     rejects("int[2] a = [1]", "length");
-    runtime_failure("int[] a = [1] @println(a[2])", "out of bounds");
+    runtime_failure("int[] a = [1];@println(a[2])", "out of bounds");
 }
 
 #[test]
@@ -3508,7 +3508,7 @@ fn integer_arithmetic_boundaries_and_overflow_in_both_modes() {
         for expression in ["max + one", "max * two", "max ** two", "max << one"] {
             runtime_failure(
                 &format!(
-                    "{ty} max = {max} {ty} one = @as({ty}, @args().len) {ty} two = one + one @println({expression})"
+                    "{ty} max = {max};{ty} one = @as({ty}, @args().len);{ty} two = one + one;@println({expression})"
                 ),
                 "panic: integer overflow",
             );
@@ -3527,12 +3527,12 @@ fn integer_arithmetic_boundaries_and_overflow_in_both_modes() {
         "",
     );
     for source in [
-        "int min = -9223372036854775808 @println(min - @as(int, @args().len))",
-        "int min = -9223372036854775808 @println(min * -@as(int, @args().len))",
-        "int min = -9223372036854775808 @println(min / -@as(int, @args().len))",
-        "int min = -9223372036854775808 @println(min << @as(int, @args().len))",
-        "byte zero = 0 @println(zero - @as(byte, @args().len))",
-        "uint zero = 0 @println(zero - @args().len)",
+        "int min = -9223372036854775808;@println(min - @as(int, @args().len))",
+        "int min = -9223372036854775808;@println(min * -@as(int, @args().len))",
+        "int min = -9223372036854775808;@println(min / -@as(int, @args().len))",
+        "int min = -9223372036854775808;@println(min << @as(int, @args().len))",
+        "byte zero = 0;@println(zero - @as(byte, @args().len))",
+        "uint zero = 0;@println(zero - @args().len)",
     ] {
         runtime_failure(source, "panic: integer overflow");
     }
@@ -3673,7 +3673,7 @@ test "shared cells" {
     assert outer == 100
     assert first.read() == 6
     mut int a, int b = (1, 2)
-    fn change = fn() { a = 3 b = 4 }
+    fn change = fn() { a = 3;b = 4 }
     change()
     assert a == 3 and b == 4
 }
@@ -3690,7 +3690,7 @@ fn make() (fn() int)[] {
     mut (fn() int)[] callbacks = []
     for i in [10, 20, 30] {
         mut int count = @as(int, i)
-        fn next = fn() int { count = count + 1 return count }
+        fn next = fn() int { count = count + 1;return count }
         callbacks = callbacks <> [next]
     }
     return callbacks
@@ -3720,7 +3720,7 @@ fn closures_capture_mutexes_without_inheriting_lock_permissions() {
         "fn outer = fn() { fn inner = fn() { value = 2 } }",
     ] {
         rejects(
-            &format!("mutex int value = 1 lock value {{ {body} }}"),
+            &format!("mutex int value = 1;lock value {{ {body} }}"),
             "immutable",
         );
     }
@@ -3731,7 +3731,7 @@ fn make() (fn() int) {
     lock value {
         value = 2
         return fn() int {
-            lock value { value = value + 1 return value }
+            lock value { value = value + 1;return value }
         }
     }
 }
@@ -3770,12 +3770,12 @@ fn mutex_reads_require_an_explicit_lock_in_each_function() {
         "if (1, 2) { (value, _) -> {} _ -> {} }",
         "fn read() int { return value }",
         "fn read = fn() int { return value }",
-        "lock value {} int copy = value",
+        "lock value {};int copy = value",
         "lock value { fn read() int { return value } }",
         "lock value { fn read = fn() int { return value } }",
     ] {
         rejects(
-            &format!("mutex int value = 1 {expression}"),
+            &format!("mutex int value = 1;{expression}"),
             "cannot read mutex `value` outside a lock scope",
         );
     }
@@ -3787,12 +3787,12 @@ fn mutex_reads_require_an_explicit_lock_in_each_function() {
         "bool present = 1 in values",
     ] {
         rejects(
-            &format!("mutex int[] values = [1] {expression}"),
+            &format!("mutex int[] values = [1];{expression}"),
             "cannot read mutex `values` outside a lock scope",
         );
     }
     rejects(
-        "struct State { int count } mutex State state = State{.count = 1} int n = state.count",
+        "struct State { int count };mutex State state = State{.count = 1};int n = state.count",
         "cannot read mutex `state` outside a lock scope",
     );
     success(
@@ -3853,7 +3853,7 @@ fn composite_patterns_preserve_captures_and_comparison_order() {
         r#"
 struct Item { int key str label }
 enum Choice { Item(Item) Empty }
-fn mark(int n) int { @print(n) return n }
+fn mark(int n) int { @print(n);return n }
 test "composite captures" {
     mut int expected = 1
     str label = "item"

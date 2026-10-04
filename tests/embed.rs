@@ -187,7 +187,7 @@ fn runtime_dependent_paths_fail_without_executing_effects() {
     fs::write(root.join("data"), [42]).unwrap();
     let input = root.join("main.nc");
     for source in [
-        "fn path() str { mut str name = \"data\" fn choose() str { @println(\"effect\") return name } return choose() } _ = @embed(path())",
+        "fn path() str { mut str name = \"data\";fn choose() str { @println(\"effect\");return name };return choose() };_ = @embed(path())",
         "mut str path = \"data\"\nbyte[] b = @embed(path)",
         "str path = \"data\"\nfn f(str path) byte[] { return @embed(path) }",
         "fn path() str { @println(\"effect\")\n return \"data\" }\nbyte[] b = @embed(path())",
@@ -197,7 +197,7 @@ fn runtime_dependent_paths_fail_without_executing_effects() {
         "mut str path, int n = (\"data\", 1)\n_ = @embed(path)",
         "fn f(str runtime) byte[] { str path, int n = (runtime, 1)\n return @embed(path) }",
         "str path, int n = (\"data\", 1)\nfn f(str path) byte[] { return @embed(path) }",
-        "fn f(str path) byte[] { fn choose = fn() str { return path } return @embed(choose()) }",
+        "fn f(str path) byte[] { fn choose = fn() str { return path };return @embed(choose()) }",
         "mut str path = \"data\"\nfn choose = fn() str { return path }\n_ = @embed(choose())",
     ] {
         for release in [false, true] {

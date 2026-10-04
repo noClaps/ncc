@@ -163,9 +163,9 @@ fn unknown_state_and_unsupported_effects_roll_back_all_recorded_output() {
         "@println(@args())",
         "@println(@env())",
         "@eprintln(\"stderr\")",
-        "fn escaped = fn() { @eprint(\"unknown effect\") } escaped()",
-        "fut str[] future = async @args() @println(await future)",
-        "mut int missing = 0 int invalid = [1][@as(uint, missing + 2)] @println(invalid)",
+        "fn escaped = fn() { @eprint(\"unknown effect\") };escaped()",
+        "fut str[] future = async @args();@println(await future)",
+        "mut int missing = 0;int invalid = [1][@as(uint, missing + 2)];@println(invalid)",
     ] {
         let source = format!(
             "mut int value = 0\nwhile value < 3 {{ value = value + 1 }}\n@println(value)\n{tail}"
@@ -184,7 +184,7 @@ fn unknown_state_and_unsupported_effects_roll_back_all_recorded_output() {
 
 #[test]
 fn tests_are_not_removed_by_whole_program_precomputation() {
-    let module = optimized("mut int value = 1 @println(value) test \"kept\" { assert value == 1 }");
+    let module = optimized("mut int value = 1;@println(value);test \"kept\" { assert value == 1 }");
     assert!(
         module
             .items
@@ -217,7 +217,7 @@ for i in [0, 0, 0] {
     );
     compare_output(source, b"0123\n");
     assert!(
-        optimized("mut int value = 0 while value < 3 { value = value + 1 }")
+        optimized("mut int value = 0;while value < 3 { value = value + 1 }")
             .items
             .is_empty()
     );
@@ -279,7 +279,7 @@ fn finite_float_output_uses_the_evaluators_exact_formatting() {
 
 #[test]
 fn known_arithmetic_failure_keeps_existing_diagnostics() {
-    let source = "@println(\"before\") mut int n = 0 @println(1 / n)";
+    let source = "@println(\"before\");mut int n = 0;@println(1 / n)";
     let error = ncc::compile_source_with_options(source, Path::new("output.nc"), true).unwrap_err();
     assert!(error.to_string().contains("constant evaluation failed"));
 }

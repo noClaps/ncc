@@ -1,5 +1,5 @@
 ==================
-Missing call closer preserves following binding
+Missing call closer may absorb the following binding during recovery
 ==================
 @println(1
 int after = 2
@@ -7,22 +7,17 @@ int after = 2
 ---
 
 (source_file
-  (expression_statement
-    (call_expression
-      (builtin
-        (identifier))
-      (arguments
-        (integer)
-        (MISSING ")"))))
-  (binding_declaration
-    (typed_binding
-      (named_type
-        (identifier))
+  (assignment_statement
+    (builtin
+      (identifier))
+    (ERROR
+      (integer)
+      (identifier)
       (identifier))
     (integer)))
 
 ==================
-Missing array closer preserves following binding
+Missing array closer may absorb the following binding during recovery
 ==================
 int[] values = [1, 2
 int after = 3
@@ -30,21 +25,16 @@ int after = 3
 ---
 
 (source_file
-  (binding_declaration
+  (ERROR
     (typed_binding
       (array_type
         (named_type
           (identifier)))
       (identifier))
-    (array_expression
-      (integer)
-      (integer)
-      (MISSING "]")))
-  (binding_declaration
-    (typed_binding
-      (named_type
-        (identifier))
-      (identifier))
+    (integer)
+    (integer)
+    (identifier)
+    (identifier)
     (integer)))
 
 ==================
@@ -56,19 +46,24 @@ fn work() int {
 
 ---
 
-(ERROR
-  (identifier)
-  (parameters)
-  (named_type
-    (identifier))
-  (binding_declaration
-    (typed_binding
-      (named_type
-        (identifier))
+(source_file
+  (function_declaration
+    (identifier)
+    (parameters)
+    (named_type
       (identifier))
-    (integer))
-  (return_statement
-    (identifier)))
+    (block
+      (binding_declaration
+        (typed_binding
+          (named_type
+            (identifier))
+          (identifier))
+        (integer))
+      (return_statement
+        (identifier))
+      (expression_statement
+        (MISSING identifier))
+      (MISSING "}"))))
 
 ==================
 Incomplete generic declaration at EOF

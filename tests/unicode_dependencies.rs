@@ -124,7 +124,7 @@ fn single_interpolations_and_empty_concatenations_preserve_evaluation() {
     check(
         r#"
 mut int count = @as(int, @args().len)
-fn next() int { count = count + 1 @print("called:") return count }
+fn next() int { count = count + 1;@print("called:");return count }
 str first = "{next()}"
 str second = "" <> @as(str, next())
 str third = @as(str, next()) <> ""
@@ -141,7 +141,7 @@ fn print_argument_snapshots_and_order_do_not_depend_on_segmentation() {
     check(
         r#"
 mut int[] values = [@as(int, @args().len)]
-fn change() int { values[0] = 9 @print("argument:") return 7 }
+fn change() int { values[0] = 9;@print("argument:");return 7 }
 @println(values, ":", change(), ":", values)
 "#,
         "argument:[2]:7:[9]\n",
@@ -156,12 +156,12 @@ fn output_and_value_helpers_keep_separate_character_boundary_contracts() {
     for (declaration, value, rendered) in [
         ("char[] value = [mark]", "value", format!("[{mark}]")),
         (
-            "enum Mark { Empty Value(char) } Mark value = Mark.Value(mark)",
+            "enum Mark { Empty Value(char) };Mark value = Mark.Value(mark)",
             "value",
             format!("Mark.Value({mark})"),
         ),
         (
-            "struct Marked { char value } Marked value = Marked{.value = mark}",
+            "struct Marked { char value };Marked value = Marked{.value = mark}",
             "value",
             format!("Marked{{.value = {mark}}}"),
         ),
@@ -207,7 +207,7 @@ str joined = text <> "!"
 #[test]
 fn character_array_casts_still_segment_runtime_strings() {
     check(
-        "str text = @args()[1] @println(@as(char[], text))",
+        "str text = @args()[1];@println(@as(char[], text))",
         "[a\u{301}, b]\n",
         Tables::Present,
         "a\u{301}b",
@@ -219,10 +219,10 @@ fn reduced_strings_example_needs_no_unicode_tables() {
     let source = r#"
 mut str[] buf = []
 mut int i = 0
-while i < 1024 { buf = buf <> [""] i = i + 1 }
+while i < 1024 { buf = buf <> [""];i = i + 1 }
 fn from_int(int n) {
     mut int i = 0
-    while i < n { buf[i & 1023] = "{i}" i = i + 1 }
+    while i < n { buf[i & 1023] = "{i}";i = i + 1 }
 }
 from_int(1024)
 @println(buf)

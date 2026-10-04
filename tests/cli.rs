@@ -157,7 +157,7 @@ fn release_changes_generated_code_and_detects_overflow() {
     let dir = ncc::temp::Directory::new().unwrap();
     let file = dir.path().join("fib.nc");
     let output = dir.path().join("output.c");
-    let source = "fn fib(int n) int { if n { 0,1 -> { return n } _ -> { return fib(n-1)+fib(n-2) } } } @println(fib(45))";
+    let source = "fn fib(int n) int { if n { 0,1 -> { return n } _ -> { return fib(n-1)+fib(n-2) } } };@println(fib(45))";
     fs::write(&file, source).unwrap();
     let file = file.to_str().unwrap();
     let output = output.to_str().unwrap();
@@ -195,19 +195,19 @@ fn tests_execute_in_source_order_only_in_test_mode() {
     let binary = dir.path().join("built");
     fs::write(
         dir.path().join("library.nc"),
-        "pub fn value() int { return 7 } test \"imported\" { @println(\"imported\") }",
+        "pub fn value() int { return 7 };test \"imported\" { @println(\"imported\") }",
     )
     .unwrap();
     fs::write(
         &input,
         r#"
 import { "library" as lib }
-fn initialize() int { @println("initialize") return lib.value() }
+fn initialize() int { @println("initialize");return lib.value() }
 mut int value = initialize()
 @println("before")
-test "first" { assert value == 7 value = value + 1 @println(value) }
+test "first" { assert value == 7;value = value + 1;@println(value) }
 @println(value)
-test "second" { assert value == 8 @println("second") }
+test "second" { assert value == 8;@println("second") }
 @println("after")
 "#,
     )
@@ -246,7 +246,7 @@ fn test_failures_are_nonzero_and_leave_no_generated_files() {
     for body in ["assert false", "throw \"test failure\"", "int value = true"] {
         fs::write(
             &input,
-            format!("test \"failure\" {{ {body} }} @println(\"after\")"),
+            format!("test \"failure\" {{ {body} }};@println(\"after\")"),
         )
         .unwrap();
         for mode in ["-d", "-r"] {

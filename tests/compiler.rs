@@ -38,7 +38,7 @@ fn compiles_and_runs_functions_conditionals_and_output() {
 
 #[test]
 fn rejects_immutable_assignment() {
-    let source = "test \"immutable\" { int value = 1 value = 2 }";
+    let source = "test \"immutable\" { int value = 1;value = 2 }";
     let error = ncc::compile_test_source(source, std::path::Path::new("test.nc")).unwrap_err();
     assert!(error.to_string().contains("cannot mutate immutable"));
 }
@@ -198,7 +198,7 @@ fn ordinary_compilation_ignores_tests_before_semantic_processing() {
     for source in [
         "test \"unknown\" { @println(missing) }",
         "test \"type error\" { int value = true }",
-        "fn identity<T>(T value) T { return value } test \"generic\" { _ = identity<int, bool>(1) }",
+        "fn identity<T>(T value) T { return value };test \"generic\" { _ = identity<int, bool>(1) }",
         "test \"embed\" { _ = @embed(\"missing-file\") }",
         "test \"assert\" { assert false }",
         "test \"throw\" { throw \"failure\" }",
@@ -217,7 +217,7 @@ fn ordinary_compilation_ignores_tests_before_semantic_processing() {
     for release in [false, true] {
         for source in [
             "test \"type error\" { int value = true }",
-            "fn identity<T>(T value) T { return value } test \"generic\" { _ = identity<int, bool>(1) }",
+            "fn identity<T>(T value) T { return value };test \"generic\" { _ = identity<int, bool>(1) }",
             "test \"embed\" { _ = @embed(\"missing-file\") }",
         ] {
             assert!(ncc::compile_test_source_with_options(source, path, release).is_err());
@@ -238,9 +238,9 @@ fn imported_tests_are_filtered_before_module_qualification() {
     .unwrap();
     fs::write(
         directory.path().join("library.nc"),
-        "import { \"dependency\" as dep } pub fn value() int { return dep.value() } test \"private export\" { _ = dep.missing() }",
+        "import { \"dependency\" as dep };pub fn value() int { return dep.value() };test \"private export\" { _ = dep.missing() }",
     ).unwrap();
-    let source = "import { \"library\" as lib } @println(lib.value())";
+    let source = "import { \"library\" as lib };@println(lib.value())";
     for release in [false, true] {
         ncc::compile_source_with_options(source, &path, release).unwrap();
         assert!(ncc::compile_test_source_with_options(source, &path, release).is_err());
@@ -267,47 +267,47 @@ test "imported state" { assert shared == 1 }
     .unwrap();
     for (source, expected) in [
         (
-            r#"mut int value = 1 value = 2 int other_value = 5 @println(value, other_value) test "prior write" { assert value == 2 @println(value) } value = 9"#,
+            r#"mut int value = 1;value = 2;int other_value = 5;@println(value, other_value);test "prior write" { assert value == 2;@println(value) };value = 9"#,
             "2\n",
         ),
         (
-            r#"mut int value = 0 fn change() int { @print("needed:") value = 3 return 9 } int unused = change() int bad = true @println("unrelated") test "initializer writes" { assert value == 3 @println(value) }"#,
+            r#"mut int value = 0;fn change() int { @print("needed:");value = 3;return 9 };int unused = change();int bad = true;@println("unrelated");test "initializer writes" { assert value == 3;@println(value) }"#,
             "needed:3\n",
         ),
         (
-            r#"mut int value = 0 fn change() { value = 4 } (fn() void) alias = change alias() test "alias" { assert value == 4 @println(value) }"#,
+            r#"mut int value = 0;fn change() { value = 4 };(fn() void) alias = change;alias();test "alias" { assert value == 4;@println(value) }"#,
             "4\n",
         ),
         (
-            r#"mut int value = 0 mut (fn() void) action = fn() {} action = fn() { value = 5 } action() test "replaced closure" { assert value == 5 @println(value) }"#,
+            r#"mut int value = 0;mut (fn() void) action = fn() {};action = fn() { value = 5 };action();test "replaced closure" { assert value == 5;@println(value) }"#,
             "5\n",
         ),
         (
-            r#"mut int value = 0 { mut int value = 1 value = 8 @println("discard shadow") } test "shadow" { assert value == 0 @println(value) }"#,
+            r#"mut int value = 0;{ mut int value = 1;value = 8;@println("discard shadow") };test "shadow" { assert value == 0;@println(value) }"#,
             "0\n",
         ),
         (
-            r#"mut int value = 0 fn change() { fn closure = fn() { value = 6 } closure() } change() test "nested closure" { assert value == 6 @println(value) }"#,
+            r#"mut int value = 0;fn change() { fn closure = fn() { value = 6 };closure() };change();test "nested closure" { assert value == 6;@println(value) }"#,
             "6\n",
         ),
         (
-            r#"mut int value = 0 for i in [1, 2] { if i { 0 -> { value = 7 } _ -> {} } } test "nested write" { assert value == 7 @println(value) }"#,
+            r#"mut int value = 0;for i in [1, 2] { if i { 0 -> { value = 7 } _ -> {} } };test "nested write" { assert value == 7;@println(value) }"#,
             "7\n",
         ),
         (
-            r#"mutex int value = 0 fn change() { lock value { value = 8 } } fut void work = async change() await work test "synchronized" { lock value { assert value == 8 @println(value) } }"#,
+            r#"mutex int value = 0;fn change() { lock value { value = 8 } };fut void work = async change();await work;test "synchronized" { lock value { assert value == 8;@println(value) } }"#,
             "8\n",
         ),
         (
-            r#"import { "library" as lib } lib.change<str>("ignored") @println("discard root output") test "generic imported mutation" { assert lib.read() == 2 @println(lib.read()) }"#,
+            r#"import { "library" as lib };lib.change<str>("ignored");@println("discard root output");test "generic imported mutation" { assert lib.read() == 2;@println(lib.read()) }"#,
             "2\n",
         ),
         (
-            r#"fn make() (fn() int) { mut int cell = 0 return fn() int { cell = cell + 1 return cell } } (fn() int) counter = make() _ = counter() test "escaped captured state" { assert counter() == 2 @println(counter()) }"#,
+            r#"fn make() (fn() int) { mut int cell = 0;return fn() int { cell = cell + 1;return cell } };(fn() int) counter = make();_ = counter();test "escaped captured state" { assert counter() == 2;@println(counter()) }"#,
             "3\n",
         ),
         (
-            r#"mutex int value = 0 fn change() { lock value { value = 10 } } fut void work = async change() fn wait(fut void task) { await task } wait(work) test "indirect synchronization" { lock value { assert value == 10 @println(value) } }"#,
+            r#"mutex int value = 0;fn change() { lock value { value = 10 } };fut void work = async change();fn wait(fut void task) { await task };wait(work);test "indirect synchronization" { lock value { assert value == 10;@println(value) } }"#,
             "10\n",
         ),
     ] {
@@ -327,7 +327,7 @@ test "imported state" { assert shared == 1 }
             assert_eq!(output.stdout, expected.as_bytes(), "{source}, {mode}");
         }
     }
-    let source = r#"mut int value = 1 value = 2 int other_value = 5 @println(value, other_value) test "user example" { assert value == 1 }"#;
+    let source = r#"mut int value = 1;value = 2;int other_value = 5;@println(value, other_value);test "user example" { assert value == 1 }"#;
     fs::write(&path, source).unwrap();
     for mode in ["-d", "-r"] {
         let c = ncc::compile_test_source_with_options(source, &path, mode == "-r").unwrap();
@@ -372,10 +372,10 @@ _ = @embed("missing-file")
             ncc::compile_test_source_with_options(&source, &path, release).unwrap();
         }
         for source in [
-            "int invalid = true test \"required\" { _ = invalid }",
-            "fn bad() int { return missing } test \"required\" { _ = bad() }",
-            "import { \"library\" as lib } fn bad() { _ = lib.missing() } test \"required\" { bad() }",
-            "extern \"missing.c\" as native { fn bad() int = \"bad\" } test \"required\" { _ = native.bad() }",
+            "int invalid = true;test \"required\" { _ = invalid }",
+            "fn bad() int { return missing };test \"required\" { _ = bad() }",
+            "import { \"library\" as lib };fn bad() { _ = lib.missing() };test \"required\" { bad() }",
+            "extern \"missing.c\" as native { fn bad() int = \"bad\" };test \"required\" { _ = native.bad() }",
         ] {
             assert!(
                 ncc::compile_test_source_with_options(source, &path, release).is_err(),
@@ -434,7 +434,7 @@ fn opaque_native_mutations_are_retained_without_nc_global_writes() {
 extern "native.c" as native { fn set() = "set" fn read() int = "read" }
 native.set()
 @println("discard")
-test "native state" { assert native.read() == 9 @println(native.read()) }
+test "native state" { assert native.read() == 9;@println(native.read()) }
 "#,
     )
     .unwrap();
@@ -509,7 +509,7 @@ fn test_slicing_unused_lambda_discards_callback_only_writes_and_calls() {
 mut int value = 0
 fn ignore((fn() void) callback) { @println("discarded call") }
 ignore(fn() void { value = 9 })
-test "unused direct write" { assert value == 0 @println(value) }
+test "unused direct write" { assert value == 0;@println(value) }
 "#,
                 "0\n",
             ),
@@ -519,7 +519,7 @@ mut int value = 0
 fn change() { value = 9 }
 fn ignore((fn() void) callback) { @println("discarded call") }
 ignore(fn() void { change() })
-test "unused helper call" { assert value == 0 @println(value) }
+test "unused helper call" { assert value == 0;@println(value) }
 "#,
                 "0\n",
             ),
@@ -528,8 +528,8 @@ test "unused helper call" { assert value == 0 @println(value) }
 mut int value = 0
 fn change() { value = 9 }
 fn ignore((fn() void) callback) { @println("discarded call") }
-ignore(fn() void { fut void work = async change() await work })
-test "unused async callback" { assert value == 0 @println(value) }
+ignore(fn() void { fut void work = async change();await work })
+test "unused async callback" { assert value == 0;@println(value) }
 "#,
                 "0\n",
             ),
@@ -542,9 +542,9 @@ test "unused async callback" { assert value == 0 @println(value) }
 fn test_slicing_unused_lambda_does_not_promote_dynamic_or_recursive_effects() {
     let directory = ncc::temp::Directory::new().unwrap();
     let sources: Vec<_> = [
-        "(fn() void) indirect = action indirect()",
+        "(fn() void) indirect = action;indirect()",
         "recurse(2)",
-        "fut void work = async recurse(2) await work",
+        "fut void work = async recurse(2);await work",
     ]
     .iter()
     .map(|body| {
@@ -552,14 +552,14 @@ fn test_slicing_unused_lambda_does_not_promote_dynamic_or_recursive_effects() {
             r#"
 mut int observed = 0
 mut int unrelated = 0
-fn action() {{ unrelated = unrelated + 1 @println("discarded invocation:", unrelated) }}
+fn action() {{ unrelated = unrelated + 1;@println("discarded invocation:", unrelated) }}
 action()
 fn recurse(int n) {{
     if n > 0 {{ true -> {{ recurse(n - 1) }} _ -> {{ action() }} }}
 }}
-fn retain((fn() void) callback) {{ observed = 7 @println("retained call") }}
+fn retain((fn() void) callback) {{ observed = 7;@println("retained call") }}
 retain(fn() void {{ {body} }})
-test "unused invocation effects" {{ assert observed == 7 @println(observed) }}
+test "unused invocation effects" {{ assert observed == 7;@println(observed) }}
 "#,
         )
     })
@@ -581,12 +581,12 @@ fn test_slicing_escaped_cell_proxy_discards_syntax_only_invocation_history() {
 fn make() (fn() int) {
     mut int cell = 0
     @println("action initializer")
-    return fn() int { cell = cell + 1 @println("discarded action:", cell) return cell }
+    return fn() int { cell = cell + 1;@println("discarded action:", cell);return cell }
 }
 (fn() int) action = make()
 _ = action()
-fn answer() int { return 7 _ = action() }
-test "syntax-only escaped callable" { assert answer() == 7 @println(answer()) }
+fn answer() int { return 7;_ = action() }
+test "syntax-only escaped callable" { assert answer() == 7;@println(answer()) }
 "#,
             "action initializer\n7\n",
         )],
@@ -603,7 +603,7 @@ fn test_slicing_escaped_cell_proxy_separates_independent_factory_instances() {
             r#"
 fn make(str name) (fn() int) {
     mut int cell = 0
-    return fn() int { cell = cell + 1 @println(name, ":", cell) return cell }
+    return fn() int { cell = cell + 1;@println(name, ":", cell);return cell }
 }
 (fn() int) first = make("first")
 (fn() int) second = make("discarded second")
@@ -632,7 +632,7 @@ fn test_slicing_escaped_cell_proxy_preserves_factory_calls_to_global_counter() {
             r#"
 fn make_counter() (fn() int) {
     mut int cell = 0
-    return fn() int { cell = cell + 1 @println("counter:", cell) return cell }
+    return fn() int { cell = cell + 1;@println("counter:", cell);return cell }
 }
 (fn() int) counter = make_counter()
 _ = counter()
@@ -641,7 +641,7 @@ fn make() (fn() int) {
     _ = counter()
     @println("factory after")
     mut int own = 0
-    return fn() int { own = own + 1 return own }
+    return fn() int { own = own + 1;return own }
 }
 _ = make()
 test "factory mutates existing escaped cell" {
@@ -665,13 +665,13 @@ fn test_slicing_escaped_cell_proxy_preserves_destructured_sibling_writer_history
             r#"
 fn make() ((fn() void), (fn() int)) {
     mut int cell = 0
-    return fn() void { cell = cell + 1 @println("writer:", cell) },
+    return fn() void { cell = cell + 1;@println("writer:", cell) },
         fn() int { return cell }
 }
 (fn() void) writer, (fn() int) reader = make()
 writer()
 writer()
-test "sibling escaped cell" { assert reader() == 2 @println("observed:", reader()) }
+test "sibling escaped cell" { assert reader() == 2;@println("observed:", reader()) }
 "#,
             "writer:1\nwriter:2\nobserved:2\n",
         )],
@@ -688,7 +688,7 @@ fn test_slicing_escaped_cell_proxy_preserves_alias_and_replacement_histories() {
             r#"
 fn make(str name) (fn() int) {
     mut int cell = 0
-    return fn() int { cell = cell + 1 @println(name, ":", cell) return cell }
+    return fn() int { cell = cell + 1;@println(name, ":", cell);return cell }
 }
 mut (fn() int) action = make("original")
 (fn() int) alias = action
@@ -716,14 +716,14 @@ fn test_slicing_escaped_cell_proxy_preserves_async_mutex_sibling_history() {
             r#"
 fn make() ((fn() void), (fn() int)) {
     mutex int cell = 0
-    return fn() void { lock cell { cell = cell + 1 @println("writer:", cell) } },
+    return fn() void { lock cell { cell = cell + 1;@println("writer:", cell) } },
         fn() int { lock cell { return cell } }
 }
 (fn() void) writer, (fn() int) reader = make()
 writer()
 fut void work = async writer()
-{ await work @println("waited") }
-test "async sibling escaped mutex" { assert reader() == 2 @println("observed:", reader()) }
+{ await work;@println("waited") }
+test "async sibling escaped mutex" { assert reader() == 2;@println("observed:", reader()) }
 "#,
             "writer:1\nwriter:2\nwaited\nobserved:2\n",
         )],
@@ -739,11 +739,11 @@ fn test_slicing_unused_lambda_preserves_capture_initializers() {
         &[(
             r#"
 mut int observed = 0
-fn initialize() int { @println("capture initializer") return 9 }
+fn initialize() int { @println("capture initializer");return 9 }
 int captured = initialize()
 fn retain((fn() int) callback) { observed = 7 }
 retain(fn() int { return captured })
-test "unused capture dependency" { assert observed == 7 @println(observed) }
+test "unused capture dependency" { assert observed == 7;@println(observed) }
 "#,
             "capture initializer\n7\n",
         )],
@@ -760,11 +760,11 @@ fn test_slicing_unused_lambda_preserves_prior_mutable_capture_mutations() {
             r#"
 mut int captured = 0
 mut int observed = 0
-fn change() { captured = 9 @println("capture mutation:", captured) }
+fn change() { captured = 9;@println("capture mutation:", captured) }
 change()
 fn retain((fn() int) callback) { observed = 7 }
 retain(fn() int { return captured })
-test "conservative mutable capture" { assert observed == 7 @println(observed) }
+test "conservative mutable capture" { assert observed == 7;@println(observed) }
 "#,
             "capture mutation:9\n7\n",
         )],
@@ -784,9 +784,9 @@ mut int value = 0
 fn ignore((fn() void) callback) {}
 {
     (fn((fn() void)) void) ignore = fn((fn() void) callback) { callback() }
-    ignore(fn() void { value = 9 @println("local callback") })
+    ignore(fn() void { value = 9;@println("local callback") })
 }
-test "local callee shadow" { assert value == 9 @println(value) }
+test "local callee shadow" { assert value == 9;@println(value) }
 "#,
                 "local callback\n9\n",
             ),
@@ -796,10 +796,10 @@ mut int value = 0
 fn ignore((fn() void) callback) {}
 fn invoke((fn() void) callback) { callback() }
 fn caller((fn((fn() void)) void) ignore) {
-    ignore(fn() void { value = 9 @println("parameter callback") })
+    ignore(fn() void { value = 9;@println("parameter callback") })
 }
 caller(invoke)
-test "parameter callee shadow" { assert value == 9 @println(value) }
+test "parameter callee shadow" { assert value == 9;@println(value) }
 "#,
                 "parameter callback\n9\n",
             ),
@@ -864,7 +864,7 @@ fn test_slicing_unused_lambda_preserves_partial_qualification_assignment_fallbac
 import { "library" as lib }
 mut int value = 0
 fn ignore((fn() void) callback) {}
-ignore(fn() void { _ = lib.good() _ = lib.missing() value = 9 })
+ignore(fn() void { _ = lib.good();_ = lib.missing();value = 9 })
 test "partial callback qualification" { assert value == 0 }
 "#,
             "does not export `missing`",
@@ -889,7 +889,7 @@ fn test_slicing_unused_lambda_refinement_preserves_used_callbacks() {
             r#"
 mut int value = 0
 {call}
-test "used callback" {{ assert value == 9 @println(value) }}
+test "used callback" {{ assert value == 9;@println(value) }}
 "#,
         )
     })
@@ -910,28 +910,28 @@ fn test_slicing_unused_lambda_refinement_preserves_argument_evaluation() {
             (
                 r#"
 mut int value = 0
-fn produce() (fn() void) { value = 9 @println("producer") return fn() void {} }
+fn produce() (fn() void) { value = 9;@println("producer");return fn() void {} }
 fn ignore((fn() void) callback) { @println("retained call") }
 ignore(produce())
-test "effectful callback producer" { assert value == 9 @println(value) }
+test "effectful callback producer" { assert value == 9;@println(value) }
 "#,
                 "producer\nretained call\n9\n",
             ),
             (
                 r#"
 mut int value = 0
-fn produce() int { value = 9 @println("producer") return 1 }
+fn produce() int { value = 9;@println("producer");return 1 }
 fn ignore((fn() void) callback, int argument) { @println("retained call") }
 ignore(fn() void {}, produce())
-test "ordinary argument effect" { assert value == 9 @println(value) }
+test "ordinary argument effect" { assert value == 9;@println(value) }
 "#,
                 "producer\nretained call\n9\n",
             ),
             (
                 r#"
 mut int value = 0
-(fn() void { value = 9 @println("immediate lambda") })()
-test "immediate invocation" { assert value == 9 @println(value) }
+(fn() void { value = 9;@println("immediate lambda") })()
+test "immediate invocation" { assert value == 9;@println(value) }
 "#,
                 "immediate lambda\n9\n",
             ),
@@ -949,8 +949,8 @@ fn test_slicing_unused_lambda_discards_irrelevant_local_diagnostics() {
             r#"
 mut int value = 0
 fn ignore((fn() void) callback) { @println("discarded call") }
-ignore(fn() void { value = 9 _ = missing })
-test "irrelevant bad callback" { assert value == 0 @println(value) }
+ignore(fn() void { value = 9;_ = missing })
+test "irrelevant bad callback" { assert value == 0;@println(value) }
 "#,
             "0\n",
         )],
@@ -990,7 +990,7 @@ import { "library" as lib }
 mut int value = 0
 fn ignore((fn() void) callback) { @println("discarded call") }
 ignore(fn() void { value = lib.helper() })
-test "irrelevant imported helper" { assert value == 0 @println(value) }
+test "irrelevant imported helper" { assert value == 0;@println(value) }
 "#,
             "0\n",
         )],
@@ -1029,26 +1029,26 @@ fn test_slicing_runtime_demand_excludes_mutations_for_dead_helper_references() {
             (
                 r#"
 mut int value = 0
-fn mutate() { @println("discarded mutation") value = 9 }
+fn mutate() { @println("discarded mutation");value = 9 }
 mutate()
 struct Box { int value }
 fn helper() int { return value }
-fn retained() int { return 7 Box box = Box { .value = helper() } _ = box.value }
-test "dead direct reference" { assert retained() == 7 @println(retained()) }
+fn retained() int { return 7;Box box = Box { .value = helper() };_ = box.value }
+test "dead direct reference" { assert retained() == 7;@println(retained()) }
 "#,
                 "7\n",
             ),
             (
                 r#"
 mut int value = 0
-fn mutate() { @println("discarded mutation") value = 9 }
+fn mutate() { @println("discarded mutation");value = 9 }
 mutate()
 fn helper(int n) int {
     if n > 0 { true -> { return helper(n - 1) } _ -> {} }
     return value
 }
-fn retained() int { return 7 _ = helper(2) }
-test "dead recursive reference" { assert retained() == 7 @println(retained()) }
+fn retained() int { return 7;_ = helper(2) }
+test "dead recursive reference" { assert retained() == 7;@println(retained()) }
 "#,
                 "7\n",
             ),
@@ -1067,10 +1067,10 @@ fn test_slicing_synchronization_excludes_waits_for_dead_helper_references() {
                 r#"
 mutex int value = 0
 fn read() int { lock value { return value } }
-fn produce() int { return 7 _ = read() }
+fn produce() int { return 7;_ = read() }
 fut int work = async produce()
 @println("discarded wait:", await work)
-test "dead declaration edge" { lock value { assert value == 0 @println(value) } }
+test "dead declaration edge" { lock value { assert value == 0;@println(value) } }
 "#,
                 "0\n",
             ),
@@ -1080,9 +1080,9 @@ mutex int value = 0
 fn read() int { lock value { return value } }
 fn produce() int { return 7 }
 fut int work = async produce()
-fn wait(fut int task) int { return await task _ = read() }
+fn wait(fut int task) int { return await task;_ = read() }
 @println("discarded wait:", wait(work))
-test "dead starting reference" { lock value { assert value == 0 @println(value) } }
+test "dead starting reference" { lock value { assert value == 0;@println(value) } }
 "#,
                 "0\n",
             ),
@@ -1109,7 +1109,7 @@ fn change() { lock value { value = 9 } }
 fn read() int { lock value { return value } }
 fut void work = async change()
 fn wait(fut void task) { await task }
-{ wait(work) @println("waited") }
+{ wait(work);@println("waited") }
 test "native mutex reader" { @println("kept:", native.invoke(read)) }
 "#,
             "waited\nkept:9\n",
@@ -1127,12 +1127,12 @@ fn test_slicing_synchronization_preserves_wait_for_captured_mutex_state() {
             r#"
 fn make() (fn() int) {
     mutex int cell = 0
-    return fn() int { lock cell { cell = cell + 1 return cell } }
+    return fn() int { lock cell { cell = cell + 1;return cell } }
 }
 (fn() int) counter = make()
 fn bump() { _ = counter() }
 fut void work = async bump()
-{ await work @println("waited") }
+{ await work;@println("waited") }
 fn read() int { return counter() }
 test "escaped mutex state" { @println("kept:", read()) }
 "#,
@@ -1153,7 +1153,7 @@ fn test_slicing_runtime_demand_preserves_direct_and_mutual_recursive_reads() {
 mut int value = 0
 value = 5
 fn read() int { return value }
-test "direct read" { assert read() == 5 @println(read()) }
+test "direct read" { assert read() == 5;@println(read()) }
 "#,
                 "5\n",
             ),
@@ -1161,14 +1161,14 @@ test "direct read" { assert read() == 5 @println(read()) }
                 r#"
 mut int value = 0
 value = 2
-fn mutate() { @println("required mutation") value = value + 3 }
+fn mutate() { @println("required mutation");value = value + 3 }
 mutate()
 fn first(int n) int {
     if n > 0 { true -> { return second(n - 1) } _ -> {} }
     return value
 }
 fn second(int n) int { return first(n) }
-test "mutual recursive read" { assert first(3) == 5 @println(second(2)) }
+test "mutual recursive read" { assert first(3) == 5;@println(second(2)) }
 "#,
                 "required mutation\n5\n",
             ),
@@ -1181,21 +1181,21 @@ test "mutual recursive read" { assert first(3) == 5 @println(second(2)) }
 fn test_slicing_callable_promotion_excludes_dead_references() {
     let directory = ncc::temp::Directory::new().unwrap();
     let sources: Vec<_> = [
-        "(fn() int) action = fn() int { return 7 _ = read() }",
-        "mut (fn() int) action = fn() int { return 0 }\naction = fn() int { return 7 _ = read() }",
-        "(fn() int) original = fn() int { if false { true -> { _ = read() } _ -> {} } return 7 }\nmut (fn() int) action = fn() int { return 0 }\naction = original",
-        "mut (fn() int) action = fn() int { return 0 }\naction = fn() int { _ = false and read() == 9 return 7 }",
+        "(fn() int) action = fn() int { return 7;_ = read() }",
+        "mut (fn() int) action = fn() int { return 0 }\naction = fn() int { return 7;_ = read() }",
+        "(fn() int) original = fn() int { if false { true -> { _ = read() } _ -> {} };return 7 }\nmut (fn() int) action = fn() int { return 0 }\naction = original",
+        "mut (fn() int) action = fn() int { return 0 }\naction = fn() int { _ = false and read() == 9;return 7 }",
     ]
     .iter()
     .map(|callable| {
         format!(
             r#"
 mut int value = 0
-fn mutate() {{ @println("discarded mutation") value = 9 }}
+fn mutate() {{ @println("discarded mutation");value = 9 }}
 mutate()
 fn read() int {{ return value }}
 {callable}
-test "dead callable reference" {{ assert action() == 7 @println(action()) }}
+test "dead callable reference" {{ assert action() == 7;@println(action()) }}
 "#,
         )
     })
@@ -1216,7 +1216,7 @@ fn test_slicing_callable_promotion_preserves_returned_and_captured_aliases() {
             (
                 r#"
 mut int value = 0
-fn mutate() { @println("required mutation") value = 9 }
+fn mutate() { @println("required mutation");value = 9 }
 mutate()
 fn first(int n) int {
     if n > 0 { true -> { return second(n - 1) } _ -> {} }
@@ -1228,7 +1228,7 @@ fn make() (fn() int) { return read }
 (fn() int) original = make()
 mut (fn() int) action = fn() int { return 0 }
 action = original
-test "returned recursive callback" { assert action() == 9 @println(action()) }
+test "returned recursive callback" { assert action() == 9;@println(action()) }
 "#,
                 "required mutation\n9\n",
             ),
@@ -1236,7 +1236,7 @@ test "returned recursive callback" { assert action() == 9 @println(action()) }
                 r#"
 fn make() (fn() int) {
     mut int cell = 0
-    return fn() int { cell = cell + 1 return cell }
+    return fn() int { cell = cell + 1;return cell }
 }
 (fn() int) counter = make()
 mut (fn() int) action = fn() int { return 0 }
@@ -1262,12 +1262,12 @@ fn test_slicing_callable_promotion_preserves_mutex_synchronization() {
 mutex int value = 0
 fn change() { lock value { value = 9 } }
 fut void work = async change()
-{ await work @println("waited") }
+{ await work;@println("waited") }
 fn read() int { lock value { return value } }
 fn make() (fn() int) { return read }
 mut (fn() int) action = fn() int { return 0 }
 action = make()
-test "returned mutex reader" { assert action() == 9 @println(action()) }
+test "returned mutex reader" { assert action() == 9;@println(action()) }
 "#,
                 "waited\n9\n",
             ),
@@ -1275,14 +1275,14 @@ test "returned mutex reader" { assert action() == 9 @println(action()) }
                 r#"
 fn make() (fn() int) {
     mutex int cell = 0
-    return fn() int { lock cell { cell = cell + 1 return cell } }
+    return fn() int { lock cell { cell = cell + 1;return cell } }
 }
 (fn() int) counter = make()
 mut (fn() int) action = fn() int { return 0 }
 action = counter
 fn bump() { _ = action() }
 fut void work = async bump()
-{ await work @println("waited") }
+{ await work;@println("waited") }
 test "escaped mutex alias" { @println("kept:", action()) }
 "#,
                 "waited\nkept:2\n",
@@ -1298,8 +1298,8 @@ fn test_slicing_callable_promotion_preserves_dead_imported_diagnostics() {
     let library = directory.path().join("library.nc");
     let expected = format!("{}:2:26: error: unknown name `missing`", library.display());
     for callable in [
-        "(fn() int) action = fn() int { return 7 _ = helper() }",
-        "mut (fn() int) action = fn() int { return 0 }\naction = fn() int { return 7 _ = helper() }",
+        "(fn() int) action = fn() int { return 7;_ = helper() }",
+        "mut (fn() int) action = fn() int { return 0 }\naction = fn() int { return 7;_ = helper() }",
     ] {
         fs::write(
             &library,
@@ -1311,7 +1311,7 @@ fn test_slicing_callable_promotion_preserves_dead_imported_diagnostics() {
         assert_slicing_cli_cases(
             directory.path(),
             &[(
-                r#"import { "library" as lib } test "dead imported callable" { assert lib.retained() == 7 }"#,
+                r#"import { "library" as lib };test "dead imported callable" { assert lib.retained() == 7 }"#,
                 &expected,
             )],
             &SlicingCliExpectation::Diagnostic,
@@ -1331,7 +1331,7 @@ mut int value = 0
 value = 9
 fn read() int { return value }
 fn invoke((fn() int) action) int { return action() }
-test "reader callback" { assert invoke(read) == 9 @println(invoke(read)) }
+test "reader callback" { assert invoke(read) == 9;@println(invoke(read)) }
 "#,
                 "9\n",
             ),
@@ -1340,8 +1340,8 @@ test "reader callback" { assert invoke(read) == 9 @println(invoke(read)) }
 mut int value = 0
 value = 9
 fn read() int { return value }
-fn invoke() int { (fn() int) action = read return action() }
-test "local reader alias" { assert invoke() == 9 @println(invoke()) }
+fn invoke() int { (fn() int) action = read;return action() }
+test "local reader alias" { assert invoke() == 9;@println(invoke()) }
 "#,
                 "9\n",
             ),
@@ -1353,7 +1353,7 @@ fn read() int { return value }
 mut (fn() int) action = fn() int { return 0 }
 action = read
 fn invoke((fn() int) callback) int { return callback() }
-test "replaced reader callback" { assert invoke(action) == 9 @println(invoke(action)) }
+test "replaced reader callback" { assert invoke(action) == 9;@println(invoke(action)) }
 "#,
                 "9\n",
             ),
@@ -1361,13 +1361,13 @@ test "replaced reader callback" { assert invoke(action) == 9 @println(invoke(act
                 r#"
 fn make() (fn() int) {
     mut int cell = 0
-    return fn() int { cell = cell + 1 return cell }
+    return fn() int { cell = cell + 1;return cell }
 }
 (fn() int) counter = make()
 _ = counter()
 fn read() int { return counter() }
 fn invoke((fn() int) action) int { return action() }
-test "escaped counter callback" { assert invoke(read) == 2 @println(invoke(read)) }
+test "escaped counter callback" { assert invoke(read) == 2;@println(invoke(read)) }
 "#,
                 "3\n",
             ),
@@ -1384,12 +1384,12 @@ fn test_slicing_runtime_demand_preserves_syntax_selected_global_initializer() {
         &[(
             r#"
 mut int value = 0
-fn mutate() { @println("required mutation") value = 5 }
+fn mutate() { @println("required mutation");value = 5 }
 mutate()
-fn initialize() int { @println("initializer:", value) return value }
+fn initialize() int { @println("initializer:", value);return value }
 int snapshot = initialize()
-fn retained() int { return 7 _ = snapshot }
-test "syntax selected initializer" { assert retained() == 7 @println(retained()) }
+fn retained() int { return 7;_ = snapshot }
+test "syntax selected initializer" { assert retained() == 7;@println(retained()) }
 "#,
             "required mutation\ninitializer:5\n7\n",
         )],
@@ -1403,12 +1403,12 @@ fn test_slicing_runtime_demand_preserves_dead_dependency_diagnostic_locations() 
     let library = directory.path().join("library.nc");
     for (source, location, diagnostic) in [
         (
-            "\nfn helper() int { return missing }\npub fn retained() int { return 7 _ = helper() }\n",
+            "\nfn helper() int { return missing }\npub fn retained() int { return 7;_ = helper() }\n",
             "2:26",
             "unknown name `missing`",
         ),
         (
-            "\nstruct Box { Missing field }\npub fn retained() int { return 7 Box box = Box { .field = 0 } _ = box.field }\n",
+            "\nstruct Box { Missing field }\npub fn retained() int { return 7;Box box = Box { .field = 0 };_ = box.field }\n",
             "2:1",
             "unknown type `Missing`",
         ),
@@ -1418,7 +1418,7 @@ fn test_slicing_runtime_demand_preserves_dead_dependency_diagnostic_locations() 
         assert_slicing_cli_cases(
             directory.path(),
             &[(
-                r#"import { "library" as lib } test "dead imported dependency" { assert lib.retained() == 7 }"#,
+                r#"import { "library" as lib };test "dead imported dependency" { assert lib.retained() == 7 }"#,
                 &expected,
             )],
             &SlicingCliExpectation::Diagnostic,
@@ -1435,11 +1435,11 @@ fn test_slicing_direct_return_excludes_dead_writes_and_calls() {
             (
                 r#"
 mut int value = 0
-fn dead() int { return 7 value = 9 }
+fn dead() int { return 7;value = 9 }
 @println("excluded:", dead())
-fn required() { @print("required:") value = 3 }
+fn required() { @print("required:");value = 3 }
 required()
-test "live mutation" { assert value == 3 @println(value) }
+test "live mutation" { assert value == 3;@println(value) }
 "#,
                 "required:3\n",
             ),
@@ -1447,9 +1447,9 @@ test "live mutation" { assert value == 3 @println(value) }
                 r#"
 mut int value = 0
 fn change() { value = 9 }
-fn dead() int { return 7 change() }
+fn dead() int { return 7;change() }
 @println("excluded:", dead())
-test "dead transitive call" { assert value == 0 @println(value) }
+test "dead transitive call" { assert value == 0;@println(value) }
 "#,
                 "0\n",
             ),
@@ -1463,9 +1463,9 @@ fn test_slicing_direct_throw_break_continue_exclude_dead_effects() {
     let directory = ncc::temp::Directory::new().unwrap();
     let mut cases = Vec::new();
     for body in [
-        r#"fn dead() int! { throw "must not execute" DEAD }"#,
-        "fn dead() int { for i in [0] { break\nDEAD } return 7 }",
-        "fn dead() int { for i in [0] { continue DEAD } return 7 }",
+        r#"fn dead() int! { throw "must not execute";DEAD }"#,
+        "fn dead() int { for i in [0] { break\nDEAD };return 7 }",
+        "fn dead() int { for i in [0] { continue;DEAD };return 7 }",
     ] {
         for effect in ["value = 9", "change()"] {
             cases.push(format!(
@@ -1474,7 +1474,7 @@ mut int value = 0
 fn change() {{ value = 9 }}
 {}
 @println("excluded:", dead())
-test "dead effect" {{ assert value == 0 @println(value) }}
+test "dead effect" {{ assert value == 0;@println(value) }}
 "#,
                 body.replace("DEAD", effect),
             ));
@@ -1493,19 +1493,19 @@ fn test_slicing_plain_block_exits_exclude_enclosing_dead_effects() {
     let mut sources = Vec::new();
     for exit in ["return 7", r#"throw "must not execute""#] {
         for block in [
-            "{ int local = 1 EXIT }",
-            "{ int local = 1 { _ = local EXIT } }",
+            "{ int local = 1;EXIT }",
+            "{ int local = 1;{ _ = local;EXIT } }",
         ] {
             for effect in ["value = 9", "change()"] {
                 sources.push(format!(
                     r#"
 mut int value = 0
 fn change() {{ value = 9 }}
-fn dead() int! {{ {} {effect} }}
+fn dead() int! {{ {};{effect} }}
 @println("excluded:", dead())
-fn required() {{ @print("required:") value = value + 1 }}
+fn required() {{ @print("required:");value = value + 1 }}
 required()
-test "nested exit" {{ assert value == 1 @println(value) }}
+test "nested exit" {{ assert value == 1;@println(value) }}
 "#,
                     block.replace("EXIT", exit),
                 ));
@@ -1525,8 +1525,8 @@ fn test_slicing_plain_block_loop_exits_keep_after_loop_effects() {
     let mut sources = Vec::new();
     for exit in ["break", "continue"] {
         for body in [
-            "for i in [0, 1] { { _ = i { EXIT } } EFFECT }",
-            "mut int i = 2 while i > 0 { i = i - 1 { { EXIT } } EFFECT }",
+            "for i in [0, 1] { { _ = i;{ EXIT } };EFFECT }",
+            "mut int i = 2;while i > 0 { i = i - 1;{ { EXIT } };EFFECT }",
         ] {
             for effect in ["value = 9", "change()"] {
                 let body = body.replace("EXIT", exit).replace("EFFECT", effect);
@@ -1534,7 +1534,7 @@ fn test_slicing_plain_block_loop_exits_keep_after_loop_effects() {
                     r#"
 mut int value = 0
 fn change() {{ value = 9 }}
-fn dead() int {{ {body} return 7 }}
+fn dead() int {{ {body};return 7 }}
 @println("excluded:", dead())
 fn required() int {{
     {body}
@@ -1543,7 +1543,7 @@ fn required() int {{
     return 7
 }}
 @println(required())
-test "after loop" {{ assert value == 1 @println(value) }}
+test "after loop" {{ assert value == 1;@println(value) }}
 "#,
                 ));
             }
@@ -1563,7 +1563,7 @@ fn test_slicing_plain_block_scope_boundaries_keep_reached_effects() {
         "done: if true { true -> { { break :done } } _ -> {} }",
         "done: lock guard { { { break :done } } }",
         "lock guard { { break } }",
-        "int[] items = [] for i in items { { return 0 } }",
+        "int[] items = [];for i in items { { return 0 } }",
         "while false { { throw \"not reached\" } }",
     ]
     .iter()
@@ -1581,7 +1581,7 @@ fn required() int! {{
     return 7
 }}
 @println(required() catch err {{ throw err }})
-test "scope continuation" {{ assert value == 1 @println(value) }}
+test "scope continuation" {{ assert value == 1;@println(value) }}
 "#,
         )
     })
@@ -1597,9 +1597,9 @@ test "scope continuation" {{ assert value == 1 @println(value) }}
 fn test_slicing_plain_block_value_breaks_keep_expression_continuations() {
     let directory = ncc::temp::Directory::new().unwrap();
     let sources: Vec<_> = [
-        "if true { true -> { { { break 7 } } value = 9 change() 0 } _ -> { 0 } }",
-        "absent else { { { break 7 } } value = 9 change() 0 }",
-        "fail() catch err { { { break 7 } } value = 9 change() 0 }",
+        "if true { true -> { { { break 7 } };value = 9;change();0 } _ -> { 0 } }",
+        "absent else { { { break 7 } };value = 9;change();0 }",
+        "fail() catch err { { { break 7 } };value = 9;change();0 }",
     ]
     .iter()
     .map(|expression| {
@@ -1609,7 +1609,7 @@ mut int value = 0
 int? absent = none
 fn fail() int! {{ throw "fallback" }}
 fn change() {{ value = 9 }}
-fn dead() int {{ int result = {expression} return result }}
+fn dead() int {{ int result = {expression};return result }}
 @println("excluded:", dead())
 fn required() int {{
     {{
@@ -1620,7 +1620,7 @@ fn required() int {{
     }}
 }}
 @println(required())
-test "value block continuation" {{ assert value == 1 @println(value) }}
+test "value block continuation" {{ assert value == 1;@println(value) }}
 "#,
         )
     })
@@ -1642,11 +1642,11 @@ fn test_slicing_plain_block_dead_suffix_keeps_syntax_and_qualification() {
 struct Box { int value }
 fn helper() int { return 9 }
 fn retained() int {
-    { int local = 1 { _ = local return 7 } }
+    { int local = 1;{ _ = local;return 7 } }
     Box box = Box { .value = helper() }
     _ = box.value
 }
-test "nested syntax dependencies" { assert retained() == 7 @println(retained()) }
+test "nested syntax dependencies" { assert retained() == 7;@println(retained()) }
 "#,
             "7\n",
         )],
@@ -1661,19 +1661,19 @@ test "nested syntax dependencies" { assert retained() == 7 @println(retained()) 
         directory.path(),
         &[
             (
-                r#"fn helper() int { return missing } fn retained() int { { { return 7 } } _ = helper() } test "dead helper" { assert retained() == 7 }"#,
+                r#"fn helper() int { return missing };fn retained() int { { { return 7 } };_ = helper() };test "dead helper" { assert retained() == 7 }"#,
                 "missing",
             ),
             (
-                r#"fn retained() int { { { return 7 } } int invalid = true } test "dead invalid" { assert retained() == 7 }"#,
+                r#"fn retained() int { { { return 7 } };int invalid = true };test "dead invalid" { assert retained() == 7 }"#,
                 "expected `int`, found `bool`",
             ),
             (
-                r#"import { "library" as lib } fn retained() int { { { return 7 } } lib.missing = 1 } test "qualification" { assert retained() == 7 }"#,
+                r#"import { "library" as lib };fn retained() int { { { return 7 } };lib.missing = 1 };test "qualification" { assert retained() == 7 }"#,
                 "does not export `missing`",
             ),
             (
-                "import { \"library\" as lib } for i in [0] { { { break } }\nlib.missing = 1 } test \"qualification\" { assert true }",
+                "import { \"library\" as lib };for i in [0] { { { break } }\nlib.missing = 1 };test \"qualification\" { assert true }",
                 "does not export `missing`",
             ),
         ],
@@ -1690,11 +1690,11 @@ fn test_slicing_direct_return_excludes_dead_captured_writes() {
             r#"
 fn make() (fn() int) {
     mut int cell = 0
-    return fn() int { return cell cell = cell + 1 }
+    return fn() int { return cell;cell = cell + 1 }
 }
 (fn() int) counter = make()
 @println("excluded:", counter())
-test "dead captured write" { assert counter() == 0 @println(counter()) }
+test "dead captured write" { assert counter() == 0;@println(counter()) }
 "#,
             "0\n",
         )],
@@ -1709,11 +1709,11 @@ fn test_slicing_direct_return_excludes_dead_await() {
         directory.path(),
         &[(
             r#"
-fn produce() int { @println("worker") return 9 }
+fn produce() int { @println("worker");return 9 }
 fut int work = async produce()
-fn dead(fut int task) int { return 7 _ = await task }
+fn dead(fut int task) int { return 7;_ = await task }
 @println("excluded:", dead(work))
-test "live await" { assert await work == 9 @println("kept") }
+test "live await" { assert await work == 9;@println("kept") }
 "#,
             "worker\nkept\n",
         )],
@@ -1731,19 +1731,19 @@ fn test_slicing_direct_return_excludes_dead_dynamic_and_native_opacity() {
             (
                 r#"
 mut int value = 0
-fn dead((fn() void) action) int { return 7 action() }
+fn dead((fn() void) action) int { return 7;action() }
 @println("excluded:", dead(fn() {}))
-test "dead dynamic call" { assert value == 0 @println(value) }
+test "dead dynamic call" { assert value == 0;@println(value) }
 "#,
                 "0\n",
             ),
             (
                 r#"
 extern "native.c" as native { fn set() = "set" fn read() int = "read" }
-fn dead() int { return 7 native.set() }
+fn dead() int { return 7;native.set() }
 @println("excluded:", dead())
 native.set()
-test "live native mutation" { assert native.read() == 9 @println(native.read()) }
+test "live native mutation" { assert native.read() == 9;@println(native.read()) }
 "#,
                 "9\n",
             ),
@@ -1760,9 +1760,9 @@ fn test_slicing_live_dynamic_calls_remain_conservative() {
         &[(
             r#"
 mut int value = 0
-fn invoke((fn() void) action) int { action() return 7 }
+fn invoke((fn() void) action) int { action();return 7 }
 @println("required:", invoke(fn() { value = 1 }))
-test "live dynamic call" { assert value == 1 @println(value) }
+test "live dynamic call" { assert value == 1;@println(value) }
 "#,
             "required:7\n1\n",
         )],
@@ -1779,29 +1779,29 @@ fn test_slicing_jump_operands_retain_mutations() {
             (
                 r#"
 mut int value = 0
-fn change() int { value = 1 return 7 }
+fn change() int { value = 1;return 7 }
 fn result() int { return change() }
 @println("required:", result())
-test "return operand" { assert value == 1 @println(value) }
+test "return operand" { assert value == 1;@println(value) }
 "#,
                 "required:7\n1\n",
             ),
             (
                 r#"
 mut int value = 0
-fn message() str { @print("required:") value = 1 return "failure" }
+fn message() str { @print("required:");value = 1;return "failure" }
 fn fail() void! { throw message() }
 _ = fail()
-test "throw operand" { assert value == 1 @println(value) }
+test "throw operand" { assert value == 1;@println(value) }
 "#,
                 "required:1\n",
             ),
             (
                 r#"
 mut int value = 0
-fn change() int { value = 1 return 7 }
+fn change() int { value = 1;return 7 }
 int unused = if true { true -> { break change() } _ -> { 0 } }
-test "value break operand" { assert value == 1 @println(value) }
+test "value break operand" { assert value == 1;@println(value) }
 "#,
                 "1\n",
             ),
@@ -1815,24 +1815,24 @@ fn test_slicing_scope_restoration_retains_reachable_mutations() {
     let directory = ncc::temp::Directory::new().unwrap();
     let mut cases = Vec::new();
     for body in [
-        "if false { true -> { return 0 value = 9 } _ -> {} }",
-        "while false { return 0 value = 9 }",
+        "if false { true -> { return 0;value = 9 } _ -> {} }",
+        "while false { return 0;value = 9 }",
         "_ = false and change()",
         "_ = true or change()",
-        "for i in [0] { { break } value = 9 }",
-        "for i in [0] { { continue } value = 9 }",
+        "for i in [0] { { break };value = 9 }",
+        "for i in [0] { { continue };value = 9 }",
     ] {
         cases.push(format!(
             r#"
 mut int value = 0
-fn change() bool {{ value = 9 return true }}
+fn change() bool {{ value = 9;return true }}
 fn required() int {{
     {body}
     value = value + 1
     return 7
 }}
 @println("required:", required())
-test "reachable mutation" {{ assert value == 1 @println(value) }}
+test "reachable mutation" {{ assert value == 1;@println(value) }}
 "#,
         ));
     }
@@ -1857,7 +1857,7 @@ fn retained() int {
     Box box = Box { .value = helper() }
     _ = box.value
 }
-test "syntax dependencies" { assert retained() == 7 @println(retained()) }
+test "syntax dependencies" { assert retained() == 7;@println(retained()) }
 "#,
             "7\n",
         )],
@@ -1872,19 +1872,19 @@ fn test_slicing_retained_dead_code_still_rejects_semantic_errors() {
         directory.path(),
         &[
             (
-                r#"fn retained() int { return 7 int invalid = true } test "dead invalid" { assert retained() == 7 }"#,
+                r#"fn retained() int { return 7;int invalid = true };test "dead invalid" { assert retained() == 7 }"#,
                 "expected `int`, found `bool`",
             ),
             (
-                r#"fn helper() int { return missing } fn retained() int { return 7 _ = helper() } test "dead helper" { assert retained() == 7 }"#,
+                r#"fn helper() int { return missing };fn retained() int { return 7;_ = helper() };test "dead helper" { assert retained() == 7 }"#,
                 "missing",
             ),
             (
-                r#"struct Box { Missing field } fn retained() int { return 7 Box box = Box { .field = 0 } } test "dead type" { assert retained() == 7 }"#,
+                r#"struct Box { Missing field };fn retained() int { return 7;Box box = Box { .field = 0 } };test "dead type" { assert retained() == 7 }"#,
                 "Missing",
             ),
             (
-                r#"fn retained() int { int value = 0 return 7 value = 1 } test "dead assignment" { assert retained() == 7 }"#,
+                r#"fn retained() int { int value = 0;return 7;value = 1 };test "dead assignment" { assert retained() == 7 }"#,
                 "cannot mutate immutable",
             ),
         ],
@@ -1904,11 +1904,11 @@ fn test_slicing_dead_assignments_preserve_qualification_error_evidence() {
         directory.path(),
         &[
             (
-                "import { \"library\" as lib } for i in [0] { break\nlib.missing = 1 } test \"qualification\" { assert true }",
+                "import { \"library\" as lib };for i in [0] { break\nlib.missing = 1 };test \"qualification\" { assert true }",
                 "does not export `missing`",
             ),
             (
-                r#"import { "library" as lib } for i in [0] { continue lib.missing = 1 } test "qualification" { assert true }"#,
+                r#"import { "library" as lib };for i in [0] { continue;lib.missing = 1 };test "qualification" { assert true }"#,
                 "does not export `missing`",
             ),
         ],
@@ -1940,10 +1940,10 @@ fn test_slicing_boolean_dead_branches_exclude_writes_and_calls() {
             sources.push(format!(
                 r#"
 mut int value = 0
-fn change() bool {{ value = 9 return true }}
-fn dead() int {{ {} return 7 }}
+fn change() bool {{ value = 9;return true }}
+fn dead() int {{ {};return 7 }}
 @println("excluded:", dead())
-test "dead Boolean effects" {{ assert value == 0 @println(value) }}
+test "dead Boolean effects" {{ assert value == 0;@println(value) }}
 "#,
                 body.replace("EFFECT", effect),
             ));
@@ -1974,10 +1974,10 @@ fn test_slicing_boolean_short_circuits_exclude_rhs_calls() {
         format!(
             r#"
 mut int value = 0
-fn change() bool {{ value = 9 return true }}
+fn change() bool {{ value = 9;return true }}
 fn dead() bool {{ return {expression} }}
 @println("excluded:", dead())
-test "dead RHS" {{ assert value == 0 @println(value) }}
+test "dead RHS" {{ assert value == 0;@println(value) }}
 "#,
         )
     })
@@ -2004,9 +2004,9 @@ fn test_slicing_boolean_dead_dynamic_calls_exclude_opacity() {
         format!(
             r#"
 mut int value = 0
-fn dead((fn() bool) action) int {{ {body} return 7 }}
+fn dead((fn() bool) action) int {{ {body};return 7 }}
 @println("excluded:", dead(fn() bool {{ return true }}))
-test "dead dynamic mutation" {{ assert value == 0 @println(value) }}
+test "dead dynamic mutation" {{ assert value == 0;@println(value) }}
 "#,
         )
     })
@@ -2034,11 +2034,11 @@ fn test_slicing_boolean_dead_native_calls_exclude_opacity() {
         format!(
             r#"
 extern "native.c" as native {{ fn set() = "set" fn read() int = "read" }}
-fn mutate() bool {{ native.set() return true }}
-fn dead() int {{ {body} return 7 }}
+fn mutate() bool {{ native.set();return true }}
+fn dead() int {{ {body};return 7 }}
 @println("excluded:", dead())
 native.set()
-test "live native mutation" {{ assert native.read() == 9 @println(native.read()) }}
+test "live native mutation" {{ assert native.read() == 9;@println(native.read()) }}
 "#,
         )
     })
@@ -2064,11 +2064,11 @@ fn test_slicing_boolean_dead_await_does_not_retain_unrelated_output() {
     .map(|body| {
         format!(
             r#"
-fn produce() bool {{ @println("worker") return true }}
+fn produce() bool {{ @println("worker");return true }}
 fut bool work = async produce()
-fn dead(fut bool task) int {{ {body} return 7 }}
+fn dead(fut bool task) int {{ {body};return 7 }}
 @println("excluded:", dead(work))
-test "live await" {{ assert await work @println("kept") }}
+test "live await" {{ assert await work;@println("kept") }}
 "#,
         )
     })
@@ -2097,10 +2097,10 @@ fn test_slicing_boolean_ordered_patterns_stop_dead_comparisons_and_arms() {
             r#"
 mut int value = 0
 fn unknown() bool {{ return false }}
-fn change() bool {{ value = 9 return true }}
-fn dead() int {{ {body} return 7 }}
+fn change() bool {{ value = 9;return true }}
+fn dead() int {{ {body};return 7 }}
 @println("excluded:", dead())
-test "ordered dead effects" {{ assert value == 0 @println(value) }}
+test "ordered dead effects" {{ assert value == 0;@println(value) }}
 "#,
         )
     })
@@ -2144,11 +2144,11 @@ fn test_slicing_boolean_reached_mutations_and_pattern_effects_are_retained() {
 mut int value = 0
 bool expected = false
 bool unknown = true
-fn change() bool {{ value = value + 1 return true }}
-fn probe() bool {{ value = value + 1 return false }}
-fn required() int {{ {body} return 7 }}
+fn change() bool {{ value = value + 1;return true }}
+fn probe() bool {{ value = value + 1;return false }}
+fn required() int {{ {body};return 7 }}
 @println("required:", required())
-test "reached Boolean effects" {{ assert value == 1 @println(value) }}
+test "reached Boolean effects" {{ assert value == 1;@println(value) }}
 "#,
         )
     })
@@ -2175,9 +2175,9 @@ fn test_slicing_boolean_reached_dynamic_mutations_are_retained() {
         format!(
             r#"
 mut int value = 0
-fn required((fn() bool) action) int {{ {body} return 7 }}
-@println("required:", required(fn() bool {{ value = 1 return true }}))
-test "reached dynamic mutation" {{ assert value == 1 @println(value) }}
+fn required((fn() bool) action) int {{ {body};return 7 }}
+@println("required:", required(fn() bool {{ value = 1;return true }}))
+test "reached dynamic mutation" {{ assert value == 1;@println(value) }}
 "#,
         )
     })
@@ -2201,14 +2201,14 @@ mut int target = 0
 fn helper() int { return 9 }
 fn condition() bool { return true }
 fn retained() int {
-    if false { true -> { Box box = Box { .value = helper() } target = box.value } _ -> {} }
-    while false { Box box = Box { .value = helper() } _ = box.value }
+    if false { true -> { Box box = Box { .value = helper() };target = box.value } _ -> {} }
+    while false { Box box = Box { .value = helper() };_ = box.value }
     _ = false and condition()
     _ = true or condition()
     if { true -> {} condition() -> { _ = helper() } _ -> {} }
     return 7
 }
-test "dead syntax dependencies" { assert retained() == 7 assert target == 0 @println(retained()) }
+test "dead syntax dependencies" { assert retained() == 7;assert target == 0;@println(retained()) }
 "#,
             "7\n",
         )],
@@ -2223,31 +2223,31 @@ fn test_slicing_boolean_dead_references_still_receive_semantic_checks() {
         directory.path(),
         &[
             (
-                r#"fn retained() { if false { true -> { int invalid = true } _ -> {} } } test "dead type" { retained() }"#,
+                r#"fn retained() { if false { true -> { int invalid = true } _ -> {} } };test "dead type" { retained() }"#,
                 "expected `int`, found `bool`",
             ),
             (
-                r#"fn helper() bool { return missing } fn retained() { _ = false and helper() } test "dead helper" { retained() }"#,
+                r#"fn helper() bool { return missing };fn retained() { _ = false and helper() };test "dead helper" { retained() }"#,
                 "missing",
             ),
             (
-                r#"fn helper() bool { return missing } fn retained() { _ = true or helper() } test "dead helper" { retained() }"#,
+                r#"fn helper() bool { return missing };fn retained() { _ = true or helper() };test "dead helper" { retained() }"#,
                 "missing",
             ),
             (
-                r#"struct Box { Missing field } fn retained() { while false { Box box = Box { .field = 0 } } } test "dead type" { retained() }"#,
+                r#"struct Box { Missing field };fn retained() { while false { Box box = Box { .field = 0 } } };test "dead type" { retained() }"#,
                 "Missing",
             ),
             (
-                r#"int value = 0 fn retained() { if { true -> {} _ -> { value = 1 } } } test "dead assignment" { retained() }"#,
+                r#"int value = 0;fn retained() { if { true -> {} _ -> { value = 1 } } };test "dead assignment" { retained() }"#,
                 "cannot mutate immutable",
             ),
             (
-                r#"fn helper() bool { return missing } fn retained() { if true { false, true, helper() -> {} _ -> {} } } test "dead pattern" { retained() }"#,
+                r#"fn helper() bool { return missing };fn retained() { if true { false, true, helper() -> {} _ -> {} } };test "dead pattern" { retained() }"#,
                 "missing",
             ),
             (
-                r#"fn helper() bool { return missing } fn retained() { if { true -> {} helper() -> {} _ -> {} } } test "dead arm" { retained() }"#,
+                r#"fn helper() bool { return missing };fn retained() { if { true -> {} helper() -> {} _ -> {} } };test "dead arm" { retained() }"#,
                 "missing",
             ),
         ],
@@ -2270,7 +2270,7 @@ fn test_slicing_boolean_dead_assignments_keep_qualification_evidence() {
     ]
     .iter()
     .map(|body| {
-        format!("import {{ \"library\" as lib }} {body} test \"qualification\" {{ assert true }}")
+        format!("import {{ \"library\" as lib }};{body};test \"qualification\" {{ assert true }}")
     })
     .collect();
     let cases: Vec<_> = sources

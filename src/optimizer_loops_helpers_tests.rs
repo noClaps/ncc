@@ -104,10 +104,10 @@ fn arguments_have_effects_in_order_and_keep_copies() {
             r"
 mut int i = 0
 mut int calls = 0
-fn argument() int { calls = calls + 1 return 1 }
+fn argument() int { calls = calls + 1;return 1 }
 fn advance(int step, int other) {
     i = i + step
-    { mut int step = 100 step = step + other }
+    { mut int step = 100;step = step + other }
 }
 while i < 3 { advance(argument(), argument()) }
 @println(i)
@@ -122,7 +122,7 @@ while i < 3 { advance(argument(), argument()) }
         output(
             r"
 mut int i = 0
-fn argument() int { i = i + 1 return 1 }
+fn argument() int { i = i + 1;return 1 }
 fn advance(int saved, int ignored) { i = saved }
 while i < 3 { advance(i, argument()) }
 @println(i)
@@ -138,7 +138,7 @@ fn uncertified_helper_loops_and_coercions_stay_runtime() {
         output(
             r"
 mut int i = 0
-fn advance() { while true {} i = i + 1 }
+fn advance() { while true {};i = i + 1 }
 while i < 3 { advance() }
 @println(i)
 "
@@ -165,7 +165,7 @@ fn snapshots_precede_later_argument_mutations() {
         output(
             r"
 mut int i = 0
-fn argument() int { i = i + 1 return 1 }
+fn argument() int { i = i + 1;return 1 }
 fn advance(int before, int ignored, int after) {
     @println(before)
     @println(after)
@@ -398,9 +398,9 @@ fn lexical_shadows_do_not_disable_known_parameter_steps() {
             r"
 mut int i = 0
 fn advance(int step) {
-    { mut int step = 100 step = step + 1 }
+    { mut int step = 100;step = step + 1 }
     mut int j = 0
-    while j < 2 { j = j + 1 i = i + step }
+    while j < 2 { j = j + 1;i = i + step }
 }
 while i < 6 { advance(1) }
 @println(i)
@@ -557,7 +557,7 @@ fn nested_effectful_calls_supply_assignment_progress() {
             r"
 mut int i = 0
 mut int checks = 0
-fn argument() int { checks = checks + 1 return i }
+fn argument() int { checks = checks + 1;return i }
 fn next(int value) int { return value + 1 }
 while i < 3 { i = next(argument()) }
 @println(i)
@@ -571,7 +571,7 @@ while i < 3 { i = next(argument()) }
             r"
 mut int i = 0
 mut int checks = 0
-fn argument() int { checks = checks + 1 return 1 }
+fn argument() int { checks = checks + 1;return 1 }
 fn next(int value) int { return value }
 while i < 3 { i = i + next(argument()) }
 @println(i)
@@ -589,8 +589,8 @@ fn helper_declarations_and_output_expand_scalar_effects() {
             r"
 mut int i = 0
 mut int checks = 0
-fn argument() int { checks = checks + 1 return 1 }
-fn check() bool { checks = checks + 1 return true }
+fn argument() int { checks = checks + 1;return 1 }
+fn check() bool { checks = checks + 1;return true }
 fn advance() {
     int step = argument()
     { int step = argument() }
@@ -612,7 +612,7 @@ fn output_arguments_keep_earlier_scalar_snapshots() {
         output(
             r"
 mut int i = 0
-fn bump() int { i = i + 1 return 1 }
+fn bump() int { i = i + 1;return 1 }
 while i < 4 {
     @println(i, bump(), i)
     i = i + 1
@@ -631,7 +631,7 @@ fn assignment_rhs_precedes_effectful_target_indices() {
             r"
 mut int i = 0
 mut int[] values = [99]
-fn index() uint { i = i + 1 return 0u }
+fn index() uint { i = i + 1;return 0u }
 while i < 3 { values[index()] = i }
 @println(i)
 @println(values[0])
@@ -644,8 +644,8 @@ while i < 3 { values[index()] = i }
 #[test]
 fn immutable_global_and_capture_loop_inputs_are_proven_without_execution() {
     for callable in [
-        "fn advance() { mut int j = start while j < limit { j = j + step i = i + 1 } }",
-        "fn advance = fn() { mut int j = start while j < limit { j = j + step i = i + 1 } }",
+        "fn advance() { mut int j = start;while j < limit { j = j + step;i = i + 1 } }",
+        "fn advance = fn() { mut int j = start;while j < limit { j = j + step;i = i + 1 } }",
     ] {
         assert_eq!(
             output(&format!(
@@ -669,7 +669,7 @@ mut int i = 0
 mut int limit = 2
 fn advance() {
     mut int j = 0
-    while j < limit { j = j + 1 i = i + 1 }
+    while j < limit { j = j + 1;i = i + 1 }
 }
 while i < 6 { advance() }
 @println(i)
@@ -686,8 +686,8 @@ fn effectful_short_circuit_operands_remain_unproven() {
             r"
 mut int i = 0
 mut int checks = 0
-fn check() bool { checks = checks + 1 return true }
-while i < 3 { bool ignored = false and check() i = i + 1 }
+fn check() bool { checks = checks + 1;return true }
+while i < 3 { bool ignored = false and check();i = i + 1 }
 @println(i)
 "
         )

@@ -484,15 +484,15 @@ Box value = factory().Box{.value = 1}
         (identifier))
       (identifier))
     (member_expression
-      (call_expression
-        (identifier)
-        (arguments))
+      (member_expression
+        (call_expression
+          (identifier)
+          (arguments))
+        (identifier))
+      (ERROR)
       (identifier)))
-  (block
-    (ERROR)
-    (assignment_statement
-      (identifier)
-      (integer))))
+  (ERROR
+    (integer)))
 
 ==================
 Generic calls require a name path not a computed member

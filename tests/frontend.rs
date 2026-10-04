@@ -52,7 +52,7 @@ fn type_errors_use_language_syntax_instead_of_rust_debug_output() {
         ("int value = true", "expected `int`, found `bool`"),
         ("int[] values = [true]", "expected `int`, found `bool`"),
         (
-            "fn f(int[] values) {} f([true])",
+            "fn f(int[] values) {};f([true])",
             "expected `int`, found `bool`",
         ),
         (
@@ -135,9 +135,9 @@ fn semantic_errors_point_to_the_failing_expression_or_statement() {
         ("fn broken() {", "break", "}"),
         ("fn broken() {", "continue", "}"),
         ("fn broken() {", "assert true", "}"),
-        ("fn target(int x) {} fn broken() {", "target(true)", "}"),
+        ("fn target(int x) {};fn broken() {", "target(true)", "}"),
         (
-            "fn target<T>(T x) {} fn broken() {",
+            "fn target<T>(T x) {};fn broken() {",
             "target<int, bool>(1)",
             "}",
         ),
@@ -186,16 +186,16 @@ fn semantic_errors_point_to_the_failing_expression_or_statement() {
 fn nested_expression_errors_keep_exact_ranges_through_specialization() {
     for (source, expected) in [
         ("int value = 1 + missing * 2", "missing"),
-        ("fn take(int n) {} take(1 + true)", "1 + true"),
-        ("fn take(int n) {} take(false)", "false"),
+        ("fn take(int n) {};take(1 + true)", "1 + true"),
+        ("fn take(int n) {};take(false)", "false"),
         ("int[] values = [1, false, 3]", "false"),
-        ("struct S { int value } S s = S{.value = false}", "false"),
+        ("struct S { int value };S s = S{.value = false}", "false"),
         (
-            "int[] values = [1] _ = values.missing.len",
+            "int[] values = [1];_ = values.missing.len",
             "values.missing",
         ),
         (
-            "fn generic<T>(T value) T { return missing } _ = generic<int>(1)",
+            "fn generic<T>(T value) T { return missing };_ = generic<int>(1)",
             "missing",
         ),
         ("str text = \"🍪\"\nint value = 1 + missing", "missing"),
@@ -241,7 +241,7 @@ fn constant_evaluation_errors_retain_imported_expression_locations() {
     let source = "// header\npub fn bad() int {\n  return 1 / 0\n}\n";
     std::fs::write(&imported, source).unwrap();
     let error = ncc::compile_source_with_options(
-        "import { \"library\" as lib } @println(lib.bad())",
+        "import { \"library\" as lib };@println(lib.bad())",
         &root,
         true,
     )
@@ -326,7 +326,7 @@ fn imported_generic_type_errors_retain_nested_helper_expression_locations() {
         "import { \"helper\" as helper }\npub fn double<T>(T value) T {\n  return helper.double<T>(value)\n}\n",
     )
     .unwrap();
-    let source = "import { \"nested/library\" as lib } _ = lib.double<str>(\"text\")";
+    let source = "import { \"nested/library\" as lib };_ = lib.double<str>(\"text\")";
     for release in [false, true] {
         let error = ncc::compile_source_with_options(source, &root, release).unwrap_err();
         let diagnostic = &error.0[0];
@@ -361,12 +361,12 @@ fn unused_generic_bodies_are_typechecked_only_when_specialized() {
     for release in [false, true] {
         for source in [
             "import { \"library\" as lib }",
-            "import { \"library\" as lib } struct Record { int field } _ = lib.get_field<Record>(Record{.field = 7})",
+            "import { \"library\" as lib };struct Record { int field };_ = lib.get_field<Record>(Record{.field = 7})",
         ] {
             ncc::compile_source_with_options(source, &root, release)
                 .unwrap_or_else(|error| panic!("release={release}, source={source}: {error}"));
         }
-        let source = "import { \"library\" as lib } _ = lib.get_field<int>(7)";
+        let source = "import { \"library\" as lib };_ = lib.get_field<int>(7)";
         let error = ncc::compile_source_with_options(source, &root, release).unwrap_err();
         let diagnostic = &error.0[0];
         assert_eq!(
@@ -396,7 +396,7 @@ fn imported_generic_mutex_reads_report_the_original_expression() {
     let imported = directory.path().join("library.nc");
     let library = "mutex int value = 1\npub fn read<T>(T ignored) int {\n  return value\n}\n";
     std::fs::write(&imported, library).unwrap();
-    let source = "import { \"library\" as lib } _ = lib.read<int>(0)";
+    let source = "import { \"library\" as lib };_ = lib.read<int>(0)";
     for release in [false, true] {
         let error = ncc::compile_source_with_options(source, &root, release).unwrap_err();
         assert_eq!(error.0[0].path.as_deref(), Some(imported.as_path()));

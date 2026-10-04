@@ -192,7 +192,7 @@ Empty populated = Empty{.value = 1,}
         (integer)))))
 
 ==================
-Ordinary empty braces are a separate block not an initializer
+Ordinary empty braces require a separator after the name expression
 ==================
 Empty empty = Empty{}
 int after = 1
@@ -206,10 +206,7 @@ int after = 1
         (identifier))
       (identifier))
     (identifier))
-  (block)
-  (binding_declaration
-    (typed_binding
-      (named_type
-        (identifier))
-      (identifier))
+  (ERROR
+    (identifier)
+    (identifier)
     (integer)))

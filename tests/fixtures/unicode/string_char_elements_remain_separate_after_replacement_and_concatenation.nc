@@ -1,5 +1,5 @@
 
-fn runtime(str text) str { @print("") return text }
+fn runtime(str text) str { @print("");return text }
 test "string elements" {
     mut str newline = runtime("\rX")
     str original = newline

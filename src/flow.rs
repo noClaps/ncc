@@ -441,9 +441,9 @@ mod tests {
     #[test]
     fn enabled_tests_compose_module_flow_and_keep_statement_locations() {
         for (source, unreachable) in [
-            ("test \"spin\" { while true {} } @println(1)", 1),
+            ("test \"spin\" { while true {} };@println(1)", 1),
             (
-                "while true {} test \"later\" { @println(1) @println(2) }",
+                "while true {};test \"later\" { @println(1);@println(2) }",
                 2,
             ),
         ] {
@@ -472,7 +472,7 @@ mod tests {
                 assert!(source[diagnostic.span.clone()].starts_with("@println"));
             }
         }
-        let checked = checked("test \"done\" {} @println(1)");
+        let checked = checked("test \"done\" {};@println(1)");
         assert_eq!(
             warnings(&checked.module, &checked.expression_types)
                 .0

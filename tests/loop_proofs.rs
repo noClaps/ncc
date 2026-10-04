@@ -48,7 +48,7 @@ fn condition() bool {
     @print("c", checks, ":")
     return i<3
 }
-while condition() { @print(i,"|") i=i+1 }
+while condition() { @print(i,"|");i=i+1 }
 @println(i,":",checks)
 "#,
         "c1:0|c2:1|c3:2|c4:3:4\n",
@@ -62,7 +62,7 @@ fn local_closure_conditions_and_helpers_share_the_actual_counter() {
 fn calculate() (int,int) {
     mut int i=0
     mut int checks=0
-    fn condition() bool {checks=checks+1 return i<3}
+    fn condition() bool {checks=checks+1;return i<3}
     fn advance() {i=i+1}
     while condition() {advance()}
     return (i,checks)
@@ -93,7 +93,7 @@ fn every_continue_path_has_progress_and_break_paths_need_none() {
         r#"
 mut int i=0
 rows: while i<7 {
-    if i<3 {true->{i=i+1 continue :rows} false->{i=i+2}}
+    if i<3 {true->{i=i+1;continue :rows} false->{i=i+2}}
 }
 mut int j=0
 while j<4 {if j==2 {true->{break} false->{j=j+1}}}
@@ -112,8 +112,8 @@ mut int checks=0
 fn next(int value) int {return value+1}
 fn advance() {i=next(i)}
 fn outer() {advance()}
-fn test_condition() bool {checks=checks+1 return i<5}
-fn condition() bool {checks=checks+10 return test_condition()}
+fn test_condition() bool {checks=checks+1;return i<5}
+fn condition() bool {checks=checks+10;return test_condition()}
 while condition() {outer()}
 @println(i,":",checks)
 "#,
@@ -142,7 +142,7 @@ mut int i=0
 fn advance() {i=i+1}
 fn calculate() int {
     mut int i=100
-    while i<103 {advance() i=i+1}
+    while i<103 {advance();i=i+1}
     return i
 }
 @println(calculate(),":",i)
@@ -160,7 +160,7 @@ fn calculate() (int,int) {
     mut int source_bound=3
     int n=source_bound
     fn condition() bool {return i<n}
-    while condition() {source_bound=source_bound+1 i=i+1}
+    while condition() {source_bound=source_bound+1;i=i+1}
     return (i,source_bound)
 }
 @println(calculate())
@@ -175,7 +175,7 @@ fn body_local_bound_shadows_do_not_change_the_actual_condition_bound() {
         r"
 mut int i=0
 mut int n=3
-while i<n {int n=100 i=i+1}
+while i<n {int n=100;i=i+1}
 @println((i,n))
 ",
         "(3, 3)\n",
@@ -199,10 +199,10 @@ while i<3 {alias()}
 #[test]
 fn changing_bounds_and_reset_helpers_are_not_assumed_invariant() {
     for source in [
-        "mut int i=1 mut int n=4 fn change(){n=n+1} while i<n {int fail=1/(i-i) change() i=i+1} @println(i)",
-        "mut int i=1 fn reset(){i=0} while i<4 {int fail=1/(i-i) reset() i=i+1} @println(i)",
-        "mut int i=1 mut int n=4 fn condition() bool {n=n+1 return i<n} while condition(){int fail=1/(i-i) i=i+1} @println(i)",
-        "mut int i=1 fn condition() bool {i=0 return i<4} while condition(){int fail=1/(i-i) i=i+1} @println(i)",
+        "mut int i=1;mut int n=4;fn change(){n=n+1};while i<n {int fail=1/(i-i);change();i=i+1};@println(i)",
+        "mut int i=1;fn reset(){i=0};while i<4 {int fail=1/(i-i);reset();i=i+1};@println(i)",
+        "mut int i=1;mut int n=4;fn condition() bool {n=n+1;return i<n};while condition(){int fail=1/(i-i);i=i+1};@println(i)",
+        "mut int i=1;fn condition() bool {i=0;return i<4};while condition(){int fail=1/(i-i);i=i+1};@println(i)",
     ] {
         unproven(source);
     }
@@ -211,8 +211,8 @@ fn changing_bounds_and_reset_helpers_are_not_assumed_invariant() {
 #[test]
 fn lexical_condition_shadows_cannot_fake_counter_progress() {
     for source in [
-        "mut int i=1 fn condition() bool {int i=0 return i<3} while condition(){int fail=1/(i-i) i=i+1} @println(i)",
-        "mut int i=1 fn inner(int i) bool {return i<3} fn condition() bool {int i=0 return inner(i)} while condition(){int fail=1/(i-i) i=i+1} @println(i)",
+        "mut int i=1;fn condition() bool {int i=0;return i<3};while condition(){int fail=1/(i-i);i=i+1};@println(i)",
+        "mut int i=1;fn inner(int i) bool {return i<3};fn condition() bool {int i=0;return inner(i)};while condition(){int fail=1/(i-i);i=i+1};@println(i)",
     ] {
         unproven(source);
     }
@@ -221,10 +221,10 @@ fn lexical_condition_shadows_cannot_fake_counter_progress() {
 #[test]
 fn known_local_condition_bound_does_not_borrow_the_shadowed_global() {
     folded(
-        "mut int i=1 mut int n=3 fn condition() bool {int n=100 return i<n} while condition(){i=i+1} @println((i,n))",
+        "mut int i=1;mut int n=3;fn condition() bool {int n=100;return i<n};while condition(){i=i+1};@println((i,n))",
         "(100, 3)\n",
     );
-    let source = "mut int i=1 mut int n=3 fn condition() bool {int n=100 return i<n} while condition(){int fail=1/(i-i) i=i+1} @println(i)";
+    let source = "mut int i=1;mut int n=3;fn condition() bool {int n=100;return i<n};while condition(){int fail=1/(i-i);i=i+1};@println(i)";
     assert!(compile(source, false).is_ok());
     let error = compile(source, true).unwrap_err();
     assert!(
@@ -238,10 +238,10 @@ fn known_local_condition_bound_does_not_borrow_the_shadowed_global() {
 #[test]
 fn skipped_progress_nonexact_strides_and_direction_changes_stay_runtime() {
     for source in [
-        "mut int i=1 while i<4 {int fail=1/(i-i) if i%2==0 {true->{i=i+1} false->{continue}}} @println(i)",
-        "mut int i=1 while i!=4 {int fail=1/(i-i) if i%2==0 {true->{i=i+1} false->{i=i+2}}} @println(i)",
-        "mut int i=1 while i<4 {int fail=1/(i-i) if i%2==0 {true->{i=i+1} false->{i=i-1}}} @println(i)",
-        "mut int i=1 fn advance(int value) int {return value+1} while i<4 {int fail=1/(i-i) int discarded=advance(i)} @println(i)",
+        "mut int i=1;while i<4 {int fail=1/(i-i);if i%2==0 {true->{i=i+1} false->{continue}}};@println(i)",
+        "mut int i=1;while i!=4 {int fail=1/(i-i);if i%2==0 {true->{i=i+1} false->{i=i+2}}};@println(i)",
+        "mut int i=1;while i<4 {int fail=1/(i-i);if i%2==0 {true->{i=i+1} false->{i=i-1}}};@println(i)",
+        "mut int i=1;fn advance(int value) int {return value+1};while i<4 {int fail=1/(i-i);int discarded=advance(i)};@println(i)",
     ] {
         unproven(source);
     }
@@ -250,10 +250,10 @@ fn skipped_progress_nonexact_strides_and_direction_changes_stay_runtime() {
 #[test]
 fn recursive_native_and_replaced_helpers_are_not_executed_for_a_proof() {
     for source in [
-        "mut int i=1 fn advance(){advance()} while i<4 {int fail=1/(i-i) advance()} @println(i)",
-        "mut int i=1 fn condition() bool {return condition()} while condition(){int fail=1/(i-i) i=i+1} @println(i)",
-        "mut int i=1 fn advance(){i=i+1} fn reset(){i=0} mut (fn() void) callback=advance fn replace(){callback=reset} while i<4 {int fail=1/(i-i) replace() callback()} @println(i)",
-        "mut int i=1 fn condition() bool {return @args().len<3} while condition(){int fail=1/(i-i) i=i+1} @println(i)",
+        "mut int i=1;fn advance(){advance()};while i<4 {int fail=1/(i-i);advance()};@println(i)",
+        "mut int i=1;fn condition() bool {return condition()};while condition(){int fail=1/(i-i);i=i+1};@println(i)",
+        "mut int i=1;fn advance(){i=i+1};fn reset(){i=0};mut (fn() void) callback=advance;fn replace(){callback=reset};while i<4 {int fail=1/(i-i);replace();callback()};@println(i)",
+        "mut int i=1;fn condition() bool {return @args().len<3};while condition(){int fail=1/(i-i);i=i+1};@println(i)",
     ] {
         unproven(source);
     }
@@ -262,8 +262,8 @@ fn recursive_native_and_replaced_helpers_are_not_executed_for_a_proof() {
 #[test]
 fn conditional_overflow_on_continuing_and_exit_paths_blocks_certification() {
     for source in [
-        "mut byte i=254 while i<255 {int fail=1/(@as(int,i)-@as(int,i)) if i==254 {true->{i=i+1} false->{i=i+2}}} @println(i)",
-        "mut byte i=254 while i<255 {int fail=1/(@as(int,i)-@as(int,i)) if i==254 {true->{i=i+1} false->{i=i+2 break}}} @println(i)",
+        "mut byte i=254;while i<255 {int fail=1/(@as(int,i)-@as(int,i));if i==254 {true->{i=i+1} false->{i=i+2}}};@println(i)",
+        "mut byte i=254;while i<255 {int fail=1/(@as(int,i)-@as(int,i));if i==254 {true->{i=i+1} false->{i=i+2;break}}};@println(i)",
     ] {
         unproven(source);
     }
@@ -271,7 +271,7 @@ fn conditional_overflow_on_continuing_and_exit_paths_blocks_certification() {
 
 #[test]
 fn condition_helper_diagnostics_retain_the_original_source_expression() {
-    let source = "mut int i=0 mut int checks=0 fn condition() bool {checks=checks+1 int fail=1/(checks-checks) return i<3} while condition(){i=i+1} @println(i)";
+    let source = "mut int i=0;mut int checks=0;fn condition() bool {checks=checks+1;int fail=1/(checks-checks);return i<3};while condition(){i=i+1};@println(i)";
     assert!(compile(source, false).is_ok());
     let error = compile(source, true).unwrap_err();
     assert!(format!("{error:?}").contains("division by zero"));
