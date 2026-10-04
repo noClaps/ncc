@@ -34,6 +34,17 @@ fn sqrt_all(int[] nums) float[] {
 
 These behave the same as normal comments since it's only the `//` that matters, all the other `/`s are optional. However, the LSP will only recognise `///` as doc comments.
 
+## Statements
+
+Statements are separated by newlines or, if on the same line, semicolons.
+
+```nc
+mut int a = 1
+a = 2
+
+mut int b = 1; b = 2
+```
+
 ## Variables
 
 ```nc
