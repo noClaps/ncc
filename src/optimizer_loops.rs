@@ -16,6 +16,12 @@ type Scope = HashMap<String, Binding>;
 #[path = "optimizer_loops_tests.rs"]
 mod tests;
 
+#[path = "optimizer_loops_helpers.rs"]
+mod helpers;
+
+#[path = "optimizer_loops_effects.rs"]
+mod effects;
+
 struct Proof<'e, 'module> {
     evaluator: &'e Evaluator<'module>,
     values: HashMap<String, Value>,
@@ -80,7 +86,7 @@ impl<'module> Proof<'_, 'module> {
     ) -> Option<()> {
         let scope = self.scope(env);
         let (mut prefix, mut comparison) = if matches!(condition.unlocated(), Expr::Call { .. }) {
-            self.return_call(condition, &scope)?
+            self.condition_call(condition, &scope)?
         } else {
             (
                 Block { statements: vec![] },
@@ -283,104 +289,12 @@ impl<'module> Proof<'_, 'module> {
         Some((function, scope))
     }
 
-    fn call_scope(&mut self, call: &Expr, caller: &Scope) -> Option<(&'module Function, Scope)> {
-        let Expr::Call {
-            callee,
-            args,
-            generics,
-        } = call.unlocated()
-        else {
-            return None;
-        };
-        if !generics.is_empty() {
-            return None;
-        }
-        let arguments = args
-            .iter()
-            .map(|arg| self.expression(arg, caller))
-            .collect::<Option<Vec<_>>>()?;
-        let (function, mut scope) = self.callable(callee, caller)?;
-        if function.params.len() != arguments.len() {
-            return None;
-        }
-        if !arguments.is_empty()
-            && !matches!(function.body.statements.as_slice(), [statement]
-            if matches!(statement.unlocated(), Stmt::Return(Some(_))))
-        {
-            return None;
-        }
-        for ((parameter, argument), original) in function.params.iter().zip(arguments).zip(args) {
-            // Substitution models a scalar by-value argument only in a pure
-            // return expression. No writable parameter is identified with a cell.
-            if !matches!(&parameter.ty, Type::Named(name, types)
-                if types.is_empty() && matches!(name.as_str(), "int" | "uint" | "byte" | "bool"))
-                || self.evaluator.checked.expression_types.get(&original.id())
-                    != Some(&parameter.ty)
-            {
-                return None;
-            }
-            scope.insert(
-                parameter.name.clone(),
-                Binding {
-                    expression: argument,
-                    value: None,
-                },
-            );
-        }
-        Some((function, scope))
-    }
-
     fn return_call(&mut self, call: &Expr, caller: &Scope) -> Option<(Block, Expr)> {
-        let (function, mut scope) = self.call_scope(call, caller)?;
-        let identity = std::ptr::from_ref(function) as usize;
-
-        if !self.active.insert(identity) {
-            return None;
-        }
-        let (last, prefix) = function.body.statements.split_last()?;
-        let Stmt::Return(Some(value)) = last.unlocated() else {
-            return None;
-        };
-        // Substitution must not erase the evaluator's return coercion.
-        if self.evaluator.expr_type(value)? != &function.return_type {
-            return None;
-        }
-        // Declarations in the function's prefix shadow its initial environment
-        // for the final return, including a returned transitive helper call.
-        let prefix = self.statements_in_scope(prefix, &mut scope)?;
-        let (nested, value) = if matches!(value.unlocated(), Expr::Call { .. }) {
-            self.return_call(value, &scope)?
-        } else {
-            (
-                Block { statements: vec![] },
-                self.expression(value, &scope)?,
-            )
-        };
-        let mut prefix = prefix;
-        prefix.statements.extend(nested.statements);
-        self.active.remove(&identity);
-        Some((prefix, value))
+        self.expanded_call(call, caller, false)
     }
 
     fn void_call(&mut self, call: &Expr, caller: &Scope) -> Option<Block> {
-        let (function, scope) = self.call_scope(call, caller)?;
-        if function.return_type != Type::void() || !function.params.is_empty() {
-            return None;
-        }
-        let identity = std::ptr::from_ref(function) as usize;
-        if !self.active.insert(identity) {
-            return None;
-        }
-        let statements = &function.body.statements;
-        let end = statements.len()
-            - usize::from(
-                statements
-                    .last()
-                    .is_some_and(|s| matches!(s.unlocated(), Stmt::Return(None))),
-            );
-        let body = self.block_statements(&statements[..end], &scope)?;
-        self.active.remove(&identity);
-        Some(body)
+        self.expanded_call(call, caller, true).map(|(body, _)| body)
     }
 
     fn expression(&mut self, expression: &Expr, scope: &Scope) -> Option<Expr> {
@@ -467,37 +381,15 @@ impl<'module> Proof<'_, 'module> {
     }
 
     fn statement(&mut self, statement: &Stmt, scope: &mut Scope) -> Option<Vec<Stmt>> {
-        // Acyclic calls alone do not prove termination of loops inside helpers.
+        // Helpers use separately certified loop summaries, never acyclicity alone.
         if !self.active.is_empty()
             && matches!(statement.unlocated(), Stmt::While { .. } | Stmt::For { .. })
         {
             return None;
         }
         let statement = match statement.unlocated() {
-            Stmt::Assign { target, value } => {
-                let value = self.expression(value, scope)?;
-                let target = self.expression(target, scope)?;
-                let name = root_name(&target)?;
-                if self
-                    .values
-                    .get(name)
-                    .is_some_and(|value| !self.evaluator.recursion_targets(value).is_empty())
-                {
-                    return None;
-                }
-                self.writes.insert(name.to_owned());
-                Stmt::Assign { target, value }
-            }
-            Stmt::Var(declaration) => {
-                if declaration.mutex {
-                    return None;
-                }
-                let value = self.expression(&declaration.value, scope)?;
-                let mut declaration = declaration.clone();
-                declaration.value = value;
-                declaration.pattern = self.declaration_pattern(&declaration.pattern, scope)?;
-                Stmt::Var(declaration)
-            }
+            Stmt::Assign { target, value } => return self.effect_assignment(target, value, scope),
+            Stmt::Var(declaration) => return self.effect_declaration(declaration, scope),
             Stmt::Block(body) => Stmt::Block(self.block(body, scope)?),
             Stmt::Expr(value) if matches!(value.unlocated(), Expr::Call { .. }) => {
                 if let Expr::Call {
@@ -507,20 +399,23 @@ impl<'module> Proof<'_, 'module> {
                 } = value.unlocated()
                     && matches!(callee.unlocated(), Expr::Name(name) if name == "@print" || name == "@println")
                 {
-                    Stmt::Expr(Expr::Call {
+                    let (mut prefix, args) =
+                        self.effect_operands(&args.iter().collect::<Vec<_>>(), scope)?;
+                    prefix.statements.push(Stmt::Expr(Expr::Call {
                         callee: callee.clone(),
                         generics: generics.clone(),
-                        args: args
-                            .iter()
-                            .map(|arg| self.expression(arg, scope))
-                            .collect::<Option<_>>()?,
-                    })
-                } else {
-                    return Some(vec![Stmt::Block(self.void_call(value, scope)?)]);
+                        args,
+                    }));
+                    return Some(prefix.statements);
                 }
+                return Some(vec![Stmt::Block(self.void_call(value, scope)?)]);
             }
             Stmt::Expr(value) => Stmt::Expr(self.control_expression(value, scope)?),
-            Stmt::Assert(value) => Stmt::Assert(self.expression(value, scope)?),
+            Stmt::Assert(value) => {
+                let (mut prefix, value) = self.effect_expression(value, scope)?;
+                prefix.statements.push(Stmt::Assert(value));
+                return Some(prefix.statements);
+            }
             Stmt::LabeledIf { label, value } => Stmt::LabeledIf {
                 label: label.clone(),
                 value: self.control_expression(value, scope)?,

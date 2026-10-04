@@ -40,6 +40,20 @@ recursive helpers, or callable replacement. Condition effects retain their final
 false check and original diagnostic locations. Proof-only helper trees are never
 executed and do not replace source trees or their checked metadata.
 
+`tests/helper_proofs.rs` extends that coverage through call-local early returns,
+labeled conditionals, counted and literal-array helper loops, immutable global and
+captured loop inputs, and effectful scalar arguments. Debug/release comparisons
+check argument snapshots, lexical parameter shadows, nested output order, RHS
+copies before target-index effects, and first/final condition checks. Counted
+helper loops obtain certificates without execution; independent monotonic updates
+can supply enclosing-loop progress through closed-form displacement summaries.
+Varied Boolean condition returns may use a wider monotonic comparison solely as a
+termination envelope, never as a replacement for the actual returned value.
+Negative probes cover return paths without progress, restored copied arguments,
+unproven helper loops, changing bounds, arithmetic overflow, and short-circuit
+argument effects. Unit tests also assert that proof construction leaves evaluator
+cells unchanged and defensively protects writable parameter copies.
+
 `tests/varying_bounds.rs` compares debug/release behavior for converging and
 same-direction counter/bound updates, correlated conditional strides, labeled
 continues, shared helpers, lexical shadows, all supported comparisons, and fixed
@@ -64,8 +78,12 @@ and bounded reset invariants. Multiplication unit tests also compare small
 recurrences against independent arithmetic safety calculations.
 
 Unproven loops/recursion are not entered speculatively. Current certificates remain
-conservative for nonlinear calculated limits, helper loops/early returns,
-mutual recursion, and more general ranking functions.
+conservative for nonlinear calculated limits, mutual recursion, and more general
+ranking functions. Helper summaries require provable constant trip counts for
+progress-carrying loops; certified rank-neutral helper loops may retain their
+control flow. Nonuniform scalar results other than compatible monotonic Boolean
+condition returns, container parameters, and effectful short-circuit operands
+remain runtime fallbacks.
 Reset proofs currently track two counters; multiplication proofs require a positive
 seed and identical continuing-path updates against a fixed or additive limit.
 The compound and varying-bound certificates reject nested loops. Counted proofs,

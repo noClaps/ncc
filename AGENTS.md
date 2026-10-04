@@ -95,6 +95,12 @@
   Helper-expanded loop proofs must distinguish shared storage identities from
   copied captures and lexical shadows. Require progress on every continuing path;
   reject unproven protected-state resets, bound changes, and callable replacements.
+  Helper returns must exit only their own proof frames. Resolve callables before
+  arguments, preserve left-to-right argument snapshots and RHS-before-target copies,
+  and never substitute a written parameter copy with caller storage. Certify helper
+  loops without executing them; closed-form progress summaries must preserve
+  intermediate excursions. Nonexact Boolean envelopes are termination-only and
+  must never replace actual helper values or source conditions.
   Varying-bound and calculated-limit certificates must track relational progress
   and each binding's intermediate excursions across a proven finite horizon, not
   assume invariant bounds. Substitute known immutable scalar steps in proof trees

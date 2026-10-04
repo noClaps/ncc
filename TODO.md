@@ -18,8 +18,8 @@
 
     - [ ] Expand conservative termination proof coverage.
 
-      - [ ] Extend helper proofs through early returns, helper loops, and effectful
-            arguments while preserving copied parameters and lexical scopes.
+      - [ ] Generalize helper ranking summaries beyond constant trip counts and
+            uniform scalar results, including container and short-circuit arguments.
       - [ ] Discharge nested-loop termination obligations before interpreting
             enclosing loop iterations, not only when the nested loop is reached.
       - [ ] Prove additional recursive ranking patterns, mutual recursion, and

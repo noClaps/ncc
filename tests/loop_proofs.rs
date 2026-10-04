@@ -213,10 +213,26 @@ fn lexical_condition_shadows_cannot_fake_counter_progress() {
     for source in [
         "mut int i=1 fn condition() bool {int i=0 return i<3} while condition(){int fail=1/(i-i) i=i+1} @println(i)",
         "mut int i=1 fn inner(int i) bool {return i<3} fn condition() bool {int i=0 return inner(i)} while condition(){int fail=1/(i-i) i=i+1} @println(i)",
-        "mut int i=1 mut int n=3 fn condition() bool {int n=100 return i<n} while condition(){int fail=1/(i-i) i=i+1} @println(i)",
     ] {
         unproven(source);
     }
+}
+
+#[test]
+fn known_local_condition_bound_does_not_borrow_the_shadowed_global() {
+    folded(
+        "mut int i=1 mut int n=3 fn condition() bool {int n=100 return i<n} while condition(){i=i+1} @println((i,n))",
+        "(100, 3)\n",
+    );
+    let source = "mut int i=1 mut int n=3 fn condition() bool {int n=100 return i<n} while condition(){int fail=1/(i-i) i=i+1} @println(i)";
+    assert!(compile(source, false).is_ok());
+    let error = compile(source, true).unwrap_err();
+    assert!(
+        error
+            .0
+            .iter()
+            .any(|diagnostic| { source.get(diagnostic.span.clone()) == Some("1/(i-i)") })
+    );
 }
 
 #[test]
