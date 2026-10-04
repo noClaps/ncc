@@ -13,6 +13,9 @@ use std::collections::{HashMap, HashSet};
 #[path = "optimizer_loops.rs"]
 mod loops;
 
+#[path = "optimizer_recursion.rs"]
+mod recursion;
+
 /// Embedding is mandatory compile-time evaluation, including in debug builds.
 ///
 /// # Errors
@@ -1738,11 +1741,9 @@ impl<'module> Evaluator<'module> {
         }
         // Resolve callable arguments without executing any candidate body. Unknown
         // edges and uncertified cycles must be rejected before entry, not by fuel.
-        if !self.recursion_graph_proven(f, &scope) {
-            return None;
-        }
-        if let Some(rank) = self.recursion_rank(f) {
-            return self.recursion_heap(f, &callable, &values, &scope, rank);
+        let ranks = self.recursion_graph_proven(f, &scope)?;
+        if let Some(rank) = ranks.get(&Self::recursion_identity(f)) {
+            return self.recursion_heap(f, &callable, &values, &scope, *rank, &ranks);
         }
         // Sequential analysis observes global mutations and must repeat call effects.
         let cacheable = !self.analyse_output
@@ -2202,7 +2203,11 @@ impl<'module> Evaluator<'module> {
     /// Monotone callable-flow analysis reaches a finite fixed point. Unknown
     /// targets never become permission to execute; only the reachable graph is
     /// checked, including callbacks returned by factories and stored in containers.
-    fn recursion_graph_proven(&self, root: &Function, values: &HashMap<String, Value>) -> bool {
+    fn recursion_graph_proven(
+        &self,
+        root: &Function,
+        values: &HashMap<String, Value>,
+    ) -> Option<HashMap<usize, usize>> {
         let mut functions: HashMap<_, _> = self
             .functions
             .values()
@@ -2244,13 +2249,11 @@ impl<'module> Evaluator<'module> {
                             self.recursion_abstract(callee, &scope, &returns, &mut HashSet::new());
                         for target in targets {
                             if target == usize::MAX {
-                                return false;
+                                return None;
                             }
                             changed |= graph.entry(id).or_default().insert(target);
                             changed |= active.insert(target);
-                            let Some(child) = functions.get(&target) else {
-                                return false;
-                            };
+                            let child = functions.get(&target)?;
                             let child_scope = scopes.entry(target).or_default();
                             for (param, arg) in child.params.iter().zip(args) {
                                 let targets = self.recursion_abstract(
@@ -2280,23 +2283,7 @@ impl<'module> Evaluator<'module> {
                 break;
             }
         }
-        for id in active {
-            let function = functions[&id];
-            let scope = scopes.get(&id).cloned().unwrap_or_default();
-            if !self.recursion_calls_known(function, &scope, &returns) {
-                return false;
-            }
-            for target in graph.get(&id).into_iter().flatten() {
-                if *target == id {
-                    if self.recursion_rank(function).is_none() {
-                        return false;
-                    }
-                } else if Self::recursion_reaches(&graph, *target, id) {
-                    return false;
-                }
-            }
-        }
-        true
+        self.recursion_certify_graph(&functions, &scopes, &returns, &graph, &active)
     }
 
     fn recursion_bindings(
@@ -2305,7 +2292,7 @@ impl<'module> Evaluator<'module> {
         scope: &mut HashMap<String, HashSet<usize>>,
         returns: &HashMap<usize, HashSet<usize>>,
     ) -> bool {
-        let mut changed = false;
+        let mut changed = self.recursion_scoped_callable_barriers(function, scope);
         for expression in self.recursion_expressions(function) {
             if let Expr::If {
                 subject: Some(subject),
@@ -2442,70 +2429,6 @@ impl<'module> Evaluator<'module> {
         false
     }
 
-    /// Certificate domain: nonnegative primitive integers, or exact integral
-    /// floats through 2^53. Every value below `coverage` returns without calls;
-    /// every remaining call reduces this unchanged parameter by 1..=coverage.
-    /// No mutations, loops, captured reads or hidden invocations are admitted.
-    fn recursion_rank(&self, function: &Function) -> Option<usize> {
-        if !self
-            .functions
-            .get(&function.name)
-            .is_some_and(|named| std::ptr::eq(*named, function))
-        {
-            return None;
-        }
-        let [statement] = function.body.statements.as_slice() else {
-            return None;
-        };
-        let Stmt::Expr(expression) = statement.unlocated() else {
-            return None;
-        };
-        let Expr::If {
-            subject: Some(subject),
-            arms,
-        } = expression.unlocated()
-        else {
-            return None;
-        };
-        let Expr::Name(name) = subject.unlocated() else {
-            return None;
-        };
-        let rank = function
-            .params
-            .iter()
-            .position(|param| param.name == *name)?;
-        if !matches!(&function.params[rank].ty, Type::Named(name, args)
-            if args.is_empty() && matches!(name.as_str(), "int" | "uint" | "byte" | "float"))
-        {
-            return None;
-        }
-        let mut bases = HashSet::new();
-        let (fallback, base_arms) = arms.split_last()?;
-        if !matches!(fallback.0.as_slice(), [Pattern::Wildcard]) {
-            return None;
-        }
-        for (patterns, body) in base_arms {
-            let value = Self::recursion_return(body)?;
-            if !self.recursion_expression(value, function, rank, 0) {
-                return None;
-            }
-            for pattern in patterns {
-                let Pattern::Literal(value) = pattern else {
-                    return None;
-                };
-                bases.insert(Self::recursion_rank_literal(function, rank, value)?);
-            }
-        }
-        let coverage = u64::try_from(bases.len()).ok()?;
-        if coverage == 0 || !(0..coverage).all(|value| bases.contains(&value)) {
-            return None;
-        }
-        let recursive = Self::recursion_return(&fallback.1)?;
-        (!Self::recursion_call_free(recursive)
-            && self.recursion_expression(recursive, function, rank, coverage))
-        .then_some(rank)
-    }
-
     fn recursion_return(block: &Block) -> Option<&Expr> {
         let [statement] = block.statements.as_slice() else {
             return None;
@@ -2543,41 +2466,6 @@ impl<'module> Evaluator<'module> {
         }
     }
 
-    fn recursion_expression(
-        &self,
-        expression: &Expr,
-        function: &Function,
-        rank: usize,
-        coverage: u64,
-    ) -> bool {
-        match expression.unlocated() {
-            Expr::Name(name) => function.params.iter().any(|param| param.name == *name),
-            Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) => true,
-            Expr::Unary { value, .. } => {
-                self.recursion_expression(value, function, rank, coverage)
-            }
-            Expr::Binary { left, right, .. } => {
-                self.recursion_expression(left, function, rank, coverage)
-                    && self.recursion_expression(right, function, rank, coverage)
-            }
-            Expr::Call { callee, args, .. } if coverage > 0 => {
-                matches!(callee.unlocated(), Expr::Name(name) if *name == function.name)
-                    && !self.checked.constant_sources.contains_key(&callee.id())
-                    && args.len() == function.params.len()
-                    && args.iter().enumerate().all(|(index, arg)| {
-                        if index == rank {
-                            matches!(arg.unlocated(), Expr::Binary { left, op: BinaryOp::Sub, right }
-                                if matches!(left.unlocated(), Expr::Name(name) if *name == function.params[rank].name)
-                                && Self::recursion_rank_literal(function, rank, right).is_some_and(|step| step > 0 && step <= coverage))
-                        } else {
-                            self.recursion_expression(arg, function, rank, 0)
-                        }
-                    })
-            }
-            _ => false,
-        }
-    }
-
     /// Integer-valued floats through 2^53 form an exact subtraction domain:
     /// every admitted decrement is positive, integral, and cannot round away.
     fn recursion_domain(value: &Value) -> bool {
@@ -2591,63 +2479,6 @@ impl<'module> Evaluator<'module> {
             }
             _ => false,
         }
-    }
-
-    fn recursion_body<'a>(function: &'a Function, value: &Value) -> Option<&'a Expr> {
-        if !Self::recursion_domain(value) {
-            return None;
-        }
-        let Stmt::Expr(expression) = function.body.statements.first()?.unlocated() else {
-            return None;
-        };
-        let Expr::If {
-            subject: Some(subject),
-            arms,
-        } = expression.unlocated()
-        else {
-            return None;
-        };
-        let Expr::Name(name) = subject.unlocated() else {
-            return None;
-        };
-        let ty = &function.params.iter().find(|param| param.name == *name)?.ty;
-        if !matches!((ty, value),
-            (Type::Named(name, _), Value::Int(_)) if name == "int")
-            && !matches!((ty, value), (Type::Named(name, _), Value::Uint(_)) if name == "uint")
-            && !matches!((ty, value), (Type::Named(name, _), Value::Byte(_)) if name == "byte")
-            && !matches!((ty, value), (Type::Named(name, _), Value::Float(_)) if name == "float")
-        {
-            return None;
-        }
-        for (patterns, body) in arms {
-            for pattern in patterns {
-                let matched = match pattern {
-                    Pattern::Wildcard => true,
-                    Pattern::Literal(expression) => {
-                        let literal = Self::recursion_integer(expression)?;
-                        match value {
-                            Value::Int(value) => u64::try_from(*value).ok()? == literal,
-                            Value::Uint(value) => *value == literal,
-                            Value::Byte(value) => u64::from(*value) == literal,
-                            Value::Float(bits) => {
-                                f64::from_bits(*bits)
-                                    .abs()
-                                    .to_string()
-                                    .parse::<u64>()
-                                    .ok()?
-                                    == literal
-                            }
-                            _ => false,
-                        }
-                    }
-                    _ => false,
-                };
-                if matched {
-                    return Self::recursion_return(body);
-                }
-            }
-        }
-        None
     }
 
     fn recursion_call_free(expression: &Expr) -> bool {
@@ -2714,6 +2545,7 @@ impl<'module> Evaluator<'module> {
         arguments: &[Value],
         scope: &HashMap<String, Value>,
         rank: usize,
+        ranks: &HashMap<usize, usize>,
     ) -> Option<Value> {
         enum Task<'a> {
             Eval(&'a Expr, usize),
@@ -2722,11 +2554,11 @@ impl<'module> Evaluator<'module> {
             Unary(&'a Expr),
             Leave(usize),
         }
-        // The certificate permits only parameter reads and pure self calls, so
-        // sequential analysis may memoize these calls too without losing effects.
-        let cacheable = !callable.contains_cell() && !arguments.iter().any(Value::contains_cell);
-        let body = Self::recursion_body(function, arguments.get(rank)?)?;
-        let mut frames = vec![(scope.clone(), arguments.to_vec())];
+        // Each frame owns the resolved callable and argument snapshots. Shared
+        // callable captures remain live cells, and never become memo keys.
+        let mut scope = scope.clone();
+        let body = self.recursion_selected_body(function, &mut scope, rank)?;
+        let mut frames = vec![(scope, arguments.to_vec(), callable.clone(), function)];
         let mut tasks = vec![Task::Leave(0), Task::Eval(body, 0)];
         let mut values = Vec::new();
         while let Some(task) = tasks.pop() {
@@ -2743,26 +2575,34 @@ impl<'module> Evaluator<'module> {
                         Expr::Unary { value, .. } => {
                             tasks.extend([Task::Unary(expression), Task::Eval(value, frame)]);
                         }
-                        Expr::Call { args, .. } => {
-                            let arguments = args
-                                .iter()
-                                .zip(&function.params)
-                                .map(|(arg, param)| {
-                                    let value = self.evaluate(arg, &mut frames[frame].0)?;
-                                    self.coerce(value, &param.ty)
-                                })
-                                .collect::<Option<Vec<_>>>()?;
-                            let body = Self::recursion_body(function, arguments.get(rank)?)?;
+                        Expr::Call { callee, args, .. } => {
+                            let callable = self.evaluate(callee, &mut frames[frame].0)?;
+                            let (child, mut scope) = match &callable {
+                                Value::Function(name) => {
+                                    (*self.functions.get(name)?, HashMap::new())
+                                }
+                                Value::Closure(key, captures) => {
+                                    (*self.lambdas.get(key)?, captures.iter().cloned().collect())
+                                }
+                                _ => return None,
+                            };
+                            let mut arguments = Vec::new();
+                            for (arg, param) in args.iter().zip(&child.params) {
+                                let value = self.evaluate(arg, &mut frames[frame].0)?;
+                                let value = self.coerce(value, &param.ty)?;
+                                scope.insert(param.name.clone(), value.clone());
+                                arguments.push(value);
+                            }
+                            let rank = *ranks.get(&Self::recursion_identity(child))?;
+                            let body = self.recursion_selected_body(child, &mut scope, rank)?;
                             let key = (callable.clone(), arguments.clone());
+                            let cacheable =
+                                self.recursion_heap_cacheable(child, &callable, &arguments);
                             if cacheable && let Some(value) = self.memo.get(&key) {
                                 values.push(value.clone());
                             } else {
-                                let mut scope = scope.clone();
-                                for (param, value) in function.params.iter().zip(&arguments) {
-                                    scope.insert(param.name.clone(), value.clone());
-                                }
                                 let next = frames.len();
-                                frames.push((scope, arguments));
+                                frames.push((scope, arguments, callable, child));
                                 tasks.extend([Task::Leave(next), Task::Eval(body, next)]);
                             }
                         }
@@ -2791,10 +2631,12 @@ impl<'module> Evaluator<'module> {
                     values.push(self.recursion_unary(expression, value)?);
                 }
                 Task::Leave(frame) => {
-                    let value = self.coerce(values.pop()?, &function.return_type)?;
                     debug_assert_eq!(frame + 1, frames.len());
-                    let (_, arguments) = frames.pop()?;
-                    if cacheable && !value.contains_cell() {
+                    let (_, arguments, callable, function) = frames.pop()?;
+                    let value = self.coerce(values.pop()?, &function.return_type)?;
+                    if self.recursion_heap_cacheable(function, &callable, &arguments)
+                        && !value.contains_cell()
+                    {
                         self.memo
                             .insert((callable.clone(), arguments), value.clone());
                     }

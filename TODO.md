@@ -16,11 +16,6 @@
     - [ ] Unknown runtime inputs.
     - [ ] Other unsupported effects.
 
-    - [ ] Expand conservative termination proof coverage.
-
-      - [ ] Prove additional recursive ranking patterns, mutual recursion, and
-            recursive closures without speculative execution.
-
     - [ ] Emit compact constant aggregate data when runtime containers must remain,
           preserving independent writable storage and nested value copies.
   - [ ] Refine test-dependency slicing precision.

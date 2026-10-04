@@ -1,5 +1,191 @@
 use std::path::Path;
 
+fn assert_folded(source: &str, names: &[&str], expected: &str) {
+    let c = compile(source, true).unwrap();
+    for name in names {
+        assert!(!c.contains(&format!("nc_fn_{name}(")), "{name} must fold");
+    }
+    assert_runtime_output(source, expected);
+}
+
+#[test]
+fn mutual_recursion_allows_neutral_edges_but_requires_cycle_descent() {
+    let source = r"
+fn first(int n) int {
+    if n <= 0 { true -> { return 0 } _ -> { return 1 + second(n - 1) } }
+}
+fn second(int n) int { return third(n) }
+fn third(int n) int { return first(n) }
+@println(first(30), second(20))
+";
+    assert_folded(source, &["first", "second", "third"], "3020\n");
+    let deep = source.replace("first(30), second(20)", "first(10000)");
+    assert!(!compile(&deep, true).unwrap().contains("nc_fn_first("));
+}
+
+#[test]
+fn contraction_preserves_numeric_boundaries_and_mutual_error_locations() {
+    for (ty, value, expected) in [
+        ("uint", "18446744073709551615", "64\n"),
+        ("int", "9223372036854775807", "63\n"),
+        ("byte", "255", "8\n"),
+    ] {
+        let source = format!(
+            "fn depth({ty} n) {ty} {{ if n > 0 {{ true -> {{return 1 + depth(n / 2)}} _ -> {{return 0}} }} }};@println(depth({value}))"
+        );
+        assert_folded(&source, &["depth"], expected);
+    }
+    let source = r"
+fn first(uint n) uint {
+    if n { 0 -> {return 0} _ -> {return 1 / second(n - 1)} }
+}
+fn second(uint n) uint { return first(n) }
+@println(first(2))
+";
+    compile(source, false).unwrap();
+    let error = compile(source, true).unwrap_err();
+    let diagnostic = &error.0[0];
+    assert!(diagnostic.message.contains("constant evaluation failed"));
+    assert_eq!(diagnostic.path.as_deref(), Some(Path::new("recursion.nc")));
+    assert_eq!(&source[diagnostic.span.clone()], "1 / second(n - 1)");
+}
+
+#[test]
+fn mutual_ranks_can_occupy_different_parameter_positions() {
+    let source = r"
+fn first(int n, int total) int {
+    if n < 1 { true -> { return total } _ -> { return second(total + 1, n - 1) } }
+}
+fn second(int total, int n) int {
+    if 0 >= n { true -> { return total } _ -> { return first(n - 1, total + 1) } }
+}
+@println(first(25, 7))
+";
+    assert_folded(source, &["first", "second"], "32\n");
+}
+
+#[test]
+fn integral_division_and_early_return_guards_certify_recursion() {
+    for (guard, recursive) in [
+        ("n < 2", "1 + depth(n / 2)"),
+        ("2 > n", "1 + depth(n / 2)"),
+        ("n <= 1", "1 + depth(n / 2)"),
+        ("1 >= n", "1 + depth(n / 2)"),
+        ("n == 0", "1 + depth(n - 1)"),
+        ("0 == n", "1 + depth(n - 1)"),
+    ] {
+        let source = format!(
+            "fn depth(uint n) uint {{ if {guard} {{ true -> {{ return 0 }} _ -> {{}} }};return {recursive} }};@println(depth(64))"
+        );
+        let expected = if recursive.contains('/') {
+            "6\n"
+        } else {
+            "64\n"
+        };
+        assert_folded(&source, &["depth"], expected);
+    }
+    let source = "fn depth(byte n) byte { if n != 0 { true -> { return 1 + depth(n / 2) } false -> { return 0 } } };@println(depth(255))";
+    assert_folded(source, &["depth"], "8\n");
+}
+
+#[test]
+fn recursive_closures_and_mutual_closure_captures_fold() {
+    for (source, expected) in [
+        (
+            r"
+mut (fn(int) int) recur = fn(int n) int { return 0 }
+recur = fn(int n) int {
+    if n > 0 { true -> { return 1 + recur(n - 1) } _ -> { return 0 } }
+}
+@println(recur(40))
+",
+            "40\n",
+        ),
+        (
+            r"
+mut (fn(int) int) first = fn(int n) int { return 0 }
+mut (fn(int) int) second = fn(int n) int { return 0 }
+first = fn(int n) int {
+    if n { 0 -> { return 0 } _ -> { return 1 + second(n - 1) } }
+}
+second = fn(int n) int { return first(n) }
+@println(first(40), second(20))
+",
+            "4020\n",
+        ),
+    ] {
+        let release = compile(source, true).unwrap();
+        assert!(!release.contains("nc_lambda_"), "closures must fold");
+        assert_runtime_output(source, expected);
+    }
+}
+
+#[test]
+fn neutral_cycles_and_unsafe_contractions_remain_runtime_without_entry() {
+    for source in [
+        "fn first(int n) int { if n { 0 -> {return 0} _ -> {return 1 / (n-n) + second(n)} } };fn second(int n) int {return third(n)};fn third(int n) int {return first(n)};@println(first(2))",
+        "fn first(int n) int { if n { 0 -> {return 0} _ -> {return 1 / (n-n) + first(n / 1)} } };@println(first(2))",
+        "fn first(int n) int {return first(n / 2)};@println(first(2))",
+        "fn first(float n) float { if n { 0.0 -> {return 0.0} _ -> {return first(n / 2.0)} } };@println(first(2.0))",
+        "fn first(uint n) uint { if n { 0 -> {return 0} _ -> {return first(n - 2)} } };@println(first(2))",
+    ] {
+        for release in [false, true] {
+            assert!(compile(source, release).unwrap().contains("nc_fn_first("));
+        }
+    }
+}
+
+#[test]
+fn transitive_mutable_callable_dependencies_never_reuse_heap_memo() {
+    let source = r"
+fn one(int n) int { if n { 0 -> {return 1} _ -> {return one(n-1)} } }
+fn two(int n) int { if n { 0 -> {return 2} _ -> {return two(n-1)} } }
+mut (fn(int) int) callback = one
+fn alias = fn(int n) int { return callback(n) }
+fn f(int n) int {
+    if n { 0 -> {return 0} _ -> {return alias(n-1) + f(n-1)} }
+}
+fn g(int n) int {
+    if n { 0 -> {return 0} _ -> {return f(n-1) + g(n-1)} }
+}
+@println(f(1))
+callback = two
+@println(g(2))
+";
+    assert_runtime_output(source, "1\n2\n");
+}
+
+#[test]
+fn lexical_callable_shadows_cannot_hide_unproven_global_cycles() {
+    let source = r"
+fn idle(int n) int { return n }
+mut (fn(int) int) callback = spin
+fn helper(int n) int {
+    { (fn(int) int) callback = idle }
+    return callback(n)
+}
+fn spin(int n) int { return helper(n) }
+fn outer(int n) int {
+    int failure = 1 / (n - n)
+    return failure + helper(n)
+}
+@println(outer(1))
+";
+    let later_declaration = source.replace(
+        "{ (fn(int) int) callback = idle }\n    return callback(n)",
+        "int result = callback(n)\n    (fn(int) int) callback = idle\n    return result",
+    );
+    let later_mutable_declaration = later_declaration.replace(
+        "(fn(int) int) callback = idle",
+        "mut (fn(int) int) callback = idle",
+    );
+    for source in [source, &later_declaration, &later_mutable_declaration] {
+        for release in [false, true] {
+            assert!(compile(source, release).unwrap().contains("nc_fn_outer("));
+        }
+    }
+}
+
 fn compile(source: &str, release: bool) -> Result<String, ncc::diagnostic::Diagnostics> {
     ncc::compile_source_with_options(source, Path::new("recursion.nc"), release)
 }
@@ -117,7 +303,7 @@ fn depth(uint n) uint {
 }
 
 #[test]
-fn mutual_recursion_is_conservatively_rejected() {
+fn unranked_mutual_recursion_is_conservatively_rejected() {
     let source = r"
 fn first(int n) int {
     int failure = 1 / (n - n)
