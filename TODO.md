@@ -2,9 +2,18 @@
 
 - [ ] Expand language and edge-case coverage.
   - [ ] Cover every part of the language and as many edge cases as possible.
-    - [ ] Add missing positive cases for syntax, types, expressions, statements,
-          functions, generics, modules, builtins, and C externs, using
-          `docs/coverage.md` to track concrete assertions and compiler modes.
+    - [ ] Continue missing positive coverage using `docs/coverage.md` to track
+          concrete assertions and compiler modes; retain existing syntax,
+          shadowing, literal, generic-example, exported-alias/private-state and
+          private-C-wrapper regressions in both modes.
+      - [ ] Expand container element-type and nominal identity matrices, recursive
+            enum discarded-payload matching, and boundary-distinct string patterns.
+      - [ ] Expand generic/nominal/container combinations and remaining specified
+            arithmetic, conversion, and inclusion positives without assuming
+            unresolved semantics.
+      - [ ] Cover remaining builtin process-state positives and successful scalar
+            async error unions; keep module initialization identity and unclear
+            lifecycle/index behavior blocked on semantic decisions below.
 
     - [ ] Add missing negative cases for parsing, type checking, control flow,
           module loading, and builtin/extern restrictions in both build modes.
