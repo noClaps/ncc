@@ -51,6 +51,13 @@
   - Module and block statements require newline or semicolon separators, including
     after block-bodied declarations and control statements. Preserve multiline
     expressions and whitespace-separated declaration member lists.
+  - Circular imports are supported, including multi-file and root back-edges.
+    Publish qualified exports before following imports; preserve private visibility
+    and source locations. Initialization order and shared module-state identity
+    remain separate unresolved contracts.
+  - The `@as` conversion table is exhaustive. Reject `byte` to `float` and typed
+    `int`/`uint`/`float` to `byte`; preserve contextual byte literals, identity
+    conversions and immediate nominal underlying unwrap/rewrap operations.
   - Bit shifts are arithmetic: signed right shifts round toward negative infinity.
     Generate portable C without relying on negative signed right shifts.
   - Functions share surrounding mutable bindings, including nested/anonymous

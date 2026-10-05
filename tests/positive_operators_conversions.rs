@@ -23,11 +23,23 @@ fn nonnegative_integer_arithmetic_covers_each_operator_and_operand_width() {
                 )
                 .unwrap();
             }
+            let (a, b) = if kind == "byte" {
+                (
+                    "left_values[offset]".to_owned(),
+                    "right_values[offset]".to_owned(),
+                )
+            } else {
+                (
+                    format!("@as({kind}, {left} + offset)"),
+                    format!("@as({kind}, {right} + offset)"),
+                )
+            };
             for offset in ["0", "@as(int, @args().len) - 1"] {
                 success(&format!(
                     "test \"{kind} arithmetic\" {{\nint offset = {offset}\n\
-                     {kind} a = @as({kind}, {left} + offset)\n\
-                     {kind} b = @as({kind}, {right} + offset)\n{assertions}\
+                     byte[] left_values = [{left}, 0]\n\
+                     byte[] right_values = [{right}, 0]\n\
+                     {kind} a = {a}\n{kind} b = {b}\n{assertions}\
                      @println(\"checked\")\n}}\n"
                 ));
             }
@@ -148,7 +160,8 @@ test "composite inclusion" {{
     assert contains<Count?>(none_value, [none_value, optional])
     assert not contains<Count?>(none_value, [optional])
     [char]Count keyed = ['a': count, 'b': missing]
-    char key = @as(char, @as(byte, seed + 96))
+    byte[] character_codes = [97, 98]
+    char key = @as(char, character_codes[seed - 1])
     assert key in keyed and 'b' in keyed and not ('c' in keyed)
     str text = "abc"
     assert "" in text and "" in ""

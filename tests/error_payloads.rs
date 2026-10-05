@@ -190,6 +190,7 @@ fn checked(bool fail, {ty} value) {ty}! {{
 }}
 test "async {ty} success" {{
     uint seed = @args().len
+    byte[] octets = [254, 255]
     {ty} value = {input}
     fut {ty}! work = async checked(seed == 0, value)
     mut int catches = 0
@@ -225,6 +226,7 @@ fn wrapper(bool fail, {ty} value, str message) {ty}! {{
 }}
 test "async {ty} try propagation" {{
     uint seed = @args().len
+    byte[] octets = [254, 255]
     {ty} value = {input}
     mut int catches = 0
     {ty} completed = wrapper(seed == 0, value, "unused") catch message {{
@@ -403,7 +405,7 @@ fn scalar_async_cases() -> [(&'static str, &'static str, &'static str); 8] {
     [
         ("bool", "seed == 0", "false"),
         ("bool", "seed == 1", "true"),
-        ("byte", "@as(byte, seed + 254)", "@as(byte, 255)"),
+        ("byte", "octets[seed]", "@as(byte, 255)"),
         ("char", "\"🙂\"[seed - 1]", "'🙂'"),
         ("int", "-@as(int, seed) - 41", "-42"),
         (

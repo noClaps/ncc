@@ -2387,7 +2387,7 @@ fn typed_operations_match_runtime_semantics() {
     for source in [
         "fn f(uint n) uint { return n - 1 };@println(f(0))",
         "fn f(byte n) byte { return n << 8 };@println(f(1))",
-        "fn f(float n) byte { return @as(byte, n) };@println(f(-0.5))",
+        "fn f(float n) uint { return @as(uint, n) };@println(f(-0.5))",
         "fn f(int n) int { return -n };@println(f(-9223372036854775808))",
     ] {
         let error = compile_fixture(source, Path::new("bad.nc"), true).unwrap_err();

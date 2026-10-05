@@ -13,11 +13,11 @@ type Table = [str]int
 fn scalar_element_matrix_in_fixed_dynamic_arrays_maps_and_tuples() {
     for (kind, literal, runtime, replacement) in [
         ("bool", "true", "seed == 1", "false"),
-        ("byte", "7", "@as(byte, seed + 6)", "9"),
+        ("byte", "7", "octets[index]", "9"),
         ("int", "-7", "-seed - 6", "9"),
         ("uint", "7u", "@as(uint, seed + 6)", "9u"),
         ("float", "1.5", "@as(float, seed) + 0.5", "2.5"),
-        ("char", "'a'", "@as(char, @as(byte, seed + 96))", "'z'"),
+        ("char", "'a'", "@as(char, character_codes[index])", "'z'"),
         ("str", "\"ab\"", "@as(str, seed + 6)", "\"changed\""),
     ] {
         let expected = if kind == "str" { "\"7\"" } else { literal };
@@ -79,6 +79,8 @@ fn element_matrix(kind: &str, literal: &str, runtime: &str, replacement: &str, e
 test "{phase} {kind} element matrix" {{
     int seed = @as(int, @args().len)
     uint index = @args().len - 1
+    byte[] octets = [7, 8]
+    byte[] character_codes = [97, 98]
     {kind} expected = {expected}
     {kind} changed = {replacement}
     mut {kind}[2] fixed = [{initial}, {initial}]

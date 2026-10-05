@@ -1211,12 +1211,23 @@ impl Checker {
             }
             return Ok(ty.clone());
         }
+        if *ty == named("byte") && matches!(value.unlocated(), Expr::Int(_)) {
+            // Integer literals may use byte context; typed integer values may not.
+            self.expected(value, ty)?;
+            return Ok(ty.clone());
+        }
         let from = self.expr(value)?;
         if !implicit
             && let Type::Named(n, _) = &from
             && matches!(self.types.get(n),Some(TypeInfo::Alias(base)) if base == ty)
         {
             return Ok(ty.clone());
+        }
+        if numeric(ty) && numeric(&from) {
+            if ty == &from || numeric_cast_allowed(&from, ty) {
+                return Ok(ty.clone());
+            }
+            return Checker::fail(format!("cannot cast `{from}` to `{ty}`"));
         }
         if *ty == named("str") {
             self.value_operation(&from, "string conversion")?;
@@ -1228,8 +1239,7 @@ impl Checker {
         }
         let string_array = matches!(ty,Type::Array(t,None) if (**t == named("char") && from == named("str")) || (**t == named("byte") && (from == named("str") || from == named("char"))));
         let bool_integer = from == named("bool") && (*ty == named("int") || *ty == named("uint"));
-        if !(numeric(ty) && numeric(&from))
-            && ty != &from
+        if ty != &from
             && *ty != named("str")
             && !string_array
             && !bool_integer
@@ -1819,4 +1829,12 @@ fn named(x: &str) -> Type {
 }
 fn numeric(t: &Type) -> bool {
     matches!(t,Type::Named(n,_)if matches!(n.as_str(),"byte"|"int"|"uint"|"float"))
+}
+fn numeric_cast_allowed(from: &Type, to: &Type) -> bool {
+    matches!((from, to), (Type::Named(from, _), Type::Named(to, _)) if matches!(
+        (from.as_str(), to.as_str()),
+        ("byte" | "float", "int" | "uint")
+            | ("int", "uint" | "float")
+            | ("uint", "int" | "float")
+    ))
 }

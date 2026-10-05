@@ -5,7 +5,7 @@ use crate::{
     lexer, parser,
 };
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     path::{Path, PathBuf},
 };
 type Names = HashMap<String, String>;
@@ -13,7 +13,7 @@ type Names = HashMap<String, String>;
 /// Resolve imports and external paths, excluding test blocks.
 ///
 /// # Errors
-/// Returns diagnostics for unreadable or invalid imports, import cycles, duplicate
+/// Returns diagnostics for unreadable or invalid imports, duplicate
 /// module aliases, inaccessible exports, or unresolved external implementation paths.
 pub fn load(module: Module, path: &Path) -> Result<Module, Diagnostics> {
     load_with_tests(module, path, false)
@@ -22,14 +22,13 @@ pub fn load(module: Module, path: &Path) -> Result<Module, Diagnostics> {
 /// Resolve modules, optionally retaining tests and their dependencies in source order.
 ///
 /// # Errors
-/// Returns diagnostics for unreadable or invalid imports, import cycles, or duplicate
+/// Returns diagnostics for unreadable or invalid imports or duplicate
 /// module aliases. Export and external-path errors are reported only for retained
 /// items in test mode, and for all non-test items otherwise.
 pub fn load_with_tests(module: Module, path: &Path, tests: bool) -> Result<Module, Diagnostics> {
     let mut loader = Loader {
         tests,
-        done: HashMap::new(),
-        active: HashSet::new(),
+        exports: HashMap::new(),
         items: vec![],
         errors: vec![],
         next: 0,
@@ -55,8 +54,7 @@ pub fn load_with_tests(module: Module, path: &Path, tests: bool) -> Result<Modul
 }
 struct Loader {
     tests: bool,
-    done: HashMap<PathBuf, Names>,
-    active: HashSet<PathBuf>,
+    exports: HashMap<PathBuf, Names>,
     items: Vec<Item>,
     errors: Vec<Option<Diagnostics>>,
     next: usize,
@@ -68,6 +66,9 @@ impl Loader {
             .unwrap_or(Path::new("."))
             .join(imported)
             .with_extension("nc");
+        if let Some(exports) = self.exports.get(&source_key(&imported_path)) {
+            return Ok(exports.clone());
+        }
         let source = std::fs::read_to_string(&imported_path).map_err(|e| {
             Diagnostics::one(
                 format!("cannot import {}: {e}", imported_path.display()),
@@ -116,15 +117,10 @@ impl Loader {
                 .retain(|item| !matches!(item, Item::Test { .. }));
         }
         let key = source_key(path);
-        if let Some(exports) = self.done.get(&key) {
+        if let Some(exports) = self.exports.get(&key) {
             return Ok(exports.clone());
         }
-        if !self.active.insert(key.clone()) {
-            return Err(Diagnostics::one(
-                format!("cyclic module import: {}", path.display()),
-                0..0,
-            ));
-        }
+
         let prefix = if root {
             String::new()
         } else {
@@ -143,6 +139,9 @@ impl Loader {
                 }
             }
         }
+        // Publish qualified declarations before following imports so back-edges
+        // can resolve exports without loading or emitting the module again.
+        self.exports.insert(key, exports.clone());
         let mut errors = HashMap::new();
         for (index, item) in module.items.iter_mut().enumerate() {
             match item {
@@ -197,8 +196,7 @@ impl Loader {
             self.items.push(item);
             self.errors.push(errors.remove(&index));
         }
-        self.active.remove(&key);
-        self.done.insert(key, exports.clone());
+
         Ok(exports)
     }
 }

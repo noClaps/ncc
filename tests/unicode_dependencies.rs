@@ -107,7 +107,8 @@ fn byte_array_casts_flatten_unicode_and_nuls_without_segmentation() {
     check(
         r#"
 str text = @args()[1]
-byte b = @as(byte, @args().len + 126u)
+byte[] values = [126, 127, 128, 129]
+byte b = values[@args().len]
 char c = @as(char, b)
 @println(@as(byte[], text))
 @println(@as(byte[], "\u{0}尾"))
