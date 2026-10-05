@@ -2,8 +2,9 @@
 
 - [ ] Expand language and edge-case coverage.
   - [ ] Cover every part of the language and as many edge cases as possible.
-    - [ ] Cover interactions between nominal types, containers, optional/error
-          values, closures, and value-copy semantics.
+    - [ ] Extend returned-closure value-copy coverage to recursive/generic nominal
+          payloads and callable optional/error failure variants; preserve the
+          nominal/container/optional/error/closure interaction matrices.
     - [ ] Cover numeric boundaries, Unicode character boundaries, embedded NULs,
           empty containers, and runtime failures.
       - [ ] Extend exact numeric conversion samples through `2^53` to specified

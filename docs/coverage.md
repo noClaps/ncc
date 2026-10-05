@@ -576,6 +576,34 @@ contextual byte literals and immediate nominal unwrap/rewrap. Existing execution
 and optimizer fixtures use byte-domain literals/arrays rather than forbidden
 casts, preserving all-256-byte and helper-loop proof assertions.
 
+## Nominal, wrapper, closure and value-copy interaction additions
+
+`tests/positive_nominal_interactions.rs` adds 16 P D/R execution fixtures:
+four nominal payload shapes (nominal-element arrays, maps of arrays, tuples and
+structs), each with constant and runtime-dependent inputs, across two matrices.
+The first stores present/absent optionals and successful/failed error unions in
+fixed arrays, dynamic arrays, maps and tuples. It asserts independent copies after
+source replacement, container updates and unwrapped payload mutation, plus error
+message recovery and catch effects. The second returns closures from factories,
+then copies them through callable arrays, maps, tuples and an optional. It asserts
+that copied closures share their factory-local mutable nominal storage, immutable
+parameter captures retain snapshots, separate factory invocations remain independent,
+replacing a callback does not replace its copies, and returned payload mutation does
+not alter captured storage. Exact output is checked separately in both NC modes.
+
+`tests/negative_nominal_interactions.rs` adds 149 N D/R rejection cases and
+141 C D/R compile-only controls. These cover distinct nominal elements in container
+literals and indexed assignments; container aliases versus underlying/sibling types;
+optional/error success promotion, wrapped binding/call/return compatibility;
+nominal identity after `else`, `catch` and `try`; capturing closure parameter/result
+signatures, callback containers, returned callables and invocation. Compile controls
+are not runtime copy evidence.
+
+These matrices do not establish exhaustive cross-product coverage. Returned closures
+with recursive/generic nominal payloads and callable optional/error failure variants
+remain expansion targets. No unresolved semantics, compiler implementation or
+specification text was changed for these additions.
+
 ## Follow-up test gaps
 
 These are concrete expansion targets, not additional work undertaken by this
@@ -654,8 +682,10 @@ Resolve the questions in the next section before choosing unspecified outcomes.
    through `2^53` and finite fraction truncation have P D/R evidence. Inexact
    large integer→float conversion cases remain unsampled; bool→uint currently
    generates a nonfatal C tautological comparison warning.
-8. **Cross-cutting:** extend nominal/container/optional/error/callable value-copy
-   combinations; exact original source locations; runtime-dependent numeric and
+8. **Cross-cutting:** nominal/container/optional/error/callable value-copy combinations
+   now have the additional positive and negative matrices above; extend returned-closure
+   coverage to recursive/generic nominal payloads and callable wrapper failure variants.
+   Exact original source locations; runtime-dependent numeric and
    bounds failures; negative cases currently D-only; independent debug/release
    checks rather than assumed coverage from a shared helper or example.
 
