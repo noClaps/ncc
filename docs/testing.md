@@ -139,6 +139,11 @@ executed only in a reduced regression, not at its full example iteration count.
 
 ## Coverage map
 
+See [the specification coverage inventory](coverage.md) for a section-by-section
+map to concrete assertions, compiler-mode limits, missing test cases, and semantics
+questions requiring clarification. The summary below is a suite-level guide, not
+a claim of complete language coverage.
+
 | Area                                                                                                                                                                         | Regression tests               |
 | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
 | Types, bindings, operators, patterns, loops, errors, optionals, generics, imports, closures, concurrency, value semantics                                                    | `tests/conformance.rs`         |

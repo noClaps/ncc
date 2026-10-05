@@ -2,22 +2,43 @@
 
 - [ ] Expand language and edge-case coverage.
   - [ ] Cover every part of the language and as many edge cases as possible.
-    - [ ] Inventory specification features and map them to existing tests.
     - [ ] Add missing positive cases for syntax, types, expressions, statements,
-          functions, generics, modules, builtins, and C externs.
+          functions, generics, modules, builtins, and C externs, using
+          `docs/coverage.md` to track concrete assertions and compiler modes.
+      - [ ] Cover doc comments, multiline execution, sigil ordering, optional tuple
+            handling, scalar truth tables, and positive bitwise OR/XOR/complement.
+      - [ ] Cover character patterns, optional conditional results, overlapping
+            predicates, generic error payloads, and async void error unions.
     - [ ] Add missing negative cases for parsing, type checking, control flow,
           module loading, and builtin/extern restrictions in both build modes.
+      - [ ] Cover mixed operand types, pattern exhaustiveness and lengths,
+            aggregate initializers, function-type syntax, and error restrictions.
+      - [ ] Cover selective/wildcard imports, multi-file cycles, extern visibility,
+            literal paths/symbols, call signatures, and invalid builtin calls.
+      - [ ] Extend debug-only embed and external-declaration rejection cases to
+            both modes, including symlinks and controlled unreadable-file cases.
     - [ ] Cover interactions between nominal types, containers, optional/error
           values, closures, and value-copy semantics.
     - [ ] Cover numeric boundaries, Unicode character boundaries, embedded NULs,
           empty containers, and runtime failures.
     - [ ] Expand async, future, mutex, and shared-storage coverage without relying
           on a particular thread schedule.
+      - [ ] Add deterministic pre-await progress and mutex-contention checks;
+            assert bare-break lock reacquisition without timing assumptions.
     - [ ] Compare debug and release behavior, including output, evaluation order,
           side effects, runtime failures, and source locations.
+      - [ ] Expand builtin process-state edges and build-format/artifact cleanup
+            checks in both modes, including backend and runtime failure paths.
+
   - [ ] Resolve unclear specification semantics before encoding assumptions.
-    - [ ] Collect ambiguous feature interactions and edge cases from the coverage
-          inventory and differential tests.
+    - [ ] Resolve the questions recorded in `docs/coverage.md` and collect further
+          ambiguous interactions from differential tests.
+      - [ ] Clarify operator compatibility, numeric/index failure conventions,
+            tuple index requirements, and aggregate-pattern exhaustiveness.
+      - [ ] Clarify multiline/Unicode contracts, observable representation,
+            map key rules, function-result consumption, and caught error values.
+      - [ ] Clarify nested lock jump targets, future lifecycle, permitted race
+            guarantees, module initialization identity, and optimization scope.
     - [ ] Ask the user to resolve each ambiguity; do not infer intended behavior
           from the current implementation or passing tests.
     - [ ] Have the user document decisions, or obtain explicit approval for any
