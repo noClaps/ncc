@@ -402,12 +402,14 @@ test "shared native implementation" { @println(native.first(1), other.value()) }
 extern "native.c" as one { fn first(int n) int = "first" }
 extern "native.c" as two { fn first(str n) int = "first" }
 "#;
-    assert!(
-        ncc::compile_source(conflict, &input)
-            .unwrap_err()
-            .to_string()
-            .contains("conflicting declarations")
-    );
+    for release in [false, true] {
+        let error = ncc::compile_source_with_options(conflict, &input, release).unwrap_err();
+        assert!(
+            error.to_string().contains("conflicting declarations"),
+            "release={release}: {error}"
+        );
+        assert_eq!(error.0[0].path.as_ref(), Some(&input));
+    }
     for symbol in [
         "int",
         "signed",
@@ -417,8 +419,14 @@ extern "native.c" as two { fn first(str n) int = "first" }
         "_Thread_local",
     ] {
         let source = format!("extern \"native.c\" as native {{ fn value() int = \"{symbol}\" }}");
-        let error = ncc::compile_source(&source, &input).unwrap_err();
-        assert!(error.to_string().contains("C keyword"), "{error}");
+        for release in [false, true] {
+            let error = ncc::compile_source_with_options(&source, &input, release).unwrap_err();
+            assert!(
+                error.to_string().contains("C keyword"),
+                "release={release}, symbol={symbol}: {error}"
+            );
+            assert_eq!(error.0[0].path.as_ref(), Some(&input));
+        }
     }
 }
 

@@ -58,10 +58,14 @@ test "embedded" {{
         assert!(output.status.success());
         assert_eq!(output.stdout, b"256\n");
     }
-    let error = ncc::compile_source("byte[] bytes = @embed(\"missing\")", &input).unwrap_err();
-    assert!(error.to_string().contains("cannot embed"));
-    assert_eq!(error.0[0].path.as_ref(), Some(&input));
-    assert_eq!(error.0[0].span.start, 15);
+    for release in [false, true] {
+        let error =
+            ncc::compile_source_with_options("byte[] bytes = @embed(\"missing\")", &input, release)
+                .unwrap_err();
+        assert!(error.to_string().contains("cannot embed"), "{error}");
+        assert_eq!(error.0[0].path.as_ref(), Some(&input));
+        assert_eq!(error.0[0].span.start, 15);
+    }
     for invalid in [
         "@embed()",
         "@embed(1)",
@@ -69,10 +73,13 @@ test "embedded" {{
         "@embed(variable)",
         "@embed(\"{variable}\")",
     ] {
-        assert!(
-            ncc::compile_source(&format!("_ = {invalid}"), &input).is_err(),
-            "{invalid}"
-        );
+        for release in [false, true] {
+            assert!(
+                ncc::compile_source_with_options(&format!("_ = {invalid}"), &input, release)
+                    .is_err(),
+                "release={release}: {invalid}"
+            );
+        }
     }
 }
 
@@ -85,13 +92,90 @@ fn rejects_symlink_files_and_parent_directories() {
     fs::write(root.join("actual/data"), [42]).unwrap();
     std::os::unix::fs::symlink("actual/data", root.join("link")).unwrap();
     std::os::unix::fs::symlink("actual", root.join("directory-link")).unwrap();
-    for name in ["link", "directory-link/data"] {
-        let error = ncc::compile_source(&format!("_ = @embed(\"{name}\")"), &root.join("main.nc"))
-            .unwrap_err();
+    std::os::unix::fs::symlink("missing", root.join("dangling")).unwrap();
+    std::os::unix::fs::symlink("loop", root.join("loop")).unwrap();
+    for name in [
+        "link",
+        "directory-link/data",
+        "directory-link/../actual/data",
+        "dangling",
+        "loop",
+    ] {
+        for file in [std::path::PathBuf::from(name), root.join(name)] {
+            rejects_embed(
+                &format!("_ = @embed(\"{}\")", file.display()),
+                &root.join("main.nc"),
+                "does not follow symlinks",
+            );
+        }
+    }
+}
+
+fn rejects_embed(source: &str, input: &std::path::Path, expected: &str) {
+    for release in [false, true] {
+        let error = ncc::compile_source_with_options(source, input, release).unwrap_err();
         assert!(
-            error.to_string().contains("does not follow symlinks"),
+            error.to_string().contains(expected),
+            "release={release}: {source}\n{error}"
+        );
+        assert_eq!(error.0[0].path.as_deref(), Some(input));
+        assert_eq!(error.0[0].span.start, 4);
+    }
+}
+
+#[test]
+fn rejects_missing_files_directories_and_non_directory_parents() {
+    let temp = ncc::temp::Directory::new().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    fs::create_dir(root.join("directory")).unwrap();
+    fs::write(root.join("file"), [42]).unwrap();
+    let input = root.join("main.nc");
+    for name in ["missing", "directory", "file/child"] {
+        rejects_embed(&format!("_ = @embed(\"{name}\")"), &input, "cannot embed");
+    }
+    rejects_embed("_ = @embed(\"file\u{0}child\")", &input, "cannot embed");
+    ncc::compile_source_with_options("_ = @embed(\"file\")", &input, false).unwrap();
+    ncc::compile_source_with_options("_ = @embed(\"file\")", &input, true).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn rejects_controlled_unreadable_files() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = ncc::temp::Directory::new().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let file = root.join("unreadable");
+    fs::write(&file, [42]).unwrap();
+    let permissions = fs::metadata(&file).unwrap().permissions();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
+    let read = fs::read(&file);
+    let input = root.join("main.nc");
+    let source = "_ = @embed(\"unreadable\")";
+    let results =
+        [false, true].map(|release| ncc::compile_source_with_options(source, &input, release));
+    // Restore before assertions so a failure cannot leave an unreadable fixture behind.
+    fs::set_permissions(&file, permissions).unwrap();
+    let Err(read_error) = read else {
+        eprintln!("skipping permission-denied assertions: this user can read mode-000 files");
+        return;
+    };
+    assert_eq!(read_error.kind(), std::io::ErrorKind::PermissionDenied);
+    for (release, result) in [false, true].into_iter().zip(results) {
+        let error = result.unwrap_err();
+        assert!(
+            error.to_string().contains("cannot embed"),
+            "release={release}: {error}"
+        );
+        assert!(
+            error.to_string().contains(&read_error.to_string()),
             "{error}"
         );
+        assert_eq!(error.0[0].path.as_ref(), Some(&input));
+        assert_eq!(error.0[0].span.start, 4);
+    }
+    for release in [false, true] {
+        ncc::compile_source_with_options(source, &input, release).unwrap();
     }
 }
 

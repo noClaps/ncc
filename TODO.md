@@ -5,9 +5,6 @@
     - [ ] Add missing negative cases for parsing, type checking, control flow,
           module loading, and builtin/extern restrictions in both build modes.
 
-      - [ ] Extend debug-only embed and external-declaration rejection cases to
-            both modes, including symlinks and controlled unreadable-file cases.
-
     - [ ] Cover interactions between nominal types, containers, optional/error
           values, closures, and value-copy semantics.
       - [ ] Extend the sampled container matrices to direct structural map
