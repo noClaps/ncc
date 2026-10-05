@@ -198,6 +198,234 @@ test "public NC contract around private C extern" {
     run_both(&input, b"9:12:3\n");
 }
 
+#[test]
+fn generic_function_type_forwarding_preserves_nominal_container_specializations() {
+    for (kind, constant, runtime) in [
+        ("Count", "7", "@as(Count, seed + 6)"),
+        ("Distance", "7", "@as(Distance, seed + 6)"),
+        ("Name", "\"7\"", "@as(Name, @as(str, seed + 6))"),
+        ("Count[2][]", "[[7, 8]]", "[[value, 8]]"),
+        ("Count[][2]", "[[7], [8, 9]]", "[[value], [8, 9]]"),
+        (
+            "[str](Count[2], Count[])",
+            "[\"x\": ([7, 8], [7])]",
+            "[\"x\": ([value, 8], [value])]",
+        ),
+        ("Count[]?", "[7, 8]", "[value, 8]"),
+        ("Count?[]", "[7, none]", "[value, none]"),
+    ] {
+        let source = format!(
+            r#"
+type Count = int
+type Distance = int
+type Name = str
+fn identity<type T>(T value) T {{ return value }}
+fn forward<type T>(T value) T {{ return identity<T>(value) }}
+fn pair<type T>(T value) (T, T) {{ return forward<T>(value), identity<T>(value) }}
+fn apply<type T, type U>(T value, (fn(T) U) callback) U {{ return callback(forward<T>(value)) }}
+fn relay<type T, type U>(T value, (fn(T) U) callback) U {{ return apply<T, U>(value, callback) }}
+test "forward {kind}" {{
+    int seed = @as(int, @args().len)
+    Count value = @as(Count, seed + 6)
+    {kind} expected = {constant}
+    {kind} known = forward<{kind}>({constant})
+    {kind} input = {runtime}
+    {kind} result = forward<{kind}>(input)
+    assert known == expected and result == expected
+    {kind} left, {kind} right = pair<{kind}>(input)
+    assert left == expected and right == expected
+    (fn({kind}) {kind}) callback = fn({kind} candidate) {kind} {{ return forward<{kind}>(candidate) }}
+    assert relay<{kind}, {kind}>(input, callback) == expected
+    (fn({kind}) bool) compare = fn({kind} candidate) bool {{ return candidate == expected }}
+    assert relay<{kind}, bool>(known, compare)
+    assert relay<{kind}, bool>(input, compare)
+
+    @println("forwarded")
+}}
+"#
+        );
+        success(&source, b"forwarded\n");
+    }
+}
+
+#[test]
+fn generic_struct_nested_fixed_dynamic_nominal_arrays_preserve_deep_copies() {
+    for initial in ["7", "@as(Count, seed + 6)"] {
+        let source = format!(
+            r#"
+type Count = int
+struct Grid<type T> {{ T[2][] rows T[][2] columns }}
+struct Box<type T> {{ T value }}
+fn wrap<type T>(T value) Box<T> {{ return Box<T>{{.value = value}} }}
+fn forward<type T>(T value) Box<T> {{ return wrap<T>(value) }}
+fn replace_first<type T>(Grid<T> grid, T replacement) Grid<T> {{
+    mut Grid<T> local = grid
+    local.rows[0][0] = replacement
+    local.columns[0][0] = replacement
+    return local
+}}
+test "nested generic array copies" {{
+    int seed = @as(int, @args().len)
+    uint index = @args().len - 1
+    Count value = {initial}
+    Grid<Count> original = Grid<Count>{{.rows = [[value, 8], [9, 10]], .columns = [[value], [8, 9]]}}
+    mut Box<Grid<Count>> boxed = forward<Grid<Count>>(original)
+    Box<Grid<Count>> snapshot = boxed
+    Grid<Count> changed = replace_first<Count>(boxed.value, 11)
+    assert @as(int, changed.rows[0][0]) == 11
+    assert @as(int, changed.columns[0][0]) == 11
+    assert changed.rows[1] == original.rows[1]
+    assert changed.columns[1] == original.columns[1]
+    boxed.value.rows[index][index] = 12
+    boxed.value.columns[index][index] = 13
+    Count[2][] extra_rows = [[14, 15]]
+    Count[] extra_column = [16]
+    boxed.value.rows = boxed.value.rows <> extra_rows
+    boxed.value.columns[1] = boxed.value.columns[1] <> extra_column
+    assert snapshot.value == original
+    Count[2][] expected_rows = [[value, 8], [9, 10]]
+    Count[][2] expected_columns = [[value], [8, 9]]
+    assert original.rows == expected_rows
+    assert original.columns == expected_columns
+    assert @as(int, boxed.value.rows[0][0]) == 12
+    assert @as(int, boxed.value.columns[0][0]) == 13
+    assert boxed.value.rows.len == 3 and snapshot.value.rows.len == 2
+    Count[] grown_column = [8, 9, 16]
+    Count[] unchanged_column = [8, 9]
+    assert boxed.value.columns[1] == grown_column
+    assert snapshot.value.columns[1] == unchanged_column
+    @println("array copies checked")
+}}
+"#
+        );
+        success(&source, b"array copies checked\n");
+    }
+}
+
+#[test]
+fn generic_struct_map_tuple_nominal_payloads_preserve_deep_copies() {
+    for initial in ["7", "@as(Count, seed + 6)"] {
+        let source = format!(
+            r#"
+type Count = int
+struct Table<type K, type V> {{ [K]V entries }}
+struct Box<type T> {{ T value }}
+fn table<type K, type V>(K key, V value) Table<K, V> {{
+    return Table<K, V>{{.entries = [key: value]}}
+}}
+fn wrap<type T>(T value) Box<T> {{ return Box<T>{{.value = value}} }}
+test "generic map tuple copies" {{
+    int seed = @as(int, @args().len)
+    uint index = @args().len - 1
+    Count value = {initial}
+    mut (Count[2], Count[], Count[]?) payload = ([value, 8], [value, 9], [value, 10])
+    mut Box<Table<str, (Count[2], Count[], Count[]?)>> boxed =
+        wrap<Table<str, (Count[2], Count[], Count[]?)>>(table<str, (Count[2], Count[], Count[]?)>("x", payload))
+    Box<Table<str, (Count[2], Count[], Count[]?)>> snapshot = boxed
+    payload[0][index] = 11
+    payload[1][index] = 12
+    payload[2] = none
+    boxed.value.entries["x"][0][index] = 13
+    boxed.value.entries["x"][1][index] = 14
+    boxed.value.entries["x"][2] = none
+    boxed.value.entries["new"] = payload
+    assert boxed.value.entries.len == 2 and snapshot.value.entries.len == 1
+    (Count[2], Count[], Count[]?) original = ([value, 8], [value, 9], [value, 10])
+    assert snapshot.value.entries["x"] == original
+    assert boxed.value.entries["new"] == payload
+    assert @as(int, boxed.value.entries["x"][0][0]) == 13
+    assert @as(int, boxed.value.entries["x"][1][0]) == 14
+    Count[]? missing = none
+    assert boxed.value.entries["x"][2] == missing
+    Count[2] fixed, (Count[], Count[]?) tail = snapshot.value.entries["x"]
+    assert fixed == original[0] and tail[0] == original[1]
+    mut Count[] extracted = tail[1] else {{ throw "missing optional payload" }}
+    extracted[index] = 15
+    Count[] changed_payload = [15, 10]
+    Count[] fallback = [99]
+    assert extracted == changed_payload
+    Count[] original_optional = [value, 10]
+    assert (snapshot.value.entries["x"][2] else fallback) == original_optional
+    @println("map tuple copies checked")
+}}
+"#
+        );
+        success(&source, b"map tuple copies checked\n");
+    }
+}
+
+#[test]
+fn generic_enum_optional_nominal_struct_payloads_preserve_variants_and_copies() {
+    for (initial, select_value, select_other) in [
+        ("7", "false", "true"),
+        ("@as(Count, seed + 6)", "seed != 1", "seed == 1"),
+    ] {
+        let source = format!(
+            r#"
+type Count = int
+struct Box<type T> {{ T value }}
+enum Choice<type T, type U> {{ Value(T) Other(U) Empty }}
+fn wrap<type T>(T value) Box<T> {{ return Box<T>{{.value = value}} }}
+fn choose<type T, type U>(bool other, T value, U alternate) Choice<T, U> {{
+    if other {{ true -> {{ return Choice.Other(alternate) }} false -> {{ return Choice.Value(value) }} }}
+}}
+fn forward<type T, type U>(Choice<T, U> value) Choice<T, U> {{ return value }}
+fn extract<type T, type U>(Choice<T, U> choice, T fallback) T {{
+    if choice {{
+        Choice.Value(value) -> {{ return value }}
+        Choice.Other(other) -> {{ return fallback }}
+        Choice.Empty -> {{ return fallback }}
+    }}
+}}
+test "generic optional enum copies" {{
+    int seed = @as(int, @args().len)
+    uint index = @args().len - 1
+    Count value = {initial}
+    mut Box<Count[2][]> source = wrap<Count[2][]>([[value, 8]])
+    Box<Count[2][]>? present = source
+    Box<Count[2][]>? absent = none
+    mut Choice<Box<Count[2][]>?, (Count, Count[])> selected =
+        choose<Box<Count[2][]>?, (Count, Count[])>({select_value}, present, (value, [value, 9]))
+    Choice<Box<Count[2][]>?, (Count, Count[])> snapshot = forward<Box<Count[2][]>?, (Count, Count[])>(selected)
+    source.value[index][index] = 11
+    selected = Choice.Empty
+    Choice<Box<Count[2][]>?, (Count, Count[])> empty = Choice.Empty
+    assert selected == empty
+    Box<Count[2][]>? optional = extract<Box<Count[2][]>?, (Count, Count[])>(snapshot, none)
+    mut Box<Count[2][]> extracted = optional else {{ throw "missing present enum payload" }}
+    Count[2][] original_payload = [[value, 8]]
+    assert extracted.value == original_payload
+    extracted.value[index][index] = 12
+    Box<Count[2][]> again = extract<Box<Count[2][]>?, (Count, Count[])>(snapshot, none) else {{ throw "snapshot changed" }}
+    Count[2][] changed_payload = [[12, 8]]
+    assert again.value == original_payload and extracted.value == changed_payload
+    Choice<Box<Count[2][]>?, (Count, Count[])> empty_payload =
+        choose<Box<Count[2][]>?, (Count, Count[])>({select_value}, absent, (value, [value]))
+    assert extract<Box<Count[2][]>?, (Count, Count[])>(empty_payload, present) == absent
+    Choice<Box<Count[2][]>?, (Count, Count[])> alternate =
+        choose<Box<Count[2][]>?, (Count, Count[])>({select_other}, absent, (value, [value, 9]))
+    if alternate {{
+        Choice.Value(payload) -> {{ assert false }}
+        Choice.Other(payload) -> {{
+            mut (Count, Count[]) local = payload
+            local[1][index] = 13
+            Count[] changed = [13, 9]
+            Count[] original = [value, 9]
+            assert payload[1] == original and local[1] == changed
+            assert @as(int, payload[0]) == 7
+        }}
+        Choice.Empty -> {{ assert false }}
+    }}
+    assert extract<Box<Count[2][]>?, (Count, Count[])>(selected, present) == present
+    assert extract<Box<Count[2][]>?, (Count, Count[])>(alternate, absent) == absent
+    @println("enum optional copies checked")
+}}
+"#
+        );
+        success(&source, b"enum optional copies checked\n");
+    }
+}
+
 fn success(source: &str, expected: &[u8]) {
     let directory = ncc::temp::Directory::new().unwrap();
     let input = directory.path().join("main.nc");

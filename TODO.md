@@ -7,9 +7,6 @@
           shadowing, literal, generic-example, exported-alias/private-state and
           private-C-wrapper regressions in both modes.
 
-      - [ ] Expand generic/nominal/container combinations and remaining specified
-            arithmetic, conversion, and inclusion positives without assuming
-            unresolved semantics.
       - [ ] Cover remaining builtin process-state positives and successful scalar
             async error unions; keep module initialization identity and unclear
             lifecycle/index behavior blocked on semantic decisions below.
@@ -26,9 +23,13 @@
           values, closures, and value-copy semantics.
       - [ ] Extend the sampled container matrices to direct structural map
             elements, recursive/generic combinations, futures, and mutexes;
-            retain the new scalar/composite/nominal/callable/error/void coverage.
+            retain the scalar/composite/nominal/callable/error/void matrices and
+            chained generic fixed/dynamic/map/tuple/optional copy regressions.
     - [ ] Cover numeric boundaries, Unicode character boundaries, embedded NULs,
           empty containers, and runtime failures.
+      - [ ] Extend exact numeric conversion samples through `2^53` to specified
+            inexact large integer-to-float rounding and nonexact finite-float
+            arithmetic cases; clarify float remainder before testing it.
     - [ ] Expand async, future, mutex, and shared-storage coverage without relying
           on a particular thread schedule.
       - [ ] Add deterministic pre-await progress and mutex-contention checks;
@@ -43,6 +44,9 @@
           ambiguous interactions from differential tests.
       - [ ] Clarify operator compatibility, numeric/index failure conventions,
             tuple index requirements, and aggregate-pattern exhaustiveness.
+      - [ ] Clarify specialized generic function-value syntax; bare
+            `identity<Count>` currently fails parsing, while typed callback
+            wrappers forwarding explicit generic calls are covered.
       - [ ] Clarify multiline/Unicode contracts, observable representation,
             map key rules, function-result consumption, and caught error values.
       - [ ] Clarify nested lock jump targets, future lifecycle, permitted race
@@ -91,6 +95,8 @@
             order, and runtime failures when narrowing retention.
       - [ ] Add regressions for both discarded unrelated output and retained
             effects needed by tests, including imported tests.
+- [ ] Avoid the generated C tautological negative-range check for bool-to-uint
+      conversions; preserve the successful true/false cast regressions.
 - [ ] Resolve the evaluator/C-backend discrepancy for indexed reads whose index
       evaluation mutates object storage or replaces its binding.
   - [ ] Isolate mutation, binding replacement, nested-container, and restored-value
