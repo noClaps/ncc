@@ -399,9 +399,35 @@ with constant/runtime inputs in both NC modes:
   concurrent locked recursive updates and copied writeback/read snapshots.
   Each future is awaited once, with no assumed worker or map traversal order.
 
-These remain finite local struct-map samples, not coverage of every recursive
-combination. Mutually recursive enum/mixed-cycle and imported recursive map
-payloads crossing async/mutex boundaries remain expandable.
+Five further locked async map tests add 28 generated-program executions,
+with constant/runtime inputs in both NC modes:
+
+- `positive_async_map_cycles::{mutually_recursive_enum_maps_preserve_locked_async_copies_and_updates,mutually_recursive_struct_enum_maps_preserve_locked_async_copies_and_updates}`
+  — P D/R: mutually recursive generic enum/enum and enum/struct map cycles
+  containing direct structural map/array payloads. Separate snapshot and update
+  programs cover every enum variant, empty branches/maps/arrays, recursive
+  rebuilding, independent initialization/awaited/pattern-extracted/writeback
+  copies, nested updates and map insertion. Concurrent locked additive updates
+  are checked against separately constructed expected trees, not worker order
+  or map traversal order.
+- `positive_async_imported_maps::{imported_recursive_optional_map_snapshots_are_independent,imported_recursive_error_map_snapshots_are_independent}`
+  — P D/R: exported recursive generic map trees containing another module's
+  nested generic optional/error structural-map payloads. Imported constructors,
+  recursive counting/rebuilding and forwarding retain independent original,
+  extracted, awaited and locked writeback snapshots; present/absent and
+  success/failure elements check exact values and error recovery.
+- `positive_async_imported_maps::imported_recursive_map_locked_updates_and_async_errors_preserve_copies`
+  — P D/R: optional imported recursive map trees, imported async success/absence/
+  failure propagation, exact error recovery and concurrent locked recursive
+  updates. Explicit expected leaf/branch/root values supplement structural
+  equality; copied writeback, map insertion and an absent-tree async update
+  preserve the retained snapshots.
+
+These remain finite samples, not complete recursive payload coverage. Imported
+map-cycle combinations and circular-import initialization/storage identity are
+not established by these acyclic imported struct-map samples. The direct
+structural container matrices and local recursive optional/error map regressions
+remain intact.
 
 The five earlier array/optional async additions add 24 generated-program
 executions. The following five tests
