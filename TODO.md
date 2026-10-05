@@ -2,8 +2,8 @@
 
 - [ ] Expand language and edge-case coverage.
   - [ ] Cover every part of the language and as many edge cases as possible.
-    - [ ] Add missing negative cases for parsing, type checking, control flow,
-          module loading, and builtin/extern restrictions in both build modes.
+    - [ ] Extend remaining debug-only frontend and imported-test rejection cases
+          to both build modes, including original-source diagnostic assertions.
 
     - [ ] Cover interactions between nominal types, containers, optional/error
           values, closures, and value-copy semantics.

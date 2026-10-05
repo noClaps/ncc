@@ -461,6 +461,34 @@ ordinary returns of caught `error` values were previously accepted in error-retu
 functions. The checker now rejects both, including nominal error aliases, while
 preserving optional/error-union wrappers and valid error-union forwarding.
 
+## Additional syntax, binding, async and control-flow rejections
+
+Three additional integration suites check all fixtures with debug and release
+compilation. Positive controls are compile-only; these suites do not execute
+async work or claim runtime/concurrency coverage.
+
+- `negative_syntax` — N/C D/R: unknown/quote-specific escapes, malformed Unicode
+  escapes, empty/multiple-grapheme characters, unterminated literals and
+  interpolation, radix digits, delimiters/commas, mixed map/array entries,
+  incomplete declarations, struct designators and malformed control/function
+  bodies. Malformed test bodies reject even in ordinary compilation. Diagnostic
+  ranges are validated; malformed interpolation retains its original literal.
+- `negative_bindings_async` — N/C D/R: immutable array/string/map/tuple/struct
+  paths, including nested paths and named/anonymous captures; await of ordinary
+  or already-awaited values; async noncalls, wrong arguments/arity/results;
+  synchronous/copied future initializers and mutable futures.
+- `negative_control_flow` — N/C D/R: missing/incompatible conditional branch
+  values, nested value-break operand types, non-Boolean predicates, wrapped
+  conditions/iterables without unwrapping, jumps without targets, unavailable
+  labels, function-boundary jump restrictions, invalid returns and incomplete
+  return paths after zero-trip loops or unreachable returns. Selected diagnostics
+  assert the exact original file and statement span.
+
+These additions do not settle nested lock jump targets, divergent non-void
+function return requirements, aggregate-pattern exhaustiveness, multiline
+whitespace, module initialization identity or other questions below. Remaining
+older debug-only frontend/imported-test checks still need mode parity.
+
 ## Circular import and exhaustive numeric conversion additions
 
 The specification now permits circular imports. `circular_imports` — P/N D/R
@@ -522,7 +550,8 @@ Resolve the questions in the next section before choosing unspecified outcomes.
    Specialized generic function-value syntax needs clarification:
    bare `identity<Count>` is not currently parsed as a callable value.
 5. **Concurrency:** deterministic pre-await progress and mutex-contention tests;
-   bare-break unlock/reacquire; invalid await/initializer cases. Successful scalar
+   bare-break unlock/reacquire. `negative_bindings_async` now covers invalid
+   await/async/initializer cases in both modes with compile-only controls. Successful scalar
    async error unions now have P D/R payload, lazy-catch and try-propagation
    assertions, with one await per future. Composite async error unions now add ten
    constant/runtime-input P D/R cases, including nominal map/array aliases,
