@@ -958,6 +958,8 @@ test "concatenation of maps with common key" {
 10 % 4 == 2
 ```
 
+The modulo operator is only for the integer types.
+
 ```nc
 // division
 5.0 / 2.0 == 2.5
@@ -2461,6 +2463,8 @@ For `float`, the `NaN`, `inf` and `-inf` values are converted as-is to `str`. Ho
 @println(inf)  // output: inf
 @println(-inf) // output: -inf
 ```
+
+Integer to float conversions will round to the nearest number representable by the float, rounding to the nearest even number in the case of ties.
 
 #### `@args`
 
