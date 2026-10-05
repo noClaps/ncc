@@ -375,6 +375,204 @@ test "recursive optional async error payload" {{
     constant_and_runtime(&source, "recursive async updates checked\n");
 }
 
+const RECURSIVE_MAP_DECLARATIONS: &str = r"
+struct MapNode<type T> { T value [str]MapNode<T> children }
+fn map_count<type T>(MapNode<T> node) uint {
+    mut uint total = 1
+    for key in node.children { total = total + map_count<T>(node.children[key]) }
+    return total
+}
+fn rebuild_map<type T>(MapNode<T> node) MapNode<T> {
+    mut [str]MapNode<T> children = []
+    for key in node.children { children[key] = rebuild_map<T>(node.children[key]) }
+    return MapNode<T>{.value = forward<T>(node.value), .children = children}
+}
+";
+
+#[test]
+fn recursive_generic_maps_cross_locked_future_boundaries_with_independent_copies() {
+    for (kind, present, absent, unwrap_present, unwrap_absent) in recursive_map_cases() {
+        let source = format!(
+            r#"{DECLARATIONS}
+{RECURSIVE_MAP_DECLARATIONS}
+fn wrapped(bool fail, [str]int[] values) Box<Box<[str]int[]>>! {{
+    if {{ fail -> {{ throw "map failure" }} _ -> {{}} }}
+    return Box<Box<[str]int[]>>{{.value = Box<[str]int[]>{{.value = values}}}}
+}}
+test "recursive map snapshots" {{
+    fn unpack({kind} value) Box<[str]int[]>! {{ return Box<[str]int[]>{{.value = {unwrap_present}}} }}
+    fn fallback({kind} value) Box<[str]int[]>! {{ return Box<[str]int[]>{{.value = {unwrap_absent}}} }}
+    int seed = @as(int, @args().len)
+    [str]int[] expected_values = ["items": [1, 2], "empty": []]
+    [str]int[] fallback_values = ["fallback": [7]]
+    {kind} present = {present}
+    {kind} absent = {absent}
+    MapNode<{kind}> empty = MapNode<{kind}>{{.value = absent, .children = []}}
+    MapNode<{kind}> leaf = MapNode<{kind}>{{.value = present, .children = []}}
+    mut MapNode<{kind}> original = MapNode<{kind}>{{.value = present, .children = [
+        "branch": MapNode<{kind}>{{.value = absent, .children = ["leaf": leaf]}},
+        "empty": empty,
+    ]}}
+    MapNode<{kind}> expected = rebuild_map<{kind}>(original)
+    mutex MapNode<{kind}> payload = original
+    original.children["branch"].children["leaf"].value = absent
+    original.children["new"] = leaf
+    fn read() MapNode<{kind}> {{
+        lock payload {{ return rebuild_map<{kind}>(payload) }}
+    }}
+    fut MapNode<{kind}> first = async read()
+    fut MapNode<{kind}> second = async read()
+    mut MapNode<{kind}> result = await first
+    MapNode<{kind}> other = await second
+    MapNode<{kind}> snapshot = result
+    assert result == expected and other == expected
+    assert map_count<{kind}>(result) == 4
+    assert (try unpack(result.children["branch"].children["leaf"].value)).value == expected_values
+    assert (try fallback(result.children["empty"].value)).value == fallback_values
+    mut [str]int[] extracted = (try unpack(result.children["branch"].children["leaf"].value)).value
+    extracted["items"][0] = 99
+    extracted["new"] = [8]
+    assert (try unpack(result.children["branch"].children["leaf"].value)).value == expected_values
+    result.children["branch"].children["leaf"].value = absent
+    result.children["branch"].children["added"] = leaf
+    result.children["empty"].value = present
+    assert map_count<{kind}>(result) == 5
+    assert result.children["branch"].children.len == 2
+    assert (try fallback(result.children["branch"].children["leaf"].value)).value == fallback_values
+    assert (try unpack(result.children["empty"].value)).value == expected_values
+    assert snapshot == expected and other == expected
+    assert map_count<{kind}>(original) == 5
+    assert (try fallback(original.children["branch"].children["leaf"].value)).value == fallback_values
+    lock payload {{ assert payload == expected; payload = result }}
+    result.children["branch"].children["added"].value = absent
+    result.children["branch"].children["later"] = empty
+    lock payload {{
+        assert map_count<{kind}>(payload) == 5
+        assert (try unpack(payload.children["branch"].children["added"].value)).value == expected_values
+        assert payload.children["branch"].children.len == 2
+    }}
+    assert snapshot == expected and other == expected
+    @println("recursive map snapshots checked")
+}}
+"#
+        );
+        constant_and_runtime(&source, "recursive map snapshots checked\n");
+    }
+}
+
+fn recursive_map_cases() -> [PayloadCase; 3] {
+    [
+        (
+            "[str]int[]",
+            "[\"items\": [seed, 2], \"empty\": []]",
+            "[]",
+            "value",
+            "if { value.len == 0 -> { break [\"fallback\": [7]] } _ -> { break value } }",
+        ),
+        (
+            "Box<Box<[str]int[]>>?",
+            "Box<Box<[str]int[]>>{.value = Box<[str]int[]>{.value = [\"items\": [seed, 2], \"empty\": []]}}",
+            "none",
+            "(value else { throw \"missing map\" }).value.value",
+            "(value else Box<Box<[str]int[]>>{.value = Box<[str]int[]>{.value = [\"fallback\": [7]]}}).value.value",
+        ),
+        (
+            "Box<Box<[str]int[]>>!",
+            "wrapped(false, [\"items\": [seed, 2], \"empty\": []])",
+            "wrapped(true, [])",
+            "(value catch err { throw err }).value.value",
+            "(value catch err { if { @as(str, err) != \"map failure\" -> { throw \"wrong map error\" } _ -> {} }; break Box<Box<[str]int[]>>{.value = Box<[str]int[]>{.value = [\"fallback\": [7]]}} }).value.value",
+        ),
+    ]
+}
+
+#[test]
+fn recursive_generic_map_updates_and_optional_async_errors_preserve_snapshots() {
+    let source = format!(
+        r#"{DECLARATIONS}
+{RECURSIVE_MAP_DECLARATIONS}
+fn shifted<type T>(MapNode<T> node, int delta) MapNode<T> {{
+    mut MapNode<T> result = node
+    for key in result.value.value.value {{
+        for i in result.value.value.value[key] {{
+            result.value.value.value[key][i] = result.value.value.value[key][i] + delta
+        }}
+    }}
+    for key in result.children {{ result.children[key] = shifted<T>(result.children[key], delta) }}
+    return result
+}}
+fn checked_map<type T>(MapNode<T>? node, bool fail) MapNode<T>?! {{
+    if {{ fail -> {{ throw "tree failure" }} _ -> {{}} }}
+    return node
+}}
+fn relay_map<type T>(MapNode<T>? node, bool fail) MapNode<T>?! {{
+    fut MapNode<T>?! pending = async checked_map<T>(node, fail)
+    return try await pending
+}}
+test "recursive map commutative updates" {{
+    int seed = @as(int, @args().len)
+    Box<Box<[str]int[]>> data = Box<Box<[str]int[]>>{{.value = Box<[str]int[]>{{.value = ["items": [seed, 2], "empty": []]}}}}
+    MapNode<Box<Box<[str]int[]>>> leaf = MapNode<Box<Box<[str]int[]>>>{{.value = data, .children = []}}
+    MapNode<Box<Box<[str]int[]>>> original = MapNode<Box<Box<[str]int[]>>>{{.value = data, .children = [
+        "branch": MapNode<Box<Box<[str]int[]>>>{{.value = data, .children = ["leaf": leaf]}},
+        "sibling": leaf,
+    ]}}
+    mut int catches = 0
+    MapNode<Box<Box<[str]int[]>>>? present = relay_map<Box<Box<[str]int[]>>>(original, false) catch err {{ catches = catches + 1; throw err }}
+    MapNode<Box<Box<[str]int[]>>>? absent = relay_map<Box<Box<[str]int[]>>>(none, false) catch err {{ catches = catches + 1; throw err }}
+    MapNode<Box<Box<[str]int[]>>>? empty = none
+    assert absent == empty and catches == 0
+    MapNode<Box<Box<[str]int[]>>>? recovered = relay_map<Box<Box<[str]int[]>>>(original, seed == 1) catch err {{
+        assert @as(str, err) == "tree failure"
+        catches = catches + 1
+        break none
+    }}
+    assert recovered == empty and catches == 1
+    MapNode<Box<Box<[str]int[]>>> snapshot = present else {{ throw "missing tree" }}
+    mutex MapNode<Box<Box<[str]int[]>>>? payload = present
+    fn add(int delta) uint {{
+        lock payload {{
+            MapNode<Box<Box<[str]int[]>>> local = payload else {{ return 0 }}
+            payload = shifted<Box<Box<[str]int[]>>>(local, delta)
+            return map_count<Box<Box<[str]int[]>>>(local)
+        }}
+    }}
+    (fn(int) uint) worker = fn(int delta) uint {{ return add(delta) }}
+    fut uint first = async add(seed)
+    fut uint second = async worker(seed + 1)
+    assert await first == 4
+    assert await second == 4
+    MapNode<Box<Box<[str]int[]>>> expected = shifted<Box<Box<[str]int[]>>>(original, 3)
+    lock payload {{
+        mut MapNode<Box<Box<[str]int[]>>> local = payload else {{ throw "lost tree" }}
+        assert local == expected
+        assert local.children["branch"].children["leaf"].value.value.value["items"] == [4, 5]
+        assert local.children["sibling"].value.value.value["empty"].len == 0
+        local.children["branch"].children["leaf"].value.value.value["items"][0] = 99
+        local.children["branch"].children["leaf"].value.value.value["new"] = [8]
+        local.children["branch"].children["new"] = leaf
+        MapNode<Box<Box<[str]int[]>>> unchanged = payload else {{ throw "lost locked snapshot" }}
+        assert unchanged == expected and local != expected
+        payload = local
+        local.children["branch"].children["leaf"].value.value.value["new"][0] = 100
+        MapNode<Box<Box<[str]int[]>>> copied = payload else {{ throw "lost copied tree" }}
+        assert copied.children["branch"].children["leaf"].value.value.value["new"] == [8]
+        assert map_count<Box<Box<[str]int[]>>>(copied) == 5
+        payload = none
+    }}
+    lock payload {{ assert payload == empty }}
+    MapNode<Box<Box<[str]int[]>>> retained = present else {{ throw "lost original snapshot" }}
+    assert retained == original and snapshot == original
+    assert original.children["branch"].children["leaf"].value.value.value["items"] == [1, 2]
+    [str]int[] expected_values = ["items": [1, 2], "empty": []]
+    assert data.value.value == expected_values
+    @println("recursive map updates checked")
+}}
+"#
+    );
+    constant_and_runtime(&source, "recursive map updates checked\n");
+}
+
 fn constant_and_runtime(source: &str, stdout: &str) {
     for (phase, source) in [
         (

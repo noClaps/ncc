@@ -134,6 +134,116 @@ test "{phase} {kind} element matrix" {{
 }
 
 #[test]
+fn direct_structural_map_elements_preserve_nested_container_copies() {
+    for (kind, initial, expected, changed, mutate) in [
+        (
+            "[str]int",
+            "[\"x\": seed + 6]",
+            "[\"x\": 7]",
+            "[\"x\": 9, \"new\": 10]",
+            "ENTRY[\"x\"] = 9; ENTRY[\"new\"] = 10",
+        ),
+        (
+            "[str]int[]",
+            "[\"x\": [seed + 6, 8]]",
+            "[\"x\": [7, 8]]",
+            "[\"x\": [9, 8], \"new\": [10]]",
+            "ENTRY[\"x\"][index] = 9; ENTRY[\"new\"] = [10]",
+        ),
+        (
+            "[str][str]Count[]",
+            "[\"x\": [\"inner\": [@as(Count, seed + 6), 8]]]",
+            "[\"x\": [\"inner\": [7, 8]]]",
+            "[\"x\": [\"inner\": [9, 8]], \"new\": [\"inner\": [10]]]",
+            "ENTRY[\"x\"][\"inner\"][index] = 9; ENTRY[\"new\"] = [\"inner\": [10]]",
+        ),
+        (
+            "[str](int[2], int[]?)",
+            "[\"x\": ([seed + 6, 8], [seed + 6])]",
+            "[\"x\": ([7, 8], [7])]",
+            "[\"x\": ([9, 8], none), \"new\": ([10, 11], [10])]",
+            "ENTRY[\"x\"][0][index] = 9; ENTRY[\"x\"][1] = none; ENTRY[\"new\"] = ([10, 11], [10])",
+        ),
+    ] {
+        for phase in ["constant", "runtime"] {
+            let source = structural_map_matrix(kind, initial, expected, changed, mutate);
+            let source = if phase == "constant" {
+                source.replace("int seed = @as(int, @args().len)", "int seed = 1")
+            } else {
+                source
+            };
+            success(&source, "structural maps checked\n");
+        }
+    }
+}
+
+fn structural_map_matrix(
+    kind: &str,
+    initial: &str,
+    expected: &str,
+    changed: &str,
+    mutate: &str,
+) -> String {
+    let mutations = [
+        "values.fixed[index]",
+        "values.dynamic[index]",
+        "values.mapped[\"first\"]",
+        "values.pair[0]",
+    ]
+    .map(|entry| mutate.replace("ENTRY", entry))
+    .join("\n");
+    format!(
+        r#"type Count = int
+struct Containers<type T> {{ T[2] fixed T[] dynamic [str]T mapped (T, T) pair }}
+fn containers<type T>(T value) Containers<T> {{
+    return Containers<T>{{.fixed = [value, value], .dynamic = [value, value],
+        .mapped = ["first": value, "last": value], .pair = (value, value)}}
+}}
+fn forward<type T>(T value) T {{ return value }}
+test "direct structural {kind} elements" {{
+    int seed = @as(int, @args().len)
+    uint index = @args().len - 1
+    mut {kind} original = {initial}
+    {kind} expected = {expected}
+    {kind} changed = {changed}
+    mut Containers<{kind}> values = containers<{kind}>(original)
+    Containers<{kind}> snapshot = forward<Containers<{kind}>>(values)
+    original = changed
+    assert values.fixed[index] == expected and values.dynamic[index] == expected
+    assert values.mapped["first"] == expected and values.pair[0] == expected
+    {mutations}
+    assert values.fixed[index] == changed and values.fixed[1] == expected
+    assert values.dynamic[index] == changed and values.dynamic[1] == expected
+    assert values.mapped["first"] == changed and values.mapped["last"] == expected
+    assert values.pair[0] == changed and values.pair[1] == expected
+    assert snapshot.fixed == [expected, expected]
+    assert snapshot.dynamic == [expected, expected]
+    assert snapshot.mapped == ["first": expected, "last": expected]
+    assert snapshot.pair == (expected, expected)
+    Containers<{kind}> joined = Containers<{kind}>{{
+        .fixed = snapshot.fixed,
+        .dynamic = snapshot.dynamic <> values.dynamic,
+        .mapped = snapshot.mapped <> values.mapped,
+        .pair = snapshot.pair}}
+    assert joined.dynamic.len == 4 and joined.dynamic[2] == changed
+    assert joined.mapped["first"] == changed and joined.mapped["last"] == expected
+    values.dynamic[index] = expected
+    values.mapped["first"] = expected
+    assert joined.dynamic[2] == changed and joined.mapped["first"] == changed
+    mut uint visits = 0
+    for key in snapshot.mapped {{
+        assert key == "first" or key == "last"
+        assert snapshot.mapped[key] == expected
+        visits = visits + 1
+    }}
+    assert visits == 2
+    @println("structural maps checked")
+}}
+"#
+    )
+}
+
+#[test]
 fn nested_container_mutations_preserve_deep_copies() {
     success(
         r#"

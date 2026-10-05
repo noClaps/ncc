@@ -4,11 +4,10 @@
   - [ ] Cover every part of the language and as many edge cases as possible.
     - [ ] Cover interactions between nominal types, containers, optional/error
           values, closures, and value-copy semantics.
-      - [ ] Extend the sampled container matrices to direct structural map
-            elements and cross-feature recursive/generic/future/mutex combinations;
-            retain the scalar/composite/nominal/callable/error/void matrices,
-            chained generic fixed/dynamic/map/tuple/optional copy regressions,
-            recursive generic array/map trees and locked async payload matrices.
+      - [ ] Extend locked async payload samples to mutually recursive enum/mixed
+            struct-enum map cycles and imported recursive generic map trees;
+            retain the direct structural map container matrices and local recursive
+            generic map optional/error snapshot and commutative-update regressions.
     - [ ] Cover numeric boundaries, Unicode character boundaries, embedded NULs,
           empty containers, and runtime failures.
       - [ ] Extend exact numeric conversion samples through `2^53` to specified
