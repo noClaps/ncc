@@ -2,12 +2,11 @@
 
 - [ ] Expand language and edge-case coverage.
   - [ ] Cover every part of the language and as many edge cases as possible.
-    - [ ] Continue remaining positive coverage using `docs/coverage.md`, focusing
-          on mutually recursive enums, mixed struct/enum cycles and recursive
-          generic types spanning modules in both modes; retain local/imported
-          mutually recursive structs, imported recursive enum traversal/rebuild/copy
-          checks and recursive optional/error-element locked future snapshots,
-          optional recursive async error propagation and locked update regressions.
+    - [ ] Extend positive recursive coverage using `docs/coverage.md` to map-backed
+          mutually recursive enums/mixed struct-enum cycles and deeper finite trees
+          in both modes; retain local/imported array-backed cycles, recursive
+          generic fields spanning acyclic modules and existing recursive
+          struct/enum/optional/error/future/mutex traversal/rebuild/copy regressions.
 
     - [ ] Add missing negative cases for parsing, type checking, control flow,
           module loading, and builtin/extern restrictions in both build modes.
