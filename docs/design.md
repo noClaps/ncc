@@ -2131,6 +2131,8 @@ import {
 @println(math.random_lcg()) // 69376
 ```
 
+Circular imports are allowed, meaning `A.nc` can import `B.nc` while `B.nc` imports `A.nc`, and so on.
+
 ### Exporting symbols
 
 As noted in the example above, symbols can be exported using the `pub` keyword. This includes variables, functions, etc.
