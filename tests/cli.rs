@@ -90,9 +90,32 @@ str os, str arch = @target()
             .unwrap();
         assert_eq!(output.status.success(), target == "macos-arm64");
     }
+}
+
+#[test]
+fn process_builtins_reject_arguments_in_both_modes() {
+    let file = std::path::Path::new("process.nc");
     for name in ["args", "env", "target"] {
-        let error = ncc::compile_source(&format!("_ = @{name}(1)"), &file).unwrap_err();
-        assert!(error.to_string().contains("expects no arguments"));
+        let source = format!("_ = @{name}(1)");
+        for release in [false, true] {
+            let error = ncc::compile_source_with_options(&source, file, release).unwrap_err();
+            assert_eq!(error.0.len(), 1, "{error}");
+            let diagnostic = &error.0[0];
+            assert_eq!(diagnostic.span, 4..source.len(), "{error}");
+            assert_eq!(diagnostic.path.as_deref(), Some(file));
+            assert!(
+                diagnostic.message.contains("expects no arguments"),
+                "{error}"
+            );
+            assert_eq!(
+                error.render(&source, file),
+                format!(
+                    "{}:1:5: error: {}\n  |\n 1 | {source}\n  |     ^\n",
+                    file.display(),
+                    diagnostic.message,
+                ),
+            );
+        }
     }
 }
 

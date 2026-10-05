@@ -36,11 +36,50 @@ fn compiles_and_runs_functions_conditionals_and_output() {
     let _ = fs::remove_dir_all(directory);
 }
 
+fn assert_original_diagnostic(
+    error: &ncc::diagnostic::Diagnostics,
+    source: &str,
+    path: &Path,
+    span: std::ops::Range<usize>,
+    message: &str,
+    rendered_location: &str,
+) {
+    assert_eq!(error.0.len(), 1, "{error}");
+    let diagnostic = &error.0[0];
+    assert_eq!(diagnostic.span, span, "{error}");
+    // Root parser errors use the supplied path; imported errors must retain theirs.
+    assert_eq!(diagnostic.path.as_deref().unwrap_or(path), path);
+    assert!(diagnostic.message.contains(message), "{error}");
+    let (line, column) = rendered_location.split_once(':').unwrap();
+    let line: usize = line.parse().unwrap();
+    let column: usize = column.parse().unwrap();
+    assert_eq!(
+        error.render(source, path),
+        format!(
+            "{}:{rendered_location}: error: {}\n  |\n{line:>2} | {}\n  | {}^\n",
+            path.display(),
+            diagnostic.message,
+            source.lines().nth(line - 1).unwrap(),
+            " ".repeat(column - 1),
+        )
+    );
+}
+
 #[test]
 fn rejects_immutable_assignment() {
     let source = "test \"immutable\" { int value = 1;value = 2 }";
-    let error = ncc::compile_test_source(source, std::path::Path::new("test.nc")).unwrap_err();
-    assert!(error.to_string().contains("cannot mutate immutable"));
+    let path = Path::new("test.nc");
+    for release in [false, true] {
+        let error = ncc::compile_test_source_with_options(source, path, release).unwrap_err();
+        assert_original_diagnostic(
+            &error,
+            source,
+            path,
+            33..38,
+            "cannot mutate immutable `value`",
+            "1:34",
+        );
+    }
 }
 
 #[test]
@@ -170,12 +209,22 @@ fn supports_multiple_conditional_patterns() {
 #[test]
 fn explains_missing_conditional_arrow() {
     let source = "test \"bad conditional\" { if 1 { 1 { } } }";
-    let error = ncc::compile_source(source, std::path::Path::new("bad.nc")).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("expected `->` after conditional pattern(s)")
-    );
+    let path = Path::new("bad.nc");
+    for release in [false, true] {
+        for error in [
+            ncc::compile_source_with_options(source, path, release).unwrap_err(),
+            ncc::compile_test_source_with_options(source, path, release).unwrap_err(),
+        ] {
+            assert_original_diagnostic(
+                &error,
+                source,
+                path,
+                34..35,
+                "expected `->` after conditional pattern(s)",
+                "1:35",
+            );
+        }
+    }
 }
 
 #[test]
@@ -215,15 +264,43 @@ fn ordinary_compilation_ignores_tests_before_semantic_processing() {
         }
     }
     for release in [false, true] {
-        for source in [
-            "test \"type error\" { int value = true }",
-            "fn identity<T>(T value) T { return value };test \"generic\" { _ = identity<int, bool>(1) }",
-            "test \"embed\" { _ = @embed(\"missing-file\") }",
+        for (source, span, message, location) in [
+            (
+                "test \"type error\" { int value = true }",
+                32..36,
+                "expected `int`, found `bool`",
+                "1:33",
+            ),
+            (
+                "fn identity<T>(T value) T { return value };test \"generic\" { _ = identity<int, bool>(1) }",
+                64..86,
+                "incorrect number of type arguments for `identity`",
+                "1:65",
+            ),
+            (
+                "test \"embed\" { _ = @embed(\"missing-file\") }",
+                19..41,
+                "cannot embed",
+                "1:20",
+            ),
         ] {
-            assert!(ncc::compile_test_source_with_options(source, path, release).is_err());
+            let error = ncc::compile_test_source_with_options(source, path, release).unwrap_err();
+            assert_original_diagnostic(&error, source, path, span, message, location);
         }
-        assert!(ncc::compile_source_with_options("test \"syntax\" {", path, release).is_err());
-        assert!(ncc::compile_test_source_with_options("test \"syntax\" {", path, release).is_err());
+        let source = "test \"syntax\" {";
+        for error in [
+            ncc::compile_source_with_options(source, path, release).unwrap_err(),
+            ncc::compile_test_source_with_options(source, path, release).unwrap_err(),
+        ] {
+            assert_original_diagnostic(
+                &error,
+                source,
+                path,
+                15..15,
+                "expected expression, found Eof",
+                "1:16",
+            );
+        }
     }
 }
 
@@ -236,17 +313,50 @@ fn imported_tests_are_filtered_before_module_qualification() {
         "pub fn value() int { return 7 }",
     )
     .unwrap();
-    fs::write(
-        directory.path().join("library.nc"),
-        "import { \"dependency\" as dep };pub fn value() int { return dep.value() };test \"private export\" { _ = dep.missing() }",
-    ).unwrap();
+    let library_path = directory.path().join("library.nc");
+    let library_source = "import { \"dependency\" as dep }\npub fn value() int { return dep.value() }\ntest \"private export\" { _ = dep.missing() }";
+    fs::write(&library_path, library_source).unwrap();
     let source = "import { \"library\" as lib };@println(lib.value())";
     for release in [false, true] {
         ncc::compile_source_with_options(source, &path, release).unwrap();
-        assert!(ncc::compile_test_source_with_options(source, &path, release).is_err());
+        let error = ncc::compile_test_source_with_options(source, &path, release).unwrap_err();
+        assert_eq!(error.0[0].path.as_deref(), Some(library_path.as_path()));
+        assert_original_diagnostic(
+            &error,
+            library_source,
+            &library_path,
+            101..112,
+            "module `dep` does not export `missing`",
+            "3:29",
+        );
+        assert_eq!(
+            error.render(source, &path),
+            error.render(library_source, &library_path)
+        );
     }
-    fs::write(directory.path().join("library.nc"), "test \"syntax\" {").unwrap();
-    assert!(ncc::compile_source(source, &path).is_err());
+    let library_source = "test \"syntax\" {";
+    fs::write(&library_path, library_source).unwrap();
+    // Imported parse failures currently retain the file but fall back to its start.
+    for release in [false, true] {
+        for error in [
+            ncc::compile_source_with_options(source, &path, release).unwrap_err(),
+            ncc::compile_test_source_with_options(source, &path, release).unwrap_err(),
+        ] {
+            assert_eq!(error.0[0].path.as_deref(), Some(library_path.as_path()));
+            assert_original_diagnostic(
+                &error,
+                library_source,
+                &library_path,
+                0..0,
+                "expected expression, found Eof",
+                "1:1",
+            );
+            assert_eq!(
+                error.render(source, &path),
+                error.render(library_source, &library_path)
+            );
+        }
+    }
 }
 
 #[test]

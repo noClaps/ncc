@@ -2,8 +2,9 @@
 
 - [ ] Expand language and edge-case coverage.
   - [ ] Cover every part of the language and as many edge cases as possible.
-    - [ ] Extend remaining debug-only frontend and imported-test rejection cases
-          to both build modes, including original-source diagnostic assertions.
+    - [ ] Preserve the original EOF span for unterminated imported test bodies;
+          both-mode rejection tests currently record the correct file but a
+          fallback `0..0` span and rendered `1:1` location.
 
     - [ ] Cover interactions between nominal types, containers, optional/error
           values, closures, and value-copy semantics.

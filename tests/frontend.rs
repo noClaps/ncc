@@ -48,20 +48,43 @@ fn design_nonoptional_array_error_is_not_a_missing_binding_syntax_error() {
 
 #[test]
 fn type_errors_use_language_syntax_instead_of_rust_debug_output() {
-    for (source, expected) in [
-        ("int value = true", "expected `int`, found `bool`"),
-        ("int[] values = [true]", "expected `int`, found `bool`"),
+    for (source, expected, expression) in [
+        ("int value = true", "expected `int`, found `bool`", "true"),
+        (
+            "int[] values = [true]",
+            "expected `int`, found `bool`",
+            "true",
+        ),
         (
             "fn f(int[] values) {};f([true])",
             "expected `int`, found `bool`",
+            "true",
         ),
         (
             "(fn(int) int) f = fn(str s) str { return s }",
             "expected `(fn(int) int)`, found `(fn(str) str)`",
+            "fn(str s) str { return s }",
         ),
     ] {
-        let error = ncc::compile_source(source, std::path::Path::new("types.nc")).unwrap_err();
-        assert!(error.to_string().contains(expected), "{error}");
+        for release in [false, true] {
+            let path = std::path::Path::new("types.nc");
+            let error = ncc::compile_source_with_options(source, path, release).unwrap_err();
+            assert!(
+                error.to_string().contains(expected),
+                "release={release}: {error}"
+            );
+            assert_eq!(error.0[0].path.as_deref(), Some(path));
+            assert_eq!(&source[error.0[0].span.clone()], expression, "{error}");
+            let rendered = error.render(source, path);
+            assert!(rendered.contains(source), "{rendered}");
+            assert!(
+                rendered.contains(&format!(
+                    "types.nc:1:{}:",
+                    source.find(expression).unwrap() + 1
+                )),
+                "{rendered}"
+            );
+        }
     }
 }
 
@@ -157,27 +180,32 @@ fn semantic_errors_point_to_the_failing_expression_or_statement() {
             } else {
                 (source.as_str(), &root)
             };
-            let error = ncc::compile_source(text, &root).unwrap_err();
-            let diagnostic = &error.0[0];
-            assert_eq!(diagnostic.path.as_ref(), Some(path), "{source}: {error}");
-            let expected = match statement {
-                "return missing" | "@println(missing)" => "missing",
-                "x = 2" => "x",
-                "target(true)" => "true",
-                _ => statement,
-            };
-            assert_eq!(
-                &source[diagnostic.span.clone()],
-                expected,
-                "{source}: {error}"
-            );
-            assert!(
-                error.render(text, &root).contains(&format!(
-                    ":3:{}: error:",
-                    statement.find(expected).unwrap() + 3
-                )),
-                "{source}: {error}"
-            );
+            for release in [false, true] {
+                let error = ncc::compile_source_with_options(text, &root, release).unwrap_err();
+                let diagnostic = &error.0[0];
+                assert_eq!(diagnostic.path.as_ref(), Some(path), "{source}: {error}");
+                let expected = match statement {
+                    "return missing" | "@println(missing)" => "missing",
+                    "x = 2" => "x",
+                    "target(true)" => "true",
+                    _ => statement,
+                };
+                assert_eq!(
+                    &source[diagnostic.span.clone()],
+                    expected,
+                    "{source}: {error}"
+                );
+                assert!(
+                    error.render(text, &root).contains(&format!(
+                        ":3:{}: error:",
+                        statement.find(expected).unwrap() + 3
+                    )),
+                    "{source}: {error}"
+                );
+                let rendered = error.render(text, &root);
+                assert!(rendered.contains(&path.display().to_string()), "{rendered}");
+                assert!(rendered.contains(statement), "{rendered}");
+            }
         }
     }
 }
@@ -228,8 +256,35 @@ fn interpolation_errors_point_to_the_original_literal() {
         "\"\"\"\n  🍪 {missing}\n  \"\"\"",
     ] {
         let source = format!("// header\n\n@println({literal})");
-        let error = ncc::compile_source(&source, std::path::Path::new("format.nc")).unwrap_err();
-        assert_eq!(&source[error.0[0].span.clone()], literal, "{error}");
+        let directory = ncc::temp::Directory::new().unwrap();
+        let root = directory.path().join("format.nc");
+        let imported = directory.path().join("library.nc");
+        std::fs::write(&imported, &source).unwrap();
+        for from_import in [false, true] {
+            let (text, path) = if from_import {
+                ("import { \"library\" as lib }", &imported)
+            } else {
+                (source.as_str(), &root)
+            };
+            for release in [false, true] {
+                let error = ncc::compile_source_with_options(text, &root, release).unwrap_err();
+                assert_eq!(&source[error.0[0].span.clone()], literal, "{error}");
+                if from_import {
+                    assert_eq!(error.0[0].path.as_ref(), Some(path));
+                } else {
+                    assert_eq!(error.0[0].path.as_ref().unwrap_or(&root), path);
+                }
+                let rendered = error.render(text, &root);
+                assert!(
+                    rendered.contains(&format!("{}:3:10:", path.display())),
+                    "{rendered}"
+                );
+                assert!(
+                    rendered.contains(literal.lines().next().unwrap()),
+                    "{rendered}"
+                );
+            }
+        }
     }
 }
 
@@ -268,17 +323,29 @@ fn imported_type_and_external_errors_retain_declaration_locations() {
     ] {
         let text = format!("// header\n\n{declaration}\n");
         std::fs::write(&imported, &text).unwrap();
-        let error = ncc::compile_source("import { \"library\" as lib }", &root).unwrap_err();
-        assert_eq!(
-            error.0[0].path.as_deref(),
-            Some(imported.as_path()),
-            "{error}"
-        );
-        assert!(!error.0[0].span.is_empty(), "{error}");
-        assert!(error.0[0].span.start >= "// header\n\n".len(), "{error}");
-        let rendered = error.render("import { \"library\" as lib }", &root);
-        assert!(rendered.contains("library.nc:"), "{rendered}");
-        assert!(!rendered.contains("library.nc:1:"), "{rendered}");
+        for release in [false, true] {
+            let error =
+                ncc::compile_source_with_options("import { \"library\" as lib }", &root, release)
+                    .unwrap_err();
+            assert_eq!(
+                error.0[0].path.as_deref(),
+                Some(imported.as_path()),
+                "{error}"
+            );
+            assert!(!error.0[0].span.is_empty(), "{error}");
+            assert!(error.0[0].span.start >= "// header\n\n".len(), "{error}");
+            let rendered = error.render("import { \"library\" as lib }", &root);
+            assert!(rendered.contains("library.nc:"), "{rendered}");
+            assert!(!rendered.contains("library.nc:1:"), "{rendered}");
+            assert!(
+                rendered.contains(&imported.display().to_string()),
+                "{rendered}"
+            );
+            assert!(
+                rendered.contains(declaration.lines().last().unwrap()),
+                "{rendered}"
+            );
+        }
     }
 }
 
@@ -293,21 +360,32 @@ fn imported_errors_retain_source_paths_and_declaration_locations() {
     )
     .unwrap();
     let source = "import { \"library\" as lib }";
-    let error = ncc::compile_source(source, &root).unwrap_err();
-    assert_eq!(error.0[0].path.as_deref(), Some(imported.as_path()));
-    let rendered = error.render(source, &root);
-    assert!(
-        rendered.contains(&format!("{}:4:11:", imported.display())),
-        "{rendered}"
-    );
-    assert!(rendered.contains("int n = false"));
+    for release in [false, true] {
+        let error = ncc::compile_source_with_options(source, &root, release).unwrap_err();
+        assert_eq!(error.0[0].path.as_deref(), Some(imported.as_path()));
+        assert_eq!(
+            &std::fs::read_to_string(&imported).unwrap()[error.0[0].span.clone()],
+            "false"
+        );
+        let rendered = error.render(source, &root);
+        assert!(
+            rendered.contains(&format!("{}:4:11:", imported.display())),
+            "{rendered}"
+        );
+        assert!(rendered.contains("int n = false"));
+    }
     std::fs::write(&imported, "pub fn broken( { }").unwrap();
-    assert_eq!(
-        ncc::compile_source(source, &root).unwrap_err().0[0]
-            .path
-            .as_deref(),
-        Some(imported.as_path())
-    );
+    for release in [false, true] {
+        let error = ncc::compile_source_with_options(source, &root, release).unwrap_err();
+        assert_eq!(error.0[0].path.as_deref(), Some(imported.as_path()));
+        let rendered = error.render(source, &root);
+        assert!(
+            rendered.contains(&format!("{}:1:16:", imported.display())),
+            "{rendered}"
+        );
+        assert_eq!(error.0[0].span, 15..16, "{error}");
+        assert!(rendered.contains("pub fn broken( { }"), "{rendered}");
+    }
 }
 
 #[test]
