@@ -179,6 +179,93 @@ test "async void try propagation" {
     );
 }
 
+#[test]
+fn async_scalar_error_union_success_preserves_payload_and_skips_catch() {
+    for (ty, input, expected) in scalar_async_cases() {
+        let source = format!(
+            r#"
+fn checked(bool fail, {ty} value) {ty}! {{
+    if {{ fail -> {{ throw "unexpected failure" }} _ -> {{}} }}
+    return value
+}}
+test "async {ty} success" {{
+    uint seed = @args().len
+    {ty} value = {input}
+    fut {ty}! work = async checked(seed == 0, value)
+    mut int catches = 0
+    {ty} result = await work catch message {{
+        catches = catches + 1
+        @println("unexpected catch:", message)
+        break {expected}
+    }}
+    assert result == {expected}
+    assert catches == 0
+    @println("scalar success")
+}}
+"#
+        );
+        success(&source, "scalar success\n");
+    }
+}
+
+#[test]
+fn async_scalar_error_union_try_preserves_success_and_propagates_failure() {
+    for (ty, input, expected) in scalar_async_cases() {
+        let source = format!(
+            r#"
+fn checked(bool fail, {ty} value, str message) {ty}! {{
+    if {{ fail -> {{ throw message }} _ -> {{}} }}
+    return value
+}}
+fn wrapper(bool fail, {ty} value, str message) {ty}! {{
+    fut {ty}! work = async checked(fail, value, message)
+    {ty} result = try await work
+    @println("wrapper completed")
+    return result
+}}
+test "async {ty} try propagation" {{
+    uint seed = @args().len
+    {ty} value = {input}
+    mut int catches = 0
+    {ty} completed = wrapper(seed == 0, value, "unused") catch message {{
+        catches = catches + 1
+        @println("unexpected catch:", message)
+        break {expected}
+    }}
+    assert completed == {expected}
+    assert catches == 0
+    {ty} recovered = wrapper(seed == 1, value, "propagated-{{seed}}") catch message {{
+        assert @as(str, message) == "propagated-1"
+        catches = catches + 1
+        break {expected}
+    }}
+    assert recovered == {expected}
+    assert catches == 1
+    @println("scalar propagation")
+}}
+"#
+        );
+        success(&source, "wrapper completed\nscalar propagation\n");
+    }
+}
+
+fn scalar_async_cases() -> [(&'static str, &'static str, &'static str); 8] {
+    [
+        ("bool", "seed == 0", "false"),
+        ("bool", "seed == 1", "true"),
+        ("byte", "@as(byte, seed + 254)", "@as(byte, 255)"),
+        ("char", "\"🙂\"[seed - 1]", "'🙂'"),
+        ("int", "-@as(int, seed) - 41", "-42"),
+        (
+            "uint",
+            "18446744073709551614u + seed",
+            "18446744073709551615u",
+        ),
+        ("float", "@as(float, seed) - 3.5", "-2.5"),
+        ("str", "\"payload-{seed}\"", "\"payload-1\""),
+    ]
+}
+
 fn success(source: &str, stdout: &str) {
     // All fixtures have explicit test roots; use the conformance harness's test CLI path.
     for release in [false, true] {

@@ -1,4 +1,4 @@
-use std::{fs, process::Command};
+use std::{fmt::Write as _, fs, process::Command};
 fn cli(args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_ncc"))
         .args(args)
@@ -93,6 +93,128 @@ str os, str arch = @target()
     for name in ["args", "env", "target"] {
         let error = ncc::compile_source(&format!("_ = @{name}(1)"), &file).unwrap_err();
         assert!(error.to_string().contains("expects no arguments"));
+    }
+}
+
+fn build_process_fixture(file: &std::path::Path, binary: &std::path::Path, release: bool) {
+    let output = Command::new(env!("CARGO_BIN_EXE_ncc"))
+        .args([
+            "build",
+            file.to_str().unwrap(),
+            "-o",
+            binary.to_str().unwrap(),
+            if release { "-r" } else { "-d" },
+        ])
+        .env("NC_TARGET", "macos-arm64")
+        .env("NC_TEST_PRESENT", "compile-time only")
+        .env("NC_TEST_ABSENT", "compile-time only")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn process_args_preserve_executable_empty_unicode_and_independent_copies() {
+    let dir = ncc::temp::Directory::new().unwrap();
+    let file = dir.path().join("arguments.nc");
+    let binary = dir.path().join("program with spaces");
+    fs::write(
+        &file,
+        r#"
+mut str[] arguments = @args()
+str[] snapshot = arguments
+@println(arguments[0])
+@println(arguments.len)
+for index in arguments {
+    if { index > 0 -> { @print("<", arguments[index], ">") } _ -> {} }
+}
+@println()
+arguments[0] = "changed executable"
+arguments = arguments <> ["extra"]
+str[] fresh = @args()
+@println(snapshot == fresh)
+@println(arguments.len == fresh.len + 1)
+@println(arguments[0] == "changed executable")
+"#,
+    )
+    .unwrap();
+    for release in [false, true] {
+        build_process_fixture(&file, &binary, release);
+        for arguments in [vec![], vec!["", "one two", "--help", "a=b", "e\u{301}🙂"]] {
+            let output = Command::new(&binary).args(&arguments).output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(output.stderr, b"");
+            let mut values = String::new();
+            for value in &arguments {
+                write!(values, "<{value}>").unwrap();
+            }
+            assert_eq!(
+                String::from_utf8(output.stdout).unwrap(),
+                format!(
+                    "{}\n{}\n{values}\ntrue\ntrue\ntrue\n",
+                    binary.display(),
+                    arguments.len() + 1
+                )
+            );
+        }
+    }
+}
+
+#[test]
+fn process_env_preserves_empty_absent_unicode_values_and_independent_copies() {
+    let dir = ncc::temp::Directory::new().unwrap();
+    let file = dir.path().join("environment.nc");
+    let binary = dir.path().join("environment");
+    fs::write(
+        &file,
+        r#"
+mut [str]str environment = @env()
+[str]str snapshot = environment
+@println(environment.len == 3)
+@println("NC_TEST_PRESENT" in environment)
+@println("NC_TEST_EMPTY" in environment)
+@println(not ("NC_TEST_ABSENT" in environment))
+@println(environment["NC_TEST_EMPTY"] == "")
+@println(environment["NC_TEST_PRESENT"] == "runtime=✓=e\u{301}🙂")
+@println(environment["NC_TEST_MULTILINE"] == "first\nsecond\tend")
+environment["NC_TEST_PRESENT"] = "changed"
+environment["NC_TEST_EMPTY"] = "no longer empty"
+environment["NC_TEST_INSERTED"] = "local only"
+[str]str fresh = @env()
+@println(snapshot == fresh)
+@println(not ("NC_TEST_INSERTED" in fresh))
+@println(environment.len == fresh.len + 1)
+@println(environment["NC_TEST_PRESENT"] == "changed")
+"#,
+    )
+    .unwrap();
+    for release in [false, true] {
+        build_process_fixture(&file, &binary, release);
+        let output = Command::new(&binary)
+            .env_clear()
+            .env("NC_TEST_PRESENT", "runtime=✓=e\u{301}🙂")
+            .env("NC_TEST_EMPTY", "")
+            .env("NC_TEST_MULTILINE", "first\nsecond\tend")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stderr, b"");
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            "true\n".repeat(11)
+        );
     }
 }
 

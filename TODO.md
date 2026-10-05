@@ -7,10 +7,6 @@
           shadowing, literal, generic-example, exported-alias/private-state and
           private-C-wrapper regressions in both modes.
 
-      - [ ] Cover remaining builtin process-state positives and successful scalar
-            async error unions; keep module initialization identity and unclear
-            lifecycle/index behavior blocked on semantic decisions below.
-
     - [ ] Add missing negative cases for parsing, type checking, control flow,
           module loading, and builtin/extern restrictions in both build modes.
       - [ ] Cover mixed operand types, pattern exhaustiveness and lengths,
