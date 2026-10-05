@@ -2,8 +2,12 @@
 
 - [ ] Expand language and edge-case coverage.
   - [ ] Cover every part of the language and as many edge cases as possible.
-    - [ ] Cover numeric boundaries, Unicode character boundaries, embedded NULs,
-          empty containers, and runtime failures.
+    - [ ] Extend boundary/failure coverage after resolving the remaining contracts.
+      - [ ] Cover signed quotient/remainder, integer zero divisors, negative
+            integral powers, `0**0`, and invalid shift counts once specified.
+      - [ ] Cover invalid runtime indices, empty `$`/`$-n`, and absent map reads
+            once their failure contracts are specified.
+      - [ ] Add Unicode version/normalization-specific cases once specified.
     - [ ] Expand async, future, mutex, and shared-storage coverage without relying
           on a particular thread schedule.
       - [ ] Add deterministic pre-await progress and mutex-contention checks;

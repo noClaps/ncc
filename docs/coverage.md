@@ -641,6 +641,48 @@ coverage. The user confirmed nearest-even basic arithmetic with separate
 operation rounding; the specification explicitly documents nearest-even
 integer conversion and integer-only modulo.
 
+## Numeric, Unicode, NUL and empty-container boundary additions
+
+`numeric_boundaries` — P/N/R D/R adds seven tests with constant and
+runtime-dependent operands:
+
+- 21 nontrivial byte/int/uint arithmetic cases reach representable limits,
+  including multiplication and powers; ten valid shifts reach high bits and
+  the signed minimum.
+- Binary64's smallest positive subnormal, underflow to zero, and overflow to
+  valid infinities are checked, including canonical infinity string conversion.
+- 17 adjacent integer overflow/underflow cases and signed-minimum negation
+  require runtime panics after operand effects in source order, without
+  executing following effects. Runtime fixtures must also compile successfully,
+  so a frontend rejection cannot satisfy the runtime assertion.
+- Eleven successful conversion neighbors and twelve failing finite/nonfinite
+  conversions sample signed/unsigned range boundaries and negative-subnormal
+  float-to-uint rejection before truncation.
+- Constant failure counterparts accept a checked constant-evaluation error or
+  runtime panic; they do not prescribe the unresolved failure phase.
+
+`container_boundaries` — P D/R adds six tests, each with constant and
+runtime-dependent inputs (24 executions):
+
+- Indexing/iteration of combining marks, CRLF, regional-indicator flags, ZWJ
+  emoji, skin-tone modifiers and Hangul graphemes, with flattened UTF-8 checks.
+- Concatenation and indexed replacement preserve separate character elements
+  even when their bytes would form a single grapheme; copies, conversion,
+  empty-string identities and iteration preserve those boundaries too.
+- Leading, interior, trailing and consecutive NULs survive indexing, independent
+  copies, byte conversion, interpolation and byte-exact stdout/stderr output.
+- Empty arrays, strings and maps are concatenation identities; copies remain
+  independent after growth, empty loops skip their bodies, right-hand empty
+  map values overwrite collisions, and nested empty containers copy deeply.
+
+All five repository verification commands in the maintenance section passed
+for these additions. No compiler or specification changes were needed. These
+are boundary samples, not exhaustive numeric or Unicode conformance. Signed
+quotient/remainder, integer zero divisors, negative integral powers, `0**0`,
+invalid shift counts, invalid/empty-last indices, absent map reads and Unicode
+version/normalization-specific expectations remain blocked on the questions
+below; the new tests do not choose outcomes for them.
+
 ## Follow-up test gaps
 
 These are concrete expansion targets, not additional work undertaken by this
@@ -723,9 +765,12 @@ Resolve the questions in the next section before choosing unspecified outcomes.
 8. **Cross-cutting:** nominal/container/optional/error/callable value-copy combinations
    now have the additional positive and negative matrices above, including returned
    closures with recursive/generic nominal payloads and callable wrapper failure variants.
-   Exact original source locations; runtime-dependent numeric and
-   bounds failures; negative cases currently D-only; independent debug/release
-   checks rather than assumed coverage from a shared helper or example.
+   Exact original source locations; remaining bounds/key failure contracts;
+   negative cases currently D-only; independent debug/release checks rather than
+   assumed coverage from a shared helper or example. `numeric_boundaries` now
+   adds runtime-dependent overflow and checked-conversion failures with preceding
+   operand effects and skipped following effects; `container_boundaries` adds
+   Unicode/NUL and empty-container interactions as detailed above.
 
 ## Semantics questions to resolve before new conformance expectations
 
