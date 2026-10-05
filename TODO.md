@@ -3,10 +3,12 @@
 - [ ] Expand language and edge-case coverage.
   - [ ] Cover every part of the language and as many edge cases as possible.
     - [ ] Continue remaining positive coverage using `docs/coverage.md`, focusing
-          on recursive generic and broader future/mutex payload combinations and
-          builtin/CLI edges; retain existing syntax, shadowing, literal,
-          generic/module, scalar/composite async error-union and direct optional
-          throw regressions in both modes.
+          on mutually recursive/imported generic types and recursive
+          optional/error/future/mutex payload combinations in both modes;
+          retain existing syntax, shadowing, literal, generic/module,
+          scalar/composite async error-union, direct optional throw, recursive
+          array/map generic, locked payload-copy/update and successful CLI
+          artifact/argument regressions.
 
     - [ ] Add missing negative cases for parsing, type checking, control flow,
           module loading, and builtin/extern restrictions in both build modes.
@@ -19,9 +21,10 @@
     - [ ] Cover interactions between nominal types, containers, optional/error
           values, closures, and value-copy semantics.
       - [ ] Extend the sampled container matrices to direct structural map
-            elements, recursive/generic combinations, futures, and mutexes;
-            retain the scalar/composite/nominal/callable/error/void matrices and
-            chained generic fixed/dynamic/map/tuple/optional copy regressions.
+            elements and cross-feature recursive/generic/future/mutex combinations;
+            retain the scalar/composite/nominal/callable/error/void matrices,
+            chained generic fixed/dynamic/map/tuple/optional copy regressions,
+            recursive generic array/map trees and locked async payload matrices.
     - [ ] Cover numeric boundaries, Unicode character boundaries, embedded NULs,
           empty containers, and runtime failures.
       - [ ] Extend exact numeric conversion samples through `2^53` to specified
@@ -33,8 +36,10 @@
             assert bare-break lock reacquisition without timing assumptions.
     - [ ] Compare debug and release behavior, including output, evaluation order,
           side effects, runtime failures, and source locations.
-      - [ ] Expand builtin process-state edges and build-format/artifact cleanup
-            checks in both modes, including backend and runtime failure paths.
+      - [ ] Expand builtin process-state failure edges and build/run/test artifact
+            cleanup checks on backend and runtime failures in both modes;
+            retain the successful inferred/explicit/default build-format matrix,
+            empty/Unicode argument forwarding and silent no-tests regressions.
 
   - [ ] Resolve unclear specification semantics before encoding assumptions.
     - [ ] Resolve the questions recorded in `docs/coverage.md` and collect further

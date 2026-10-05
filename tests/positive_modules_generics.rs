@@ -426,6 +426,249 @@ test "generic optional enum copies" {{
     }
 }
 
+#[test]
+fn recursive_generic_struct_arrays_preserve_independent_deep_copies() {
+    for initial in ["7", "@as(Count, seed + 6)"] {
+        let source = format!(
+            r#"
+type Count = int
+struct Node<type T> {{ T value Node<T>[] children }}
+fn count<type T>(Node<T> node) uint {{
+    mut uint total = 1
+    for i in node.children {{ total = total + count<T>(node.children[i]) }}
+    return total
+}}
+fn replace<type T>(Node<T> node, T value) Node<T> {{
+    mut Node<T> local = node
+    local.value = value
+    for i in local.children {{ local.children[i] = replace<T>(local.children[i], value) }}
+    return local
+}}
+test "recursive generic array struct copies" {{
+    int seed = @as(int, @args().len)
+    uint index = @args().len - 1
+    Count value = {initial}
+    mut Node<Count> leaf = Node<Count>{{.value = value, .children = []}}
+    Node<Count> branch = Node<Count>{{.value = 8, .children = [leaf]}}
+    Node<Count> original = Node<Count>{{.value = 9, .children = [branch, leaf]}}
+    mut Node<Count> copy = original
+    Node<Count> snapshot = copy
+    leaf.value = 10
+    assert @as(int, original.children[0].children[0].value) == 7
+    assert @as(int, original.children[1].value) == 7
+    assert count<Count>(original) == 4
+    assert count<Count>(leaf) == 1
+    Node<Count> replaced = replace<Count>(original, 11)
+    assert @as(int, replaced.value) == 11
+    assert @as(int, replaced.children[0].value) == 11
+    assert @as(int, replaced.children[0].children[0].value) == 11
+    assert @as(int, replaced.children[1].value) == 11
+    assert count<Count>(replaced) == 4
+    copy.children[index].children[index].value = 12
+    Node<Count>[] extra = [leaf]
+    copy.children[index].children = copy.children[index].children <> extra
+    assert @as(int, copy.children[0].children[0].value) == 12
+    assert @as(int, copy.children[0].children[1].value) == 10
+    assert @as(int, copy.children[1].value) == 7
+    assert count<Count>(copy) == 5
+    assert snapshot == original and copy != original and replaced != original
+    assert @as(int, original.value) == 9
+    assert @as(int, original.children[0].value) == 8
+    assert original.children[0].children.len == 1
+    mut Node<Count>[] extracted = snapshot.children[0].children
+    extracted[index].value = 13
+    assert @as(int, snapshot.children[0].children[0].value) == 7
+    assert @as(int, extracted[0].value) == 13
+    @println(count<Count>(original), ":", count<Count>(copy), ":", count<Count>(replaced))
+}}
+"#
+        );
+        success(&source, b"4:5:4\n");
+    }
+}
+
+#[test]
+fn recursive_generic_struct_maps_preserve_independent_deep_copies() {
+    for initial in ["7", "@as(Count, seed + 6)"] {
+        let source = format!(
+            r#"
+type Count = int
+struct Node<type K, type T> {{ T value [K]Node<K, T> children }}
+fn count<type K, type T>(Node<K, T> node) uint {{
+    mut uint total = 1
+    for key in node.children {{ total = total + count<K, T>(node.children[key]) }}
+    return total
+}}
+fn replace<type K, type T>(Node<K, T> node, T value) Node<K, T> {{
+    mut Node<K, T> local = node
+    local.value = value
+    for key in local.children {{ local.children[key] = replace<K, T>(local.children[key], value) }}
+    return local
+}}
+test "recursive generic map struct copies" {{
+    int seed = @as(int, @args().len)
+    Count value = {initial}
+    mut Node<str, Count[]> leaf = Node<str, Count[]>{{.value = [value, 8], .children = []}}
+    Node<str, Count[]> branch = Node<str, Count[]>{{.value = [9], .children = ["leaf": leaf]}}
+    Node<str, Count[]> original = Node<str, Count[]>{{.value = [10], .children = ["branch": branch, "sibling": leaf]}}
+    mut Node<str, Count[]> copy = original
+    Node<str, Count[]> snapshot = copy
+    leaf.value[0] = 11
+    Count[] expected = [value, 8]
+    assert original.children["branch"].children["leaf"].value == expected
+    assert original.children["sibling"].value == expected
+    assert count<str, Count[]>(original) == 4
+    assert count<str, Count[]>(leaf) == 1
+    mut Count[] replacement = [12]
+    mut Node<str, Count[]> replaced = replace<str, Count[]>(original, replacement)
+    replacement[0] = 13
+    Count[] twelve = [12]
+    assert replaced.value == twelve
+    assert replaced.children["branch"].value == twelve
+    assert replaced.children["branch"].children["leaf"].value == twelve
+    assert replaced.children["sibling"].value == twelve
+    replaced.children["branch"].children["leaf"].value[0] = 14
+    assert replaced.value == twelve and replaced.children["sibling"].value == twelve
+    copy.children["branch"].children["leaf"].value[0] = 15
+    copy.children["branch"].children["new"] = leaf
+    assert copy.children["branch"].children.len == 2
+    assert @as(int, copy.children["branch"].children["leaf"].value[0]) == 15
+    assert @as(int, copy.children["branch"].children["new"].value[0]) == 11
+    assert copy.children["sibling"].value == expected
+    assert snapshot == original and copy != original and replaced != original
+    assert original.children["branch"].children.len == 1
+    mut [str]Node<str, Count[]> extracted = snapshot.children["branch"].children
+    extracted["leaf"].value[0] = 16
+    assert snapshot.children["branch"].children["leaf"].value == expected
+    assert @as(int, extracted["leaf"].value[0]) == 16
+    @println(count<str, Count[]>(original), ":", count<str, Count[]>(copy), ":", count<str, Count[]>(replaced))
+}}
+"#
+        );
+        success(&source, b"4:5:4\n");
+    }
+}
+
+const RECURSIVE_GENERIC_ENUM_DEFINITIONS: &str = r"
+type Count = int
+enum Tree<type T> { Leaf(T) Branch(Tree<T>[]) Named([str]Tree<T>) Empty }
+fn count<type T>(Tree<T> tree) uint {
+    if tree {
+        Tree.Leaf(value) -> { return 1 }
+        Tree.Branch(children) -> {
+            mut uint total = 0
+            for i in children { total = total + count<T>(children[i]) }
+            return total
+        }
+        Tree.Named(children) -> {
+            mut uint total = 0
+            for key in children { total = total + count<T>(children[key]) }
+            return total
+        }
+        Tree.Empty -> { return 0 }
+    }
+}
+fn replace<type T>(Tree<T> tree, T value) Tree<T> {
+    if tree {
+        Tree.Leaf(payload) -> { return Tree.Leaf(value) }
+        Tree.Branch(children) -> {
+            mut Tree<T>[] local = children
+            for i in local { local[i] = replace<T>(local[i], value) }
+            return Tree.Branch(local)
+        }
+        Tree.Named(children) -> {
+            mut [str]Tree<T> local = children
+            for key in local { local[key] = replace<T>(local[key], value) }
+            return Tree.Named(local)
+        }
+        Tree.Empty -> { return Tree.Empty }
+    }
+}
+fn leaf_value<type T>(Tree<T> tree, T fallback) T {
+    if tree {
+        Tree.Leaf(value) -> { return value }
+        Tree.Branch(children) -> { return fallback }
+        Tree.Named(children) -> { return fallback }
+        Tree.Empty -> { return fallback }
+    }
+}
+";
+
+#[test]
+fn recursive_generic_enum_dynamic_branches_preserve_variants_and_deep_copies() {
+    for initial in ["7", "@as(Count, seed + 6)"] {
+        let source = format!(
+            r#"
+{RECURSIVE_GENERIC_ENUM_DEFINITIONS}
+test "recursive generic enum copies" {{
+    int seed = @as(int, @args().len)
+    Count value = {initial}
+    mut Count[] payload = [value, 8]
+    Tree<Count[]> leaf = Tree.Leaf(payload)
+    Tree<Count[]> empty = Tree.Empty
+    Tree<Count[]> branch = Tree.Branch([leaf, empty])
+    Tree<Count[]> original = Tree.Named(["branch": branch, "sibling": leaf])
+    Tree<Count[]> snapshot = original
+    payload[0] = 9
+    Count[] expected = [value, 8]
+    Count[] fallback = [99]
+    assert leaf_value<Count[]>(leaf, fallback) == expected
+    assert count<Count[]>(empty) == 0 and count<Count[]>(leaf) == 1
+    assert count<Count[]>(branch) == 1 and count<Count[]>(original) == 2
+    Tree<Count[]> empty_branch = Tree.Branch([])
+    Tree<Count[]> empty_map = Tree.Named([])
+    assert count<Count[]>(empty_branch) == 0 and count<Count[]>(empty_map) == 0
+    assert replace<Count[]>(empty_branch, fallback) == empty_branch
+    assert replace<Count[]>(empty_map, fallback) == empty_map
+    mut Count[] replacement = [10]
+    Tree<Count[]> replaced = replace<Count[]>(original, replacement)
+    replacement[0] = 11
+    Tree<Count[]> changed_leaf = Tree.Leaf([10])
+    Tree<Count[]> changed_branch = Tree.Branch([changed_leaf, empty])
+    Tree<Count[]> expected_replaced = Tree.Named(["branch": changed_branch, "sibling": changed_leaf])
+    assert replaced == expected_replaced and count<Count[]>(replaced) == 2
+    if snapshot {{
+        Tree.Named(children) -> {{
+            mut [str]Tree<Count[]> local = children
+            if local["branch"] {{
+                Tree.Branch(nodes) -> {{
+                    mut Tree<Count[]>[] extracted = nodes
+                    mut Count[] data = leaf_value<Count[]>(extracted[0], fallback)
+                    data[0] = 12
+                    extracted[0] = Tree.Leaf(data)
+                    Tree<Count[]>[] extra = [leaf]
+                    extracted = extracted <> extra
+                    local["branch"] = Tree.Branch(extracted)
+                    assert nodes.len == 2 and extracted.len == 3
+                    assert leaf_value<Count[]>(nodes[0], fallback) == expected
+                    assert extracted[1] == empty
+                    assert @as(int, leaf_value<Count[]>(extracted[0], fallback)[0]) == 12
+                }}
+                Tree.Leaf(data) -> {{ assert false }}
+                Tree.Named(nodes) -> {{ assert false }}
+                Tree.Empty -> {{ assert false }}
+            }}
+            local["new"] = leaf
+            Tree<Count[]> changed = Tree.Named(local)
+            assert local.len == 3 and children.len == 2
+            assert count<Count[]>(changed) == 4 and changed != original
+            assert leaf_value<Count[]>(children["sibling"], fallback) == expected
+            assert leaf_value<Count[]>(local["sibling"], fallback) == expected
+        }}
+        Tree.Leaf(data) -> {{ assert false }}
+        Tree.Branch(nodes) -> {{ assert false }}
+        Tree.Empty -> {{ assert false }}
+    }}
+    assert snapshot == original and original != replaced
+    assert leaf_value<Count[]>(leaf, fallback) == expected
+    @println(count<Count[]>(original), ":", count<Count[]>(replaced))
+}}
+"#
+        );
+        success(&source, b"2:2\n");
+    }
+}
+
 fn success(source: &str, expected: &[u8]) {
     let directory = ncc::temp::Directory::new().unwrap();
     let input = directory.path().join("main.nc");
