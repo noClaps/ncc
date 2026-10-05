@@ -204,6 +204,73 @@ test "recursive cycle array traversal rebuild and copies" {
 }
 "#;
 
+const DEEP_TREE_CHECKS: &str = r#"
+fn deepen<type T>($Tree<T> base) $Tree<T> {
+    mut $Tree<T> tree = base
+    mut uint depth = 0
+    while depth < 28 {
+        tree = $Tree.Branch([$children_link<T>([tree])])
+        depth = depth + 1
+    }
+    return tree
+}
+test "deep finite recursive tree traversal rebuild and copies" {
+    int seed = @as(int, @args().len)
+    uint index = @args().len - 1
+    mut int[] payload = [INITIAL, 8]
+    $Tree<int[]> base = $Tree.Branch([
+        $children_link<int[]>([$Tree.Leaf(payload), $Tree.Empty, $Tree.Leaf([9])]),
+        $values_link<int[]>([[10, 11]]), $empty_link<int[]>()
+    ])
+    mut $Tree<int[]> source = deepen<int[]>(base)
+    $Tree<int[]> snapshot = source
+    payload[index] = 12
+    int[][] expected = [[7, 8], [9], [10, 11]]
+    assert $flatten<int[]>(source) == expected
+    assert source == deepen<int[]>(base)
+
+    mut int[] replacement = [13, 14]
+    mut $Tree<int[]> rebuilt = $rebuild<int[]>(source, replacement)
+    $Tree<int[]> rebuilt_snapshot = rebuilt
+    replacement[index] = 15
+    $Tree<int[]> expected_base = $Tree.Branch([
+        $children_link<int[]>([$Tree.Leaf([13, 14]), $Tree.Empty, $Tree.Leaf([13, 14])]),
+        $values_link<int[]>([[13, 14]]), $empty_link<int[]>()
+    ])
+    $Tree<int[]> expected_rebuilt = deepen<int[]>(expected_base)
+    assert rebuilt == expected_rebuilt and rebuilt != source
+    assert $flatten<int[]>(rebuilt) == [[13, 14], [13, 14], [13, 14]]
+
+    if rebuilt {
+        $Tree.Branch(links) -> {
+            mut $Link<int[]>[] extracted = links
+            extracted[index] = $rebuild_link<int[]>(extracted[index], [16])
+            extracted = extracted <> [$values_link<int[]>([[17]])]
+            rebuilt = $Tree.Branch(extracted)
+            assert links.len == 1 and extracted.len == 2
+            assert $flatten_link<int[]>(links[index]) == [[13, 14], [13, 14], [13, 14]]
+        }
+        $Tree.Leaf(data) -> { assert false }
+        $Tree.Empty -> { assert false }
+    }
+    assert $flatten<int[]>(rebuilt) == [[16], [16], [16], [17]]
+    assert rebuilt_snapshot == expected_rebuilt
+    assert source == snapshot and $flatten<int[]>(source) == expected
+
+    mut int[][] extracted = $flatten<int[]>(snapshot)
+    extracted[index][index] = 18
+    int[][] expected_extracted = [[18, 8], [9], [10, 11]]
+    assert extracted == expected_extracted
+    source = $rebuild<int[]>(source, [19])
+    assert $flatten<int[]>(source) == [[19], [19], [19]]
+    assert snapshot == deepen<int[]>(base) and $flatten<int[]>(snapshot) == expected
+    assert rebuilt_snapshot == expected_rebuilt
+    assert $flatten<int[]>(rebuilt) == [[16], [16], [16], [17]]
+    assert payload == [12, 8] and replacement == [15, 14]
+    @println("deep tree checked")
+}
+"#;
+
 const ENUM_CHECKS: &str = r#"
 test "mutual enum pattern extracted values preserve nested copies" {
     uint index = @args().len - 1
@@ -364,12 +431,12 @@ fn run_cases(definitions: &str, imported: bool, mixed: bool) {
     };
     let extra = if mixed { MIXED_CHECKS } else { ENUM_CHECKS };
     let expected: &[u8] = if mixed {
-        b"array cycle checked\nmixed fields checked\nstr cycle checked\n"
+        b"array cycle checked\nmixed fields checked\nstr cycle checked\ndeep tree checked\n"
     } else {
-        b"array cycle checked\nenum values checked\nstr cycle checked\n"
+        b"array cycle checked\nenum values checked\nstr cycle checked\ndeep tree checked\n"
     };
     for initial in ["7", "seed + 6"] {
-        let checks = format!("{ARRAY_CHECKS}\n{extra}\n{STRING_CHECKS}")
+        let checks = format!("{ARRAY_CHECKS}\n{extra}\n{STRING_CHECKS}\n{DEEP_TREE_CHECKS}")
             .replace('$', prefix)
             .replace("INITIAL", initial);
         fs::write(&input, format!("{prelude}\n{checks}")).unwrap();

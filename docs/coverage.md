@@ -398,9 +398,28 @@ add another 20 generated-program executions, retaining all earlier regressions:
   empty maps/payloads and independent source/replacement/rebuilt snapshots are
   checked for constant/runtime `int[]` and constant `str` inputs.
 
-Remaining gaps include map-backed mutual enum/mixed cycles and deeper recursion.
-The module-chain test uses acyclic imports with no shared initialization state;
-recursive definitions requiring circular imports remain untested. These tests
+The four `positive_recursive_cycles` tests now also construct 28 alternating
+array-backed branch/link levels around a branching base, checking deep traversal,
+structural rebuilding/equality and independent source, replacement, rebuilt,
+pattern-extracted and flattened payload snapshots in the same 16 executions.
+
+Four `positive_recursive_maps` tests add 16 generated-program executions:
+
+- `{local,imported}_map_backed_mutually_recursive_generic_enums` — P D/R:
+  alternating generic enum map recursion, all variants, empty maps/payloads,
+  commutative traversal sums, key-preserving rebuilding and structural equality.
+  Construction, extracted map/payload mutation, insertion and rebuilt snapshots
+  remain independent.
+- `{local,imported}_map_backed_mixed_generic_struct_enum_cycle` — P D/R:
+  alternating generic struct/enum map recursion with the same checks, plus nested
+  struct-field updates and child-map insertion without changing source snapshots.
+- Each map test uses constant/runtime-derived `int[]` payloads with 24 alternating
+  branch/link levels and a constant `str` specialization with 12 levels. Traversal
+  assertions never depend on map order; exact output and empty stderr are checked.
+
+These are finite-depth samples, not arbitrary-depth or complete recursive payload
+coverage. The module-chain test uses acyclic imports with no shared initialization
+state; recursive definitions requiring circular imports remain untested. These tests
 neither establish complete recursive payload coverage nor settle future lifecycle,
 circular-import or module identity questions.
 
@@ -435,8 +454,10 @@ Resolve the questions in the next section before choosing unspecified outcomes.
    copies with constant/runtime inputs. The recursive additions above extend this
    to local/imported mutual structs and enums, mixed struct/enum cycles, imported
    recursive enums, recursive generic fields spanning acyclic modules and recursive
-   optional/error/future/mutex payloads. Map-backed mutual enum/mixed cycles and
-   deeper recursion remain expandable; circular imports are not covered.
+   optional/error/future/mutex payloads. `positive_recursive_maps` adds local/imported
+   map-backed mutual enum/mixed cycles and finite-depth traversal/rebuild/copy checks;
+   array-backed cycles now also include deeper finite trees. Further payload/shape/depth
+   combinations remain expandable; circular imports are not covered.
    Specialized generic function-value syntax needs clarification:
    bare `identity<Count>` is not currently parsed as a callable value.
 5. **Concurrency:** deterministic pre-await progress and mutex-contention tests;
