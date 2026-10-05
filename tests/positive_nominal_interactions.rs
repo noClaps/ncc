@@ -3,9 +3,38 @@ use std::{fs, process::Command};
 const DECLARATIONS: &str = r"
 type Count = int
 struct Record { Count[] values }
+struct Box<type T> { T value }
+struct Node<type T> { T value Node<T>[] children }
+struct MapNode<type T> { T value [str]MapNode<T> children }
+enum Chain<type T> { Item(T) Next(Chain<T>) Empty }
+fn sample_chain(Count count) (Chain<Count[]>, Chain<Count[]>) {
+    Chain<Count[]> item = Chain.Item([count, 2])
+    Chain<Count[]> next = Chain.Next(item)
+    Chain<Count[]> head = Chain.Next(next)
+    Chain<Count[]> empty = Chain.Empty
+    return (head, empty)
+}
+fn replace_item(Chain<Count[]> chain, Count replacement) Chain<Count[]> {
+    if chain {
+        Chain.Item(values) -> {
+            mut Count[] values = values
+            values[0] = replacement
+            return Chain.Item(values)
+        }
+        Chain.Next(next) -> { return Chain.Next(replace_item(next, replacement)) }
+        Chain.Empty -> { return Chain.Empty }
+    }
+}
+fn first_item(Chain<Count[]> chain) Count {
+    if chain {
+        Chain.Item(values) -> { return values[0] }
+        Chain.Next(next) -> { return first_item(next) }
+        Chain.Empty -> { return 0 }
+    }
+}
 ";
 
-const PAYLOADS: [(&str, &str, &str, &str); 4] = [
+const PAYLOADS: [(&str, &str, &str, &str); 8] = [
     ("Count[]", "[count, 2]", "payload[0] = 9", "payload[0]"),
     (
         "[str]Count[]",
@@ -24,6 +53,30 @@ const PAYLOADS: [(&str, &str, &str, &str); 4] = [
         "Record{.values = [count, 2]}",
         "payload.values[0] = 9",
         "payload.values[0]",
+    ),
+    (
+        "Box<Box<[str]Count[]>>",
+        "Box<Box<[str]Count[]>>{.value = Box<[str]Count[]>{.value = [\"x\": [count, 2]]}}",
+        "payload.value.value[\"x\"][0] = 9",
+        "payload.value.value[\"x\"][0]",
+    ),
+    (
+        "Node<Count[]>",
+        "Node<Count[]>{.value = [count], .children = [Node<Count[]>{.value = [count, 2], .children = []}]}",
+        "payload.children[0].value[0] = 9",
+        "payload.children[0].value[0]",
+    ),
+    (
+        "MapNode<Box<Count[]>>",
+        "MapNode<Box<Count[]>>{.value = Box<Count[]>{.value = [count]}, .children = [\"leaf\": MapNode<Box<Count[]>>{.value = Box<Count[]>{.value = [count, 2]}, .children = []}]}",
+        "payload.children[\"leaf\"].value.value[0] = 9",
+        "payload.children[\"leaf\"].value.value[0]",
+    ),
+    (
+        "(Chain<Count[]>, Chain<Count[]>)",
+        "sample_chain(count)",
+        "Count replacement = 9; payload[0] = replace_item(payload[0], replacement)",
+        "first_item(payload[0])",
     ),
 ];
 
@@ -159,6 +212,117 @@ test "closure storage versus payload copies" {{
 "#
             );
             success(&source, "closure copies checked\n");
+        }
+    }
+}
+
+const CALLABLE_WRAPPER_CHECKS: &str = r#"
+fn live(Payload value) CALLBACK {
+    mut Payload state = value
+    return fn(int operation) Payload! {
+        if operation {
+            1 -> {
+                mut UNDERLYING payload = @as(UNDERLYING, state)
+                MUTATION
+                state = @as(Payload, payload)
+            }
+            2 -> { throw "payload failure" }
+            _ -> {}
+        }
+        return state
+    }
+}
+fn checked<type T>(bool fail, T value) T! {
+    if { fail -> { throw "factory failure" } _ -> {} }
+    return value
+}
+test "callable wrapper variants" {
+    Count count = @as(Count, SEED)
+    Payload original = @as(Payload, INITIAL)
+    CALLBACK update = live(original)
+    CALLBACK? present = update
+    CALLBACK? absent = none
+    CALLBACK! good = checked<CALLBACK>(false, update)
+    CALLBACK! bad = checked<CALLBACK>(true, update)
+    mut CALLBACK?[2] fixed = [present, absent]
+    mut CALLBACK![] dynamic = [good, bad]
+    mut [str]CALLBACK? mapped = ["some": present, "none": absent]
+    mut (CALLBACK!, CALLBACK?) tuple = (bad, present)
+    CALLBACK?[2] fixed_copy = fixed
+    CALLBACK![] dynamic_copy = dynamic
+    [str]CALLBACK? map_copy = mapped
+    (CALLBACK!, CALLBACK?) tuple_copy = tuple
+    fixed[0] = none
+    fixed[1] = present
+    dynamic[0] = bad
+    dynamic[1] = good
+    mapped["some"] = none
+    mapped["none"] = present
+    tuple[0] = good
+    tuple[1] = none
+    mut int catches = 0
+    mut int fallbacks = 0
+    CALLBACK from_fixed = fixed_copy[0] else { fallbacks = fallbacks + 1; break live(original) }
+    CALLBACK from_map = map_copy["some"] else { fallbacks = fallbacks + 1; break live(original) }
+    CALLBACK from_tuple = tuple_copy[1] else { fallbacks = fallbacks + 1; break live(original) }
+    CALLBACK from_good = dynamic_copy[0] catch _ { catches = catches + 1; break live(original) }
+    assert catches == 0 and fallbacks == 0
+    Payload! before = from_fixed(0)
+    CALLBACK recovered = dynamic_copy[1] catch message {
+        assert @as(str, message) == "factory failure"
+        catches = catches + 1
+        break update
+    }
+    CALLBACK recovered_tuple = tuple_copy[0] catch message {
+        assert @as(str, message) == "factory failure"
+        catches = catches + 1
+        break update
+    }
+    CALLBACK fallback_fixed = fixed_copy[1] else { fallbacks = fallbacks + 1; break live(original) }
+    CALLBACK fallback_map = map_copy["none"] else { fallbacks = fallbacks + 1; break live(original) }
+    assert catches == 2 and fallbacks == 2
+    Payload changed = try recovered(1)
+    assert changed != original
+    assert (try from_fixed(0)) == changed
+    assert (try from_map(0)) == changed
+    assert (try from_tuple(0)) == changed
+    assert (try from_good(0)) == changed
+    assert (try recovered_tuple(0)) == changed
+    assert (try update(0)) == changed
+    assert (try before) == original
+    assert (try fallback_fixed(0)) == original
+    assert (try fallback_map(0)) == original
+    Payload! failure = from_good(2)
+    Payload! failure_copy = failure
+    Payload recovered_payload = failure_copy catch message {
+        assert @as(str, message) == "payload failure"
+        catches = catches + 1
+        break original
+    }
+    assert recovered_payload == original and catches == 3
+    assert (try update(0)) == changed
+    mut UNDERLYING payload = @as(UNDERLYING, changed)
+    INDEPENDENT_MUTATION
+    assert @as(int, READ) == 12
+    assert (try from_good(0)) == changed
+    @println("callable variants checked")
+}
+"#;
+
+#[test]
+fn copied_callable_optional_and_error_variants_preserve_recovery_and_storage() {
+    for (underlying, initial, mutation, read) in PAYLOADS {
+        for seed in ["1", "@as(int, @args().len)"] {
+            let checks = CALLABLE_WRAPPER_CHECKS
+                .replace("CALLBACK", "(fn(int) Payload!)")
+                .replace("UNDERLYING", underlying)
+                .replace("INDEPENDENT_MUTATION", &mutation.replace("= 9", "= 12"))
+                .replace("MUTATION", mutation)
+                .replace("READ", read)
+                .replace("INITIAL", initial)
+                .replace("SEED", seed);
+            let source = format!("{DECLARATIONS}\ntype Payload = {underlying}\n{checks}");
+            success(&source, "callable variants checked\n");
         }
     }
 }

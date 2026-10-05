@@ -578,9 +578,12 @@ casts, preserving all-256-byte and helper-loop proof assertions.
 
 ## Nominal, wrapper, closure and value-copy interaction additions
 
-`tests/positive_nominal_interactions.rs` adds 16 P D/R execution fixtures:
-four nominal payload shapes (nominal-element arrays, maps of arrays, tuples and
-structs), each with constant and runtime-dependent inputs, across two matrices.
+`tests/positive_nominal_interactions.rs` adds 48 P D/R execution fixtures:
+eight nominal payload shapes, each with constant and runtime-dependent inputs,
+across three matrices. The original nominal-element arrays, maps of arrays,
+tuples and structs are retained alongside nested generic boxes containing maps,
+recursive generic structs with array/map children, and a tuple containing a
+recursive generic enum chain and its empty variant.
 The first stores present/absent optionals and successful/failed error unions in
 fixed arrays, dynamic arrays, maps and tuples. It asserts independent copies after
 source replacement, container updates and unwrapped payload mutation, plus error
@@ -589,7 +592,15 @@ then copies them through callable arrays, maps, tuples and an optional. It asser
 that copied closures share their factory-local mutable nominal storage, immutable
 parameter captures retain snapshots, separate factory invocations remain independent,
 replacing a callback does not replace its copies, and returned payload mutation does
-not alter captured storage. Exact output is checked separately in both NC modes.
+not alter captured storage. The third matrix copies present/absent callable
+optionals and successful/failed callable error unions through fixed/dynamic arrays,
+maps and tuples, then replaces the source variants. It asserts preserved failure
+messages, lazy successful extraction, exactly counted catch/fallback effects,
+shared state after recovery to an existing closure, independent fallback factories,
+and payload snapshots before mutations. A failed closure invocation is also copied
+and caught without changing the captured payload. Recursive enum helpers rebuild
+nested values while preserving the immutable captured snapshots. Exact output is
+checked separately in both NC modes.
 
 `tests/negative_nominal_interactions.rs` adds 149 N D/R rejection cases and
 141 C D/R compile-only controls. These cover distinct nominal elements in container
@@ -599,9 +610,9 @@ nominal identity after `else`, `catch` and `try`; capturing closure parameter/re
 signatures, callback containers, returned callables and invocation. Compile controls
 are not runtime copy evidence.
 
-These matrices do not establish exhaustive cross-product coverage. Returned closures
-with recursive/generic nominal payloads and callable optional/error failure variants
-remain expansion targets. No unresolved semantics, compiler implementation or
+These matrices do not establish exhaustive cross-product coverage. In particular,
+mutually recursive payloads and every nesting/order of callable optional/error
+wrappers are not covered here. No unresolved semantics, compiler implementation or
 specification text was changed for these additions.
 
 ## Follow-up test gaps
@@ -683,8 +694,8 @@ Resolve the questions in the next section before choosing unspecified outcomes.
    large integer→float conversion cases remain unsampled; bool→uint currently
    generates a nonfatal C tautological comparison warning.
 8. **Cross-cutting:** nominal/container/optional/error/callable value-copy combinations
-   now have the additional positive and negative matrices above; extend returned-closure
-   coverage to recursive/generic nominal payloads and callable wrapper failure variants.
+   now have the additional positive and negative matrices above, including returned
+   closures with recursive/generic nominal payloads and callable wrapper failure variants.
    Exact original source locations; runtime-dependent numeric and
    bounds failures; negative cases currently D-only; independent debug/release
    checks rather than assumed coverage from a shared helper or example.
