@@ -6,8 +6,7 @@
           concrete assertions and compiler modes; retain existing syntax,
           shadowing, literal, generic-example, exported-alias/private-state and
           private-C-wrapper regressions in both modes.
-      - [ ] Expand container element-type and nominal identity matrices, recursive
-            enum discarded-payload matching, and boundary-distinct string patterns.
+
       - [ ] Expand generic/nominal/container combinations and remaining specified
             arithmetic, conversion, and inclusion positives without assuming
             unresolved semantics.
@@ -25,6 +24,9 @@
             both modes, including symlinks and controlled unreadable-file cases.
     - [ ] Cover interactions between nominal types, containers, optional/error
           values, closures, and value-copy semantics.
+      - [ ] Extend the sampled container matrices to direct structural map
+            elements, recursive/generic combinations, futures, and mutexes;
+            retain the new scalar/composite/nominal/callable/error/void coverage.
     - [ ] Cover numeric boundaries, Unicode character boundaries, embedded NULs,
           empty containers, and runtime failures.
     - [ ] Expand async, future, mutex, and shared-storage coverage without relying
