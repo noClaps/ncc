@@ -4,12 +4,12 @@
   - [ ] Cover every part of the language and as many edge cases as possible.
     - [ ] Add missing negative cases for parsing, type checking, control flow,
           module loading, and builtin/extern restrictions in both build modes.
-      - [ ] Cover mixed operand types, pattern exhaustiveness and lengths,
-            aggregate initializers, function-type syntax, and error restrictions.
+
       - [ ] Cover selective/wildcard imports, multi-file cycles, extern visibility,
             literal paths/symbols, call signatures, and invalid builtin calls.
       - [ ] Extend debug-only embed and external-declaration rejection cases to
             both modes, including symlinks and controlled unreadable-file cases.
+
     - [ ] Cover interactions between nominal types, containers, optional/error
           values, closures, and value-copy semantics.
       - [ ] Extend the sampled container matrices to direct structural map
@@ -37,7 +37,8 @@
     - [ ] Resolve the questions recorded in `docs/coverage.md` and collect further
           ambiguous interactions from differential tests.
       - [ ] Clarify operator compatibility, numeric/index failure conventions,
-            tuple index requirements, and aggregate-pattern exhaustiveness.
+            tuple index requirements, aggregate-pattern exhaustiveness, and
+            missing/duplicate struct initializer fields.
       - [ ] Clarify specialized generic function-value syntax; bare
             `identity<Count>` currently fails parsing, while typed callback
             wrappers forwarding explicit generic calls are covered.

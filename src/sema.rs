@@ -736,6 +736,13 @@ impl Checker {
             .ok_or_else(|| Diagnostics::one("return outside function", 0..0))?;
         if let Some(value) = value {
             self.expected(value, &expected)?;
+            if self
+                .expression_types
+                .get(&value.id())
+                .is_some_and(|ty| self.is_error_value(ty))
+            {
+                return Checker::fail("errors cannot be returned; they must be thrown");
+            }
         } else {
             Checker::assignable(
                 if let Type::ErrorUnion(inner) = &expected {
@@ -747,6 +754,18 @@ impl Checker {
             )?;
         }
         Ok(())
+    }
+    fn is_error_value<'a>(&'a self, mut ty: &'a Type) -> bool {
+        while let Type::Named(name, _) = ty {
+            if name == "error" {
+                return true;
+            }
+            let Some(TypeInfo::Alias(base)) = self.types.get(name) else {
+                break;
+            };
+            ty = base;
+        }
+        false
     }
     fn check_for(
         &mut self,
@@ -1730,7 +1749,10 @@ impl Checker {
                 let Type::Array(element, size) = ty else {
                     return Checker::fail("array pattern requires an array subject");
                 };
-                let mut total = size == &Some(patterns.len());
+                if size.is_some_and(|size| size != patterns.len()) {
+                    return Checker::fail("fixed-size array pattern has wrong length");
+                }
+                let mut total = size.is_some();
                 for p in patterns {
                     total &= self.check_pattern(p, element)?;
                 }

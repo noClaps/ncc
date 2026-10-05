@@ -423,6 +423,43 @@ state; recursive definitions requiring circular imports remain untested. These t
 neither establish complete recursive payload coverage nor settle future lifecycle,
 circular-import or module identity questions.
 
+## Negative operand, initializer, syntax, pattern and error additions
+
+Three dedicated integration suites check each fixture with debug and release
+compilation. Negative fixtures assert diagnostic substrings; positive controls
+are compile-only, not generated-program execution evidence.
+
+- `negative_operands` — N/C D/R: ordered pairs of distinct `byte`, `int`, `uint`
+  and `float` bindings across arithmetic/equality/ordering operators, plus integer
+  bitwise/shift operators; mixed Boolean logical operands in both orders;
+  incompatible array elements and map keys/values for concatenation, including
+  empty containers; tuple shape and nominal scalar/container equality mismatches.
+  Controls retain explicit casts, differently sized fixed-array concatenation,
+  fixed/dynamic concatenation and the specified inclusion exceptions. These tests
+  do not resolve the general operator-compatibility or undefined pipe question.
+- `negative_initializers_functions` — N/C D/R: incompatible array/map/tuple
+  constituents, fixed lengths (including nested arrays), tuple destructuring,
+  struct field names/types and nominal identity, enum variants/payload arity/types,
+  unparenthesized function signatures in nine type positions, malformed signatures
+  and value returns without return annotations. Missing/duplicate struct initializer
+  fields remain a clarification question; map duplicate keys and permitted key
+  domains are not settled by these fixtures.
+- `negative_patterns_errors` — N/C D/R: incomplete Boolean/enum/string/dynamic-array
+  patterns, simple literal-constrained full-field struct/tuple patterns, fixed-array
+  lengths (including nested/nominal subjects), tuple arity and pattern type mismatches;
+  direct error construction, ordinary caught-error returns, invalid throw operands,
+  nonthrowing-function restrictions, and invalid catch/try contexts. Controls retain
+  valid exhaustive patterns, throwing/rethrowing and error-union forwarding.
+  Location regressions check the original file and failing statement. General nested
+  finite partitions, omitted struct pattern fields and caught-error storage/passing/
+  casting remain unresolved.
+
+These regressions exposed and fixed two semantic-checker gaps: incorrect fixed-array
+pattern lengths were previously accepted when a fallback made the match exhaustive;
+ordinary returns of caught `error` values were previously accepted in error-returning
+functions. The checker now rejects both, including nominal error aliases, while
+preserving optional/error-union wrappers and valid error-union forwarding.
+
 ## Follow-up test gaps
 
 These are concrete expansion targets, not additional work undertaken by this
@@ -430,11 +467,12 @@ documentation task. Rows above contain the finer-grained evidence and limitation
 Resolve the questions in the next section before choosing unspecified outcomes.
 
 1. **Syntax/frontend:** mandatory return annotations and invalid function-type
-   spellings; remaining multiline whitespace and Unicode contracts require
-   clarification. Comment forms, specified escapes, ordinary multiline execution
+   spellings now have N/C D/R evidence above; remaining multiline whitespace and
+   Unicode contracts require clarification. Comment forms, specified escapes, ordinary multiline execution
    and paired sigil ordering now have P D/R execution evidence.
-2. **Types and expressions:** mixed numeric and map-concat rejection;
-   tuple/negative/empty-last-index cases; aggregate initialization errors;
+2. **Types and expressions:** mixed numeric/map-concat and aggregate initializer
+   rejection now have N/C D/R evidence above. Remaining tuple/negative/empty-last-index
+   cases and missing/duplicate struct initializer fields require clarification;
    further recursive/generic/future/mutex element combinations beyond the new
    18-type container and same-underlying nominal-pair matrices. Optional tuple handling,
    scalar truth/comparison tables, bitwise OR/XOR/complement, integer spellings
@@ -442,10 +480,12 @@ Resolve the questions in the next section before choosing unspecified outcomes.
    arithmetic and exact binary-fraction float arithmetic now have operator samples;
    generic inclusion covers nominal/structural/optional elements. Signed
    quotient/remainder, negative powers and other unresolved numeric cases remain blocked.
-3. **Patterns/control flow:** incomplete Boolean/struct/tuple coverage;
-   fixed-array pattern length errors. Recursive discarded-tree payloads and
+3. **Patterns/control flow:** incomplete Boolean/simple full-field struct/tuple
+   coverage and fixed-array pattern length errors now have N/C D/R evidence above.
+   General nested finite partitions and omitted struct fields remain unresolved. Recursive discarded-tree payloads and
    boundary-distinct string subjects now have dedicated P D/R assertions.
-4. **Errors/generics:** construction/return/throw restrictions for errors.
+4. **Errors/generics:** construction/return/throw restrictions for errors now have
+   N/C D/R evidence above; caught-error storage/passing/casting still need clarification.
    Direct scalar optional throw fallback now has P D/R result, laziness and
    Unicode/NUL message assertions. Chained generic/nominal/container functions, structs and enums now
    have P D/R assertions for substituted fixed/dynamic/map/tuple/optional payloads
@@ -520,12 +560,20 @@ more precise reading or a user decision without a specification edit; any edit t
 | Optimization scope               | The specification promises broad evaluatable folding/infinite-loop warnings; tests document conservative proof domains. Clarify the normative completeness expectation without claiming all termination is decidable or silently weakening the language.                                                                                   |
 | External examples                | Etch examples remain in the specification, but project scope is C-only. Record this mismatch without implementing Etch or altering the specification. C ownership/lifetime and malformed foreign values need a separate ABI/UB audit.                                                                                                      |
 
+Missing and duplicate struct initializer fields also need an explicit rule before
+new conformance expectations are added; current diagnostics alone do not decide it.
+
 ## Maintenance and verification
 
 When adding a regression, update its row with the actual asserted property and
 modes. Keep compile-only, rejection, runtime failure, execution and optimization
 assertions distinct. Remove a gap only after the relevant assertion exists; do
 not mark an entire feature complete because one happy path passes.
+
+After the negative operand/initializer/function-syntax/pattern/error additions and
+both semantic-checker fixes, all five verification commands below passed again.
+These additions are rejection and compile-control evidence, not runtime execution
+coverage or a resolution of the remaining semantics questions.
 
 After the positive generic/nominal/container, arithmetic/conversion/inclusion,
 composite async error-union, direct optional throw, recursive generic, locked
