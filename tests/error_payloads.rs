@@ -249,6 +249,156 @@ test "async {ty} try propagation" {{
     }
 }
 
+#[test]
+fn async_composite_error_unions_preserve_payloads_copies_and_propagation() {
+    for (ty, input, expected, mutate) in composite_async_cases() {
+        let source = format!(
+            r#"
+struct Box<type T> {{ T value }}
+enum Choice<type T> {{ Value(T) Empty }}
+type Numbers = int[]
+type Lookup = [str]int
+fn checked<type T>(bool fail, T value, str message) T! {{
+    if {{ fail -> {{ throw message }} _ -> {{}} }}
+    return value
+}}
+fn wrapper<type T>(bool fail, T value, str message) T! {{
+    fut T! work = async checked<T>(fail, value, message)
+    T result = try await work
+    @println("wrapper completed")
+    return result
+}}
+test "async composite result" {{
+    uint seed = @args().len
+    mut {ty} value = {input}
+    {ty} expected = {expected}
+    fut {ty}! work = async checked<{ty}>(seed == 0, value, "unused")
+    mut int catches = 0
+    mut {ty} result = await work catch message {{
+        catches = catches + 1
+        break expected
+    }}
+    assert result == expected and value == expected
+    {mutate}
+    assert value == expected
+    assert catches == 0
+    {ty} completed = wrapper<{ty}>(seed == 0, value, "unused") catch message {{
+        catches = catches + 1
+        break expected
+    }}
+    assert completed == expected and catches == 0
+    {ty} recovered = wrapper<{ty}>(seed == 1, value, "failure-{{seed}}") catch message {{
+        assert @as(str, message) == "failure-1"
+        catches = catches + 1
+        break expected
+    }}
+    assert recovered == expected and catches == 1
+    assert value == expected
+    @println("composite propagation")
+}}
+"#
+        );
+        success(&source, "wrapper completed\ncomposite propagation\n");
+        success(
+            &source.replace("uint seed = @args().len", "uint seed = 1u"),
+            "wrapper completed\ncomposite propagation\n",
+        );
+    }
+}
+
+fn composite_async_cases() -> [(&'static str, &'static str, &'static str, &'static str); 10] {
+    [
+        (
+            "int[]",
+            "[@as(int, seed), 2]",
+            "[1, 2]",
+            "result[0] = 99; assert result == [99, 2]",
+        ),
+        (
+            "int[2]",
+            "[@as(int, seed), 2]",
+            "[1, 2]",
+            "result[1] = 99; assert result == [1, 99]",
+        ),
+        (
+            "Lookup",
+            "[\"key\": @as(int, seed)]",
+            "@as(Lookup, [\"key\": 1])",
+            "mut [str]int copy = @as([str]int, result); copy[\"key\"] = 99; copy[\"new\"] = 2; assert copy.len == 2 and copy[\"key\"] == 99 and result == @as(Lookup, [\"key\": 1])",
+        ),
+        (
+            "(str, int[])",
+            "(\"tuple-{seed}\", [@as(int, seed), 2])",
+            "(\"tuple-1\", [1, 2])",
+            "result[1][0] = 99; assert result[1] == [99, 2]",
+        ),
+        (
+            "Box<int[]>",
+            "Box<int[]>{.value = [@as(int, seed), 2]}",
+            "Box<int[]>{.value = [1, 2]}",
+            "result.value[0] = 99; assert result.value == [99, 2]",
+        ),
+        (
+            "Choice<int[]>",
+            "Choice.Value([@as(int, seed), 2])",
+            "Choice.Value([1, 2])",
+            "if result { Choice.Value(values) -> { mut int[] copy = values; copy[0] = 99; assert copy == [99, 2] } Choice.Empty -> { assert false } }; assert result == expected",
+        ),
+        (
+            "Choice<int[]>",
+            "Choice.Empty",
+            "Choice.Empty",
+            "if result { Choice.Value(values) -> { assert false } Choice.Empty -> {} }",
+        ),
+        (
+            "Numbers",
+            "@as(Numbers, [@as(int, seed), 2])",
+            "@as(Numbers, [1, 2])",
+            "mut int[] copy = @as(int[], result); copy[0] = 99; assert copy == [99, 2] and result == @as(Numbers, [1, 2])",
+        ),
+        (
+            "int[]?",
+            "[@as(int, seed), 2]",
+            "[1, 2]",
+            "mut int[] copy = result else { throw \"missing payload\" }; copy[0] = 99; assert copy == [99, 2] and result == expected",
+        ),
+        (
+            "int[]?",
+            "none",
+            "none",
+            "int[] copy = result else [@as(int, seed), 2]; assert copy == [1, 2] and result == expected",
+        ),
+    ]
+}
+
+#[test]
+fn optional_direct_throw_fallback_is_lazy_and_preserves_message() {
+    success(
+        r#"
+fn opt_throw(int? opt, str message) int! {
+    return opt else { throw message }
+}
+test "direct optional throw" {
+    int seed = @as(int, @args().len)
+    mut int catches = 0
+    int present = opt_throw(seed + 4, "unused") catch message {
+        catches = catches + 1
+        break -1
+    }
+    assert present == 5 and catches == 0
+    int absent = opt_throw(none, "missing-{seed}\u{0}🙂") catch message {
+        assert @as(str, message) == "missing-1\u{0}🙂"
+        catches = catches + 1
+        break 7
+    }
+    assert absent == 7 and catches == 1
+    @println("optional throw checked")
+}
+"#,
+        "optional throw checked\n",
+    );
+}
+
 fn scalar_async_cases() -> [(&'static str, &'static str, &'static str); 8] {
     [
         ("bool", "seed == 0", "false"),

@@ -2,10 +2,11 @@
 
 - [ ] Expand language and edge-case coverage.
   - [ ] Cover every part of the language and as many edge cases as possible.
-    - [ ] Continue missing positive coverage using `docs/coverage.md` to track
-          concrete assertions and compiler modes; retain existing syntax,
-          shadowing, literal, generic-example, exported-alias/private-state and
-          private-C-wrapper regressions in both modes.
+    - [ ] Continue remaining positive coverage using `docs/coverage.md`, focusing
+          on recursive generic and broader future/mutex payload combinations and
+          builtin/CLI edges; retain existing syntax, shadowing, literal,
+          generic/module, scalar/composite async error-union and direct optional
+          throw regressions in both modes.
 
     - [ ] Add missing negative cases for parsing, type checking, control flow,
           module loading, and builtin/extern restrictions in both build modes.
