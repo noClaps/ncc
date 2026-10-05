@@ -2,6 +2,160 @@ use std::fmt::Write as _;
 use std::{fs, path::Path, process::Command};
 
 #[test]
+fn character_patterns_match_ascii_graphemes_nuls_and_fallbacks() {
+    success(
+        r#"
+fn classify(char value) int {
+    return if value {
+        'A', 'B' -> { break 1 }
+        '🍪' -> { break 2 }
+        '👨‍👩‍👧‍👦' -> { break 3 }
+        'e\u{301}' -> { break 4 }
+        '\u{0}' -> { break 5 }
+        '\n' -> { break 6 }
+        _ -> { break -1 }
+    }
+}
+test "character subjects" {
+    assert classify('A') == 1
+    assert classify('B') == 1
+    assert classify('🍪') == 2
+    assert classify('👨‍👩‍👧‍👦') == 3
+    assert classify('e\u{301}') == 4
+    assert classify('\u{0}') == 5
+    assert classify('\n') == 6
+    assert classify('a') == -1
+    assert classify('🍰') == -1
+    char[] values = ['A', 'B', '🍪', '👨‍👩‍👧‍👦', 'e\u{301}', '\u{0}', '\n', 'a', '🍰']
+    int[] expected = [1, 1, 2, 3, 4, 5, 6, -1, -1]
+    uint offset = @args().len - 1
+    for index in values {
+        assert classify(values[index + offset]) == expected[index]
+    }
+    @println("character patterns checked")
+}
+"#,
+        "character patterns checked\n",
+    );
+}
+
+#[test]
+fn optional_conditional_results_select_payload_or_none() {
+    success(
+        r#"
+fn some_first(bool present, int value) int? {
+    int? result = if present {
+        true -> { break value }
+        false -> { break none }
+    }
+    return result
+}
+fn none_first(bool present, int value) int? {
+    int? result = if present {
+        false -> { break none }
+        true -> { break value }
+    }
+    return result
+}
+test "optional branch results" {
+    mut str trace = ""
+    fn choose(bool present, int value) int? {
+        int? result = if present {
+            true -> { trace = trace <> "P";break value }
+            false -> { trace = trace <> "N";break none }
+        }
+        return result
+    }
+    assert (some_first(true, 7) else -1) == 7
+    assert (some_first(false, 7) else -1) == -1
+    assert (none_first(true, 8) else -1) == 8
+    assert (none_first(false, 8) else -1) == -1
+    bool present = @args().len == 1
+    int value = @as(int, @args().len) + 6
+    assert (some_first(present, value) else -1) == 7
+    assert (some_first(not present, value) else -1) == -1
+    assert (none_first(present, value) else -1) == 7
+    assert (none_first(not present, value) else -1) == -1
+    int? selected = choose(present, value)
+    int recovered = selected else { trace = trace <> "F";break -1 }
+    assert recovered == 7 and trace == "P"
+    int? absent = choose(not present, value)
+    int fallback = absent else { trace = trace <> "F";break -1 }
+    assert fallback == -1 and trace == "PNF"
+    mut int[] original = [value, 2]
+    int[]? selected_array = if present {
+        true -> { break original }
+        false -> { break none }
+    }
+    original[0] = 99
+    int[] snapshot = selected_array else { throw "missing payload" }
+    assert snapshot == [7, 2]
+    int[]? absent_array = if present {
+        true -> { break none }
+        false -> { break original }
+    }
+    assert (absent_array else [3, 4]) == [3, 4]
+    @println(trace)
+}
+"#,
+        "PNF\n",
+    );
+}
+
+#[test]
+fn overlapping_predicates_choose_first_and_skip_later_effects() {
+    success(
+        r#"
+fn classify(int value) int {
+    return if {
+        value <= 5 -> { break 1 }
+        value <= 10 -> { break 2 }
+        _ -> { break 3 }
+    }
+}
+test "first predicate wins" {
+    assert classify(5) == 1
+    assert classify(6) == 2
+    assert classify(11) == 3
+    int seed = @as(int, @args().len)
+    assert classify(seed + 4) == 1
+    assert classify(seed + 5) == 2
+    assert classify(seed + 10) == 3
+    mut str trace = ""
+    fn check(bool condition, str label) bool {
+        trace = trace <> label
+        return condition
+    }
+    fn traced(int value) int {
+        return if {
+            check(value <= 5, "a") -> { trace = trace <> "A";break 1 }
+            check(value <= 10, "b") -> { trace = trace <> "B";break 2 }
+            _ -> { trace = trace <> "C";break 3 }
+        }
+    }
+    assert traced(seed + 4) == 1
+    assert trace == "aA"
+    trace = ""
+    assert traced(seed + 5) == 2
+    assert trace == "abB"
+    trace = ""
+    assert traced(seed + 10) == 3
+    assert trace == "abC"
+    trace = ""
+    if {
+        check(seed <= 5, "a") -> { trace = trace <> "A" }
+        check(seed <= 10, "b") -> { throw "later predicate executed" }
+        _ -> { throw "fallback executed" }
+    }
+    assert trace == "aA"
+    @println(trace)
+}
+"#,
+        "aA\n",
+    );
+}
+
+#[test]
 fn slash_comment_forms_execute_like_ordinary_comments() {
     for comment in ["//", "///", "////", "////////"] {
         success(
