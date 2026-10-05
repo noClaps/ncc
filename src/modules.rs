@@ -77,7 +77,7 @@ impl Loader {
         })?;
         let imported_module = lexer::lex(&source)
             .and_then(|tokens| parser::parse_at(tokens, &imported_path))
-            .map_err(|error| error.at_source(&imported_path, 0..0))?;
+            .map_err(|error| error.at_path(&imported_path))?;
         self.visit(imported_module, &imported_path, false)
     }
 

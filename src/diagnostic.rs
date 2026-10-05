@@ -14,6 +14,16 @@ pub struct Diagnostic {
 pub struct Diagnostics(pub Vec<Diagnostic>);
 
 impl Diagnostics {
+    /// Attach a source path without changing known spans, including empty EOF spans.
+    #[must_use]
+    pub fn at_path(mut self, path: &std::path::Path) -> Self {
+        for diagnostic in &mut self.0 {
+            if diagnostic.path.is_none() {
+                diagnostic.path = Some(path.to_path_buf());
+            }
+        }
+        self
+    }
     #[must_use]
     pub fn at_source(mut self, path: &std::path::Path, fallback: Range<usize>) -> Self {
         for diagnostic in &mut self.0 {

@@ -59,7 +59,7 @@ fn assert_original_diagnostic(
             "{}:{rendered_location}: error: {}\n  |\n{line:>2} | {}\n  | {}^\n",
             path.display(),
             diagnostic.message,
-            source.lines().nth(line - 1).unwrap(),
+            source.split('\n').nth(line - 1).unwrap(),
             " ".repeat(column - 1),
         )
     );
@@ -334,27 +334,40 @@ fn imported_tests_are_filtered_before_module_qualification() {
             error.render(library_source, &library_path)
         );
     }
-    let library_source = "test \"syntax\" {";
-    fs::write(&library_path, library_source).unwrap();
-    // Imported parse failures currently retain the file but fall back to its start.
-    for release in [false, true] {
-        for error in [
-            ncc::compile_source_with_options(source, &path, release).unwrap_err(),
-            ncc::compile_test_source_with_options(source, &path, release).unwrap_err(),
-        ] {
-            assert_eq!(error.0[0].path.as_deref(), Some(library_path.as_path()));
-            assert_original_diagnostic(
-                &error,
-                library_source,
-                &library_path,
-                0..0,
-                "expected expression, found Eof",
-                "1:1",
-            );
-            assert_eq!(
-                error.render(source, &path),
-                error.render(library_source, &library_path)
-            );
+}
+
+#[test]
+fn unterminated_imported_test_bodies_preserve_eof_locations() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let path = directory.path().join("main.nc");
+    let library_path = directory.path().join("library.nc");
+    let source = "import { \"library\" as lib }";
+    for (library_source, location) in [
+        ("test \"syntax\" {", "1:16"),
+        ("test \"syntax\" {\n  assert true;", "2:15"),
+        ("test \"café 🍪\" {", "1:16"),
+        ("test \"syntax\" {\n  assert true\n", "3:1"),
+    ] {
+        fs::write(&library_path, library_source).unwrap();
+        for release in [false, true] {
+            for error in [
+                ncc::compile_source_with_options(source, &path, release).unwrap_err(),
+                ncc::compile_test_source_with_options(source, &path, release).unwrap_err(),
+            ] {
+                assert_original_diagnostic(
+                    &error,
+                    library_source,
+                    &library_path,
+                    library_source.len()..library_source.len(),
+                    "expected expression, found Eof",
+                    location,
+                );
+                assert_eq!(error.0[0].path.as_deref(), Some(library_path.as_path()));
+                assert_eq!(
+                    error.render(source, &path),
+                    error.render(library_source, &library_path)
+                );
+            }
         }
     }
 }
