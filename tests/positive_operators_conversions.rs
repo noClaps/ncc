@@ -70,6 +70,151 @@ fn finite_float_arithmetic_uses_exact_binary_fraction_oracles() {
 }
 
 #[test]
+fn signed_integer_to_float_rounds_binary64_neighbors_and_extrema_to_even() {
+    // Decimal expectations are explicit binary64 values, not host integer casts.
+    let cases = [
+        ("9007199254740991", "9007199254740991.0"),
+        ("9007199254740992", "9007199254740992.0"),
+        ("9007199254740993", "9007199254740992.0"),
+        ("9007199254740994", "9007199254740994.0"),
+        ("9007199254740995", "9007199254740996.0"),
+        ("9007199254740996", "9007199254740996.0"),
+        ("18014398509481983", "18014398509481984.0"),
+        ("18014398509481984", "18014398509481984.0"),
+        ("18014398509481985", "18014398509481984.0"),
+        ("18014398509481986", "18014398509481984.0"),
+        ("18014398509481987", "18014398509481988.0"),
+        ("18014398509481988", "18014398509481988.0"),
+        ("18014398509481989", "18014398509481988.0"),
+        ("18014398509481990", "18014398509481992.0"),
+        ("18014398509481991", "18014398509481992.0"),
+    ];
+    for offset in ["0", "@as(int, @args().len) - 1"] {
+        let mut source = format!("test \"signed binary64 rounding\" {{\nint offset = {offset}\n");
+        for (integer, expected) in cases {
+            writeln!(
+                source,
+                "assert @as(float, {integer} + offset) == {expected}\n\
+                 assert @as(float, -{integer} + offset) == -{expected}"
+            )
+            .unwrap();
+        }
+        // The rounded maximum is outside int's range: deliberately do not backcast.
+        writeln!(
+            source,
+            "assert @as(float, 9223372036854775807 + offset) == 9223372036854775808.0\n\
+             assert @as(float, -9223372036854775808 + offset) == -9223372036854775808.0\n\
+             @println(\"checked\")\n}}"
+        )
+        .unwrap();
+        success(&source);
+    }
+}
+
+#[test]
+fn unsigned_integer_to_float_rounds_binary64_neighbors_and_maximum_to_even() {
+    let cases = [
+        ("9007199254740991", "9007199254740991.0"),
+        ("9007199254740992", "9007199254740992.0"),
+        ("9007199254740993", "9007199254740992.0"),
+        ("9007199254740994", "9007199254740994.0"),
+        ("9007199254740995", "9007199254740996.0"),
+        ("9007199254740996", "9007199254740996.0"),
+        ("18014398509481983", "18014398509481984.0"),
+        ("18014398509481984", "18014398509481984.0"),
+        ("18014398509481985", "18014398509481984.0"),
+        ("18014398509481986", "18014398509481984.0"),
+        ("18014398509481987", "18014398509481988.0"),
+        ("18014398509481988", "18014398509481988.0"),
+        ("18014398509481989", "18014398509481988.0"),
+        ("18014398509481990", "18014398509481992.0"),
+        ("18014398509481991", "18014398509481992.0"),
+        ("9223372036854775807", "9223372036854775808.0"),
+        ("9223372036854775808", "9223372036854775808.0"),
+        ("18446744073709551615", "18446744073709551616.0"),
+    ];
+    for offset in ["0u", "@as(uint, @args().len) - 1u"] {
+        let mut source =
+            format!("test \"unsigned binary64 rounding\" {{\nuint offset = {offset}\n");
+        for (integer, expected) in cases {
+            writeln!(
+                source,
+                "assert @as(float, {integer}u + offset) == {expected}"
+            )
+            .unwrap();
+        }
+        // uint max rounds to 2^64, so no float-to-uint backcast is valid here.
+        source.push_str("@println(\"checked\")\n}\n");
+        success(&source);
+    }
+}
+
+#[test]
+fn finite_float_arithmetic_rounds_nonexact_results_and_binary64_ties() {
+    let cases = [
+        ("0.1", "+", "0.2", "0.30000000000000004"),
+        ("0.3", "-", "0.2", "0.09999999999999998"),
+        ("0.1", "*", "0.2", "0.020000000000000004"),
+        ("0.1", "/", "0.3", "0.33333333333333337"),
+        ("2.0", "/", "3.0", "0.6666666666666666"),
+        ("9007199254740992.0", "+", "1.0", "9007199254740992.0"),
+        ("9007199254740992.0", "+", "3.0", "9007199254740996.0"),
+        ("9007199254740994.0", "-", "1.0", "9007199254740992.0"),
+        ("9007199254740996.0", "-", "1.0", "9007199254740996.0"),
+        ("-9007199254740992.0", "-", "1.0", "-9007199254740992.0"),
+        ("-9007199254740992.0", "-", "3.0", "-9007199254740996.0"),
+    ];
+    for offset in ["0.0", "@as(float, @args().len) - 1.0"] {
+        let mut source =
+            format!("test \"finite binary64 arithmetic\" {{\nfloat offset = {offset}\n");
+        for (left, operator, right, expected) in cases {
+            writeln!(
+                source,
+                "assert ({left} + offset) {operator} ({right} + offset) == {expected}"
+            )
+            .unwrap();
+        }
+        source.push_str("@println(\"checked\")\n}\n");
+        success(&source);
+    }
+}
+
+#[test]
+fn finite_float_operations_round_separately_before_cancellation() {
+    for offset in ["0.0", "@as(float, @args().len) - 1.0"] {
+        success(&format!(
+            r#"test "separate binary64 rounding" {{
+    float offset = {offset}
+    float large = 9007199254740992.0 + offset
+    float one = 1.0 + offset
+    float rounded_sum = large + one
+    assert rounded_sum == 9007199254740992.0
+    assert rounded_sum - large == 0.0
+    assert (large + one) - large == 0.0
+    assert large + (one - large) == 1.0
+    float tenth = 0.1 + offset
+    float fifth = 0.2 + offset
+    float sum = tenth + fifth
+    assert sum == 0.30000000000000004
+    assert sum - 0.3 == 0.00000000000000005551115123125783
+    assert (tenth + fifth) - 0.3 == 0.00000000000000005551115123125783
+    float factor = 1.0000000000000002 + offset
+    float product = factor * factor
+    assert product == 1.0000000000000004
+    assert product - 1.0000000000000004 == 0.0
+    assert (factor * factor) - 1.0000000000000004 == 0.0
+    float quotient = one / (10.0 + offset)
+    assert quotient == 0.1
+    assert quotient * 3.0 == 0.30000000000000004
+    assert (one / (10.0 + offset)) * 3.0 == 0.30000000000000004
+    @println("checked")
+}}
+"#
+        ));
+    }
+}
+
+#[test]
 fn boolean_conversions_cover_both_values_and_all_specified_destinations() {
     for source in ["false", "true", "@args().len == 0", "@args().len == 1"] {
         let (number, text) = if source == "true" || source == "@args().len == 1" {

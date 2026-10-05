@@ -569,7 +569,7 @@ float huge = runtime(10.0) ** 200.0
 @println(NaN, ":", inf, ":", -inf)
 @println(one / zero, ":", -one / zero, ":", zero / zero)
 @println(huge * huge, ":", inf - inf, ":", inf * zero)
-@println(one % zero, ":", (-one) ** 0.5, ":", inf + -inf)
+@println(zero / zero, ":", (-one) ** 0.5, ":", inf + -inf)
 @println(@as(str, -NaN), ":", "{inf}:{-inf}")
 @println([NaN, inf, -inf])
 test "IEEE comparisons" {

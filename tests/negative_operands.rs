@@ -43,6 +43,23 @@ fn mixed_numeric_bindings_require_explicit_conversion_for_binary_operators() {
 }
 
 #[test]
+fn modulo_rejects_float_operands_before_folding_or_codegen() {
+    for source in [
+        "_ = 5.5 % 2.0",
+        "_ = 1.0 % 0.0",
+        "_ = inf % 2.0",
+        "_ = NaN % 2.0",
+        "float a = 5.5\nfloat b = 2.0\n_ = a % b",
+        "float a = @as(float, @args().len)\n_ = a % 2.0",
+        "fn remainder(float a, float b) float { return a % b }\n_ = remainder(5.5, 2.0)",
+        "fn remainder<type T>(T a, T b) T { return a % b }\n_ = remainder<float>(5.5, 2.0)",
+        "float[] values = [5.5, 2.0]\n_ = values[0] % values[1]",
+    ] {
+        rejects(source, "modulo requires integer operands");
+    }
+}
+
+#[test]
 fn mixed_logical_bindings_do_not_coerce_to_boolean() {
     for (ty, value) in [
         ("int", "1"),

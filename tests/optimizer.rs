@@ -913,13 +913,13 @@ fn values() float[] {
     return [positive, negative, nan, large * 2.0,
         -large * 2.0, positive + 1.0, positive + negative,
         positive - positive, positive * 0.0, positive / positive,
-        1.0 % 0.0, positive % 2.0, 2.0 ** 1024.0, (-1.0) ** 0.5,
+        2.0 ** 1024.0, (-1.0) ** 0.5,
         0.0 ** -1.0, nan + 1.0, -nan]
 }
 @println(values())
 ",
         &["values"],
-        "[inf, -inf, NaN, inf, -inf, inf, NaN, NaN, NaN, NaN, NaN, NaN, inf, NaN, inf, NaN, NaN]\n",
+        "[inf, -inf, NaN, inf, -inf, inf, NaN, NaN, NaN, NaN, inf, NaN, inf, NaN, NaN]\n",
     );
 }
 

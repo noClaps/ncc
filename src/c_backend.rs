@@ -2919,12 +2919,11 @@ impl Emitter<'_> {
         let result = self.fresh();
         self.line(format!("{ct} {result};"));
         if matches!(&ty, Type::Named(n, _) if n == "float") {
-            if matches!(op, BinaryOp::Pow | BinaryOp::Mod) {
+            if op == BinaryOp::Pow {
                 self.headers.insert("math.h");
             }
             let operation = match op {
                 BinaryOp::Pow => format!("pow({left}, {right})"),
-                BinaryOp::Mod => format!("fmod({left}, {right})"),
                 _ => format!("{left} {} {right}", operator(op)),
             };
             self.line(format!("{result} = {operation};"));

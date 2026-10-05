@@ -4,9 +4,6 @@
   - [ ] Cover every part of the language and as many edge cases as possible.
     - [ ] Cover numeric boundaries, Unicode character boundaries, embedded NULs,
           empty containers, and runtime failures.
-      - [ ] Extend exact numeric conversion samples through `2^53` to specified
-            inexact large integer-to-float rounding and nonexact finite-float
-            arithmetic cases; clarify float remainder before testing it.
     - [ ] Expand async, future, mutex, and shared-storage coverage without relying
           on a particular thread schedule.
       - [ ] Add deterministic pre-await progress and mutex-contention checks;

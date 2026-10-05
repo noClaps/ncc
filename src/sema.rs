@@ -1383,12 +1383,10 @@ impl Checker {
             BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge if !numeric(&l) => {
                 return Checker::fail("ordered comparisons require numeric operands");
             }
-            BinaryOp::Add
-            | BinaryOp::Sub
-            | BinaryOp::Mul
-            | BinaryOp::Div
-            | BinaryOp::Mod
-            | BinaryOp::Pow => {
+            BinaryOp::Mod if !numeric(&l) || l == named("float") => {
+                return Checker::fail("modulo requires integer operands");
+            }
+            BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Pow => {
                 if !numeric(&l) {
                     return Checker::fail("arithmetic requires numeric operands");
                 }

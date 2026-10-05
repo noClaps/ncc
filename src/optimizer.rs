@@ -1353,7 +1353,7 @@ impl<'module> Evaluator<'module> {
         })
     }
     fn float(a: f64, b: f64, op: BinaryOp) -> Option<Value> {
-        use BinaryOp::{Add, Div, Eq, Ge, Gt, Le, Lt, Mod, Mul, Ne, Pow, Sub};
+        use BinaryOp::{Add, Div, Eq, Ge, Gt, Le, Lt, Mul, Ne, Pow, Sub};
         let comparison = match op {
             // NC equality is exact IEEE-754 equality, not an approximate comparison.
             #[allow(clippy::float_cmp)]
@@ -1375,7 +1375,6 @@ impl<'module> Evaluator<'module> {
             Sub => a - b,
             Mul => a * b,
             Div => a / b,
-            Mod => a % b,
             Pow => a.powf(b),
             _ => return None,
         };

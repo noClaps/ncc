@@ -58,6 +58,10 @@
   - The `@as` conversion table is exhaustive. Reject `byte` to `float` and typed
     `int`/`uint`/`float` to `byte`; preserve contextual byte literals, identity
     conversions and immediate nominal underlying unwrap/rewrap operations.
+  - Integer-to-float conversions and basic float arithmetic use binary64
+    round-to-nearest, ties-to-even. Round each arithmetic operation separately;
+    preserve intermediate rounding rather than reassociating or fusing operations.
+    The `%` operator accepts only integer types, never floats.
   - Bit shifts are arithmetic: signed right shifts round toward negative infinity.
     Generate portable C without relying on negative signed right shifts.
   - Functions share surrounding mutable bindings, including nested/anonymous
