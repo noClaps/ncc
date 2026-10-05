@@ -5,10 +5,10 @@
     - [ ] Add missing positive cases for syntax, types, expressions, statements,
           functions, generics, modules, builtins, and C externs, using
           `docs/coverage.md` to track concrete assertions and compiler modes.
-      - [ ] Cover doc comments, multiline execution, sigil ordering, optional tuple
-            handling, scalar truth tables, and positive bitwise OR/XOR/complement.
+
       - [ ] Cover character patterns, optional conditional results, overlapping
             predicates, generic error payloads, and async void error unions.
+
     - [ ] Add missing negative cases for parsing, type checking, control flow,
           module loading, and builtin/extern restrictions in both build modes.
       - [ ] Cover mixed operand types, pattern exhaustiveness and lengths,

@@ -2,6 +2,368 @@ use std::fmt::Write as _;
 use std::{fs, path::Path, process::Command};
 
 #[test]
+fn slash_comment_forms_execute_like_ordinary_comments() {
+    for comment in ["//", "///", "////", "////////"] {
+        success(
+            &format!(
+                "{comment} ignored: throw \"bad\"; {{ invalid syntax\n\
+                 fn add(int value) int {{ {comment} documentation\n\
+                 return value + 2 {comment} ignored return 99\n\
+                 }}\n\
+                 int value = 3 {comment} ignored ; value = 99\n\
+                 @println(add(value)) {comment} ignored output\n"
+            ),
+            "5\n",
+        );
+    }
+}
+
+#[test]
+fn multiline_expressions_and_member_declarations_execute() {
+    success(
+        r#"
+struct Pair { int left int right }
+enum Choice { First Second(int) }
+fn add(int left, int right) int { return left + right }
+fn result() int! { return 7 }
+test "multiline execution" {
+    int seed = @as(int, @args().len)
+    int value
+    =
+    seed +
+    2
+    + 3
+    int[] values = [
+        value,
+        add(
+            seed,
+            4
+        )
+    ]
+    Pair pair = Pair{
+        .left = values[
+            0
+        ],
+        .right = values[1]
+    }
+    assert pair
+        .left == 6
+    assert pair.right == 5
+    assert Choice.Second(pair.left) != Choice.First
+    int? absent = none
+    int fallback = absent
+        else { break seed + 8 }
+    int returned = result()
+        catch message { throw message }
+    assert fallback == 9
+    assert returned == 7
+    @println(pair.left, ":", pair.right, ":", fallback, ":", returned)
+}
+"#,
+        "6:5:9:7\n",
+    );
+}
+
+#[test]
+fn triple_quoted_strings_dedent_interpolate_quotes_and_escapes() {
+    success(
+        r#"
+str literal = """
+  Hello World
+    Indented line
+  Unindented line
+  """
+@print(literal)
+int value = @as(int, @args().len) + 6
+@print("""
+  3 + 5 = {3 + 5}
+  runtime = {value}
+    "quoted" and ""paired""
+  escapes: \t|\r|\n|\\|\"|\{value}|\u{1F36A}|\e
+  """)
+"#,
+        "Hello World\n  Indented line\nUnindented line\n3 + 5 = 8\nruntime = 7\n  \"quoted\" and \"\"paired\"\"\nescapes: \t|\r|\n|\\|\"|{value}|🍪|\u{1b}\n",
+    );
+}
+
+#[test]
+fn optional_array_and_optional_element_sigils_are_distinct() {
+    success(
+        r#"
+test "ordered optional sigils" {
+    int value = @as(int, @args().len)
+    mut int[]? whole = none
+    mut int?[] elements = [none]
+    assert (whole else [9]) == [9]
+    assert elements.len == 1
+    assert (elements[0] else 9) == 9
+    whole = [value, 2]
+    int[] unwrapped = whole else { throw "missing array" }
+    assert unwrapped == [1, 2]
+    elements = [value, none, 3]
+    assert elements.len == 3
+    assert (elements[0] else 9) == 1
+    assert (elements[1] else 9) == 9
+    assert (elements[2] else 9) == 3
+    whole = []
+    int[] empty = whole else [9]
+    assert empty.len == 0
+    elements = []
+    assert elements.len == 0
+    whole = none
+    assert (whole else [9]) == [9]
+    int[]? literal_whole = [4]
+    int?[] literal_elements = [none, 4]
+    assert (literal_whole else []) == [4]
+    assert (literal_elements[1] else 0) == 4
+}
+"#,
+        "",
+    );
+    for source in [
+        "int[]? values = [none]",
+        "int?[] values = none",
+        "mut int[]? values = [1];values = [none]",
+        "mut int?[] values = [none];values = none",
+    ] {
+        rejects(source, "cannot infer type of none");
+    }
+    for source in [
+        "int? absent = none;mut int[]? values = [1];values = [absent]",
+        "int[]? absent = none;mut int?[] values = [none];values = absent",
+    ] {
+        rejects(source, "expected");
+    }
+}
+
+#[test]
+fn optional_tuples_require_unwrap_before_full_or_partial_destructuring() {
+    success(
+        r#"
+test "optional tuple unwrap" {
+    int value = @as(int, @args().len)
+    (int, int, int)? optional = (value, 2, 3)
+    (int, int, int) unwrapped = optional else { throw "missing tuple" }
+    int first, int second, int third = unwrapped
+    assert first == 1 and second == 2 and third == 3
+    int head, (int, int) tail = unwrapped
+    assert head == 1 and tail == (2, 3)
+    (int, int)? literal = (4, 5)
+    (int, int) present = literal else { throw "present tuple threw" }
+    int left, int right = present
+    assert left == 4 and right == 5
+}
+"#,
+        "",
+    );
+    for initializer in ["none", "(1, 2, 3)"] {
+        for bindings in ["int a, int b, int c", "int a, (int, int) rest"] {
+            rejects(
+                &format!("(int, int, int)? value = {initializer};{bindings} = value"),
+                "expected",
+            );
+        }
+    }
+}
+
+#[test]
+fn optional_tuple_else_throw_distinguishes_present_and_absent() {
+    success(
+        r#"
+fn require((int, int)? value) (int, int)! {
+    return value else { throw "missing optional tuple" }
+}
+test "present and caught absent" {
+    int seed = @as(int, @args().len)
+    (int, int) present = require((seed, 2)) catch message { throw message }
+    assert present == (1, 2)
+    mut int catches = 0
+    (int, int) recovered = require(none) catch message {
+        assert @as(str, message) == "missing optional tuple"
+        catches = catches + 1
+        break (3, 4)
+    }
+    assert catches == 1
+    assert recovered == (3, 4)
+}
+"#,
+        "",
+    );
+    runtime_failure(
+        r#"
+test "absent tuple throws" {
+    (int, int)? value = none
+    (int, int) unwrapped = value else { throw "missing optional tuple" }
+    int first, int second = unwrapped
+    @println(first, second)
+}
+"#,
+        "missing optional tuple",
+    );
+}
+
+#[test]
+fn logical_truth_tables_preserve_effects_and_short_circuiting() {
+    let mut source = String::from(
+        "test \"logical truth tables\" {\n\
+         bool runtime_true = @args().len == 1\n\
+         bool runtime_false = @args().len == 0\n\
+         mut str trace = \"\"\n\
+         fn mark(bool value, str label) bool { trace = trace <> label;return value }\n",
+    );
+    for left in [false, true] {
+        for right in [false, true] {
+            for (operator, expected, rhs_runs) in
+                [("and", left && right, left), ("or", left || right, !left)]
+            {
+                writeln!(
+                    source,
+                    "assert ({left} {operator} {right}) == {expected}\n\
+                     trace = \"\"\n\
+                     assert (mark(runtime_{left}, \"L\") {operator} mark(runtime_{right}, \"R\")) == {expected}\n\
+                     assert trace == \"{}\"",
+                    if rhs_runs { "LR" } else { "L" },
+                )
+                .unwrap();
+            }
+        }
+        writeln!(
+            source,
+            "assert (not {left}) == {}\n\
+             trace = \"\"\n\
+             assert (not mark(runtime_{left}, \"N\")) == {}\n\
+             assert trace == \"N\"",
+            !left, !left,
+        )
+        .unwrap();
+    }
+    source.push_str("}\n");
+    success(&source, "");
+}
+
+#[test]
+fn finite_numeric_comparison_truth_tables_cover_all_scalar_types() {
+    for (ty, values) in [
+        ("byte", vec!["0", "1", "127", "128", "255"]),
+        (
+            "int",
+            vec![
+                "-9223372036854775808",
+                "-1",
+                "0",
+                "1",
+                "9223372036854775807",
+            ],
+        ),
+        (
+            "uint",
+            vec!["0u", "1u", "9223372036854775808u", "18446744073709551615u"],
+        ),
+        (
+            "float",
+            vec![
+                "-9007199254740992.0",
+                "-1.5",
+                "-0.0",
+                "0.0",
+                "0.5",
+                "9007199254740992.0",
+            ],
+        ),
+    ] {
+        let mut source = format!(
+            "test \"{ty} comparisons\" {{\n\
+             {ty} zero = @as({ty}, @args().len - 1)\n"
+        );
+        for (left_index, left) in values.iter().enumerate() {
+            for (right_index, right) in values.iter().enumerate() {
+                let ordering = if ty == "float" {
+                    left.parse::<f64>()
+                        .unwrap()
+                        .partial_cmp(&right.parse::<f64>().unwrap())
+                        .unwrap()
+                } else {
+                    left_index.cmp(&right_index)
+                };
+                for (operator, expected) in [
+                    ("==", ordering.is_eq()),
+                    ("!=", !ordering.is_eq()),
+                    ("<", ordering.is_lt()),
+                    ("<=", !ordering.is_gt()),
+                    (">", ordering.is_gt()),
+                    (">=", !ordering.is_lt()),
+                ] {
+                    writeln!(
+                        source,
+                        "assert (@as({ty}, {left}) {operator} @as({ty}, {right})) == {expected}\n\
+                         assert ((@as({ty}, {left}) + zero) {operator} (@as({ty}, {right}) + zero)) == {expected}"
+                    )
+                    .unwrap();
+                }
+            }
+        }
+        source.push_str("}\n");
+        success(&source, "");
+    }
+}
+
+#[test]
+fn bitwise_integer_truth_tables_include_boundaries_and_complements() {
+    let byte_values = [0u8, 1, 6, 85, 128, 170, 255];
+    let int_values = [i64::MIN, -7, -1, 0, 1, 6, i64::MAX];
+    let uint_values = [0u64, 1, 6, 1 << 63, u64::MAX];
+    for (ty, values) in [
+        ("byte", byte_values.map(u64::from).to_vec()),
+        (
+            "int",
+            int_values
+                .map(|value| u64::from_ne_bytes(value.to_ne_bytes()))
+                .to_vec(),
+        ),
+        ("uint", uint_values.to_vec()),
+    ] {
+        let literal = |bits: u64| match ty {
+            "int" => i64::from_ne_bytes(bits.to_ne_bytes()).to_string(),
+            "uint" => format!("{bits}u"),
+            _ => bits.to_string(),
+        };
+        let mut source = format!(
+            "test \"{ty} bitwise\" {{\n\
+             {ty} zero = @as({ty}, @args().len - 1)\n"
+        );
+        for left in &values {
+            let complement = if ty == "byte" { !left & 255 } else { !left };
+            let left_literal = literal(*left);
+            let expected = literal(complement);
+            writeln!(
+                source,
+                "assert (!@as({ty}, {left_literal})) == @as({ty}, {expected})\n\
+                 assert (!(@as({ty}, {left_literal}) + zero)) == @as({ty}, {expected})"
+            )
+            .unwrap();
+            for right in &values {
+                let right_literal = literal(*right);
+                for (operator, expected) in [
+                    ("&", left & right),
+                    ("|", left | right),
+                    ("^", left ^ right),
+                ] {
+                    let expected = literal(expected);
+                    writeln!(
+                        source,
+                        "assert (@as({ty}, {left_literal}) {operator} @as({ty}, {right_literal})) == @as({ty}, {expected})\n\
+                         assert ((@as({ty}, {left_literal}) + zero) {operator} (@as({ty}, {right_literal}) + zero)) == @as({ty}, {expected})"
+                    )
+                    .unwrap();
+                }
+            }
+        }
+        source.push_str("}\n");
+        success(&source, "");
+    }
+}
+
+#[test]
 fn map_concatenation_overwrites_collisions_without_aliasing_operands() {
     success(
         r#"
