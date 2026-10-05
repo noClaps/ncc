@@ -5,8 +5,9 @@
     - [ ] Add missing negative cases for parsing, type checking, control flow,
           module loading, and builtin/extern restrictions in both build modes.
 
-      - [ ] Cover selective/wildcard imports, multi-file cycles, extern visibility,
-            literal paths/symbols, call signatures, and invalid builtin calls.
+      - [ ] Clarify valid multi-file circular-import semantics before adding
+            cycle acceptance/rejection cases; retain malformed/missing imports
+            on cycle graphs and selective/wildcard, extern and builtin negatives.
       - [ ] Extend debug-only embed and external-declaration rejection cases to
             both modes, including symlinks and controlled unreadable-file cases.
 
@@ -42,6 +43,8 @@
       - [ ] Clarify specialized generic function-value syntax; bare
             `identity<Count>` currently fails parsing, while typed callback
             wrappers forwarding explicit generic calls are covered.
+      - [ ] Clarify whether the conversion table is exhaustive: the compiler
+            accepts `byte` to `float`, which the table does not list.
       - [ ] Clarify multiline/Unicode contracts, observable representation,
             map key rules, function-result consumption, and caught error values.
       - [ ] Clarify nested lock jump targets, future lifecycle, permitted race
