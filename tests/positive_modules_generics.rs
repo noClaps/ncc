@@ -669,6 +669,211 @@ test "recursive generic enum copies" {{
     }
 }
 
+const MUTUALLY_RECURSIVE_GENERIC_DEFINITIONS: &str = r"
+pub struct Forest<type T> { T value Branch<T>[] branches }
+pub struct Branch<type T> { [str]Forest<T> trees }
+pub fn count<type T>(Forest<T> forest) uint {
+    mut uint total = 1
+    for i in forest.branches { total = total + count_branch<T>(forest.branches[i]) }
+    return total
+}
+fn count_branch<type T>(Branch<T> branch) uint {
+    mut uint total = 0
+    for key in branch.trees { total = total + count<T>(branch.trees[key]) }
+    return total
+}
+pub fn rebuild<type T>(Forest<T> forest, T value) Forest<T> {
+    mut Forest<T> local = forest
+    local.value = value
+    for i in local.branches { local.branches[i] = rebuild_branch<T>(local.branches[i], value) }
+    return local
+}
+fn rebuild_branch<type T>(Branch<T> branch, T value) Branch<T> {
+    mut Branch<T> local = branch
+    for key in local.trees { local.trees[key] = rebuild<T>(local.trees[key], value) }
+    return local
+}
+";
+
+const MUTUALLY_RECURSIVE_GENERIC_CHECKS: &str = r#"
+test "mutually recursive generic copies" {
+    int seed = @as(int, @args().len)
+    uint index = @args().len - 1
+    mut int[] payload = [INITIAL, 8]
+    mut $Forest<int[]> leaf = $Forest<int[]>{.value = payload, .branches = []}
+    $Branch<int[]> empty = $Branch<int[]>{.trees = []}
+    $Branch<int[]> branch = $Branch<int[]>{.trees = ["leaf": leaf]}
+    $Forest<int[]> middle = $Forest<int[]>{.value = [9], .branches = [branch, empty]}
+    mut $Forest<int[]> original = $Forest<int[]>{.value = [10], .branches = [
+        $Branch<int[]>{.trees = ["middle": middle, "sibling": leaf]}
+    ]}
+    mut $Forest<int[]> copy = original
+    $Forest<int[]> snapshot = original
+    payload[0] = 11
+    leaf.value[0] = 12
+    int[] expected = [7, 8]
+    assert original.branches[0].trees["middle"].branches[0].trees["leaf"].value == expected
+    assert original.branches[0].trees["sibling"].value == expected
+    assert $count<int[]>(original) == 4 and $count<int[]>(leaf) == 1
+    assert $rebuild<int[]>(leaf, []) == $Forest<int[]>{.value = [], .branches = []}
+    mut int[] replacement = [13]
+    mut $Forest<int[]> rebuilt = $rebuild<int[]>(original, replacement)
+    replacement[0] = 14
+    int[] thirteen = [13]
+    assert rebuilt.value == thirteen
+    assert rebuilt.branches[0].trees["middle"].value == thirteen
+    assert rebuilt.branches[0].trees["middle"].branches[0].trees["leaf"].value == thirteen
+    assert rebuilt.branches[0].trees["sibling"].value == thirteen
+    assert rebuilt.branches[0].trees["middle"].branches[1] == empty
+    assert $count<int[]>(rebuilt) == 4
+    rebuilt.branches[index].trees["middle"].branches[index].trees["leaf"].value[index] = 15
+    assert rebuilt.value == thirteen and rebuilt.branches[0].trees["sibling"].value == thirteen
+    copy.branches[index].trees["middle"].branches[index].trees["leaf"].value[index] = 16
+    copy.branches[index].trees["middle"].branches[index].trees["extra"] = leaf
+    assert $count<int[]>(copy) == 5
+    assert copy.branches[0].trees["middle"].branches[0].trees["leaf"].value[0] == 16
+    assert copy.branches[0].trees["middle"].branches[0].trees["extra"].value[0] == 12
+    assert copy.branches[0].trees["sibling"].value == expected
+    assert original == snapshot and copy != snapshot and rebuilt != snapshot
+    mut [str]$Forest<int[]> extracted = snapshot.branches[0].trees
+    extracted["middle"].branches[index].trees["leaf"].value[index] = 17
+    original.branches[index].trees["sibling"].value[index] = 18
+    assert snapshot.branches[0].trees["sibling"].value == expected
+    assert snapshot.branches[0].trees["middle"].branches[0].trees["leaf"].value == expected
+    assert extracted["middle"].branches[0].trees["leaf"].value[0] == 17
+
+    $Forest<str> text_leaf = $Forest<str>{.value = "old", .branches = []}
+    $Forest<str> text = $Forest<str>{.value = "root", .branches = [
+        $Branch<str>{.trees = ["leaf": text_leaf]}, $Branch<str>{.trees = []}
+    ]}
+    $Forest<str> text_rebuilt = $rebuild<str>(text, "new")
+    assert $count<str>(text) == 2 and $count<str>(text_rebuilt) == 2
+    assert text_rebuilt.value == "new" and text_rebuilt.branches[0].trees["leaf"].value == "new"
+    assert text.value == "root" and text.branches[0].trees["leaf"].value == "old"
+    assert text_rebuilt.branches[1].trees.len == 0
+    @println("mutual copies checked")
+}
+"#;
+
+#[test]
+fn mutually_recursive_generic_structs_preserve_traversal_rebuilds_and_deep_copies() {
+    for initial in ["7", "seed + 6"] {
+        let checks = MUTUALLY_RECURSIVE_GENERIC_CHECKS
+            .replace('$', "")
+            .replace("INITIAL", initial);
+        success(
+            &format!("{MUTUALLY_RECURSIVE_GENERIC_DEFINITIONS}\n{checks}"),
+            b"mutual copies checked\n",
+        );
+    }
+}
+
+#[test]
+fn imported_mutually_recursive_generic_structs_preserve_traversal_rebuilds_and_deep_copies() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let input = directory.path().join("main.nc");
+    fs::write(
+        directory.path().join("forest.nc"),
+        MUTUALLY_RECURSIVE_GENERIC_DEFINITIONS,
+    )
+    .unwrap();
+    for initial in ["7", "seed + 6"] {
+        let checks = MUTUALLY_RECURSIVE_GENERIC_CHECKS
+            .replace('$', "forest.")
+            .replace("INITIAL", initial);
+        fs::write(
+            &input,
+            format!("import {{ \"forest\" as forest }}\n{checks}"),
+        )
+        .unwrap();
+        run_both(&input, b"mutual copies checked\n");
+    }
+}
+
+#[test]
+fn imported_recursive_generic_enum_preserves_traversal_rebuilds_and_deep_copies() {
+    let directory = ncc::temp::Directory::new().unwrap();
+    let input = directory.path().join("main.nc");
+    let definitions = RECURSIVE_GENERIC_ENUM_DEFINITIONS
+        .replace("\ntype ", "\npub type ")
+        .replace("\nenum ", "\npub enum ")
+        .replace("\nfn ", "\npub fn ");
+    fs::write(directory.path().join("tree.nc"), definitions).unwrap();
+    for initial in ["7", "@as(tree.Count, seed + 6)"] {
+        let source = r#"
+import { "tree" as tree }
+test "imported recursive enum copies" {
+    int seed = @as(int, @args().len)
+    uint index = @args().len - 1
+    mut tree.Count[] payload = [INITIAL, 8]
+    tree.Tree<tree.Count[]> leaf = tree.Tree.Leaf(payload)
+    tree.Tree<tree.Count[]> empty = tree.Tree.Empty
+    tree.Tree<tree.Count[]> empty_branch = tree.Tree.Branch([])
+    tree.Tree<tree.Count[]> empty_map = tree.Tree.Named([])
+    tree.Tree<tree.Count[]> branch = tree.Tree.Branch([leaf, empty, empty_branch, empty_map])
+    tree.Tree<tree.Count[]> original = tree.Tree.Named(["branch": branch, "sibling": leaf])
+    tree.Tree<tree.Count[]> snapshot = original
+    payload[index] = 9
+    tree.Count[] expected = [7, 8]
+    assert tree.leaf_value<tree.Count[]>(leaf, []) == expected
+    assert tree.count<tree.Count[]>(original) == 2
+    assert tree.count<tree.Count[]>(empty) == 0
+    assert tree.count<tree.Count[]>(empty_branch) == 0 and tree.count<tree.Count[]>(empty_map) == 0
+    assert tree.replace<tree.Count[]>(empty, [10]) == empty
+    assert tree.replace<tree.Count[]>(empty_branch, [10]) == empty_branch
+    assert tree.replace<tree.Count[]>(empty_map, [10]) == empty_map
+    mut tree.Count[] replacement = [10]
+    tree.Tree<tree.Count[]> rebuilt = tree.replace<tree.Count[]>(original, replacement)
+    replacement[index] = 11
+    tree.Tree<tree.Count[]> changed_leaf = tree.Tree.Leaf([10])
+    tree.Tree<tree.Count[]> changed_branch = tree.Tree.Branch([changed_leaf, empty, empty_branch, empty_map])
+    tree.Tree<tree.Count[]> expected_rebuilt = tree.Tree.Named(["branch": changed_branch, "sibling": changed_leaf])
+    assert rebuilt == expected_rebuilt and tree.count<tree.Count[]>(rebuilt) == 2
+    if snapshot {
+        tree.Tree.Named(children) -> {
+            mut [str]tree.Tree<tree.Count[]> local = children
+            if local["branch"] {
+                tree.Tree.Branch(nodes) -> {
+                    mut tree.Tree<tree.Count[]>[] extracted = nodes
+                    mut tree.Count[] data = tree.leaf_value<tree.Count[]>(extracted[index], [])
+                    data[index] = 12
+                    extracted[index] = tree.Tree.Leaf(data)
+                    local["branch"] = tree.Tree.Branch(extracted)
+                    assert tree.leaf_value<tree.Count[]>(nodes[0], []) == expected
+                    assert @as(int, tree.leaf_value<tree.Count[]>(extracted[0], [])[0]) == 12
+                }
+                tree.Tree.Leaf(data) -> { assert false }
+                tree.Tree.Named(nodes) -> { assert false }
+                tree.Tree.Empty -> { assert false }
+            }
+            local["extra"] = leaf
+            tree.Tree<tree.Count[]> changed = tree.Tree.Named(local)
+            assert tree.count<tree.Count[]>(changed) == 3 and changed != original
+            assert children.len == 2 and local.len == 3
+            assert tree.leaf_value<tree.Count[]>(local["sibling"], []) == expected
+        }
+        tree.Tree.Leaf(data) -> { assert false }
+        tree.Tree.Branch(nodes) -> { assert false }
+        tree.Tree.Empty -> { assert false }
+    }
+    assert snapshot == original and original != rebuilt
+    tree.Tree<str> text_leaf = tree.Tree.Leaf("old")
+    tree.Tree<str> text_empty = tree.Tree.Empty
+    tree.Tree<str> text = tree.Tree.Branch([tree.Tree.Named(["leaf": text_leaf]), text_empty])
+    tree.Tree<str> text_rebuilt = tree.replace<str>(text, "new")
+    tree.Tree<str> expected_text = tree.Tree.Branch([tree.Tree.Named(["leaf": tree.Tree.Leaf("new")]), text_empty])
+    assert text_rebuilt == expected_text and text != text_rebuilt
+    assert tree.count<str>(text) == 1 and tree.count<str>(text_rebuilt) == 1
+    assert tree.leaf_value<str>(text_leaf, "missing") == "old"
+    @println("imported recursive copies checked")
+}
+"#
+        .replace("INITIAL", initial);
+        fs::write(&input, source).unwrap();
+        run_both(&input, b"imported recursive copies checked\n");
+    }
+}
+
 fn success(source: &str, expected: &[u8]) {
     let directory = ncc::temp::Directory::new().unwrap();
     let input = directory.path().join("main.nc");

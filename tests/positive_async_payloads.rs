@@ -238,6 +238,143 @@ fn update_cases() -> [PayloadCase; 5] {
     ]
 }
 
+const RECURSIVE_DECLARATIONS: &str = r#"
+struct Node<type T> { T value Node<T>[] children }
+fn count<type T>(Node<T> node) uint {
+    mut uint total = 1
+    for i in node.children { total = total + count<T>(node.children[i]) }
+    return total
+}
+fn numbers(bool fail, int seed) int[]! {
+    if { fail -> { throw "nested failure" } _ -> {} }
+    return [seed, 2]
+}
+"#;
+
+#[test]
+fn recursive_optional_and_error_elements_cross_locked_future_copy_boundaries() {
+    for (kind, present, absent, unwrap_present, unwrap_absent) in [
+        (
+            "int[]?",
+            "[seed, 2]",
+            "none",
+            "value else { throw \"missing value\" }",
+            "value else [7]",
+        ),
+        (
+            "int[]!",
+            "numbers(false, seed)",
+            "numbers(true, seed)",
+            "value catch err { throw err }",
+            "value catch err { if { @as(str, err) != \"nested failure\" -> { throw \"wrong error\" } _ -> {} }; break [7] }",
+        ),
+    ] {
+        let source = format!(
+            r#"{RECURSIVE_DECLARATIONS}
+test "recursive wrapped elements" {{
+    fn unwrap({kind} value) int[]! {{ return {unwrap_present} }}
+    fn fallback({kind} value) int[]! {{ return {unwrap_absent} }}
+    int seed = @as(int, @args().len)
+    {kind} present = {present}
+    {kind} absent = {absent}
+    Node<{kind}> leaf = Node<{kind}>{{.value = absent, .children = []}}
+    Node<{kind}> original = Node<{kind}>{{.value = present, .children = [leaf]}}
+    mutex Node<{kind}> payload = original
+    fn read() Node<{kind}> {{ lock payload {{ return payload }} }}
+    fut Node<{kind}> first = async read()
+    fut Node<{kind}> second = async read()
+    mut Node<{kind}> result = await first
+    Node<{kind}> other = await second
+    assert count<{kind}>(result) == 2
+    assert (try unwrap(result.value)) == [1, 2]
+    assert (try fallback(result.children[0].value)) == [7]
+    mut int[] extracted = try unwrap(result.value)
+    extracted[0] = 99
+    assert (try unwrap(result.value)) == [1, 2]
+    result.children[0].value = present
+    result.children = result.children <> [leaf]
+    assert count<{kind}>(result) == 3
+    assert (try unwrap(result.children[0].value)) == [1, 2]
+    assert (try fallback(result.children[1].value)) == [7]
+    assert (try fallback(other.children[0].value)) == [7]
+    assert (try fallback(original.children[0].value)) == [7]
+    lock payload {{
+        assert count<{kind}>(payload) == 2
+        assert (try fallback(payload.children[0].value)) == [7]
+        payload = result
+    }}
+    result.value = absent
+    lock payload {{ assert (try unwrap(payload.value)) == [1, 2] }}
+    assert (try unwrap(other.value)) == [1, 2]
+    @println("recursive elements checked")
+}}
+"#
+        );
+        constant_and_runtime(&source, "recursive elements checked\n");
+    }
+}
+
+#[test]
+fn recursive_optional_async_errors_propagate_and_locked_updates_preserve_snapshots() {
+    let source = format!(
+        r#"{RECURSIVE_DECLARATIONS}
+fn checked(Node<int[]>? node, bool fail) Node<int[]>?! {{
+    if {{ fail -> {{ throw "recursive failure" }} _ -> {{}} }}
+    return node
+}}
+fn relay(Node<int[]>? node, bool fail) Node<int[]>?! {{
+    fut Node<int[]>?! pending = async checked(node, fail)
+    return try await pending
+}}
+test "recursive optional async error payload" {{
+    int seed = @as(int, @args().len)
+    Node<int[]> leaf = Node<int[]>{{.value = [seed, 2], .children = []}}
+    Node<int[]> original = Node<int[]>{{.value = [3], .children = [leaf]}}
+    mut int catches = 0
+    Node<int[]>? present = relay(original, false) catch err {{ catches = catches + 1; throw err }}
+    Node<int[]>? absent = relay(none, false) catch err {{ catches = catches + 1; throw err }}
+    Node<int[]>? empty = none
+    assert absent == empty and catches == 0
+    Node<int[]>? recovered = relay(original, seed == 1) catch err {{
+        assert @as(str, err) == "recursive failure"
+        catches = catches + 1
+        break none
+    }}
+    assert recovered == empty and catches == 1
+    mut Node<int[]> snapshot = present else {{ throw "missing tree" }}
+    mutex Node<int[]>? payload = present
+    fn add(int delta) uint {{
+        lock payload {{
+            mut Node<int[]> local = payload else {{ return 0 }}
+            local.children[0].value[0] = local.children[0].value[0] + delta
+            payload = local
+            return count<int[]>(local)
+        }}
+    }}
+    fut uint first = async add(seed)
+    fut uint second = async add(seed + 1)
+    assert await first == 2
+    assert await second == 2
+    lock payload {{
+        mut Node<int[]> local = payload else {{ throw "missing updated tree" }}
+        assert local.children[0].value == [4, 2]
+        local.children[0].value[0] = 99
+        Node<int[]> unchanged = payload else {{ throw "lost tree" }}
+        assert unchanged.children[0].value == [4, 2]
+        payload = none
+    }}
+    lock payload {{ assert payload == empty }}
+    snapshot.children[0].value[0] = 9
+    assert original.children[0].value == [1, 2]
+    Node<int[]> retained = present else {{ throw "lost snapshot" }}
+    assert retained.children[0].value == [1, 2]
+    @println("recursive async updates checked")
+}}
+"#
+    );
+    constant_and_runtime(&source, "recursive async updates checked\n");
+}
+
 fn constant_and_runtime(source: &str, stdout: &str) {
     for (phase, source) in [
         (
