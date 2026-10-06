@@ -953,18 +953,28 @@ test "concatenation of maps with common key" {
 2 ** 6 == 64
 ```
 
+> [!NOTE]
+> If an integer is raised to a negative exponent, the result will always be 0, except when the base is 1 or -1, in which case it will just be 1 or -1, respectively.
+>
+> `0 ** 0` is defined to be 1. However, it will emit a compiler warning if detected in code.
+
 ```nc
 // modulo
 10 % 4 == 2
+-7 % 3 == -1
 ```
 
-The modulo operator is only for the integer types.
+> [!NOTE]
+> The modulo operator is only for the integer types. When one of the arguments is a negative number, the remainder inherits the sign of the dividend.
 
 ```nc
 // division
 5.0 / 2.0 == 2.5
 5 / 2 == 2
 ```
+
+> [!NOTE]
+> Integer division truncates towards zero. Dividing by zero will panic for all integer types.
 
 ```nc
 // multiplication
@@ -1023,6 +1033,8 @@ Bit arithmetic will only be allowed for integers.
 
 > [!NOTE]
 > The bit shift operators are [arithmetic shifts](https://en.wikipedia.org/wiki/Arithmetic_shift). This means that a left shift is equivalent to multiplication by 2 and a right shift is equivalent to division by 2, rounded down towards negative infinity for negative numbers and towards 0 for positive numbers.
+>
+> Bit shifts will panic if they are out of range of the operand.
 
 ```nc
 // bitwise and
