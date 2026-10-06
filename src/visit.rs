@@ -61,6 +61,19 @@ pub(crate) fn pattern<'a>(p: &'a Pattern, f: &mut impl FnMut(&'a Expr)) {
         _ => {}
     }
 }
+/// A backwards index offset, not arbitrary arithmetic containing `$`.
+pub(crate) fn is_index_offset(e: &Expr) -> bool {
+    match e.unlocated() {
+        Expr::Name(name) => name == "$",
+        Expr::Binary {
+            left,
+            op: crate::ast::BinaryOp::Sub,
+            ..
+        } => is_index_offset(left),
+        _ => false,
+    }
+}
+
 /// Whether an index expression uses its enclosing container's length. Nested
 /// indexing establishes its own `$` context; function bodies do not inherit it.
 pub(crate) fn uses_index_length(e: &Expr) -> bool {

@@ -80,6 +80,7 @@ impl Analysis<'_> {
             | Expr::Char(_)
             | Expr::Bytes(_)
             | Expr::None => true,
+            Expr::Name(name) if name == "$" => true,
             Expr::Name(_) => self
                 .checked
                 .constant_sources
@@ -144,7 +145,7 @@ impl Analysis<'_> {
             Stmt::Var(declaration) => self.expression(&declaration.value, reached),
             Stmt::Assign { target, value } => {
                 self.expression(value, reached)?;
-                self.expression(target, reached && self.reaches_next(value))
+                self.assignment_target(target, reached && self.reaches_next(value))
             }
             Stmt::Expr(value)
             | Stmt::Throw(value)
@@ -175,6 +176,18 @@ impl Analysis<'_> {
             Some((path, span)) => error.at_source(path, span.clone()),
             None => error,
         })
+    }
+
+    fn assignment_target(&mut self, target: &Expr, reached: bool) -> Result<(), Diagnostics> {
+        // The final map key is an insertion, not a read of an existing entry.
+        match target.unlocated() {
+            Expr::Index { object, index } => {
+                self.expression(object, reached)?;
+                self.expression(index, reached && self.reaches_next(object))
+            }
+            Expr::Member { object, .. } => self.assignment_target(object, reached),
+            _ => self.expression(target, reached),
+        }
     }
 
     fn expression(&mut self, expression: &Expr, reached: bool) -> Result<(), Diagnostics> {
@@ -236,6 +249,11 @@ impl Analysis<'_> {
                 }
             }
             Expr::Index { object, index } => {
+                // Evaluate known indexing as a unit so `$` failures precede
+                // later arithmetic failures in the index expression.
+                if reached {
+                    self.value(expression)?;
+                }
                 self.expression(object, reached)?;
                 self.expression(index, reached && self.reaches_next(object))?;
             }
@@ -402,6 +420,122 @@ fn is_zero(expression: &Expr) -> bool {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+
+    #[test]
+    fn indexing_failures_are_diagnosed_in_both_modes() {
+        for (source, message) in [
+            ("int[] a = [];_ = a[$]", "out of bounds"),
+            ("str a = \"\";_ = a[$]", "out of bounds"),
+            ("int[] a = [1];_ = a[$-1]", "out of bounds"),
+            ("str a = \"a\";_ = a[$-1]", "out of bounds"),
+            ("int[] a = [1, 2];_ = a[$-1-1]", "out of bounds"),
+            ("int[] a = [1];_ = a[2]", "out of bounds"),
+            ("str a = \"a\";_ = a[2]", "out of bounds"),
+            ("int[] a = [1];_ = a[-1]", "out of bounds"),
+            ("str a = \"a\";_ = a[-1]", "out of bounds"),
+            ("int[] a = [];_ = a[$-(1u/0u)]", "out of bounds"),
+            ("[str]int a = [\"a\": 1];_ = a[\"b\"]", "map key not found"),
+        ] {
+            for release in [false, true] {
+                let error =
+                    crate::compile_source_with_options(source, Path::new("index.nc"), release)
+                        .unwrap_err();
+                assert!(error.to_string().contains(message), "{error}\n{source}");
+                assert!(!error.to_string().contains("integer overflow"), "{error}");
+                assert_eq!(error.0[0].path.as_deref(), Some(Path::new("index.nc")));
+                assert!(!error.0[0].span.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn valid_index_offsets_and_map_insertions_compile() {
+        for source in [
+            "int[] a = [1, 2, 3];@println(a[$], a[$-1], a[$-1-1])",
+            "str a = \"abc\";@println(a[$], a[$-1], a[$-1-1])",
+            "int[][] a = [[1, 2], [3, 4]];@println(a[$][a[0][$]-1])",
+            "mut [str]int a = [\"a\": 1];a[\"b\"] = 2;@println(a[\"b\"])",
+            "mut int[] a = [1, 2];a[$-1] = 3;@println(a)",
+            "mut str a = \"ab\";a[$-1] = 'c';@println(a)",
+        ] {
+            for release in [false, true] {
+                crate::compile_source_with_options(source, Path::new("index.nc"), release)
+                    .unwrap_or_else(|error| panic!("{error}\n{source}"));
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_index_arithmetic_retains_overflow_diagnostic() {
+        for source in [
+            "uint a = 0;_ = a - 1",
+            "int[] a = [1];_ = a[0u-1u]",
+            "int[] a = [1, 2];_ = a[$-(0u-1u)]",
+            "int[] a = [1, 2];_ = a[0u-$]",
+        ] {
+            for release in [false, true] {
+                let error =
+                    crate::compile_source_with_options(source, Path::new("index.nc"), release)
+                        .unwrap_err();
+                assert!(
+                    error.to_string().contains("integer overflow"),
+                    "{error}\n{source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn release_indexed_writes_report_invalid_storage() {
+        for source in [
+            "mut int[] a = [1];a[2] = 3",
+            "mut str a = \"a\";a[2] = 'b'",
+            "mut int[] a = [];a[$] = 3",
+            "mut str a = \"\";a[$] = 'b'",
+            "mut int[] a = [1];a[$-1] = 3",
+            "mut [str]int[] a = [\"a\": [1]];a[\"b\"][0] = 3",
+        ] {
+            let error = crate::compile_source_with_options(source, Path::new("index.nc"), true)
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("out of bounds")
+                    || error.to_string().contains("map key not found"),
+                "{error}\n{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn indexing_preserves_unreached_paths_and_rhs_first_failures() {
+        for release in [false, true] {
+            for source in [
+                "int[] a = [];_ = false and (a[$] == 0)",
+                "str a = \"\";_ = true or (a[$] == 'a')",
+                "[str]int a = [\"a\": 1];_ = false and (a[\"b\"] == 0)",
+            ] {
+                crate::compile_source_with_options(source, Path::new("index.nc"), release)
+                    .unwrap_or_else(|error| panic!("{error}\n{source}"));
+            }
+            let error = crate::compile_source_with_options(
+                "mut int[] a = [];a[$] = 1 / 0",
+                Path::new("index.nc"),
+                release,
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("division by zero"), "{error}");
+            assert!(!error.to_string().contains("out of bounds"), "{error}");
+        }
+    }
+
+    #[test]
+    fn runtime_index_offsets_emit_bounds_checks() {
+        let source = "fn read(int[] a, uint n) int {return a[$-n]}";
+        let c = crate::compile_source(source, Path::new("index.nc")).unwrap();
+        assert!(c.contains("== 0) nc_panic(\"index out of bounds\")"));
+        assert!(c.contains("nc_panic(\"index out of bounds\")"));
+        // Ordinary subtraction still uses the checked arithmetic operation.
+        assert!(c.contains("__builtin_sub_overflow"));
+    }
 
     #[test]
     fn immutable_chains_tuples_and_captures_report_arithmetic_failures() {

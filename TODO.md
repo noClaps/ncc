@@ -4,8 +4,6 @@
   - [ ] Cover every part of the language and as many edge cases as possible.
     - [ ] Extend boundary/failure coverage after resolving the remaining contracts.
 
-      - [ ] Cover invalid runtime indices, empty `$`/`$-n`, and absent map reads
-            once their failure contracts are specified.
       - [ ] Add Unicode version/normalization-specific cases once specified.
 
     - [ ] Expand async, future, mutex, and shared-storage coverage without relying
@@ -23,8 +21,8 @@
     - [ ] Resolve the questions recorded in `docs/coverage.md` and collect further
           ambiguous interactions from differential tests.
       - [ ] Clarify signed-minimum remainder by `-1`: zero or checked overflow.
-      - [ ] Clarify operator compatibility, remaining numeric/index failure conventions,
-            tuple index requirements, aggregate-pattern exhaustiveness, and
+      - [ ] Clarify operator compatibility, tuple index requirements,
+            aggregate-pattern exhaustiveness, and
             missing/duplicate struct initializer fields.
       - [ ] Clarify specialized generic function-value syntax; bare
             `identity<Count>` currently fails parsing, while typed callback

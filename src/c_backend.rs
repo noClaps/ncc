@@ -1576,12 +1576,18 @@ impl Emitter<'_> {
                 self.headers.insert("stdbool.h");
                 b.to_string()
             }
-            Expr::Name(n) if n == "$" => format!(
-                "({}) - 1",
-                self.index_context
+            Expr::Name(n) if n == "$" => {
+                let length = self
+                    .index_context
                     .last()
-                    .ok_or_else(|| Diagnostics::one("$ outside indexing", 0..0))?
-            ),
+                    .cloned()
+                    .ok_or_else(|| Diagnostics::one("$ outside indexing", 0..0))?;
+                self.panic_support();
+                self.line(format!(
+                    "if (({length}) == 0) nc_panic(\"index out of bounds\");"
+                ));
+                format!("({length}) - 1")
+            }
             Expr::Name(n) => {
                 if matches!(self.ty(e)?, Type::Function(_, _))
                     && !self.scopes.iter().any(|s| s.contains_key(n))
@@ -1757,6 +1763,13 @@ impl Emitter<'_> {
             return Ok(result);
         }
         let r = self.expr(right)?;
+        if op == BinaryOp::Sub
+            && !self.index_context.is_empty()
+            && crate::visit::is_index_offset(left)
+        {
+            self.panic_support();
+            self.line(format!("if ({l} < {r}) nc_panic(\"index out of bounds\");"));
+        }
         let value = match op {
             BinaryOp::Eq | BinaryOp::Ne => {
                 let eq = self.equality(&l, &r, &self.ty(left)?)?;

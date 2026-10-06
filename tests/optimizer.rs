@@ -349,8 +349,8 @@ fn top_level_precomputation_exceeds_former_budget_and_rolls_back_failures() {
     assert!(!c.contains("} goto "), "certified region must precompute");
     folded(source, &[], "20000\n");
     for source in [
-        "mut int[] values=[1];mut int i=0;while i<3 {i=i+1};values[2]=i;@println(\"unreached\")",
-        "mut int i=0;@println(\"before\");mut int[] values=[1];values[2]=i;@println(\"unreached\")",
+        "mut int[] values=[1];mut int i=0;while i<3 {i=i+1};values[@args().len]=i;@println(\"unreached\")",
+        "mut int i=0;@println(\"before\");mut int[] values=[1];values[@args().len]=i;@println(\"unreached\")",
     ] {
         let directory = ncc::temp::Directory::new().unwrap();
         let input = directory.path().join("failure.nc");

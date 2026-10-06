@@ -882,6 +882,7 @@ struct Evaluator<'a> {
     recorded_output: Option<Vec<Item>>,
     analysis_globals: HashMap<String, Value>,
     arithmetic_failure: bool,
+    indexing_failure: Option<&'static str>,
     arithmetic_location: Option<SourceLocation>,
     // Value expressions can exit enclosing statements through returns, throws, or jumps.
     flow: Option<Flow>,
@@ -917,6 +918,7 @@ impl<'module> Evaluator<'module> {
             recorded_output: None,
             analysis_globals: HashMap::new(),
             arithmetic_failure: false,
+            indexing_failure: None,
             arithmetic_location: None,
             flow: None,
             indices: vec![],
@@ -926,11 +928,13 @@ impl<'module> Evaluator<'module> {
         if let Some(error) = self.embed_error.take() {
             return Some(error);
         }
-        if !self.arithmetic_failure {
+        if !self.arithmetic_failure && self.indexing_failure.is_none() {
             return None;
         }
         let error = Diagnostics::one(
-            "constant evaluation failed: integer overflow, division by zero, invalid shift/exponent, or numeric cast out of range",
+            self.indexing_failure.take().unwrap_or(
+                "constant evaluation failed: integer overflow, division by zero, invalid shift/exponent, or numeric cast out of range",
+            ),
             0..0,
         );
         Some(if let Some(location) = self.arithmetic_location.take() {
@@ -1031,7 +1035,7 @@ impl<'module> Evaluator<'module> {
     // Resolve storage using previously evaluated keys/indices, never by
     // executing the assignment's parent expression a second time.
     fn read_place<'b>(
-        &'b self,
+        &'b mut self,
         root: &str,
         env: &'b HashMap<String, Value>,
         path: &[Access],
@@ -1040,6 +1044,10 @@ impl<'module> Evaluator<'module> {
             Value::Cell(index) => self.cells.get(*index)?,
             value => value,
         };
+        if let Some(error) = invalid_place(storage, path, false) {
+            self.indexing_failure = Some(error);
+            return None;
+        }
         place_value(storage, path)
     }
     fn coerce(&self, value: Value, ty: &Type) -> Option<Value> {
@@ -1416,7 +1424,9 @@ impl<'module> Evaluator<'module> {
             }
         });
 
-        if self.arithmetic_failure && self.arithmetic_location.is_none() {
+        if (self.arithmetic_failure || self.indexing_failure.is_some())
+            && self.arithmetic_location.is_none()
+        {
             self.arithmetic_location = e.location().cloned();
         }
         result
@@ -1459,7 +1469,7 @@ impl<'module> Evaluator<'module> {
             _ => None,
         }
     }
-    fn literal_value(&self, e: &Expr) -> Option<Value> {
+    fn literal_value(&mut self, e: &Expr) -> Option<Value> {
         match e {
             Expr::Int(s) => {
                 let n = crate::lexer::integer(s).ok()?;
@@ -1487,11 +1497,14 @@ impl<'module> Evaluator<'module> {
                 };
                 Some(Value::Optional((**inner).clone(), None))
             }
-            Expr::Name(n) if n == "$" => self
-                .indices
-                .last()
-                .and_then(|n| n.checked_sub(1))
-                .map(Value::Uint),
+            Expr::Name(n) if n == "$" => {
+                let length = *self.indices.last()?;
+                if length == 0 {
+                    self.indexing_failure = Some("index out of bounds");
+                    return None;
+                }
+                Some(Value::Uint(length - 1))
+            }
             _ => None,
         }
     }
@@ -1672,21 +1685,25 @@ impl<'module> Evaluator<'module> {
         }
         let index = index?;
         if let Value::Map(entries) = object {
-            return entries
+            let value = entries
                 .into_iter()
                 .find(|(key, _)| key.equals(&index))
                 .map(|(_, value)| value);
+            if value.is_none() {
+                self.indexing_failure = Some("map key not found");
+            }
+            return value;
         }
-        let n = match index {
-            Value::Int(n) => usize::try_from(n).ok()?,
-            Value::Uint(n) => usize::try_from(n).ok()?,
+        let n = index_number(&index);
+        let value = match object {
+            Value::Array(values) | Value::Tuple(values) => n.and_then(|n| values.get(n).cloned()),
+            Value::String(value) => n.and_then(|n| value.get(n).cloned().map(Value::Char)),
             _ => return None,
         };
-        match object {
-            Value::Array(values) | Value::Tuple(values) => values.get(n).cloned(),
-            Value::String(value) => value.get(n).cloned().map(Value::Char),
-            _ => None,
+        if value.is_none() {
+            self.indexing_failure = Some("index out of bounds");
         }
+        value
     }
     fn cast_value(
         &mut self,
@@ -2525,7 +2542,9 @@ impl<'module> Evaluator<'module> {
     }
 
     fn recursion_result(&mut self, expression: &Expr, value: Option<Value>) -> Option<Value> {
-        if self.arithmetic_failure && self.arithmetic_location.is_none() {
+        if (self.arithmetic_failure || self.indexing_failure.is_some())
+            && self.arithmetic_location.is_none()
+        {
             self.arithmetic_location = expression.location().cloned();
         }
         let value = value?;
@@ -2753,6 +2772,8 @@ impl<'module> Evaluator<'module> {
         right: &Expr,
         env: &mut HashMap<String, Value>,
     ) -> Option<Value> {
+        let index_offset =
+            op == BinaryOp::Sub && !self.indices.is_empty() && crate::visit::is_index_offset(left);
         let left = self.evaluate(left, env)?;
         if op == BinaryOp::And && left == Value::Bool(false) {
             return Some(left);
@@ -2761,6 +2782,10 @@ impl<'module> Evaluator<'module> {
             return Some(left);
         }
         let right = self.evaluate(right, env)?;
+        if index_offset && matches!((&left, &right), (Value::Uint(a), Value::Uint(b)) if a < b) {
+            self.indexing_failure = Some("index out of bounds");
+            return None;
+        }
         if matches!(op, BinaryOp::Eq | BinaryOp::Ne) && !matches!(left, Value::Float(_)) {
             let equal = left.equals(&right);
             return Some(Value::Bool(if op == BinaryOp::Eq { equal } else { !equal }));
@@ -2867,6 +2892,45 @@ fn place_value<'a>(mut value: &'a Value, path: &[Access]) -> Option<&'a Value> {
         };
     }
     Some(value)
+}
+
+// Validate only known storage, without evaluating indices again. The final map
+// assignment may insert a key; reads and intermediate map accesses may not.
+fn invalid_place(value: &Value, path: &[Access], insertion: bool) -> Option<&'static str> {
+    let (first, rest) = path.split_first()?;
+    let next = match (value, first) {
+        (Value::Array(values) | Value::Tuple(values), Access::Index(index)) => {
+            if matches!(index, Value::Unknown) {
+                return None;
+            }
+            let Some(next) = index_number(index).and_then(|n| values.get(n)) else {
+                return Some("index out of bounds");
+            };
+            next
+        }
+        (Value::String(parts), Access::Index(index)) => {
+            if !matches!(index, Value::Unknown)
+                && index_number(index).is_none_or(|n| n >= parts.len())
+            {
+                return Some("index out of bounds");
+            }
+            return None;
+        }
+        (Value::Map(entries), Access::Index(key)) => {
+            if matches!(key, Value::Unknown) || (insertion && rest.is_empty()) {
+                return None;
+            }
+            let Some((_, next)) = entries.iter().find(|(stored, _)| stored.equals(key)) else {
+                return Some("map key not found");
+            };
+            next
+        }
+        (Value::Struct(_, fields), Access::Field(name)) => {
+            &fields.iter().find(|(field, _)| field == name)?.1
+        }
+        _ => return None,
+    };
+    invalid_place(next, rest, insertion)
 }
 
 fn assign(value: &mut Value, path: &[Access], replacement: Value) -> Option<()> {
@@ -3178,6 +3242,11 @@ impl Evaluator<'_> {
                 }
                 value => value,
             };
+            if let Some(error) = invalid_place(storage, &path, true) {
+                self.indexing_failure = Some(error);
+                self.arithmetic_location = target.location().cloned();
+                return None;
+            }
             assign(storage, &path, v)?;
         }
         Some(Flow::Next)

@@ -1749,7 +1749,10 @@ fn unicode_string_length_indexing_and_iteration() {
         include_str!("fixtures/unicode/unicode_string_length_indexing_and_iteration.nc"),
         "cookie 🍪\n",
     );
-    runtime_failure("str empty = \"\";@println(empty[0])", "out of bounds");
+    runtime_failure(
+        "str empty = \"\";@println(empty[@args().len - 1u])",
+        "out of bounds",
+    );
 }
 
 #[test]
@@ -2247,15 +2250,15 @@ test "RHS copy before tuple ancestor replacement" {
 fn nested_assignment_failures_are_preserved_in_release() {
     for (source, message) in [
         (
-            "fn invalid() int { mut int[][] rows = [[1]];rows[1][0] = 7;return 9 };@println(invalid())",
+            "fn invalid() int { mut int[][] rows = [[1]];rows[@args().len][0] = 7;return 9 };@println(invalid())",
             "out of bounds",
         ),
         (
-            "struct Bucket { int[] values };fn invalid() int { mut [str]Bucket buckets = [\"present\": Bucket{.values = [1]}];buckets[\"missing\"].values[0] = 7;return 9 };@println(invalid())",
+            "struct Bucket { int[] values };fn invalid() int { mut [str]Bucket buckets = [\"present\": Bucket{.values = [1]}];buckets[@args()[0]].values[0] = 7;return 9 };@println(invalid())",
             "map key not found",
         ),
         (
-            "fn invalid() str { mut str[] texts = [\"x\"];texts[0][1] = 'y';return texts[0] };@println(invalid())",
+            "fn invalid() str { mut str[] texts = [\"x\"];texts[0][@args().len] = 'y';return texts[0] };@println(invalid())",
             "out of bounds",
         ),
     ] {
@@ -4006,7 +4009,7 @@ test "arrays" {
     );
     rejects("test \"bad\" { int[] a = [1];a[0] = 2 }", "immutable");
     rejects("int[2] a = [1]", "length");
-    runtime_failure("int[] a = [1];@println(a[2])", "out of bounds");
+    runtime_failure("int[] a = [1];@println(a[@args().len])", "out of bounds");
 }
 
 #[test]

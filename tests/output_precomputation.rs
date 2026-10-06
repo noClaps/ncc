@@ -165,7 +165,7 @@ fn unknown_state_and_unsupported_effects_roll_back_all_recorded_output() {
         "@eprintln(\"stderr\")",
         "fn escaped = fn() { @eprint(\"unknown effect\") };escaped()",
         "fut str[] future = async @args();@println(await future)",
-        "mut int missing = 0;int invalid = [1][@as(uint, missing + 2)];@println(invalid)",
+        "mut int missing = @as(int, @args().len);int invalid = [1][@as(uint, missing + 2)];@println(invalid)",
     ] {
         let source = format!(
             "mut int value = 0\nwhile value < 3 {{ value = value + 1 }}\n@println(value)\n{tail}"
@@ -247,7 +247,7 @@ fn runtime_failure_preserves_prior_output_and_stops_later_output() {
     let source = r#"
 @println("before")
 mut int[] values = [1]
-mut uint index = 2
+mut uint index = @args().len + 2
 @println(values[index])
 @println("after")
 "#;
