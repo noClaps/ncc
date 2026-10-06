@@ -160,9 +160,13 @@ Internally, these are represented by a single 8-bit byte, that can be either `0`
 
 Characters are a single Unicode extended grapheme cluster, represented by the `char` type. This means that characters can take up multiple bytes, like emojis or CJK characters. The benefit of this is that, if you're trying to access a character, you will get the full character you expect, even if it spans multiple bytes.
 
-According to [this blog post](https://tonsky.me/blog/unicode/), Swift seems to handle grapheme clusters correctly. NC will follow similar logic to how Swift handles grapheme, or use a Unicode library like [ICU](https://unicode-org.github.io/icu/). There's also [this talk](https://evanhahn.com/longhornphp2025/) which is a good resource on the difference between Unicode graphemes, scalars, and UTF-8 units, and generally what it means for something to be a 'character'.
+NC uses [Unicode 18.0.0](https://www.unicode.org/versions/Unicode18.0.0/) and its default extended grapheme cluster rules from Unicode Standard Annex #29 to decide where one character ends and the next begins. This version is fixed to the compiler edition, newer Unicode releases will require an update to the compiler and toolchain.
 
-The definition of a 'character' in Unicode isn't quite aligned with what a character means to a person. For instance, the character `ö` looks like one character to us, but it actually consists of two code points, `¨`and `o`. NC will count it as one character, not two, since a `char` represents what a person would say is a character.
+[This blog post](https://tonsky.me/blog/unicode/) and [this talk](https://evanhahn.com/longhornphp2025/) are good resources on the difference between Unicode graphemes, code points, and UTF-8 bytes.
+
+A character can contain multiple code points. For example, you can write `ö` as a single code point (`\u{F6}`), or as `o` followed by a combining mark (`o\u{308}`). NC counts either form as one character, so both can be used as a `char`.
+
+NC keeps the code points you write, after handling escapes. It doesn't automatically change them into an equivalent form, a process called Unicode normalization. For example, `'\u{E9}'` and `'e\u{301}'` both look like `é` and count as one character, but they aren't equal. The same applies to strings, pattern matching, and map keys. Printing these values or converting them to `byte[]` keeps their original UTF-8 bytes.
 
 Internally, NC will use UTF-8 encoding, as it is the most widely used everywhere else, making it a good default. If you'd like to use a different encoding, you can implement that yourself by converting your string into a `byte` array and parsing the raw bytes manually, or using a library that does that for you.
 
@@ -256,6 +260,8 @@ type str = char[]
 ```
 
 Of course, this is all internal, and they will be represented to you as `"string"`. However, this will allow you to access the length of the string with `<string>.len`.
+
+NC splits string literals into characters using the Unicode rules above, after handling escapes. Joining strings keeps their characters separate, and replacing a character doesn't combine it with its neighbors. This means two strings can have the same UTF-8 bytes but different characters, making them unequal. Joining, replacing, indexing, iterating over, or interpolating strings doesn't normalize them, nor does printing or converting them to bytes.
 
 ```nc
 str my_string = "cookie 🍪"
