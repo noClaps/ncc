@@ -3,11 +3,11 @@
 - [ ] Expand language and edge-case coverage.
   - [ ] Cover every part of the language and as many edge cases as possible.
     - [ ] Extend boundary/failure coverage after resolving the remaining contracts.
-      - [ ] Cover signed quotient/remainder, integer zero divisors, negative
-            integral powers, `0**0`, and invalid shift counts once specified.
+
       - [ ] Cover invalid runtime indices, empty `$`/`$-n`, and absent map reads
             once their failure contracts are specified.
       - [ ] Add Unicode version/normalization-specific cases once specified.
+
     - [ ] Expand async, future, mutex, and shared-storage coverage without relying
           on a particular thread schedule.
       - [ ] Add deterministic pre-await progress and mutex-contention checks;
@@ -22,7 +22,8 @@
   - [ ] Resolve unclear specification semantics before encoding assumptions.
     - [ ] Resolve the questions recorded in `docs/coverage.md` and collect further
           ambiguous interactions from differential tests.
-      - [ ] Clarify operator compatibility, numeric/index failure conventions,
+      - [ ] Clarify signed-minimum remainder by `-1`: zero or checked overflow.
+      - [ ] Clarify operator compatibility, remaining numeric/index failure conventions,
             tuple index requirements, aggregate-pattern exhaustiveness, and
             missing/duplicate struct initializer fields.
       - [ ] Clarify specialized generic function-value syntax; bare
@@ -92,6 +93,9 @@
   - [ ] Add positive and failure regressions comparing debug and release behavior.
   - [ ] Revisit constant-evaluation and generalized helper-proof barriers only
         after the discrepancy is resolved and storage dependencies are tracked.
+- [ ] Extend static numeric diagnostics beyond call-free immutable expressions.
+  - [ ] Reuse certified evaluation for known pure calls without executing effects
+        or unproven loops; preserve conditional execution and source locations.
 - [ ] Attempt to eliminate all undefined behavior from the language.
   - [ ] Identify potentially undefined cases.
     - [ ] Audit numeric arithmetic, shifts, casts, and nonfinite float handling.

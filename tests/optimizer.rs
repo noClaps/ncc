@@ -397,19 +397,24 @@ fn top_level_assignments_and_control_flow_evaluate_reached_failures() {
         ),
     ] {
         let path = Path::new("top-level.nc");
-        compile_fixture(source, path, false).unwrap();
-        let error = compile_fixture(source, path, true).unwrap_err();
-        assert!(
-            error.to_string().contains("constant evaluation failed"),
-            "{source}: {error}"
-        );
-        let diagnostic = &error.0[0];
-        assert_eq!(diagnostic.path.as_deref(), Some(path), "{source}: {error}");
-        assert_eq!(
-            &source[diagnostic.span.clone()],
-            failing_expression,
-            "{source}: {error}"
-        );
+        for release in [false, true] {
+            if !release && failing_expression != "1 / 0" {
+                compile_fixture(source, path, release).unwrap();
+                continue;
+            }
+            let error = compile_fixture(source, path, release).unwrap_err();
+            assert!(
+                error.to_string().contains("constant evaluation failed"),
+                "{source}: {error}"
+            );
+            let diagnostic = &error.0[0];
+            assert_eq!(diagnostic.path.as_deref(), Some(path), "{source}: {error}");
+            assert_eq!(
+                &source[diagnostic.span.clone()],
+                failing_expression,
+                "{source}: {error}"
+            );
+        }
     }
 }
 
@@ -482,22 +487,43 @@ values[0] = value
 
 #[test]
 fn top_level_output_analysis_preserves_known_state_and_argument_effects() {
-    for source in [
-        "mut int value = 1;@println(\"hello\");value = 1 / 0",
-        "fn output() { @print(\"hello\") };mut int value = 1;output();value = 1 / 0",
-        "mut int value = 0;fn update = fn() int { @print(\"effect\");value = value + 1;return value };@println(update());@println(update());value = value / (value - 2)",
-        "mut int value = 0;fn update = fn() int { value = 2;return value };@println(update());value = 1 / (value - 2)",
-        "mut int value = 0;while value < 2 { @println(value);value = value + 1 };value = 1 / (value - 2)",
-        "mut int value = 0;@println(1 / 0);value = 2",
+    for (source, failing_expression) in [
+        (
+            "mut int value = 1;@println(\"hello\");value = 1 / 0",
+            "1 / 0",
+        ),
+        (
+            "fn output() { @print(\"hello\") };mut int value = 1;output();value = 1 / 0",
+            "1 / 0",
+        ),
+        (
+            "mut int value = 0;fn update = fn() int { @print(\"effect\");value = value + 1;return value };@println(update());@println(update());value = value / (value - 2)",
+            "value / (value - 2)",
+        ),
+        (
+            "mut int value = 0;fn update = fn() int { value = 2;return value };@println(update());value = 1 / (value - 2)",
+            "1 / (value - 2)",
+        ),
+        (
+            "mut int value = 0;while value < 2 { @println(value);value = value + 1 };value = 1 / (value - 2)",
+            "1 / (value - 2)",
+        ),
+        ("mut int value = 0;@println(1 / 0);value = 2", "1 / 0"),
     ] {
         let path = Path::new("after-output.nc");
-        ncc::compile_source(source, path).unwrap();
-        let error = ncc::compile_source_with_options(source, path, true).unwrap_err();
-        assert!(
-            error.to_string().contains("constant evaluation failed"),
-            "{source}: {error}"
-        );
-        assert_eq!(error.0[0].path.as_deref(), Some(path));
+        for release in [false, true] {
+            if !release && failing_expression != "1 / 0" {
+                ncc::compile_source_with_options(source, path, release).unwrap();
+                continue;
+            }
+            let error = ncc::compile_source_with_options(source, path, release).unwrap_err();
+            assert!(
+                error.to_string().contains("constant evaluation failed"),
+                "{source}: {error}"
+            );
+            assert_eq!(error.0[0].path.as_deref(), Some(path));
+            assert_eq!(&source[error.0[0].span.clone()], failing_expression);
+        }
     }
     folded(
         r#"
@@ -514,9 +540,9 @@ fn increment = fn() int { @print("effect:");count = count + 1;return count }
 #[test]
 fn output_with_unknown_arguments_does_not_assume_later_execution() {
     for source in [
-        "mut int value = 1;@println(@args());value = 1 / 0",
-        "mut int value = 1;@println(@env());value = 1 / 0",
-        "fn unknown() { @println(@args()) };mut int value = 1;unknown();value = 1 / 0",
+        "mut int value = 0;@println(@args());value = 1 / value",
+        "mut int value = 0;@println(@env());value = 1 / value",
+        "fn unknown() { @println(@args()) };mut int value = 0;unknown();value = 1 / value",
     ] {
         ncc::compile_source_with_options(source, Path::new("unknown-output.nc"), true).unwrap();
     }
@@ -768,9 +794,9 @@ int unreachable = 1 / 0
 #[test]
 fn infinite_loop_proofs_use_value_block_types_and_builtin_argument_order() {
     for source in [
-        "while true { int value = if true { true -> { break 1 } false -> { break 2 } };_ = 1 / 0 }",
-        "fn maybe_spin(bool spin) int { if spin { true -> { while true {} } false -> { return 1 } } };@println(maybe_spin(true), 1 / 0)",
-        "@println(@args(), 1 / 0)",
+        "while true { int value = if true { true -> { break 1 } false -> { break 2 } } };_ = 1 / 0",
+        "mut int divisor = 0;fn maybe_spin(bool spin) int { if spin { true -> { while true {} } false -> { return 1 } } };@println(maybe_spin(true), 1 / divisor)",
+        "mut int divisor = 0;@println(@args(), 1 / divisor)",
     ] {
         for release in [false, true] {
             ncc::compile_source_with_options(source, Path::new("unreached-arithmetic.nc"), release)

@@ -840,6 +840,18 @@ fn constant_statement(statement: Stmt, ty: Type) -> Expr {
         generics: vec![],
     }
 }
+/// Evaluate an expression already certified as effect-free by the caller.
+pub(crate) fn evaluate_static_expression(
+    expression: &Expr,
+    checked: &CheckedModule,
+) -> Result<Option<Expr>, Diagnostics> {
+    evaluate(expression, &HashMap::new(), &HashMap::new(), checked).map(|value| {
+        value
+            .filter(Value::materializable)
+            .map(|value| materialize(value, expression, checked))
+    })
+}
+
 fn evaluate(
     e: &Expr,
     env: &HashMap<String, Value>,
@@ -2697,7 +2709,8 @@ impl<'module> Evaluator<'module> {
             Mul => a.checked_mul(b).map(Value::Int),
             Div => a.checked_div(b).map(Value::Int),
             Mod => a.checked_rem(b).map(Value::Int),
-            Pow if (-1..=1).contains(&a) && b >= 0 => Some(Value::Int(if b == 0 {
+            Pow if b < 0 => Some(Value::Int(if a == 1 || a == -1 { a } else { 0 })),
+            Pow if (-1..=1).contains(&a) => Some(Value::Int(if b == 0 {
                 1
             } else if a == -1 {
                 if b % 2 == 0 { 1 } else { -1 }
@@ -3262,5 +3275,91 @@ impl Evaluator<'_> {
             env.remove(name);
         }
         Some(flow)
+    }
+}
+
+#[cfg(test)]
+mod numeric_arithmetic_tests {
+    use super::{BinaryOp, CheckedModule, Evaluator, HashMap, Value};
+
+    fn checked() -> CheckedModule {
+        let module = crate::parser::parse(crate::lexer::lex("").unwrap()).unwrap();
+        crate::sema::check(module, std::path::Path::new("arithmetic.nc")).unwrap()
+    }
+
+    #[test]
+    fn negative_integer_exponents_follow_literal_base_rule() {
+        let checked = checked();
+        let functions = HashMap::new();
+        let mut evaluator = Evaluator::new(&functions, &checked);
+        for exponent in [-1, -2, -3, i64::MIN] {
+            for (base, expected) in [(0, 0), (1, 1), (-1, -1), (2, 0), (-2, 0), (i64::MIN, 0)] {
+                assert_eq!(
+                    evaluator.signed(base, exponent, BinaryOp::Pow),
+                    Some(Value::Int(expected)),
+                    "{base} ** {exponent}"
+                );
+            }
+        }
+        assert!(!evaluator.arithmetic_failure);
+    }
+
+    #[test]
+    fn trivial_bases_accept_large_integer_exponents() {
+        let checked = checked();
+        let functions = HashMap::new();
+        let mut evaluator = Evaluator::new(&functions, &checked);
+        for (base, exponent, expected) in [
+            (0, 0, 1),
+            (0, i64::MAX, 0),
+            (1, i64::MAX, 1),
+            (-1, 0, 1),
+            (-1, i64::MAX, -1),
+            (-1, i64::MAX - 1, 1),
+            (-2, 63, i64::MIN),
+        ] {
+            assert_eq!(
+                evaluator.signed(base, exponent, BinaryOp::Pow),
+                Some(Value::Int(expected))
+            );
+        }
+        for (base, exponent, expected) in [(0, 0, 1), (0, u64::MAX, 0), (1, u64::MAX, 1)] {
+            assert_eq!(
+                evaluator.unsigned(base, exponent, BinaryOp::Pow, false),
+                Some(Value::Uint(expected))
+            );
+        }
+        for (base, exponent, expected) in [(0, 0, 1), (0, 255, 0), (1, 255, 1)] {
+            assert_eq!(
+                evaluator.unsigned(base, exponent, BinaryOp::Pow, true),
+                Some(Value::Byte(expected))
+            );
+        }
+        assert!(!evaluator.arithmetic_failure);
+    }
+
+    #[test]
+    fn signed_quotient_truncates_and_remainder_follows_dividend() {
+        let checked = checked();
+        let functions = HashMap::new();
+        let mut evaluator = Evaluator::new(&functions, &checked);
+        for (dividend, divisor, quotient, remainder) in [
+            (7, 3, 2, 1),
+            (-7, 3, -2, -1),
+            (7, -3, -2, 1),
+            (-7, -3, 2, -1),
+            (i64::MIN, 1, i64::MIN, 0),
+            (i64::MIN, 3, -3_074_457_345_618_258_602, -2),
+        ] {
+            assert_eq!(
+                evaluator.signed(dividend, divisor, BinaryOp::Div),
+                Some(Value::Int(quotient))
+            );
+            assert_eq!(
+                evaluator.signed(dividend, divisor, BinaryOp::Mod),
+                Some(Value::Int(remainder))
+            );
+        }
+        assert!(!evaluator.arithmetic_failure);
     }
 }

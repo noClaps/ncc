@@ -2950,14 +2950,18 @@ impl Emitter<'_> {
             }
             BinaryOp::Pow => {
                 self.headers.insert("stdint.h");
-                if matches!(&ty, Type::Named(n, _) if n == "int") {
+                let signed = matches!(&ty, Type::Named(n, _) if n == "int");
+                if signed {
                     self.line(format!(
-                        "if ({right} < 0) nc_panic(\"negative integer exponent\");"
+                        "if ({right} < 0) {{ {result} = ({left} == 1 || {left} == -1) ? {left} : 0; }} else {{"
                     ));
                 }
                 let base = self.fresh();
                 let power = self.fresh();
                 self.line(format!("{result} = 1; {ct} {base} = {left}; uint64_t {power} = (uint64_t){right};\nwhile ({power}) {{\nif (({power} & 1) && __builtin_mul_overflow({result}, {base}, &{result})) nc_panic(\"integer overflow\");\n{power} >>= 1;\nif ({power} && __builtin_mul_overflow({base}, {base}, &{base})) nc_panic(\"integer overflow\");\n}}"));
+                if signed {
+                    self.line("}");
+                }
             }
             BinaryOp::Shl | BinaryOp::Shr => {
                 let bits = if matches!(&ty, Type::Named(n, _) if n == "byte") {
@@ -3053,4 +3057,86 @@ fn c_string_bytes(value: &[u8]) -> String {
     }
     s.push('"');
     s
+}
+
+#[cfg(test)]
+mod numeric_arithmetic_tests {
+    use std::{path::Path, process::Command};
+
+    #[test]
+    fn generated_integer_arithmetic_matches_evaluator() {
+        let source = r"
+fn power(int base, int exponent) int { return base ** exponent }
+fn unsigned_power(uint base, uint exponent) uint { return base ** exponent }
+fn byte_power(byte base, byte exponent) byte { return base ** exponent }
+fn quotient(int dividend, int divisor) int { return dividend / divisor }
+fn remainder(int dividend, int divisor) int { return dividend % divisor }
+@println(power(0, -1))
+@println(power(2, -2))
+@println(power(-2, -3))
+@println(power(1, -9223372036854775808))
+@println(power(-1, -2))
+@println(power(-1, -3))
+@println(power(-1, -9223372036854775808))
+@println(power(-9223372036854775808, -1))
+@println(power(0, 0))
+@println(power(0, 9223372036854775807))
+@println(power(1, 9223372036854775807))
+@println(power(-1, 9223372036854775807))
+@println(power(-1, 9223372036854775806))
+@println(power(-2, 63))
+@println(unsigned_power(0, 0))
+@println(unsigned_power(0, 18446744073709551615))
+@println(unsigned_power(1, 18446744073709551615))
+@println(byte_power(0, 0))
+@println(byte_power(0, 255))
+@println(byte_power(1, 255))
+@println(quotient(-7, 3))
+@println(quotient(7, -3))
+@println(quotient(-7, -3))
+@println(remainder(-7, 3))
+@println(remainder(7, -3))
+@println(remainder(-7, -3))
+@println(quotient(-9223372036854775808, 3))
+@println(remainder(-9223372036854775808, 3))
+";
+        let expected = "0\n0\n0\n1\n-1\n-1\n-1\n0\n1\n0\n1\n-1\n1\n-9223372036854775808\n1\n0\n1\n1\n0\n1\n-2\n-2\n2\n-1\n1\n-1\n-3074457345618258602\n-2\n";
+        let directory = crate::temp::Directory::new().unwrap();
+        let c_path = directory.path().join("arithmetic.c");
+        let executable = directory.path().join("arithmetic");
+        for release in [false, true] {
+            let c = crate::compile_source_with_options(source, Path::new("arithmetic.nc"), release)
+                .unwrap();
+            std::fs::write(&c_path, c).unwrap();
+            let compiled = Command::new("cc")
+                .args([
+                    "-std=c11",
+                    if release { "-O2" } else { "-O0" },
+                    "-fsanitize=undefined",
+                    "-fno-sanitize-recover=undefined",
+                ])
+                .arg(&c_path)
+                .arg("-o")
+                .arg(&executable)
+                .output()
+                .unwrap();
+            assert!(
+                compiled.status.success(),
+                "{}",
+                String::from_utf8_lossy(&compiled.stderr)
+            );
+            let output = Command::new(&executable).output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(output.stdout, expected.as_bytes());
+            assert!(
+                output.stderr.is_empty(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
 }

@@ -2280,7 +2280,9 @@ fn assignment_rhs_failures_precede_invalid_targets() {
         let source = source
             .replace("1 / 0", "fail()")
             .replace("@as(uint, -0.75)", "@as(uint, fail())");
-        let source = format!("fn fail() int {{ @print(\"\");return 1 / 0 }}\n{source}");
+        let source = format!(
+            "fn fail() int {{ @print(\"\");return 1 / (@as(int, @args().len) - 1) }}\n{source}"
+        );
         runtime_failure(&source, "division by zero");
     }
 }
@@ -2331,7 +2333,7 @@ buckets["item"].values[restore()] = 9
         "repair:[[7]]\nrepair:[[8]]\nrestore:[9]\n",
     );
     runtime_failure(
-        "mut int[][] rows = [];fn fail() int { @print(\"\");return 1 / 0 };rows[0][fail()] = 7",
+        "mut int[][] rows = [];fn fail() int { @print(\"\");return 1 / (@as(int, @args().len) - 1) };rows[0][fail()] = 7",
         "division by zero",
     );
     for source in [
@@ -3397,7 +3399,7 @@ fn checked_integer_arithmetic() {
         "int n = 9223372036854775807;@println(n + @as(int, @args().len))",
         "byte[] steps = [0, 1];byte b = 255;@println(b + steps[@args().len])",
         "int n = @as(int, @args().len) - 1;@println(1 / n)",
-        "@println(@as(int, @args().len) << 64)",
+        "@println(@as(int, @args().len) << (@as(int, @args().len) + 63))",
         "@println((@as(int, @args().len) + 1) ** 63)",
     ] {
         runtime_failure(source, "panic:");
@@ -3469,7 +3471,7 @@ test "module bindings" { assert read() == 2;assert value == 12 }
 #[test]
 fn test_body_runtime_failures_keep_the_runtime_barrier() {
     runtime_failure(
-        "test \"runtime panic\" { @println(1 / 0) }",
+        "test \"runtime panic\" { @println(1 / (@as(int, @args().len) - 1)) }",
         "division by zero",
     );
 }

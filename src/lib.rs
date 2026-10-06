@@ -7,6 +7,7 @@ mod flow;
 pub mod generics;
 pub mod lexer;
 pub mod modules;
+mod numeric_diagnostics;
 pub mod optimizer;
 pub mod parser;
 pub mod sema;
@@ -27,7 +28,8 @@ use diagnostic::Diagnostics;
 ///
 /// # Errors
 /// Returns diagnostics for invalid source, module or external-path resolution
-/// failures, invalid generic applications, type errors, embed resolution failures,
+/// failures, invalid generic applications, type errors, statically known arithmetic
+/// failures, embed resolution failures,
 /// or C generation failures.
 pub fn compile_source(source: &str, path: &Path) -> Result<String, Diagnostics> {
     compile_source_with_options(source, path, false)
@@ -109,7 +111,8 @@ fn compile(
     let tokens = lexer::lex(source)?;
     let module = modules::load_with_tests(parser::parse_at(tokens, path)?, path, tests)?;
     let checked = sema::check(generics::specialize(module)?, path)?;
-    let warnings = warnings::data_races(&checked);
+    let mut warnings = warnings::data_races(&checked);
+    warnings.0.extend(numeric_diagnostics::check(&checked)?.0);
     let checked = optimizer::resolve_embeds(checked, path)?;
     if release {
         let checked = sema::check(optimizer::optimize(checked)?, path)?;
