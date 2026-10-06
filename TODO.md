@@ -2,9 +2,6 @@
 
 - [ ] Expand language and edge-case coverage.
   - [ ] Cover every part of the language and as many edge cases as possible.
-    - [ ] Extend boundary/failure coverage after resolving the remaining contracts.
-
-      - [ ] Add Unicode version/normalization-specific cases once specified.
 
     - [ ] Expand async, future, mutex, and shared-storage coverage without relying
           on a particular thread schedule.
@@ -28,7 +25,7 @@
             `identity<Count>` currently fails parsing, while typed callback
             wrappers forwarding explicit generic calls are covered.
 
-      - [ ] Clarify multiline/Unicode contracts, observable representation,
+      - [ ] Clarify multiline whitespace contracts, observable representation,
             map key rules, function-result consumption, and caught error values.
       - [ ] Clarify nested lock jump targets, future lifecycle, permitted race
             guarantees, module initialization identity, and optimization scope.

@@ -3,9 +3,6 @@ name = "ncc"
 version = "0.1.0"
 edition = "2024"
 
-[dev-dependencies]
-unicode-segmentation = "=1.12.0"
-
 [[bin]]
 name = "ncc"
 path = "src/main.rs"

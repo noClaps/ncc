@@ -119,10 +119,10 @@ and warnings separately; existing compilation helpers continue to return C only.
 ## Dependencies and self-hosting
 
 The compiler needs only Rust's standard library and has no production crate
-dependencies. The Unicode reference package is test-only.
+dependencies. Unicode tests use checked-in official data, with no extra crates.
 
 Generated programs use C library facilities and, only for futures/mutexes,
-POSIX threads. Unicode grapheme segmentation uses checked-in Unicode 16 data
+POSIX threads. Unicode grapheme segmentation uses checked-in Unicode 18.0.0 data
 and a small runtime, without ICU or another external Unicode library. These are
 emitted only when needed by character-aware operations; printing composite values
 and converting strings to `byte[]` do not themselves require the tables. Actual
