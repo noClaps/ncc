@@ -5,8 +5,6 @@
 
     - [ ] Expand async, future, mutex, and shared-storage coverage without relying
           on a particular thread schedule.
-      - [ ] Add deterministic pre-await progress and mutex-contention checks;
-            assert bare-break lock reacquisition without timing assumptions.
     - [ ] Compare debug and release behavior, including output, evaluation order,
           side effects, runtime failures, and source locations.
       - [ ] Expand builtin process-state failure edges and build/run/test artifact
