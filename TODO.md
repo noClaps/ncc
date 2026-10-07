@@ -3,8 +3,6 @@
 - [ ] Expand language and edge-case coverage.
   - [ ] Cover every part of the language and as many edge cases as possible.
 
-    - [ ] Expand async, future, mutex, and shared-storage coverage without relying
-          on a particular thread schedule.
     - [ ] Compare debug and release behavior, including output, evaluation order,
           side effects, runtime failures, and source locations.
       - [ ] Expand builtin process-state failure edges and build/run/test artifact

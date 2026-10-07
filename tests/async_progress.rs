@@ -99,6 +99,179 @@ test "bare break unlocks" {
     );
 }
 
+#[test]
+fn joined_workers_share_global_and_escaped_mutable_storage() {
+    run_both(
+        r#"
+mut int[] global = [1, 2]
+fn update_global(int delta) int {
+    global[0] = global[0] + delta
+    global = global <> [delta]
+    return global[0]
+}
+struct Counter { (fn(int) int) update (fn() int) read }
+fn counter(int initial) Counter {
+    mut int value = initial
+    fn update(int delta) int { value = value + delta;return value }
+    fn read() int { return value }
+    return Counter{.update = update, .read = read}
+}
+Counter first = counter(10)
+Counter second = counter(100)
+fut int initial = async update_global(3)
+int joined = await initial
+// No ordinary mutable access overlaps a worker: every phase ends with a join.
+global[0] = global[0] + 5
+fut int next = async update_global(7)
+int joined_next = await next
+fut int first_job = async first.update(2)
+int first_result = await first_job
+fut int second_job = async second.update(4)
+int second_result = await second_job
+_ = first.update(3)
+fut int final_job = async first.update(5)
+int final_result = await final_job
+test "joined shared storage" {
+    assert joined == 4
+    assert joined_next == 16
+    assert global == [16, 2, 3, 7]
+    assert first_result == 12
+    assert second_result == 104
+    assert final_result == 20
+    assert first.read() == 20
+    assert second.read() == 104
+    @println("shared storage checked")
+}
+"#,
+        "",
+        "shared storage checked\n",
+    );
+}
+
+#[test]
+fn async_arguments_and_immutable_captures_keep_pre_release_snapshots() {
+    run_both(
+        r#"
+test "async snapshots" {
+    mutex bool released = false
+    mut int[][] source = [[1, 2], [3]]
+    int[][] frozen = source
+    fn captured = fn() int[][] {
+        mut bool ready = false
+        while not ready { lock released { ready = released } }
+        return frozen
+    }
+    fn argument(int[][] values) int[][] {
+        mut bool ready = false
+        while not ready { lock released { ready = released } }
+        mut int[][] local = values
+        local[0][0] = 9
+        return local
+    }
+    fut int[][] from_argument = async argument(source)
+    fut int[][] from_capture = async captured()
+    source[0][0] = 7
+    source[1] = [8, 9]
+    source = source <> [[10]]
+    lock released { released = true }
+    mut int[][] argument_result = await from_argument
+    mut int[][] capture_result = await from_capture
+    int[][] argument_expected = [[9, 2], [3]]
+    int[][] frozen_expected = [[1, 2], [3]]
+    assert argument_result == argument_expected
+    assert capture_result == frozen_expected
+    argument_result[1][0] = 20
+    capture_result[0] = [30]
+    int[][] source_expected = [[7, 2], [8, 9], [10]]
+    int[][] mutated_argument = [[9, 2], [20]]
+    int[][] mutated_capture = [[30], [3]]
+    assert frozen == frozen_expected
+    assert source == source_expected
+    assert argument_result == mutated_argument
+    assert capture_result == mutated_capture
+    @println("snapshots checked")
+}
+"#,
+        "",
+        "snapshots checked\n",
+    );
+}
+
+#[test]
+fn escaped_mutex_closures_serialize_exactly_once_updates_and_keep_factory_identity() {
+    run_both(
+        r#"
+struct Counter { (fn(uint, int) void) update (fn() int[]) read }
+fn counter(int initial) Counter {
+    mutex int[] state = [initial, 0, 0, 0]
+    fn update(uint slot, int delta) {
+        for i in [0, 0, 0, 0, 0, 0, 0, 0] {
+            lock state {
+                state[0] = state[0] + delta
+                state[slot] = state[slot] + 1
+            }
+        }
+    }
+    fn read() int[] { lock state { return state } }
+    return Counter{.update = update, .read = read}
+}
+test "escaped mutex storage" {
+    Counter first = counter(10)
+    Counter second = counter(100)
+    int[] before = first.read()
+    fut void a = async first.update(1, 1)
+    fut void b = async first.update(2, 2)
+    fut void c = async first.update(3, 4)
+    fut void d = async second.update(1, 10)
+    _ = await c
+    _ = await d
+    _ = await a
+    _ = await b
+    mut int[] after = first.read()
+    assert after == [66, 8, 8, 8]
+    assert second.read() == [180, 8, 0, 0]
+    assert before == [10, 0, 0, 0]
+    after[0] = -1
+    assert first.read() == [66, 8, 8, 8]
+    @println("mutex identity checked")
+}
+"#,
+        "",
+        "mutex identity checked\n",
+    );
+}
+
+#[test]
+fn async_throw_releases_mutex_before_recovery_and_next_worker() {
+    run_both(
+        r#"
+test "async throw unlocks" {
+    mutex int value = 0
+    fn fail() int! {
+        lock value { value = 7;throw "worker failed" }
+        return 99
+    }
+    fn succeed() int {
+        lock value { value = value + 1;return value }
+    }
+    fut int! failed = async fail()
+    int recovered = await failed catch err {
+        assert @as(str, err) == "worker failed"
+        lock value { assert value == 7;value = 10 }
+        break 42
+    }
+    assert recovered == 42
+    fut int next = async succeed()
+    assert await next == 11
+    lock value { assert value == 11 }
+    @println("throw unlock checked")
+}
+"#,
+        "",
+        "throw unlock checked\n",
+    );
+}
+
 // Intercept only the armed worker's next lock. A failed try-lock proves actual
 // contention while the caller still owns the NC mutex; the real blocking lock
 // then preserves ordinary runtime behavior. Probe synchronization is separate.
