@@ -7,6 +7,10 @@ edition = "2024"
 name = "ncc"
 path = "src/main.rs"
 
+[[bench]]
+name = "compilation"
+harness = false
+
 # Keep the compiler's evaluator fast in development and integration tests without
 # disabling Rust debug assertions or overflow checks.
 [profile.dev]

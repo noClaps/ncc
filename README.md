@@ -13,6 +13,8 @@ Everything below the line is the original LLM-written README. I cannot guarantee
 Rust front end, portable C output, and system-C-compiler executable builds.
 The language specification is in [docs/design.md](docs/design.md).
 Known remaining work is tracked in [TODO.md](TODO.md).
+For compilation performance measurements, see the
+[compilation benchmark guide](docs/testing.md#compilation-benchmarks).
 
 A standalone Tree-sitter grammar, generated parser, syntax corpus, and highlighting
 queries are in [tree-sitter-nc](tree-sitter-nc/README.md). Run `make grammar-test`

@@ -200,6 +200,81 @@ separate, preserve combining-character boundaries and embedded NULs, and check
 print-argument snapshots and single-interpolation effects. The strings workload is
 executed only in a reduced regression, not at its full example iteration count.
 
+## Compilation benchmarks
+
+Run the stdlib-only Python runner from the repository root (Python 3, Cargo, and
+Rust are required; `--native` also requires the system C toolchain):
+
+```sh
+python3 scripts/benchmark-compilation.py --help
+python3 scripts/benchmark-compilation.py --output compilation.csv
+python3 scripts/benchmark-compilation.py --samples 9 --warmup 3 \
+  --sizes 128,512,2048 --depths 8,16,24 --native --output compilation-native.csv
+python3 -m unittest discover -s scripts -p 'test_benchmark_compilation.py'
+```
+
+The runner first prepares the benchmark with
+`cargo build --offline --release --bench compilation --message-format=json`.
+Cargo supports `build --bench`; this command builds but does not execute the
+benchmark. The runner discovers its executable from Cargo's `compiler-artifact`
+JSON rather than assuming a target directory or artifact filename, then invokes
+it once, sequentially. Cargo preparation wall time is reported separately on
+stderr and is not included in the compilation samples. No `cargo clean` is run.
+The metadata records whether the benchmark artifact and all reported artifacts
+were fresh, but freshness describes Cargo reuse, not a true clean build. For a
+clean-build comparison, deliberately prepare a separate empty Cargo target
+directory, record that procedure, and account for preparation separately.
+
+Defaults are seven measured samples and two warmups, expression counts
+`128,512,2048`, and shared-type graph depths `8,16,24`. Samples, sizes, and depths
+must be positive integers; warmups may be zero. Size/depth lists must contain
+distinct comma-separated integers. Both NC debug and release modes are measured
+using the same release-built Rust benchmark executable; the `mode` column does
+not describe Cargo's build profile.
+
+The harness can also run directly with
+`cargo bench --offline --bench compilation -- --samples 7`; that command does not
+separately record Cargo preparation or host metadata, so use the Python runner
+for comparisons.
+
+The `expression_list` workload times `compile_test_source_with_options`, while
+`shared_type_graph` times `compile_source_with_options` on shared type DAGs.
+`nc_compile` measures the end-to-end library compilation to emitted C, not
+individual parser, checker, evaluator, or code-generation phases. With `--native`,
+`native_c` separately measures C compilation and linking using the CLI's debug
+`-O0 -g` or release `-O3` settings and macOS architecture flags. It never executes
+the generated programs. Native timings depend on the C toolchain as well as the
+size of emitted code; they are not NC-only compilation timings.
+
+Stdout contains only the raw harness CSV:
+
+```text
+workload,size,mode,phase,sample,elapsed_ns,source_bytes,c_bytes
+```
+
+`size` counts expression pairs (one arithmetic assertion and one closure-call
+assertion) for `expression_list`, and is the graph depth for
+`shared_type_graph`; `elapsed_ns` is the measured duration in nanoseconds. The
+runner validates workload/mode/phase groups and measured sample counts, then
+reports median and minimum durations per group on stderr. `--output PATH` also
+saves the unmodified CSV to `PATH` and JSON metadata to `PATH.json` (existing
+files are overwritten; the parent directory must exist). Without `--output`,
+CSV can be redirected from stdout and metadata is still printed on stderr.
+Metadata includes arguments, exact build/run commands, Cargo preparation and
+whole-harness wall times, tool versions, OS/CPU details, load averages before
+preparation and before/after samples, Git revision and dirty status, artifact
+freshness, and summaries. Dirty status includes untracked files; retain the
+source diff separately when comparing dirty revisions.
+
+Run comparisons sequentially under controlled load, with the same toolchain,
+arguments, host, and cache-preparation procedure. Stop unrelated builds,
+profilers, and other CPU-heavy processes, and inspect the recorded load averages.
+Warmups do not make these results independent of caches, thermal state, or
+background activity. There are no wall-time limits or pass/fail timing thresholds;
+large requested workloads can take substantial time. These focused measurements
+are not full-suite execution timings, proof of language conformance, or evidence
+that the full test suite consistently completes within 90 seconds.
+
 ## Coverage map
 
 See [the specification coverage inventory](coverage.md) for a section-by-section
