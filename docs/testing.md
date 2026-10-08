@@ -275,6 +275,59 @@ large requested workloads can take substantial time. These focused measurements
 are not full-suite execution timings, proof of language conformance, or evidence
 that the full test suite consistently completes within 90 seconds.
 
+## Native full-suite profiling
+
+Use the stdlib-only runner to attribute actual native C-driver costs to test
+binaries, independently of the compilation-only workloads above:
+
+```sh
+python3 scripts/profile-native-tests.py --output tmp/native-profile \
+  --samples 3 --test-threads 8 --max-load 6 --cooldown 90
+python3 -m unittest discover -s scripts -p 'test_profile_native_tests.py'
+```
+
+Choose thread count and load threshold for the host rather than copying these
+values universally. Stop unrelated CPU-heavy work, prepare artifacts, let the
+machine settle, and inspect live CPU idle capacity as well as load averages.
+`--max-load` rejects a sample whose initial one-minute load exceeds the threshold;
+it does not certify quiet conditions throughout the run. `--cooldown` defaults
+to 90 seconds between samples and is excluded from sample wall times. macOS
+`top` snapshots before/after each sample use two observations one second apart;
+process-inspection permissions may be required. Probe failures are retained in
+the report rather than silently claiming controlled load.
+
+The output must be a new directory. `report.json` contains toolchain/host/Git
+metadata, exact commands, Cargo artifact freshness and preparation time,
+per-binary test wall times, per-invocation native records, and grouped summaries.
+The runner builds with `cargo test --offline --no-run --message-format=json`,
+discovers test executable paths from Cargo messages, then runs unit/integration
+binaries sequentially with the requested test-thread count. Doctests run once
+separately and their time is not included in profile samples. Use
+`--no-default-features` for the corresponding preparation and doctest commands.
+`--timeout` bounds each build or test binary, not the entire profiling run.
+
+A temporary `cc` wrapper forwards arguments and inherited stdout/stderr to the
+original compiler. It records compiler-driver wall/descendant CPU time, exit
+status, actual optimization/debug flags, primary `.c` input sizes/hashes,
+includes, and Unicode-table presence. It does not instrument Rust compilation,
+absolute compiler paths, or deliberately substituted test compilers. Primary
+inputs do not include transitive header/extern contents. Summed concurrent
+native durations are not suite wall time, and wrapper startup/input inspection
+adds substantial observer overhead. **Measure the 90-second budget separately
+with uninstrumented, ready-artifact `cargo test --offline` repeats.**
+
+All test output is saved to private per-binary logs; the terminal shows only
+suite names, timings, and statuses. Do not dump logs containing environment
+output. `--keep-c-sources` optionally retains content-addressed primary inputs
+for separate compile/link experiments; these can contain embedded private data
+and may not be self-contained when including temporary external sources. Keep
+the output directory local/ignored. Existing outputs are never overwritten.
+Failures preserve an incomplete report and return nonzero; expected negative
+native statuses are not failures when their enclosing Rust tests pass.
+
+See `docs/native-compilation-profile.md` for the October 2026 measurements,
+compile/link replays, observed wrapper overhead, and remaining budget work.
+
 ## Coverage map
 
 See [the specification coverage inventory](coverage.md) for a section-by-section
