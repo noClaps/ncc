@@ -177,10 +177,73 @@ and had no live CPU-idle measurement because the terminal sandbox denied
 `top`. No low-load acceptance threshold or repeated-sample protocol was applied.
 Do not compare that wall time or native CPU total to the controlled baseline as
 an optimization speedup/regression. Repeated ready-artifact, low-load,
-uninstrumented budget checks remain open. Raw records and private suite logs
+uninstrumented budget checks were still open at that point; the completed recheck
+below supplies those measurements. Raw records and private suite logs
 are in ignored `tmp/native-profile-reduction`; default/no-default validation
 logs are `tmp/native-reduction-default.log` and
 `tmp/native-reduction-no-default.log`.
+
+## Post-reduction budget recheck — October 8, 2026
+
+Source revision: `20108226f32b01d1935d1ab226a268ebde672ad5`, with a clean
+worktree. The host and toolchain were unchanged from the baseline above. No
+compiler, native flags, fixtures, coverage, or production code changed for this
+recheck. The 2,461-invocation count comes from the separate reduction profile;
+these budget samples did not wrap or count native compiler calls.
+
+Both feature configurations were prepared with `cargo test --offline --no-run`
+(and `--no-default-features` for that configuration) before sampling. Before
+each sample, the corresponding `--no-run --message-format=json` command confirmed
+that every Cargo compiler artifact was fresh. Preparation was outside the timed
+region. Samples ran sequentially, with no concurrent agent build or profiler,
+and a 90-second idle interval before each admission check, including the first.
+
+Admission required a one-minute load at most 6 and at least 80% CPU idle in the
+second sample of `top -l 2 -s 1 -n 0`. All four samples were admitted on their
+first attempt. Ordinary background/editor activity remained; this is a
+controlled low-load comparison, not an isolated-machine guarantee. `top` ran
+before timing, not during the suite. The sandbox blocks macOS `top`, so the
+measurement command ran with explicitly approved unsandboxed access.
+
+| Uninstrumented run               | Tests passed | Wall seconds | Starting one-minute load | Starting live CPU idle |
+| -------------------------------- | -----------: | -----------: | -----------------------: | ---------------------: |
+| Default sample 1                 |          949 |        74.55 |                     1.88 |                 88.65% |
+| Default sample 2                 |          949 |        74.92 |                     3.17 |                 88.56% |
+| Default sample 3                 |          949 |        75.11 |                     3.17 |                 88.76% |
+| `--no-default-features` sample 1 |          949 |        74.98 |                     4.05 |                 88.91% |
+
+The timed commands were `/usr/bin/time -p cargo test --offline` and
+`/usr/bin/time -p cargo test --offline --no-default-features`, using default
+libtest concurrency on the eight-CPU host. Cargo overhead and the empty doctest
+suite are included. All commands exited successfully; none reported a Cargo
+recompilation. Full stdout/stderr was saved privately, never printed uncensored.
+After all timing samples, `cargo clippy --offline --all-targets -- -D warnings`,
+`cargo fmt --check`, and `cargo build --offline --release` also passed; these
+checks did not overlap the budget measurements.
+
+The default median was **74.92 seconds**, with a **0.56-second range**. All four
+samples met the 90-second budget, with minimum observed headroom of **14.89
+seconds**. The default range is below the earlier 79.46–81.72-second baseline,
+but these are sequential observations, not an interleaved before/after study;
+they do not isolate the reduction's causal speedup from host variability.
+The loaded, instrumented 142.36-second reduction profile remains separate and
+is neither a budget failure nor an overhead-adjusted timing estimate.
+
+This completes the post-reduction low-load recheck. The broader reproducibility
+task remains open: three default samples and one alternate-feature sample do
+not establish a guarantee under background pressure, on other hosts, for clean
+builds, or after future fixture growth. Repeat the ready-artifact/admission/
+cooldown protocol after further reductions or material coverage changes rather
+than treating these results as permanent certification.
+
+Raw records, fresh-artifact messages, CPU snapshots, and private logs are in
+ignored `tmp/native-budget-recheck/report.json` and adjacent files. The local
+orchestration script is `tmp/recheck-native-budget.py`; it is not a committed
+fixture. To reproduce manually, prepare both configurations, then for each
+sample confirm fresh artifacts with `--no-run --message-format=json`, wait
+90 seconds, inspect the second `top` CPU sample and current one-minute load,
+and time the appropriate command above with private stdout/stderr redirection.
+Reject inadmissible starts rather than combining them with the low-load table.
 
 ## Remaining follow-up
 
@@ -194,9 +257,10 @@ logs are `tmp/native-reduction-default.log` and
 - If targeting individual expensive translation units, investigate generated
   helper/function size in runtime Unicode and recursive-map fixtures. Do not
   remove segmentation, sanitizer, or optimized coverage to meet a time target.
-- Recheck uninstrumented low-load repeats after any change. These runs beat
-  90 seconds, but do not establish consistent performance under background
-  pressure, other machines, or clean builds. The parent budget task stays open.
+- Recheck uninstrumented low-load repeats after further reductions or material
+  coverage changes. The completed post-reduction samples beat 90 seconds, but do
+  not establish consistent performance under background pressure, other machines,
+  or clean builds. The parent budget task stays open.
 
 Raw reports and private logs remain under ignored `tmp/native-profile-8-repeat`,
 `tmp/native-profile-8-settled`, and `tmp/native-replay`; uninstrumented logs and

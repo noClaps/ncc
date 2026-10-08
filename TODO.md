@@ -2,11 +2,12 @@
 
 - [ ] Make the full-suite 90-second performance budget consistently reproducible.
 
-  - [ ] Recheck the budget with repeated ready-artifact, low-load runs after
-        reductions; keep loaded runs and profiler overhead separate. Native
-        invocations are now 2,461 (down from 2,651); see
-        `docs/native-compilation-profile.md`. Controlled baseline uninstrumented
-        runs reached 79.46–81.72 seconds, not a loaded-run guarantee.
+  - [ ] Preserve the observed low-load budget headroom as coverage grows; repeat
+        ready-artifact measurements after further reductions or material fixture
+        changes, keeping loaded runs and profiler overhead separate. The completed
+        post-reduction recheck reached 74.55–75.11 seconds across four runs; see
+        `docs/native-compilation-profile.md`. Background pressure, other hosts,
+        and clean-build guarantees remain unestablished.
 
 - [ ] Expand language and edge-case coverage.
   - [ ] Continue full-language and edge-case coverage using `docs/coverage.md`;
