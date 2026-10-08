@@ -2,11 +2,6 @@
 
 - [ ] Make the full-suite 90-second performance budget consistently reproducible.
 
-  - [ ] After further reductions or material fixture growth, repeat the checked-in
-        `scripts/recheck-native-budget.py` ready-artifact protocol; keep loaded
-        runs and profiler overhead separate. The latest four-sample repeat reached
-        72.84–75.28 seconds with at least 14.72 seconds of observed headroom; see
-        `docs/native-compilation-profile.md`.
   - [ ] Establish budget behavior under background pressure, on other hosts, and
         for clean builds; the completed low-load repeats do not cover these.
 

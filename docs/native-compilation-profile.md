@@ -305,6 +305,55 @@ build passed. Raw records and private logs are in ignored
 `tmp/native-budget-repeatable/report.json` and adjacent files. The runner is
 macOS-specific because its live CPU admission uses `top`'s macOS output.
 
+## Additional ready-artifact repeat — October 8, 2026
+
+Source revision: `d5b603733ab6729940a2806a7b36e5f3b565d357`, with a clean
+worktree. This requested repeat used the checked-in runner unchanged. There
+were no intervening compiler reductions or fixture changes, so it measures
+repeatability rather than a new speedup. The host and toolchain were unchanged.
+
+```sh
+python3 scripts/recheck-native-budget.py --output tmp/native-budget-recheck-d5b6037
+```
+
+The default protocol was unchanged: three default samples and one
+`--no-default-features` sample, default libtest concurrency, fresh Cargo
+artifacts before each sample, a 90-second cooldown before every admission
+attempt, one-minute load at most 6, and live CPU idle at least 80%. Preparation
+and `top` inspection remained outside timing. The runner used approved
+unsandboxed access for macOS `top`; no agent build or profiler overlapped the
+sequential measurements.
+
+| Uninstrumented run               | Tests passed | Wall seconds | Starting one-minute load | Starting live CPU idle |
+| -------------------------------- | -----------: | -----------: | -----------------------: | ---------------------: |
+| Default sample 1                 |          949 |        75.51 |                     2.42 |                 86.42% |
+| Default sample 2                 |          949 |        73.80 |                     3.28 |                 89.33% |
+| Default sample 3                 |          949 |        76.71 |                     3.07 |                 84.16% |
+| `--no-default-features` sample 1 |          949 |        69.85 |                     2.03 |                 92.97% |
+
+The default starts were admitted on their first attempts. The alternate-feature
+sample's first admission attempt was rejected at load **2.90** and **79.55%**
+CPU idle; no suite was timed at that rejected start. After another 90-second
+cooldown, its second attempt met the admission thresholds shown above. The
+rejected attempt is retained in the report, not mixed into the timing table.
+
+Every timed command exited successfully, passed 949 tests, and reported no Cargo
+recompilation. The default median was **75.51 seconds**, with a **2.91-second
+range**. All four samples met the 90-second budget, with minimum observed
+headroom of **13.29 seconds**. The overall range was **69.85–76.71 seconds**;
+the single alternate-feature observation does not establish a feature-dependent
+speedup. These observations retain low-load headroom without proving performance
+under background pressure, on other hosts, or for clean builds. Loaded runs and
+profiler overhead remain separate, with no overhead correction.
+
+After timing, all 51 Python script tests, `cargo clippy --offline --all-targets
+-- -D warnings`, `cargo fmt --check`, and `cargo build --offline --release`
+passed. Raw records, admission snapshots, and private test logs are in ignored
+`tmp/native-budget-recheck-d5b6037/report.json` and adjacent files; no test logs
+were printed uncensored. This completes the requested repeat, not the parent
+reproducibility task. Repeat the documented protocol after future reductions or
+material fixture growth.
+
 ## Remaining follow-up
 
 - Continue prioritizing invocation volume and repeated linking before broad
