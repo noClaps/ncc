@@ -5,10 +5,6 @@
 
     - [ ] Compare debug and release behavior, including output, evaluation order,
           side effects, runtime failures, and source locations.
-      - [ ] Expand builtin process-state failure edges and build/run/test artifact
-            cleanup checks on backend and runtime failures in both modes;
-            retain the successful inferred/explicit/default build-format matrix,
-            empty/Unicode argument forwarding and silent no-tests regressions.
 
   - [ ] Resolve unclear specification semantics before encoding assumptions.
     - [ ] Resolve the questions recorded in `docs/coverage.md` and collect further
