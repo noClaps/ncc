@@ -1,7 +1,12 @@
 # Remaining work
 
 - [ ] Expand language and edge-case coverage.
-  - [ ] Cover every part of the language and as many edge cases as possible.
+  - [ ] Continue full-language and edge-case coverage using `docs/coverage.md`;
+        container/function rejection matrices are expanded, not complete.
+    - [ ] Extend parenthesized function-type coverage to remaining type positions
+          beyond parameters, return annotations and struct fields.
+    - [ ] Extend container write/index rejection matrices to nominal and optional
+          interactions after clarifying any unspecified index/key rules.
 
   - [ ] Resolve unclear specification semantics before encoding assumptions.
     - [ ] Resolve the questions recorded in `docs/coverage.md` and collect further

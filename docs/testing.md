@@ -30,6 +30,15 @@ locations, not a requirement for located runtime panics. Neither suite settles
 unresolved indexed-read snapshots, map traversal order, or async scheduling, nor
 does passing differential coverage establish full language conformance.
 
+`tests/negative_container_edges.rs` and `tests/negative_function_edges.rs`
+check 116 rejection fixtures in both NC debug and release modes, asserting the
+relevant diagnostic rather than accepting any compilation failure. They cover
+noninteger array/string indexing, typed array/map writes, immutable map insertion,
+required return annotations, function-local scope, nonoptional `none` arguments,
+and representative parenthesized function-type requirements. Compile-only valid
+controls guard against blanket rejection; these suites do not execute the controls
+or establish semantics for byte/nominal indices or unresolved map key domains.
+
 Release analysis follows safely known state through retained test blocks and
 assertion-expression effects, including repeated named calls sharing global
 mutations. Known-true assertions permit continued analysis; false or unknown
