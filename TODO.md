@@ -1,12 +1,12 @@
 # Remaining work
 
 - [ ] Make the full-suite 90-second performance budget consistently reproducible.
-  - [ ] Reduce the measured native invocation/link overhead without weakening
-        debug/release coverage or fresh-build CLI artifact checks; see
-        `docs/native-compilation-profile.md` for the 2,651-invocation profile.
+
   - [ ] Recheck the budget with repeated ready-artifact, low-load runs after
-        reductions; keep loaded runs and profiler overhead separate. Controlled
-        uninstrumented runs reached 79.46–81.72 seconds, not a loaded-run guarantee.
+        reductions; keep loaded runs and profiler overhead separate. Native
+        invocations are now 2,461 (down from 2,651); see
+        `docs/native-compilation-profile.md`. Controlled baseline uninstrumented
+        runs reached 79.46–81.72 seconds, not a loaded-run guarantee.
 
 - [ ] Expand language and edge-case coverage.
   - [ ] Continue full-language and edge-case coverage using `docs/coverage.md`;

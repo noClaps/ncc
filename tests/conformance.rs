@@ -595,16 +595,16 @@ test "IEEE comparisons" {
 
 #[test]
 fn nonfinite_float_integer_casts_fail_at_runtime() {
+    let mut cases = Vec::new();
     for value in ["NaN", "inf", "-inf"] {
         for ty in ["int", "uint"] {
-            runtime_failure(
-                &format!(
-                    "fn runtime() float {{ @print(\"\");return {value} }};_ = @as({ty}, runtime())"
-                ),
-                "cast out of range",
-            );
+            cases.push(format!(
+                "_ = @args()\n\
+                 fn runtime() float {{ @print(\"\");return {value} }};_ = @as({ty}, runtime())"
+            ));
         }
     }
+    numeric_cast_failure_matrix(&cases, 6, "", Path::new("test.nc"));
 }
 
 #[test]
@@ -763,30 +763,22 @@ fn signed_unsigned_runtime_casts_preserve_the_shared_integer_range() {
 #[test]
 fn negative_fractional_float_to_uint_panics_before_truncation() {
     let tiny = format!("-0.{}5", "0".repeat(323));
+    let mut cases = Vec::new();
     for value in ["-0.75", "-0.5", "-0.0001", tiny.as_str()] {
-        let source = format!(
+        cases.push(format!(
             r#"
 fn argument() float {{ _ = @args();@println("argument");return {value} }}
 @println(@as(uint, argument()))
 @println("after")
 "#,
-        );
-        for release in [false, true] {
-            compile_fixture(&source, Path::new("negative-cast.nc"), release).unwrap();
-            let output = run_mode(&source, release);
-            assert_eq!(output.status.code(), Some(1), "release={release}: {value}");
-            assert_eq!(output.stdout, b"argument\n", "release={release}: {value}");
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            assert!(
-                stderr.contains("cast out of range"),
-                "release={release}: {value}: {stderr}",
-            );
-        }
+        ));
     }
+    numeric_cast_failure_matrix(&cases, 4, "argument\n", Path::new("negative-cast.nc"));
 }
 
 #[test]
 fn finite_out_of_range_numeric_casts_panic_before_c_conversion() {
+    let mut cases = Vec::new();
     for (from, to, value) in [
         ("float", "int", "9223372036854775808.0"),
         ("float", "int", "-9223372036854777856.0"),
@@ -796,13 +788,66 @@ fn finite_out_of_range_numeric_casts_panic_before_c_conversion() {
         ("uint", "int", "9223372036854775808u"),
         ("uint", "int", "18446744073709551615u"),
     ] {
-        runtime_failure(
-            &format!(
-                "fn runtime({from} value) {from} {{ @print(\"\");return value }};\
-                 _ = @as({to}, runtime({value}))",
-            ),
-            "cast out of range",
+        cases.push(format!(
+            "_ = @args()\n\
+             fn runtime({from} value) {from} {{ @print(\"\");return value }};\
+             _ = @as({to}, runtime({value}))",
+        ));
+    }
+    numeric_cast_failure_matrix(&cases, 7, "", Path::new("test.nc"));
+}
+
+fn numeric_cast_failure_matrix(
+    cases: &[String],
+    expected_count: usize,
+    stdout: &str,
+    fixture_path: &Path,
+) {
+    assert_eq!(cases.len(), expected_count);
+    let mut source = String::from("if @args()[1] {\n");
+    for (index, body) in cases.iter().enumerate() {
+        writeln!(source, "\"{index}\" -> {{\n{body}\n}}").unwrap();
+    }
+    source.push_str("_ -> {}\n}\n");
+    let dir = ncc::temp::Directory::new().unwrap();
+    let input = dir.path().join(fixture_path);
+    fs::write(&input, &source).unwrap();
+    for release in [false, true] {
+        // Keep unguarded front-end/optimizer coverage: the selector must not hide failures.
+        for body in cases {
+            compile_fixture(body, fixture_path, release).unwrap();
+        }
+        let executable = dir.path().join(if release { "release" } else { "debug" });
+        let build = Command::new(env!("CARGO_BIN_EXE_ncc"))
+            .arg("build")
+            .arg(if release { "-r" } else { "-d" })
+            .arg(&input)
+            .arg("-o")
+            .arg(&executable)
+            .output()
+            .unwrap();
+        assert!(
+            build.status.success(),
+            "release={release}: {}",
+            String::from_utf8_lossy(&build.stderr)
         );
+        for (index, body) in cases.iter().enumerate() {
+            let output = Command::new(&executable)
+                .arg(index.to_string())
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(1), "release={release}: {body}");
+            assert_eq!(
+                output.stdout,
+                stdout.as_bytes(),
+                "release={release}: {body}"
+            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains("cast out of range"),
+                "release={release}: {body}\n{stderr}"
+            );
+        }
     }
 }
 

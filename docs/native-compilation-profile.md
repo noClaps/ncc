@@ -130,10 +130,62 @@ time in compilation, not linking. Real combined `cc` calls have a different
 process structure, so multiplying replay medians by all 2,651 calls is not a
 valid prediction of achievable suite savings.
 
-## Follow-up, not implemented here
+## Invocation reduction — October 8, 2026
 
-- Prioritize invocation volume and repeated linking before broad compiler
-  reduction. Inspect runtime-failure and differential helpers for compile-once,
+The bounds-failure matrices in `tests/index_failures.rs` and three numeric-cast
+failure matrices in `tests/conformance.rs` now compile runtime-selected cases
+once per matrix in each NC mode. Each case still runs in a fresh process; a
+panic cannot prevent subsequent cases from executing. Builds use the actual CLI
+`build -d` / `build -r`, preserving `-O0 -g` / `-O3`. There is no compilation
+cache. Case-count assertions guard the matrices, and each unguarded case still
+passes through the compiler API in both modes before native execution so the
+selector cannot hide front-end/optimizer diagnostics.
+
+| Scope                       | Native invocations before | Native invocations after | Failure cases per mode |
+| --------------------------- | ------------------------: | -----------------------: | ---------------------: |
+| `index_failures`            |                       172 |                       10 |                     85 |
+| Three numeric-cast matrices |                        34 |                        6 |                     17 |
+| Full `conformance` binary   |                       358 |                      330 |              Unchanged |
+| Full suite                  |                     2,651 |                    2,461 |              Unchanged |
+
+The index total includes two unchanged successful-control compilations. All
+204 failure executions remain, covering extreme signed/unsigned indices,
+every last-index expression, map failures, unrecoverable panics, nonfinite and
+out-of-range casts, and negative fractional casts. Runtime argument-count
+indices in the grouped bounds cases account for the added selector argument.
+Trace/panic checks remain; no production compiler code or fresh-build CLI
+artifact/error checks changed.
+
+The full-suite invocation count was verified with prepared Cargo artifacts:
+
+```sh
+python3 scripts/profile-native-tests.py --output tmp/native-profile-reduction \
+  --samples 1 --test-threads 8
+```
+
+The report completed successfully, recording **2,461 native invocations** and
+the same **20 expected nonzero native statuses**. The reduction is **190 calls
+(7.2%)**, split evenly between debug and release. The new flag counts are 1,218
+`-O0` (1,208 with `-g`), 1,203 `-O3`, nine `-O2`, and 31 without explicit `-O`.
+All 949 Rust tests passed, as did the separate empty doctest suite. Full default
+and no-default-feature test runs, all-target Clippy with warnings denied,
+formatting checks, and the release build also passed.
+
+**This is an invocation-count validation, not a budget measurement.** The
+single instrumented sample started at one-minute load 8.72, took 142.36 seconds,
+and had no live CPU-idle measurement because the terminal sandbox denied
+`top`. No low-load acceptance threshold or repeated-sample protocol was applied.
+Do not compare that wall time or native CPU total to the controlled baseline as
+an optimization speedup/regression. Repeated ready-artifact, low-load,
+uninstrumented budget checks remain open. Raw records and private suite logs
+are in ignored `tmp/native-profile-reduction`; default/no-default validation
+logs are `tmp/native-reduction-default.log` and
+`tmp/native-reduction-no-default.log`.
+
+## Remaining follow-up
+
+- Continue prioritizing invocation volume and repeated linking before broad
+  compiler reduction. Inspect other runtime-failure and differential helpers for compile-once,
   runtime-selected cases, preserving each failure in a fresh process and both
   NC modes. Fresh compilation is itself part of CLI artifact/error tests; do
   not cache those paths away.
