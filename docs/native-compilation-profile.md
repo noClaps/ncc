@@ -245,6 +245,66 @@ sample confirm fresh artifacts with `--no-run --message-format=json`, wait
 and time the appropriate command above with private stdout/stderr redirection.
 Reject inadmissible starts rather than combining them with the low-load table.
 
+## Checked-in budget runner and repeat — October 8, 2026
+
+The ready-artifact procedure is now checked in as
+`scripts/recheck-native-budget.py`, with stdlib-only regression tests in
+`scripts/test_recheck_native_budget.py`. It replaces the need to reconstruct the
+ignored orchestration script described above. Run it from the repository root:
+
+```sh
+python3 scripts/recheck-native-budget.py --output tmp/native-budget-repeatable
+```
+
+Use a new output directory for each run; existing directories are never
+replaced. The default protocol prepares both feature configurations outside
+measurement, requires every Cargo artifact to be fresh before each sample,
+waits 90 seconds, and admits starts only at one-minute load at most 6 and at
+least 80% idle in the second macOS `top` sample. It runs three default samples
+and one `--no-default-features` sample with uninstrumented `/usr/bin/time -p`
+and default libtest concurrency. `RUST_TEST_THREADS` overrides are rejected.
+`top` still requires approved unsandboxed access in the editor environment.
+
+The report records the source revision, worktree status, host/toolchain,
+settings, admission attempts, test counts, timings, and completion status.
+The test count is discovered from successful results rather than fixed at 949,
+and must agree across samples. All test stdout/stderr stays in local logs;
+never print those logs uncensored, since builtin tests can expose environment
+values. Recompilation, failed tests, stale artifacts, missing measurements,
+exhausted admission attempts, or timeouts leave an incomplete report. A
+completed run exceeding the budget remains complete but exits unsuccessfully.
+Changing admission settings or concurrency is a different comparison protocol,
+not interchangeable with the default low-load observations.
+
+This repeat used source revision `25704ecdbd14fc51034a82f088f85d191c8bc655`
+with only the new runner and its tests added locally. Compiler code, NC/Rust
+fixtures, coverage, native flags, host, and toolchain were unchanged. Samples
+ran sequentially without concurrent agent builds or profilers, and every start
+was admitted on the first attempt. Preparation and CPU inspection were outside
+timing; no timed command recompiled Cargo artifacts.
+
+| Uninstrumented run               | Tests passed | Wall seconds | Starting one-minute load | Starting live CPU idle |
+| -------------------------------- | -----------: | -----------: | -----------------------: | ---------------------: |
+| Default sample 1                 |          949 |        75.28 |                     2.33 |                 85.13% |
+| Default sample 2                 |          949 |        72.84 |                     3.47 |                 80.62% |
+| Default sample 3                 |          949 |        74.26 |                     3.04 |                 88.62% |
+| `--no-default-features` sample 1 |          949 |        74.11 |                     3.37 |                 86.10% |
+
+The default median was **74.26 seconds**, with a **2.44-second range**.
+Minimum observed headroom across all four samples was **14.72 seconds**.
+This preserves the previously observed low-load headroom; it is not evidence
+of a new compiler speedup because the compiler and fixtures did not change.
+Loaded and instrumented observations remain separate, without any overhead
+correction. Background pressure, other hosts, clean builds, and future fixture
+growth remain unestablished.
+
+All 51 Python script tests passed, including mocked admission, stale-artifact,
+timeout/privacy, output-preservation, and complete-over-budget reporting cases.
+After timing, Clippy with warnings denied, formatting, and the offline release
+build passed. Raw records and private logs are in ignored
+`tmp/native-budget-repeatable/report.json` and adjacent files. The runner is
+macOS-specific because its live CPU admission uses `top`'s macOS output.
+
 ## Remaining follow-up
 
 - Continue prioritizing invocation volume and repeated linking before broad
