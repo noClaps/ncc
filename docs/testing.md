@@ -12,6 +12,24 @@ cargo build --release
 Use `--offline` on Cargo commands when dependencies are already cached. The core
 compiler has no production dependencies. Unicode segmentation is a test oracle only.
 
+`tests/differential_behavior.rs` compares exit codes and exact stdout/stderr bytes
+between NC debug and release modes, with independent expected results. Positive
+fixtures run both with known inputs and after process-dependent input, through
+both `ncc run` and actual `ncc test` roots. They cover callable selection before
+argument mutation, composite snapshots, RHS copies before target replacement,
+short-circuit and fallback effects, embedded NUL/Unicode output, immutable tuple
+and by-value captures, and independent mutable closure cells. Failure fixtures
+check division-before-target precedence, bounds and missing-key panics, prior
+output, skipped catch/tails, and assertion stopping across shared-state tests.
+
+`tests/differential_locations.rs` compares structured and rendered semantic errors
+and CLI rejection in both modes: original file, byte span, line/column, excerpt,
+and caret for transitive imported generics, nested closures, and escaped
+interpolations. Output probes must not execute on rejection. These are compile-time
+locations, not a requirement for located runtime panics. Neither suite settles
+unresolved indexed-read snapshots, map traversal order, or async scheduling, nor
+does passing differential coverage establish full language conformance.
+
 Release analysis follows safely known state through retained test blocks and
 assertion-expression effects, including repeated named calls sharing global
 mutations. Known-true assertions permit continued analysis; false or unknown

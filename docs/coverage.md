@@ -48,6 +48,23 @@ In tables, `suite::test_name` identifies a Rust test in the following files:
 | `output`               | [tests/output_precomputation.rs](../tests/output_precomputation.rs)   |
 | `partial`              | [tests/partial_precomputation.rs](../tests/partial_precomputation.rs) |
 
+### Explicit debug/release comparisons
+
+`tests/differential_behavior.rs` checks mode equality and independent expected
+exit codes and exact stdout/stderr bytes. Known and process-dependent inputs run
+through both normal and test CLI execution. Coverage includes callable-before-
+argument selection, deep argument and assignment snapshots, target replacement,
+short-circuit/fallback laziness, immutable tuple/by-value captures, mutable closure
+identity, NUL/Unicode output, failure precedence, uncatchable indexing panics,
+and stopping at false assertions across shared-state test roots.
+
+`tests/differential_locations.rs` checks identical structured and rendered semantic
+diagnostics, including exact original spans, paths, line/column, source excerpts,
+and carets for transitive imported generics, nested closures, and escaped
+interpolation. CLI checks require rejection without executing preceding output.
+Runtime panic locations and unresolved indexed-read semantics are not asserted.
+These additions do not close the other inventory gaps or prove full conformance.
+
 ### Harness limits
 
 - `conformance::{success,rejects,runtime_failure}` check both modes. Runtime

@@ -3,9 +3,6 @@
 - [ ] Expand language and edge-case coverage.
   - [ ] Cover every part of the language and as many edge cases as possible.
 
-    - [ ] Compare debug and release behavior, including output, evaluation order,
-          side effects, runtime failures, and source locations.
-
   - [ ] Resolve unclear specification semantics before encoding assumptions.
     - [ ] Resolve the questions recorded in `docs/coverage.md` and collect further
           ambiguous interactions from differential tests.
