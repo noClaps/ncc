@@ -3,8 +3,6 @@
 - [ ] Expand language and edge-case coverage.
   - [ ] Continue full-language and edge-case coverage using `docs/coverage.md`;
         container/function rejection matrices are expanded, not complete.
-    - [ ] Extend parenthesized function-type coverage to remaining type positions
-          beyond parameters, return annotations and struct fields.
     - [ ] Extend container write/index rejection matrices to nominal and optional
           interactions after clarifying any unspecified index/key rules.
 

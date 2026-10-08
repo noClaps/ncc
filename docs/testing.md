@@ -39,6 +39,14 @@ and representative parenthesized function-type requirements. Compile-only valid
 controls guard against blanket rejection; these suites do not execute the controls
 or establish semantics for byte/nominal indices or unresolved map key domains.
 
+`tests/function_type_positions.rs` pairs parenthesized syntax controls with
+individually unparenthesized rejections across the remaining binding, declaration,
+container, wrapper, generic, conversion and nested/anonymous/extern signature
+positions. Rejections compile in both modes; map-key and extern positive controls
+only parse and do not assert a callable key domain or C callback ABI. Execution
+fixtures invoke callbacks in the other positions in both modes with process-dependent
+inputs, including nominal conversions, generic forwarding, futures and mutexes.
+
 Release analysis follows safely known state through retained test blocks and
 assertion-expression effects, including repeated named calls sharing global
 mutations. Known-true assertions permit continued analysis; false or unknown

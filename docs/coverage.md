@@ -80,8 +80,22 @@ function-local/parameter/shadow scope escape; `none` passed to nonoptional named
 anonymous and explicitly specialized generic parameters; and unparenthesized
 function types in parameter, return and struct-field positions. A compile-only
 control pairs valid annotations, optional arguments and parenthesized signatures.
-Function-type positions are representative, not exhaustive; neither suite is
-runtime execution evidence or a resolution of the recorded semantic questions.
+Neither rejection suite is runtime execution evidence or a resolution of the
+recorded semantic questions.
+
+`tests/function_type_positions.rs` extends parenthesized signature coverage to
+module/local/mutable/multiple bindings, nominal aliases, enum payloads, tuple
+members, dynamic/fixed array elements, map values/keys, optional/error/future/mutex
+payloads, generic function/struct/enum arguments, conversion targets, nested
+signature parameters/returns, anonymous function annotations and extern signatures.
+Each syntax template parses with parentheses; removing each signature's parentheses
+independently must produce the same parser diagnostic through compilation in both
+modes. Map-key and C-extern positive controls are parser-only, not evidence of a
+supported callable key domain or C callback ABI. Two P D/R execution fixtures use
+process-dependent inputs to invoke callbacks through the other positions, including
+nominal wrap/unwrap, generic forwarding, awaited function values and locked mutable
+callbacks. This covers the listed type positions, not every signature/container
+combination.
 
 ### Harness limits
 
