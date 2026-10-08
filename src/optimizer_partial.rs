@@ -1,7 +1,7 @@
 //! Statement-sized transactions preserve storage and effects across runtime barriers.
 use super::{
-    CheckedModule, Evaluator, Expr, Flow, Function, HashMap, HashSet, Item, Pattern, Stmt, Type,
-    Value, VarDecl, materialize,
+    CheckedModule, EvaluationIndex, Evaluator, Expr, Flow, Function, HashMap, HashSet, Item,
+    Pattern, Stmt, Type, Value, VarDecl, materialize,
 };
 
 pub(super) fn effectful_index(index: &Expr) -> bool {
@@ -25,6 +25,7 @@ pub(super) fn precompute(
     checked: &CheckedModule,
     functions: &HashMap<String, &Function>,
     prefix: &[(usize, Option<Expr>)],
+    evaluation_index: &EvaluationIndex<'_>,
 ) -> Vec<(usize, Vec<Item>)> {
     let consumed: HashSet<_> = prefix.iter().map(|(index, _)| *index).collect();
     let mut env = HashMap::new();
@@ -43,7 +44,7 @@ pub(super) fn precompute(
         ) {
             continue;
         }
-        let mut evaluator = Evaluator::new(functions, checked);
+        let mut evaluator = Evaluator::with_index(functions, checked, evaluation_index);
         evaluator.analyse_output = true;
         evaluator.recorded_output = Some(vec![]);
         evaluator.cells.clone_from(&cells);

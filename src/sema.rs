@@ -203,10 +203,14 @@ impl Checker {
             checker: &Checker,
             ty: &Type,
             active: &mut HashSet<String>,
+            completed: &mut HashSet<String>,
             aliases_only: bool,
         ) -> Result<(), Diagnostics> {
             match ty {
                 Type::Named(name, _) => {
+                    if completed.contains(name) {
+                        return Ok(());
+                    }
                     let children = match checker.types.get(name) {
                         Some(TypeInfo::Alias(base)) => vec![base],
                         Some(TypeInfo::Struct(declaration)) if !aliases_only => {
@@ -224,30 +228,31 @@ impl Checker {
                         });
                     }
                     for child in children {
-                        visit(checker, child, active, aliases_only)?;
+                        visit(checker, child, active, completed, aliases_only)?;
                     }
                     active.remove(name);
+                    completed.insert(name.clone());
                 }
                 Type::Tuple(types) => {
                     for ty in types {
-                        visit(checker, ty, active, aliases_only)?;
+                        visit(checker, ty, active, completed, aliases_only)?;
                     }
                 }
                 Type::Optional(ty) | Type::ErrorUnion(ty) => {
-                    visit(checker, ty, active, aliases_only)?;
+                    visit(checker, ty, active, completed, aliases_only)?;
                 }
                 Type::Array(ty, _) | Type::Future(ty) if aliases_only => {
-                    visit(checker, ty, active, true)?;
+                    visit(checker, ty, active, completed, true)?;
                 }
                 Type::Map(key, value) if aliases_only => {
-                    visit(checker, key, active, true)?;
-                    visit(checker, value, active, true)?;
+                    visit(checker, key, active, completed, true)?;
+                    visit(checker, value, active, completed, true)?;
                 }
                 Type::Function(params, ret) if aliases_only => {
                     for ty in params {
-                        visit(checker, ty, active, true)?;
+                        visit(checker, ty, active, completed, true)?;
                     }
-                    visit(checker, ret, active, true)?;
+                    visit(checker, ret, active, completed, true)?;
                 }
                 _ => {}
             }
@@ -255,9 +260,18 @@ impl Checker {
         }
         let mut names = self.types.keys().collect::<Vec<_>>();
         names.sort();
+        // Alias cycles and finite layouts follow different edges through containers.
+        let mut completed_by_mode = [HashSet::new(), HashSet::new()];
         for name in names {
-            for aliases_only in [true, false] {
-                visit(self, &named(name), &mut HashSet::new(), aliases_only).map_err(|error| {
+            for (aliases_only, completed) in [true, false].into_iter().zip(&mut completed_by_mode) {
+                visit(
+                    self,
+                    &named(name),
+                    &mut HashSet::new(),
+                    completed,
+                    aliases_only,
+                )
+                .map_err(|error| {
                     if let Some(location) = self.locations.get(name) {
                         error.at_source(&location.path, location.span.clone())
                     } else {

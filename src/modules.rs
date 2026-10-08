@@ -5,6 +5,7 @@ use crate::{
     lexer, parser,
 };
 use std::{
+    borrow::Cow,
     collections::HashMap,
     path::{Path, PathBuf},
 };
@@ -280,7 +281,7 @@ fn qualify_item(
                 local.insert(p.name.clone(), p.name.clone());
             }
             qualify_type(&mut f.return_type, &local);
-            block(&mut f.body, &local, aliases)?;
+            block_in_scope(&mut f.body, &mut local, aliases)?;
         }
         Item::Global(v) => {
             qualify_type(&mut v.ty, names);
@@ -293,20 +294,14 @@ fn qualify_item(
         Item::Test { body, .. } => block(body, names, aliases)?,
         Item::Struct(s) => {
             s.name = names[&s.name].clone();
-            let mut local = names.clone();
-            for n in &s.generics {
-                local.remove(n);
-            }
+            let local = type_scope(names, &s.generics);
             for f in &mut s.fields {
                 qualify_type(&mut f.ty, &local);
             }
         }
         Item::Enum(e) => {
             e.name = names[&e.name].clone();
-            let mut local = names.clone();
-            for n in &e.generics {
-                local.remove(n);
-            }
+            let local = type_scope(names, &e.generics);
             for v in &mut e.variants {
                 for ty in &mut v.values {
                     qualify_type(ty, &local);
@@ -329,6 +324,17 @@ fn qualify_item(
     }
     Ok(())
 }
+fn type_scope<'a>(names: &'a Names, generics: &[String]) -> Cow<'a, Names> {
+    if generics.is_empty() {
+        return Cow::Borrowed(names);
+    }
+    let mut local = names.clone();
+    for generic in generics {
+        local.remove(generic);
+    }
+    Cow::Owned(local)
+}
+
 fn qualify_binding(pattern: &mut Pattern, names: &Names) {
     match pattern {
         Pattern::Name(name) => {
@@ -367,9 +373,15 @@ fn block(
     names: &Names,
     aliases: &HashMap<String, Names>,
 ) -> Result<(), Diagnostics> {
-    let mut names = names.clone();
+    block_in_scope(b, &mut names.clone(), aliases)
+}
+fn block_in_scope(
+    b: &mut Block,
+    names: &mut Names,
+    aliases: &HashMap<String, Names>,
+) -> Result<(), Diagnostics> {
     for s in &mut b.statements {
-        statement(s, &mut names, aliases)?;
+        statement(s, names, aliases)?;
     }
     Ok(())
 }
@@ -438,7 +450,7 @@ fn qualify_lambda(
         local.insert(p.name.clone(), p.name.clone());
     }
     qualify_type(&mut f.return_type, names);
-    block(&mut f.body, &local, aliases)
+    block_in_scope(&mut f.body, &mut local, aliases)
 }
 
 fn qualify_conditional(

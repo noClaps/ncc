@@ -360,7 +360,7 @@ impl Pass {
         for p in &f.params {
             self.values.insert(p.name.clone(), p.ty.clone());
         }
-        let result = self.block(&mut f.body, b);
+        let result = self.block_in_scope(&mut f.body, b);
         self.values = values;
         self.return_type = ret;
         result.map_err(|error| error.at_source(&f.source_path, f.span.clone()))
@@ -545,10 +545,18 @@ impl Pass {
         bindings: &HashMap<String, Type>,
     ) -> Result<(), Diagnostics> {
         let values = self.values.clone();
+        self.block_in_scope(b, bindings)?;
+        self.values = values;
+        Ok(())
+    }
+    fn block_in_scope(
+        &mut self,
+        b: &mut Block,
+        bindings: &HashMap<String, Type>,
+    ) -> Result<(), Diagnostics> {
         for s in &mut b.statements {
             self.statement(s, bindings)?;
         }
-        self.values = values;
         Ok(())
     }
     fn statement(&mut self, s: &mut Stmt, b: &HashMap<String, Type>) -> Result<(), Diagnostics> {

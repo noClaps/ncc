@@ -225,7 +225,7 @@ fn emit_translation_unit(
         output.push_str(include_str!("runtime_async.h"));
     }
     if e.helpers.contains("/* unicode runtime */") {
-        output.push_str(&crate::unicode::c_tables());
+        output.push_str(crate::unicode::cached_c_tables());
         output.push_str(include_str!("runtime_unicode.h"));
     }
     for (_, name, _) in &e.record_types {
@@ -277,18 +277,20 @@ fn emit_translation_unit(
 }
 
 fn emit_type_definitions(e: &Emitter<'_>, output: &mut String) -> Result<(), Diagnostics> {
+    let names: HashSet<_> = e
+        .type_definitions
+        .iter()
+        .map(|definition| &definition.name)
+        .collect();
     let mut emitted = HashSet::new();
     while emitted.len() < e.type_definitions.len() {
         let previous = emitted.len();
         for definition in &e.type_definitions {
             if !emitted.contains(&definition.name)
-                && definition.dependencies.iter().all(|name| {
-                    emitted.contains(name)
-                        || !e
-                            .type_definitions
-                            .iter()
-                            .any(|definition| &definition.name == name)
-                })
+                && definition
+                    .dependencies
+                    .iter()
+                    .all(|name| emitted.contains(name) || !names.contains(name))
             {
                 output.push_str(&definition.code);
                 output.push('\n');

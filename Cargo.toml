@@ -7,6 +7,11 @@ edition = "2024"
 name = "ncc"
 path = "src/main.rs"
 
+# Keep the compiler's evaluator fast in development and integration tests without
+# disabling Rust debug assertions or overflow checks.
+[profile.dev]
+opt-level = 2
+
 [profile.release]
 lto = true
 codegen-units = 1

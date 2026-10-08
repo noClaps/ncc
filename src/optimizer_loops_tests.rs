@@ -1,4 +1,6 @@
-use super::super::{Evaluator, Expr, HashMap, HashSet, Item, Stmt, precompute_output};
+use super::super::{
+    EvaluationIndex, Evaluator, Expr, HashMap, HashSet, Item, Stmt, precompute_output,
+};
 use super::{Proof, block_writes};
 
 fn output(source: &str) -> Option<Vec<String>> {
@@ -15,7 +17,7 @@ fn output(source: &str) -> Option<Vec<String>> {
             Some((function.name.clone(), function))
         })
         .collect::<HashMap<_, _>>();
-    precompute_output(&checked, &functions).map(|items| {
+    precompute_output(&checked, &functions, &EvaluationIndex::new(&checked)).map(|items| {
         items
             .iter()
             .map(|item| {

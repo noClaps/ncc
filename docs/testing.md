@@ -12,6 +12,34 @@ cargo build --release
 Use `--offline` on Cargo commands when dependencies are already cached. The core
 compiler has no production dependencies. Unicode segmentation is a test oracle only.
 
+Cargo's development/test builds optimize the Rust compiler at level 2 while
+retaining debug assertions, overflow checks, and debug information. This affects
+the compiler executable, not NC's debug/release modes. Test discovery and the
+individual integration-test binaries are unchanged; focused suites still use
+commands such as `cargo test --offline --test evaluation_performance`.
+
+For performance measurements, separate Rust build time from test execution and
+run timed checks sequentially, without concurrent builds or profiling processes.
+The October 2026 optimization pass measured an original full `cargo test --offline`
+run at 119.35 seconds on an eight-core Apple Silicon machine. Reusing immutable
+constant-evaluation indexes, memoizing completed type-layout checks, eliminating
+redundant scope copies, and optimizing development builds reduce compiler work.
+A 432-assertion fixture's unoptimized Rust evaluator pass dropped from 5.22 seconds
+to about 16 milliseconds by sharing lookup indexes. Suite timings also depend
+heavily on native C builds and machine load; benchmark with ready build artifacts
+and report rebuild time separately. Measurements are not timing assertions or a
+guarantee for clean builds and other machines. Debug/release coverage and runtime
+failure checks are unchanged. The final default run passed all 949 tests in
+86.01 seconds with ready build artifacts. Subsequent no-default-features runs
+also passed all tests but took 94.94 and 121.87 seconds under changing machine
+load, so the 90-second budget is not yet consistently reproducible.
+
+`tests/evaluation_performance.rs`, `tests/layout_performance.rs`, and
+`tests/scope_performance.rs` guard large independent-expression workloads, shared
+type graphs, evaluator-state isolation, lexical scopes, and source diagnostics.
+The evaluator shares only immutable expression/lambda lookup maps: mutable cells,
+call memoization, recorded output, and failure/jump state remain evaluator-local.
+
 `tests/differential_behavior.rs` compares exit codes and exact stdout/stderr bytes
 between NC debug and release modes, with independent expected results. Positive
 fixtures run both with known inputs and after process-dependent input, through

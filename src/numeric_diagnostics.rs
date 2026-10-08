@@ -4,20 +4,13 @@ use crate::{
     diagnostic::Diagnostics,
     flow, optimizer,
     sema::CheckedModule,
-    visit,
 };
 use std::collections::{HashMap, HashSet};
 
 pub(crate) fn check(checked: &CheckedModule) -> Result<Diagnostics, Diagnostics> {
-    let mut expressions = HashMap::new();
-    for item in &checked.module.items {
-        visit::item(item, &mut |expression| {
-            expressions.insert(expression.id(), expression);
-        });
-    }
     let mut analysis = Analysis {
         checked,
-        expressions,
+        index: optimizer::EvaluationIndex::new(checked),
         pure: HashMap::new(),
         visiting: HashSet::new(),
         warnings: Diagnostics::default(),
@@ -57,7 +50,7 @@ pub(crate) fn check(checked: &CheckedModule) -> Result<Diagnostics, Diagnostics>
 
 struct Analysis<'a> {
     checked: &'a CheckedModule,
-    expressions: HashMap<usize, &'a Expr>,
+    index: optimizer::EvaluationIndex<'a>,
     pure: HashMap<usize, bool>,
     visiting: HashSet<usize>,
     warnings: Diagnostics,
@@ -87,7 +80,7 @@ impl Analysis<'_> {
                 .get(&id)
                 .copied()
                 .flatten()
-                .and_then(|source| self.expressions.get(&source).copied())
+                .and_then(|source| self.index.expressions.get(&source).copied())
                 .is_some_and(|initializer| self.is_pure(initializer)),
             Expr::Cast { value, .. }
             | Expr::Unary { value, .. }
@@ -111,7 +104,7 @@ impl Analysis<'_> {
 
     fn value(&mut self, expression: &Expr) -> Result<Option<Expr>, Diagnostics> {
         if self.is_pure(expression) {
-            optimizer::evaluate_static_expression(expression, self.checked)
+            optimizer::evaluate_static_expression(expression, self.checked, &self.index)
         } else {
             Ok(None)
         }

@@ -1,4 +1,4 @@
-use super::super::super::{Expr, HashMap, Item, Stmt, precompute_output};
+use super::super::super::{EvaluationIndex, Expr, HashMap, Item, Stmt, precompute_output};
 
 fn output(source: &str) -> Option<Vec<String>> {
     let module = crate::parser::parse(crate::lexer::lex(source).unwrap()).unwrap();
@@ -15,7 +15,7 @@ fn output(source: &str) -> Option<Vec<String>> {
             }
         })
         .collect::<HashMap<_, _>>();
-    precompute_output(&checked, &functions).map(|items| {
+    precompute_output(&checked, &functions, &EvaluationIndex::new(&checked)).map(|items| {
         items
             .iter()
             .map(|item| {

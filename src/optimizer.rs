@@ -8,7 +8,10 @@ use crate::{
     diagnostic::Diagnostics,
     sema::{CheckedModule, TypeInfo},
 };
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    rc::Rc,
+};
 
 #[path = "optimizer_loops.rs"]
 mod loops;
@@ -65,6 +68,7 @@ fn embed_module(
             }
         })
         .collect();
+    let index = EvaluationIndex::new(&checked);
     let mut replacements = HashMap::new();
     let mut embeds = Vec::new();
     for item in &checked.module.items {
@@ -81,7 +85,7 @@ fn embed_module(
         else {
             unreachable!()
         };
-        let value = evaluate(e, &HashMap::new(), &functions, &checked)
+        let value = evaluate(e, &HashMap::new(), &functions, &checked, &index)
             .map_err(|error| error.at_source(source_path, span.clone()))?;
         let Some(Value::Array(bytes)) = value else {
             return Err(Diagnostics::one(
@@ -405,10 +409,11 @@ fn optimize_module(checked: CheckedModule) -> Result<Module, Diagnostics> {
             }
         })
         .collect();
-    if let Some(items) = precompute_output(&checked, &functions) {
+    let evaluation_index = EvaluationIndex::new(&checked);
+    if let Some(items) = precompute_output(&checked, &functions, &evaluation_index) {
         return Ok(Module { items });
     }
-    evaluate_top_level(&checked, &functions)?;
+    evaluate_top_level(&checked, &functions, &evaluation_index)?;
     let mut env = HashMap::new();
     let mut replacements = Vec::new();
     let mut reaches_next = true;
@@ -420,9 +425,12 @@ fn optimize_module(checked: CheckedModule) -> Result<Module, Diagnostics> {
             Item::Global(v) => {
                 reaches_next =
                     crate::flow::expression_reaches_next(&v.value, &checked.expression_types);
-                replacements.push((index, fold(&v.value, &env, &functions, &checked)?));
+                replacements.push((
+                    index,
+                    fold(&v.value, &env, &functions, &checked, &evaluation_index)?,
+                ));
                 let constant = if !v.mutable && !v.mutex {
-                    evaluate(&v.value, &env, &functions, &checked)?
+                    evaluate(&v.value, &env, &functions, &checked, &evaluation_index)?
                 } else {
                     None
                 };
@@ -440,7 +448,10 @@ fn optimize_module(checked: CheckedModule) -> Result<Module, Diagnostics> {
                 reaches_next =
                     crate::flow::statement_reaches_next(statement, &checked.expression_types);
                 if let Stmt::Expr(e) = statement.unlocated() {
-                    replacements.push((index, fold(e, &env, &functions, &checked)?));
+                    replacements.push((
+                        index,
+                        fold(e, &env, &functions, &checked, &evaluation_index)?,
+                    ));
                 }
             }
             Item::Test { body, .. } => {
@@ -449,9 +460,9 @@ fn optimize_module(checked: CheckedModule) -> Result<Module, Diagnostics> {
             _ => {}
         }
     }
-    let prefix = precompute_prefix(&checked, &functions);
-    let partial = partial::precompute(&checked, &functions, &prefix);
-    let mut body_replacements = expression_constants(&checked, &functions);
+    let prefix = precompute_prefix(&checked, &functions, &evaluation_index);
+    let partial = partial::precompute(&checked, &functions, &prefix, &evaluation_index);
+    let mut body_replacements = expression_constants(&checked, &functions, &evaluation_index);
     let mut module = checked.module;
     for item in &mut module.items {
         crate::visit::rewrite(item, &mut |e| {
@@ -524,6 +535,7 @@ fn prune_unreachable_functions(module: &mut Module) {
 fn precompute_output(
     checked: &CheckedModule,
     functions: &HashMap<String, &Function>,
+    index: &EvaluationIndex<'_>,
 ) -> Option<Vec<Item>> {
     if checked
         .module
@@ -533,7 +545,7 @@ fn precompute_output(
     {
         return None;
     }
-    let mut evaluator = Evaluator::new(functions, checked);
+    let mut evaluator = Evaluator::with_index(functions, checked, index);
     // Reuse lexical global storage and repeat every call's effects, rather than
     // evaluating named functions against caller-local bindings or memoized state.
     evaluator.analyse_output = true;
@@ -625,6 +637,7 @@ fn prefix_items(checked: &CheckedModule) -> Vec<usize> {
 fn precompute_prefix(
     checked: &CheckedModule,
     functions: &HashMap<String, &Function>,
+    index: &EvaluationIndex<'_>,
 ) -> Vec<(usize, Option<Expr>)> {
     let indices = prefix_items(checked);
     if !indices
@@ -633,7 +646,7 @@ fn precompute_prefix(
     {
         return vec![];
     }
-    let mut evaluator = Evaluator::new(functions, checked);
+    let mut evaluator = Evaluator::with_index(functions, checked, index);
     let mut env = HashMap::new();
     for &index in &indices {
         let flow = match &checked.module.items[index] {
@@ -680,9 +693,10 @@ fn precompute_prefix(
 fn evaluate_top_level(
     checked: &CheckedModule,
     functions: &HashMap<String, &Function>,
+    index: &EvaluationIndex<'_>,
 ) -> Result<(), Diagnostics> {
     let mut env = HashMap::new();
-    let mut evaluator = Evaluator::new(functions, checked);
+    let mut evaluator = Evaluator::with_index(functions, checked, index);
     evaluator.analyse_output = true;
     for item in &checked.module.items {
         if !matches!(
@@ -716,6 +730,7 @@ fn evaluate_top_level(
 fn expression_constants(
     checked: &CheckedModule,
     functions: &HashMap<String, &Function>,
+    index: &EvaluationIndex<'_>,
 ) -> HashMap<usize, Expr> {
     let mut replacements = HashMap::new();
     let mut preserved = HashSet::new();
@@ -757,7 +772,7 @@ fn expression_constants(
                 return;
             }
             // Failed evaluation may be unreachable at runtime: keep it intact.
-            if let Ok(Some(value)) = evaluate(e, &HashMap::new(), functions, checked)
+            if let Ok(Some(value)) = evaluate(e, &HashMap::new(), functions, checked, index)
                 && value.materializable()
             {
                 replacements.insert(e.id(), materialize(value, e, checked));
@@ -771,10 +786,11 @@ fn fold(
     env: &HashMap<String, Value>,
     functions: &HashMap<String, &Function>,
     checked: &CheckedModule,
+    index: &EvaluationIndex<'_>,
 ) -> Result<Option<Expr>, Diagnostics> {
     // Only fold whole pure evaluations. Do not rewrite expressions inside a
     // short-circuited or potentially effectful expression independently.
-    if let Some(v) = evaluate(e, env, functions, checked)?.filter(Value::materializable) {
+    if let Some(v) = evaluate(e, env, functions, checked, index)?.filter(Value::materializable) {
         return Ok(Some(materialize(v, e, checked)));
     } else if let Expr::Call {
         callee,
@@ -786,7 +802,7 @@ fn fold(
         let mut reached = true;
         let mut folded_args = Vec::new();
         for arg in args {
-            let value = match evaluate(arg, env, functions, checked) {
+            let value = match evaluate(arg, env, functions, checked, index) {
                 Ok(value) => value,
                 Err(error) if reached => return Err(error),
                 Err(_) => None,
@@ -844,8 +860,9 @@ fn constant_statement(statement: Stmt, ty: Type) -> Expr {
 pub(crate) fn evaluate_static_expression(
     expression: &Expr,
     checked: &CheckedModule,
+    index: &EvaluationIndex<'_>,
 ) -> Result<Option<Expr>, Diagnostics> {
-    evaluate(expression, &HashMap::new(), &HashMap::new(), checked).map(|value| {
+    evaluate(expression, &HashMap::new(), &HashMap::new(), checked, index).map(|value| {
         value
             .filter(Value::materializable)
             .map(|value| materialize(value, expression, checked))
@@ -857,8 +874,9 @@ fn evaluate(
     env: &HashMap<String, Value>,
     functions: &HashMap<String, &Function>,
     checked: &CheckedModule,
+    index: &EvaluationIndex<'_>,
 ) -> Result<Option<Value>, Diagnostics> {
-    let mut evaluator = Evaluator::new(functions, checked);
+    let mut evaluator = Evaluator::with_index(functions, checked, index);
     let value = evaluator.evaluate(e, &mut env.clone());
     if let Some(error) = evaluator.failure() {
         Err(error)
@@ -867,11 +885,37 @@ fn evaluate(
         Ok(value.filter(|value| !value.contains_cell()))
     }
 }
+/// Immutable syntax lookups shared by independent evaluation attempts. Callable
+/// name resolution and all evaluation state remain local to each evaluator.
+pub(crate) struct EvaluationIndex<'a> {
+    lambdas: Rc<HashMap<usize, &'a Function>>,
+    pub(crate) expressions: Rc<HashMap<usize, &'a Expr>>,
+}
+
+impl<'a> EvaluationIndex<'a> {
+    pub(crate) fn new(checked: &'a CheckedModule) -> Self {
+        let mut lambdas = HashMap::new();
+        let mut expressions = HashMap::new();
+        for item in &checked.module.items {
+            crate::visit::item(item, &mut |e| {
+                expressions.insert(e.id(), e);
+                if let Expr::Lambda(f) = e {
+                    lambdas.insert(e.id(), &**f);
+                }
+            });
+        }
+        Self {
+            lambdas: Rc::new(lambdas),
+            expressions: Rc::new(expressions),
+        }
+    }
+}
+
 struct Evaluator<'a> {
     functions: &'a HashMap<String, &'a Function>,
     checked: &'a CheckedModule,
-    lambdas: HashMap<usize, &'a Function>,
-    expressions: HashMap<usize, &'a Expr>,
+    lambdas: Rc<HashMap<usize, &'a Function>>,
+    expressions: Rc<HashMap<usize, &'a Expr>>,
     embed_error: Option<Diagnostics>,
     memo: HashMap<(Value, Vec<Value>), Value>,
     cells: Vec<Value>,
@@ -889,25 +933,24 @@ struct Evaluator<'a> {
     indices: Vec<u64>,
 }
 impl<'module> Evaluator<'module> {
+    #[cfg(test)]
     fn new(
         functions: &'module HashMap<String, &'module Function>,
         checked: &'module CheckedModule,
     ) -> Self {
-        let mut lambdas = HashMap::new();
-        let mut expressions = HashMap::new();
-        for item in &checked.module.items {
-            crate::visit::item(item, &mut |e| {
-                expressions.insert(e.id(), e);
-                if let Expr::Lambda(f) = e {
-                    lambdas.insert(e.id(), &**f);
-                }
-            });
-        }
+        Self::with_index(functions, checked, &EvaluationIndex::new(checked))
+    }
+
+    fn with_index(
+        functions: &'module HashMap<String, &'module Function>,
+        checked: &'module CheckedModule,
+        index: &EvaluationIndex<'module>,
+    ) -> Self {
         Self {
             functions,
             checked,
-            lambdas,
-            expressions,
+            lambdas: Rc::clone(&index.lambdas),
+            expressions: Rc::clone(&index.expressions),
             embed_error: None,
             memo: HashMap::new(),
             cells: Vec::new(),

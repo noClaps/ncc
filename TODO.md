@@ -1,5 +1,12 @@
 # Remaining work
 
+- [ ] Make the full-suite 90-second performance budget consistently reproducible.
+  - [ ] Add repeatable compilation-only performance benchmarks separating NC
+        analysis/evaluation/C generation from native C compilation and Cargo
+        rebuild time; track large expression lists and shared type graphs.
+  - [ ] Profile remaining native C compilation costs under controlled machine load.
+        The default suite reached 86.01 seconds, but loaded repeats exceeded 90.
+
 - [ ] Expand language and edge-case coverage.
   - [ ] Continue full-language and edge-case coverage using `docs/coverage.md`;
         container/function rejection matrices are expanded, not complete.

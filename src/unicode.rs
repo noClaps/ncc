@@ -93,6 +93,15 @@ pub fn boundaries(text: &str) -> Vec<usize> {
 }
 #[must_use]
 pub fn c_tables() -> String {
+    cached_c_tables().to_owned()
+}
+
+pub(crate) fn cached_c_tables() -> &'static str {
+    static TABLES: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TABLES.get_or_init(format_c_tables)
+}
+
+fn format_c_tables() -> String {
     use std::fmt::Write;
     let mut result = String::from("/* Unicode 18.0.0; Unicode, Inc. Unicode License V3. */\n");
     result.push_str("/*\n");
