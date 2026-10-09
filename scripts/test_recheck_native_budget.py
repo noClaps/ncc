@@ -8,6 +8,7 @@ import math
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -43,6 +44,8 @@ class ArgumentTests(unittest.TestCase):
             "attempts": 3,
             "timeout": 240.0,
             "budget": 90.0,
+            "clean_build": False,
+            "pressure_workers": 0,
         }.items():
             with self.subTest(name=name):
                 self.assertEqual(getattr(args, name), expected)
@@ -103,9 +106,14 @@ class ArgumentTests(unittest.TestCase):
         self.assert_rejected(["--output"])
 
     def test_integer_bounds_and_invalid_numbers(self):
-        for option in ["--samples", "--no-default-samples", "--attempts"]:
+        for option in [
+            "--samples",
+            "--no-default-samples",
+            "--attempts",
+            "--pressure-workers",
+        ]:
             invalid = ["-1", "1.5", "bad", "nan", "inf", "-inf"]
-            if option != "--no-default-samples":
+            if option not in ("--no-default-samples", "--pressure-workers"):
                 invalid.append("0")
             for value in invalid:
                 with self.subTest(option=option, value=value):
@@ -287,6 +295,96 @@ class MeasurementTests(unittest.TestCase):
                 RECHECK.measurement(text, 0, 90.0)
 
 
+class NewProtocolTests(unittest.TestCase):
+    def test_clean_requires_compilation_evidence(self):
+        for compiled in (False, True):
+            text = (
+                ("   Compiling ncc v0.1.0\n" if compiled else "")
+                + test_result(1)
+                + "real 1\n"
+            )
+            for clean in (False, True):
+                self.assertEqual(
+                    RECHECK.measurement(text, 0, 90, clean)["valid"], compiled == clean
+                )
+        text = "test says Compiling something\n" + test_result(1) + "real 1\n"
+        self.assertFalse(RECHECK.measurement(text, 0, 90, True)["valid"])
+
+    def test_pressure_argument(self):
+        args = RECHECK.parse_args(
+            ["--output", "unused", "--clean-build", "--pressure-workers", "2"]
+        )
+        self.assertTrue(args.clean_build)
+        self.assertEqual(args.pressure_workers, 2)
+
+    def test_linux_idle_includes_iowait_but_not_guest(self):
+        before = "cpu 10 10 10 10 10 10 10 10 10 10\ncpu0 1 2 3 4"
+        after = "cpu 20 20 20 40 20 20 20 20 20 20\n"
+        self.assertEqual(RECHECK.linux_idle(before, after), 40)
+        self.assertEqual(RECHECK.linux_idle("cpu 1 1 1 1", "cpu 1 1 1 5"), 100)
+
+    def test_linux_invalid_counters_and_deltas(self):
+        for text in (
+            "",
+            "cpu0 1 2 3 4",
+            "cpu 1 2 3",
+            "cpu 1 2 3 -1",
+            "cpu 1 2 3 nan",
+            "cpu 1 2 3 1.5",
+            "cpu " + "1 " * 11,
+        ):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                RECHECK.linux_cpu(text)
+        for after in ("cpu 1 2 3 4", "cpu 0 2 3 5"):
+            with self.assertRaises(ValueError):
+                RECHECK.linux_idle("cpu 1 2 3 4", after)
+
+    def test_linux_snapshot_reads_twice_one_second_apart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args = RECHECK.parse_args(["--output", directory])
+            with (
+                mock.patch.object(RECHECK.platform, "system", return_value="Linux"),
+                mock.patch.object(
+                    Path, "read_text", side_effect=["cpu 1 1 1 1", "cpu 2 1 1 4"]
+                ) as read,
+                mock.patch.object(RECHECK.time, "sleep") as sleep,
+            ):
+                state = RECHECK.snapshot(args, "probe")
+            self.assertEqual(read.call_count, 2)
+            sleep.assert_called_once_with(1)
+            self.assertEqual(state["live_idle_percent"], 75)
+            self.assertTrue((Path(directory) / "probe.stdout").exists())
+
+    def test_managed_run_interrupt_kills_process_group(self):
+        process = mock.Mock(pid=4321)
+        process.communicate.side_effect = KeyboardInterrupt()
+        with (
+            mock.patch.object(
+                RECHECK.subprocess, "Popen", return_value=process
+            ) as spawn,
+            mock.patch.object(RECHECK.os, "killpg") as kill,
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                RECHECK.managed_run(["unused"], timeout=1)
+        self.assertTrue(spawn.call_args.kwargs["start_new_session"])
+        kill.assert_called_once_with(4321, RECHECK.signal.SIGKILL)
+        process.wait.assert_called_once()
+
+    def test_timeout_kills_real_descendant(self):
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "leaked-child"
+            child = f"import time; from pathlib import Path; time.sleep(0.6); Path({str(marker)!r}).touch()"
+            parent = f"import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', {child!r}]); time.sleep(10)"
+            with self.assertRaises(subprocess.TimeoutExpired):
+                RECHECK.managed_run(
+                    [sys.executable, "-c", parent], timeout=0.3, capture_output=True
+                )
+            time.sleep(0.8)
+            self.assertFalse(
+                marker.exists(), "timed-out child survived process-group cleanup"
+            )
+
+
 class OrchestrationTests(unittest.TestCase):
     def setUp(self):
         stack = contextlib.ExitStack()
@@ -296,6 +394,9 @@ class OrchestrationTests(unittest.TestCase):
         self.console = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
         self.stderr = stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
         stack.enter_context(mock.patch.dict(RECHECK.os.environ, {}, clear=True))
+        stack.enter_context(
+            mock.patch.object(RECHECK.platform, "system", return_value="Darwin")
+        )
         self.sleep = stack.enter_context(mock.patch.object(RECHECK.time, "sleep"))
         self.load = stack.enter_context(
             mock.patch.object(RECHECK.os, "getloadavg", return_value=(1.0, 2.0, 3.0))
@@ -306,14 +407,17 @@ class OrchestrationTests(unittest.TestCase):
         self.wall = 12.5
         self.timed_error = None
         self.run = stack.enter_context(
-            mock.patch.object(RECHECK.subprocess, "run", side_effect=self.fake_run)
+            mock.patch.object(RECHECK, "managed_run", side_effect=self.fake_run)
         )
 
     def fake_run(self, command, **kwargs):
         if command[0] == "/usr/bin/time":
             if self.timed_error is not None:
                 raise self.timed_error
-            kwargs["stdout"].write(test_result(7) + f"real {self.wall}\n")
+            compilation = (
+                "   Compiling ncc v0.1.0\n" if "--target-dir" in command else ""
+            )
+            kwargs["stdout"].write(compilation + test_result(7) + f"real {self.wall}\n")
             return subprocess.CompletedProcess(command, 0)
         if command[0] == "top":
             text = f"10% idle\n{self.idle}% idle\n"
@@ -514,6 +618,132 @@ class OrchestrationTests(unittest.TestCase):
                     all(call.args[0][0] == "git" for call in self.run.call_args_list)
                 )
                 self.sleep.assert_not_called()
+
+    def test_clean_build_skips_preparation_and_uses_distinct_private_targets(self):
+        with mock.patch.dict(
+            RECHECK.os.environ, {"CARGO_TARGET_DIR": "/unused/shared"}
+        ):
+            self.assertEqual(self.main("--clean-build"), 0)
+        report = self.report()
+        self.assertTrue(report["clean_build"])
+        self.assertIn("OS caches are not disabled", report["clean_build_scope"])
+        targets = []
+        for sample in report["samples"]:
+            self.assertTrue(sample["clean_build"])
+            self.assertTrue(sample["cargo_recompiled"])
+            self.assertNotIn("artifacts_fresh", sample)
+            target = Path(sample["target_dir"])
+            self.assertEqual(target.parent, self.output)
+            self.assertTrue(target.is_dir())
+            targets.append(target)
+        self.assertEqual(len(set(targets)), 2)
+        self.assertEqual(self.output.stat().st_mode & 0o777, 0o700)
+        self.assertFalse(
+            any("--no-run" in call.args[0] for call in self.run.call_args_list)
+        )
+
+    def test_clean_environment_overrides_are_rejected(self):
+        for name in ("CARGO_BUILD_TARGET", "CARGO_BUILD_BUILD_DIR"):
+            self.output = self.output.parent / name
+            with mock.patch.dict(RECHECK.os.environ, {name: "override"}):
+                self.assertEqual(self.main("--clean-build"), 1)
+            self.assertIn(name, self.report()["error"])
+            self.assertEqual(self.report()["samples"], [])
+
+    def test_unsupported_platform_is_rejected(self):
+        with mock.patch.object(RECHECK.platform, "system", return_value="Windows"):
+            self.assertEqual(self.main(), 1)
+        self.run.assert_not_called()
+        self.assertIn("only Linux and Darwin", self.report()["error"])
+
+    def test_pressure_protocol_and_cleanup_on_timeout_and_interrupt(self):
+        for failure in (
+            None,
+            subprocess.TimeoutExpired("private", 10),
+            KeyboardInterrupt(),
+        ):
+            self.output = self.output.parent / f"pressure-{type(failure).__name__}"
+            self.timed_error = failure
+            events = []
+            worker = mock.Mock(pid=1234)
+            worker.poll.return_value = None
+            original_run = self.fake_run
+
+            def run(command, **kwargs):
+                events.append("timed" if command[0] == "/usr/bin/time" else "probe")
+                return original_run(command, **kwargs)
+
+            def start(*args, **kwargs):
+                self.assertTrue(
+                    self.report()["samples"][-1]["attempts"][-1]["accepted"]
+                )
+                events.append("start")
+                return worker
+
+            with (
+                mock.patch.object(
+                    RECHECK.subprocess, "Popen", side_effect=start
+                ) as spawn,
+                mock.patch.object(RECHECK, "stop_group") as stop,
+            ):
+                self.run.side_effect = run
+                self.assertEqual(
+                    self.main("--pressure-workers", "1"), 0 if failure is None else 1
+                )
+                self.assertEqual(stop.call_count, 2 if failure is None else 1)
+                for call in spawn.call_args_list:
+                    self.assertTrue(call.kwargs["start_new_session"])
+            sample = self.report()["samples"][0]
+            self.assertTrue(sample["pressure"]["cleaned_up"])
+            self.assertEqual(sample["pressure"]["before"]["active_workers"], 1)
+            if failure is None:
+                self.assertEqual(sample["pressure"]["after"]["active_workers"], 1)
+            self.assertLess(events.index("start"), events.index("timed"))
+            self.assertEqual(events[events.index("start") + 1], "probe")
+
+    def test_dead_pressure_worker_prevents_timing_and_is_cleaned_up(self):
+        worker = mock.Mock(pid=1234)
+        worker.poll.return_value = 1
+        with (
+            mock.patch.object(RECHECK.subprocess, "Popen", return_value=worker),
+            mock.patch.object(RECHECK, "stop_group") as stop,
+        ):
+            self.assertEqual(self.main("--pressure-workers", "1"), 1)
+            stop.assert_called_once_with(worker)
+        self.assertEqual(self.timed_calls(), [])
+        self.assertEqual(
+            self.report()["samples"][0]["pressure"]["before"]["active_workers"], 0
+        )
+
+    def test_partial_pressure_startup_failure_cleans_started_worker(self):
+        worker = mock.Mock(pid=1234)
+        with (
+            mock.patch.object(
+                RECHECK.subprocess,
+                "Popen",
+                side_effect=[worker, OSError("worker startup failed")],
+            ),
+            mock.patch.object(RECHECK, "stop_group") as stop,
+        ):
+            self.assertEqual(self.main("--pressure-workers", "2"), 1)
+            stop.assert_called_once_with(worker)
+        self.assertEqual(self.timed_calls(), [])
+        self.assertTrue(self.report()["samples"][0]["pressure"]["cleaned_up"])
+
+    def test_pressure_worker_death_during_suite_invalidates_report(self):
+        worker = mock.Mock(pid=1234)
+        worker.poll.side_effect = [None, 1]
+        with (
+            mock.patch.object(RECHECK.subprocess, "Popen", return_value=worker),
+            mock.patch.object(RECHECK, "stop_group") as stop,
+        ):
+            self.assertEqual(self.main("--pressure-workers", "1"), 1)
+            stop.assert_called_once_with(worker)
+        self.assertEqual(len(self.timed_calls()), 1)
+        sample = self.report()["samples"][0]
+        self.assertEqual(sample["pressure"]["after"]["active_workers"], 0)
+        self.assertTrue(sample["pressure"]["cleaned_up"])
+        self.assertFalse(self.report()["complete"])
 
     def test_existing_output_is_not_overwritten(self):
         self.output.mkdir()

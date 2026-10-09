@@ -2,8 +2,16 @@
 
 - [ ] Make the full-suite 90-second performance budget consistently reproducible.
 
-  - [ ] Establish budget behavior under background pressure, on other hosts, and
-        for clean builds; the completed low-load repeats do not cover these.
+  - [ ] Establish budget behavior on other physical hosts using the checked-in
+        Linux/macOS runner; this host's fresh-target clean builds and two-worker
+        pressure repeats are recorded in `docs/native-compilation-profile.md`.
+  - [ ] Complete a repeated saturated-CPU pressure series, including the alternate
+        feature configuration; the eight-worker series stopped after two measured
+        budget overruns because later low-load admission was exhausted.
+  - [ ] Measure combined clean-build/background-pressure behavior; separate
+        scenarios do not establish their interaction or cold-cache behavior.
+  - [ ] Investigate the measured clean-build and saturated-CPU budget overruns
+        without reducing language, failure, sanitizer, or debug/release coverage.
 
 - [ ] Expand language and edge-case coverage.
   - [ ] Continue full-language and edge-case coverage using `docs/coverage.md`;

@@ -354,6 +354,142 @@ were printed uncensored. This completes the requested repeat, not the parent
 reproducibility task. Repeat the documented protocol after future reductions or
 material fixture growth.
 
+## Background pressure and clean builds — October 9, 2026
+
+Source revision: `7305f3a`, with only the budget runner and its Python tests
+modified during measurement. Compiler code, fixtures, coverage, native flags,
+and default libtest concurrency were unchanged. The host remains the eight-CPU
+Apple M2 MacBook Air. `uname` reports Darwin 27.0.0; Apple clang is 21.0.0
+(`clang-2100.3.34.2`), Rust is 1.99.0 (`b940084d7`), and Cargo is 1.99.0
+(`5f94df478`). No other agent builds, tests, or profilers overlapped samples.
+These are sequential observations, not an interleaved causal speedup study.
+
+The runner now supports distinct protocols without changing the ready-artifact
+low-load default:
+
+- `--clean-build` creates a new Cargo target directory inside the output directory
+  for **each** sample, skips preparation/fresh-artifact checks, and times Cargo
+  compilation plus the entire suite. It never cleans the shared `target` tree.
+  A valid clean measurement requires passing tests and Cargo compilation evidence.
+  This means a **fresh Cargo target**, not flushed filesystem caches or guaranteed
+  uncached compiler work: Cargo configuration and external wrappers remain in
+  effect. Check those before interpreting results on another host. On this host,
+  no Cargo configuration files were found in the repository/ancestor or Cargo-home
+  search paths, and no target, build-directory, Rust compiler-wrapper, or Rust flag
+  environment overrides were present. All four samples reported recompilation.
+- `--pressure-workers N` starts N CPU-bound Python integer-arithmetic processes
+  **after** normal low-load admission and keeps them alive throughout the suite.
+  Worker startup, 0.2-second stabilization, before/after CPU probes, and cleanup
+  are outside `/usr/bin/time` timing. Worker liveness is checked at both probes;
+  their PIDs, snapshots, and cleanup status are recorded. This is uncalibrated
+  CPU contention, not a standardized cross-host workload or a simulation of memory,
+  disk, network, or mixed background pressure. Probes bracket the suite; they do
+  not measure CPU idle continuously during it.
+- Linux admission now uses two `/proc/stat` aggregate CPU readings one second
+  apart, without double-counting guest time; idle includes iowait. macOS still
+  uses the second `top -l 2 -s 1 -n 0` sample and requires approved unsandboxed
+  access here. The OS-specific idle definitions are not interchangeable CPU-work
+  measurements. Linux parsing/protocols have unit coverage, **not** a measured
+  Linux-host suite result. Other platforms are rejected.
+- Timed commands run in their own process groups; timeout/interrupt cleanup kills
+  their group and cleans up pressure workers. This covers ordinary Cargo/native
+  children, not processes deliberately detaching into another session. Private
+  output directories are owner-only. Test output is never printed uncensored.
+
+All starts still required one-minute load at most 6 and at least 80% live idle,
+with a 90-second cooldown before each attempt. Each protocol requested three
+ordinary samples and one `--no-default-features` sample, using a 90-second budget.
+A longer timeout is only an execution safety bound, not an increased budget.
+
+```sh
+python3 scripts/recheck-native-budget.py \
+  --output tmp/native-budget-pressure-7305f3a --pressure-workers 2
+python3 scripts/recheck-native-budget.py \
+  --output tmp/native-budget-clean-7305f3a --clean-build --timeout 480
+python3 scripts/recheck-native-budget.py \
+  --output tmp/native-budget-pressure8-7305f3a --pressure-workers 8 --timeout 480
+```
+
+### Completed two-worker pressure repeat
+
+All four samples passed **949 tests** with fresh Cargo artifacts and no timed
+recompilation. Both workers remained alive at the before/after probes and were
+cleaned up after every sample.
+
+| Sample                    | Wall seconds | Admitted one-minute load | Admitted CPU idle | Worker-active idle before / after |
+| ------------------------- | -----------: | -----------------------: | ----------------: | --------------------------------: |
+| Default 1                 |        82.32 |                     2.34 |            89.21% |                   63.31% / 66.16% |
+| Default 2                 |        79.91 |                     3.17 |            90.58% |                   65.22% / 64.41% |
+| Default 3                 |        80.12 |                     2.83 |            92.91% |                   66.00% / 69.56% |
+| `--no-default-features` 1 |        80.43 |                     2.55 |            93.69% |                   66.97% / 66.74% |
+
+The default median was **80.12 seconds**, with a **2.41-second range**. All
+samples met budget; minimum observed headroom was **7.68 seconds**. The first
+alternate-feature admission was rejected at load 2.99 and 77.31% idle. The
+completed repeat demonstrates headroom for this particular contention level,
+not arbitrary background activity.
+
+### Completed fresh-target clean-build repeat
+
+All four commands passed **949 tests**, but **none met the 90-second budget**.
+The report is complete with `within_budget=false`; runner exit status 1 denotes
+budget overruns, not test failures. Compilation is included, not estimated by
+subtracting warm-suite timings.
+
+| Sample                    | Wall seconds | Admitted one-minute load | Admitted CPU idle |
+| ------------------------- | -----------: | -----------------------: | ----------------: |
+| Default 1                 |       100.96 |                     2.19 |            86.80% |
+| Default 2                 |       100.97 |                     4.39 |            84.91% |
+| Default 3                 |       100.95 |                     3.92 |            82.12% |
+| `--no-default-features` 1 |       108.18 |                     5.19 |            88.60% |
+
+The default median was **100.96 seconds**, with a **0.02-second range**. Default
+samples exceeded budget by **10.95–10.97 seconds**; the alternate-feature sample
+exceeded it by **18.18 seconds**. Its single observation does not establish a
+feature-dependent performance difference. The first default admission was
+rejected at load 2.64 and 69.22% idle. Existing prepared artifacts were preserved.
+
+### Incomplete eight-worker pressure series
+
+Two default samples passed **949 tests**, without Cargo recompilation, in
+**124.43** and **130.97 seconds**. Admission states were respectively load 3.81 /
+86.46% idle and load 2.88 / 84.73% idle. All eight workers were alive before and
+after each suite; both probes reported **0% idle**. Worker cleanup completed.
+These measured samples exceeded budget by **34.43** and **40.97 seconds**.
+
+Default sample 2 needed its third admission attempt. Default sample 3 never ran:
+its three attempts were rejected at load/idle 18.21/88.46%, 6.31/84.43%, and
+6.58/71.74%. The alternate-feature sample also never ran. The runner exited 1
+with `complete=false`; **do not treat this as a completed repeated series**, or
+mix the rejected starts into the timing data. Low-load admission still applies
+before introducing workers, so lingering load averages can exhaust retries
+although the workers from the prior sample have been stopped.
+
+### Scope, validation, and reproduction elsewhere
+
+The 90-second target is not universal: fresh-target clean builds fail it on this
+host, and the measured saturated-CPU samples fail it as well. Two-worker warm
+samples retain headroom. Combined clean/pressure runs, genuinely cold caches,
+other physical hosts, and future fixture growth remain unmeasured. The parent
+reproducibility task stays open; no coverage was removed to improve timings.
+
+On a second Linux or macOS host, record a matching source revision, CPU/OS,
+compiler/toolchain, Cargo configuration/cache policy, and runner settings; run
+separate warm, pressure, and clean protocols into new output directories. Keep
+admission/concurrency settings explicit rather than silently loosening them to
+obtain results. Do not infer other-host behavior from the Linux parser tests.
+The runner captures host/toolchain and worktree status, but configuration/cache
+inspection and physical CPU identification remain part of the operator protocol.
+
+All **65 Python script tests** passed, including new Linux CPU-delta,
+clean-target, pressure-liveness, timeout/interrupt, and partial-startup cleanup
+regressions. Both Cargo feature configurations passed throughout the measured
+commands. After timing, `cargo clippy --offline --all-targets -- -D warnings`,
+`cargo fmt --check`, and `cargo build --offline --release` passed. Raw reports,
+snapshots, and private logs remain in the three ignored output directories above.
+The final runner additionally makes its fresh-target/cache limitation explicit
+in CLI help and reports; this wording-only clarification does not change timing.
+
 ## Remaining follow-up
 
 - Continue prioritizing invocation volume and repeated linking before broad
@@ -368,8 +504,9 @@ material fixture growth.
   remove segmentation, sanitizer, or optimized coverage to meet a time target.
 - Recheck uninstrumented low-load repeats after further reductions or material
   coverage changes. The completed post-reduction samples beat 90 seconds, but do
-  not establish consistent performance under background pressure, other machines,
-  or clean builds. The parent budget task stays open.
+  not establish a universal budget. This host's clean-build repeats and measured
+  saturated-CPU samples exceed it; other-host and combined clean/pressure results
+  remain open. The parent budget task stays open.
 
 Raw reports and private logs remain under ignored `tmp/native-profile-8-repeat`,
 `tmp/native-profile-8-settled`, and `tmp/native-replay`; uninstrumented logs and
