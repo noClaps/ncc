@@ -2,9 +2,6 @@
 
 - [ ] Make the full-suite 90-second performance budget consistently reproducible.
 
-  - [ ] Establish budget behavior on other physical hosts using the checked-in
-        Linux/macOS runner; this host's fresh-target clean builds and two-worker
-        pressure repeats are recorded in `docs/native-compilation-profile.md`.
   - [ ] Complete a repeated saturated-CPU pressure series, including the alternate
         feature configuration; the eight-worker series stopped after two measured
         budget overruns because later low-load admission was exhausted.

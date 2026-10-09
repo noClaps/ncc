@@ -465,21 +465,15 @@ mix the rejected starts into the timing data. Low-load admission still applies
 before introducing workers, so lingering load averages can exhaust retries
 although the workers from the prior sample have been stopped.
 
-### Scope, validation, and reproduction elsewhere
+### Scope and validation
 
 The 90-second target is not universal: fresh-target clean builds fail it on this
 host, and the measured saturated-CPU samples fail it as well. Two-worker warm
 samples retain headroom. Combined clean/pressure runs, genuinely cold caches,
-other physical hosts, and future fixture growth remain unmeasured. The parent
-reproducibility task stays open; no coverage was removed to improve timings.
-
-On a second Linux or macOS host, record a matching source revision, CPU/OS,
-compiler/toolchain, Cargo configuration/cache policy, and runner settings; run
-separate warm, pressure, and clean protocols into new output directories. Keep
-admission/concurrency settings explicit rather than silently loosening them to
-obtain results. Do not infer other-host behavior from the Linux parser tests.
-The runner captures host/toolchain and worktree status, but configuration/cache
-inspection and physical CPU identification remain part of the operator protocol.
+and future fixture growth remain unmeasured. The parent reproducibility task
+stays open; no coverage was removed to improve timings. Cross-host validation
+is outside the requested scope; the measurements remain specific to this host.
+The Linux/macOS runner support is unchanged.
 
 All **65 Python script tests** passed, including new Linux CPU-delta,
 clean-target, pressure-liveness, timeout/interrupt, and partial-startup cleanup
@@ -505,8 +499,8 @@ in CLI help and reports; this wording-only clarification does not change timing.
 - Recheck uninstrumented low-load repeats after further reductions or material
   coverage changes. The completed post-reduction samples beat 90 seconds, but do
   not establish a universal budget. This host's clean-build repeats and measured
-  saturated-CPU samples exceed it; other-host and combined clean/pressure results
-  remain open. The parent budget task stays open.
+  saturated-CPU samples exceed it; combined clean/pressure results remain open.
+  The parent budget task stays open.
 
 Raw reports and private logs remain under ignored `tmp/native-profile-8-repeat`,
 `tmp/native-profile-8-settled`, and `tmp/native-replay`; uninstrumented logs and
