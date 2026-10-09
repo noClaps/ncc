@@ -2,9 +2,6 @@
 
 - [ ] Make the full-suite 90-second performance budget consistently reproducible.
 
-  - [ ] Complete a repeated saturated-CPU pressure series, including the alternate
-        feature configuration; the eight-worker series stopped after two measured
-        budget overruns because later low-load admission was exhausted.
   - [ ] Measure combined clean-build/background-pressure behavior; separate
         scenarios do not establish their interaction or cold-cache behavior.
   - [ ] Investigate the measured clean-build and saturated-CPU budget overruns

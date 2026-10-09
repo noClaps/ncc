@@ -484,6 +484,71 @@ snapshots, and private logs remain in the three ignored output directories above
 The final runner additionally makes its fresh-target/cache limitation explicit
 in CLI help and reports; this wording-only clarification does not change timing.
 
+## Completed eight-worker pressure repeat — October 9, 2026
+
+Source revision: `0c4d09b`, with a clean worktree during measurement. Compiler
+code, fixtures, runner, native flags, and default libtest concurrency were
+unchanged. The host and toolchain match the preceding observations: eight-CPU
+Apple M2 MacBook Air, Darwin 27.0.0, Rust 1.99.0 (`b940084d7`), and Apple clang
+21.0.0 (`clang-2100.3.34.2`). No agent build, test, or profiler overlapped the
+sequential samples.
+
+To allow load averages to settle after saturated samples, this repeat used a
+**180-second cooldown before every admission attempt** and allowed **eight
+attempts**, rather than the earlier 90-second/three-attempt protocol. Admission
+thresholds remained one-minute load at most 6 and live idle at least 80%.
+This is a distinct start protocol, not an unchanged-protocol repeat or evidence
+of a compiler speedup. Preparation and fresh-artifact checks remained outside
+timing, as did worker startup, stabilization, CPU probes, and cleanup. The
+480-second timeout is a safety bound; the budget remains **90 seconds**.
+
+```sh
+python3 scripts/recheck-native-budget.py \
+  --output tmp/native-budget-pressure8-0c4d09b \
+  --pressure-workers 8 --timeout 480 --cooldown 180 --attempts 8
+```
+
+| Sample                    | Wall seconds | Admitted one-minute load | Admitted CPU idle | Worker-active idle before / after |
+| ------------------------- | -----------: | -----------------------: | ----------------: | --------------------------------: |
+| Default 1                 |       119.04 |                     2.84 |            89.56% |                     0.00% / 0.00% |
+| Default 2                 |       131.31 |                     4.73 |            83.67% |                     0.00% / 0.00% |
+| Default 3                 |       122.58 |                     5.26 |            88.83% |                     0.00% / 0.00% |
+| `--no-default-features` 1 |       125.03 |                     2.43 |            89.53% |                     0.11% / 0.00% |
+
+All four commands passed **949 tests**, with fresh Cargo artifacts and no timed
+recompilation. All eight workers were alive at both probes for every sample,
+and cleanup completed after each sample. These probes show saturated or nearly
+saturated CPU at the endpoints, not continuous idle measurements during the
+suite. The workload remains uncalibrated Python integer arithmetic, not a
+standardized cross-host or mixed-pressure benchmark.
+
+Default sample 1 needed two admission attempts: its first start was rejected at
+load **3.91** / **72.30%** idle. Default samples 2 and 3 were admitted on their
+first attempts. The alternate-feature sample needed three attempts: its first
+two were rejected at **7.30** / **86.13%** and **1.85** / **70.94%**. Rejected
+starts are retained in the report and are not timed samples.
+
+The default median was **122.58 seconds**, with a **12.27-second range**.
+Default samples exceeded budget by **29.04–41.31 seconds**; the alternate-feature
+sample exceeded it by **35.03 seconds**. Its single observation does not establish
+a feature-dependent performance difference. The runner exited 1 with
+`complete=true` and `within_budget=false`: this is a **completed repeated series
+with budget overruns**, not admission exhaustion or test failure. The earlier
+incomplete series remains separate; its samples are not pooled into these
+statistics.
+
+This completes the saturated-CPU measurement item, not the parent reproducibility
+task or investigation of the overruns. Combined clean-build/pressure behavior and
+genuinely cold caches remain unmeasured. No language, failure, sanitizer, or
+debug/release coverage was reduced.
+
+After timing, all **65 Python script tests**, `cargo clippy --offline --all-targets
+-- -D warnings`, `cargo fmt --check`, and `cargo build --offline --release` passed.
+The measured commands cover both `cargo test --offline` and `cargo test --offline
+--no-default-features`. Raw reports, admission/pressure snapshots, and private
+logs remain in ignored `tmp/native-budget-pressure8-0c4d09b/`; no test logs were
+printed uncensored.
+
 ## Remaining follow-up
 
 - Continue prioritizing invocation volume and repeated linking before broad
