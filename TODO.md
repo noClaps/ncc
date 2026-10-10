@@ -1,12 +1,5 @@
 # Remaining work
 
-- [ ] Make the full-suite 90-second performance budget consistently reproducible.
-
-  - [ ] Measure combined clean-build/background-pressure behavior; separate
-        scenarios do not establish their interaction or cold-cache behavior.
-  - [ ] Investigate the measured clean-build and saturated-CPU budget overruns
-        without reducing language, failure, sanitizer, or debug/release coverage.
-
 - [ ] Expand language and edge-case coverage.
   - [ ] Continue full-language and edge-case coverage using `docs/coverage.md`;
         container/function rejection matrices are expanded, not complete.
