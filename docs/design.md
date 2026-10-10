@@ -363,7 +363,7 @@ mut int[] nums = [1, 2, 3, 4, 5]
 nums[3] = 3.5 // error: `float` value in an `int` array
 ```
 
-Arrays are 0-indexed, so the first value of the array is at the 0th index. Negative indexing is not allowed, but you can use `$` to signify the last index of the array, basically equivalent to the `array.len-1` value. You can also count backwards by subtracting from `$`.
+Arrays are 0-indexed, so the first value of the array is at the 0th index. Array indices must be `uint`s. Negative indexing is not allowed, but you can use `$` to signify the last index of the array, basically equivalent to the `array.len-1` value. You can also count backwards by subtracting from `$`.
 
 ```nc
 test "$ indexing" {
