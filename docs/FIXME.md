@@ -208,3 +208,17 @@ A: The whole process panics: message to stderr, exit 101. Under `ncc test` the w
 
 **Q: Is a bare identifier in an `if` pattern a new binding or a comparison?**
 A: If the identifier names a variable already in scope it is compared with `==`; otherwise it binds a new variable. This applies at any depth.
+
+## Indexing and literals
+
+**Q: Must array/string indexes be `uint`?**
+A: No, `uint` and `int` are both accepted, and a negative `int` index panics. (An untyped literal index therefore defaults to `int`.)
+
+**Q: In map concatenation `a <> b`, which value wins for a key in both maps?**
+A: The right side (`b`) wins.
+
+**Q: Must struct literals and struct patterns list every field?**
+A: Yes, both must list every field. Use `.f = _` to ignore a field in a pattern.
+
+**Q: Does `@print` with several arguments put a separator between them?**
+A: No. Arguments are converted to `str` and written back-to-back.
