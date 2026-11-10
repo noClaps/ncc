@@ -173,6 +173,10 @@ impl<'a> Checker<'a> {
         let rest = &tys[1..];
         // rows with a wildcard first column
         let default: Vec<Vec<Pat>> = rows.iter().filter(|r| Self::is_wild(&r[0])).map(|r| r[1..].to_vec()).collect();
+        if default.len() == rows.len() {
+            // no constructor in this column: it is irrelevant
+            return self.matrix_exhaustive(&default, rest);
+        }
         match self.types.kind(t).clone() {
             TyKind::Bool => {
                 [true, false].iter().all(|b| {

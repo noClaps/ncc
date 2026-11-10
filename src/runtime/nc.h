@@ -498,16 +498,25 @@ static void nc_sb_f64(nc_sb *sb, double v) {
     nc_sb_cstr(sb, v < 0 ? "-inf" : "inf");
     return;
   }
-  int n = 0;
-  for (int prec = 1; prec <= 17; prec++) {
-    n = snprintf(b, sizeof b, "%.*g", prec, v);
+  /* shortest number of significant digits that round-trips */
+  int prec = 1;
+  for (; prec < 17; prec++) {
+    snprintf(b, sizeof b, "%.*e", prec - 1, v);
     if (strtod(b, NULL) == v) break;
   }
-  bool has_point = false;
-  for (int i = 0; i < n; i++)
-    if (b[i] == '.' || b[i] == 'e' || b[i] == 'n' || b[i] == 'i') has_point = true;
-  nc_sb_put(sb, b, n);
-  if (!has_point) nc_sb_cstr(sb, ".0");
+  snprintf(b, sizeof b, "%.*e", prec - 1, v);
+  int exp10 = atoi(strchr(b, 'e') + 1);
+  int n;
+  if (exp10 >= -5 && exp10 < 17) {
+    int decimals = prec - 1 - exp10;
+    if (decimals < 0) decimals = 0;
+    n = snprintf(b, sizeof b, "%.*f", decimals, v);
+    nc_sb_put(sb, b, n);
+    if (decimals == 0) nc_sb_cstr(sb, ".0");
+  } else {
+    n = (int)strlen(b);
+    nc_sb_put(sb, b, n);
+  }
 }
 static void nc_sb_char(nc_sb *sb, uint32_t c) {
   char enc[4];

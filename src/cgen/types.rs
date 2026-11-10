@@ -10,6 +10,8 @@ pub struct TypeGen<'t> {
     pub t: &'t Types,
     /// forward declarations and struct definitions, in dependency order
     pub decls: String,
+    /// enum payload definitions (heap allocated, so they can come last)
+    pub late_decls: String,
     /// helper prototypes
     pub protos: String,
     /// helper definitions
@@ -36,6 +38,7 @@ impl<'t> TypeGen<'t> {
         TypeGen {
             t,
             decls: String::new(),
+            late_decls: String::new(),
             protos: String::new(),
             bodies: String::new(),
             done: HashSet::new(),
@@ -45,6 +48,10 @@ impl<'t> TypeGen<'t> {
     }
 
     /// Helper id: nominal types share their underlying type's helpers.
+    pub fn all_decls(&self) -> String {
+        format!("{}{}", self.decls, self.late_decls)
+    }
+
     pub fn hid(&self, t: TyId) -> TyId {
         self.t.base(t)
     }
@@ -226,7 +233,7 @@ impl<'t> TypeGen<'t> {
                     writeln!(s, " }} v{vi}; /* {vname} */").unwrap();
                 }
                 s.push_str("  } u;\n};\n");
-                self.decls.push_str(&s);
+                self.late_decls.push_str(&s);
             }
             TyKind::Fn(ps, r) => {
                 let rc = self.ret_ct(*r);
