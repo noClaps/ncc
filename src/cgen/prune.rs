@@ -204,12 +204,9 @@ fn split(src: &str) -> Vec<Item> {
         // comments at top level attach to the next item
         if b[i] == b'/' && i + 1 < b.len() && (b[i + 1] == b'*' || b[i + 1] == b'/') {
             let end = if b[i + 1] == b'*' {
-                src[i + 2..]
-                    .find("*/")
-                    .map(|e| i + 2 + e + 2)
-                    .unwrap_or(b.len())
+                src[i + 2..].find("*/").map_or(b.len(), |e| i + 2 + e + 2)
             } else {
-                src[i..].find('\n').map(|e| i + e).unwrap_or(b.len())
+                src[i..].find('\n').map_or(b.len(), |e| i + e)
             };
             comments.push_str(&src[i..end]);
             comments.push('\n');
@@ -220,7 +217,7 @@ fn split(src: &str) -> Vec<Item> {
         if b[i] == b'#' {
             let mut end = i;
             loop {
-                let nl = src[end..].find('\n').map(|e| end + e).unwrap_or(b.len());
+                let nl = src[end..].find('\n').map_or(b.len(), |e| end + e);
                 if nl > 0 && b[nl - 1] == b'\\' && nl < b.len() {
                     end = nl + 1;
                 } else {
@@ -245,13 +242,10 @@ fn split(src: &str) -> Vec<Item> {
             match b[i] {
                 b'"' | b'\'' => i = skip_literal(b, i),
                 b'/' if i + 1 < b.len() && b[i + 1] == b'*' => {
-                    i = src[i + 2..]
-                        .find("*/")
-                        .map(|e| i + 2 + e + 2)
-                        .unwrap_or(b.len());
+                    i = src[i + 2..].find("*/").map_or(b.len(), |e| i + 2 + e + 2);
                 }
                 b'/' if i + 1 < b.len() && b[i + 1] == b'/' => {
-                    i = src[i..].find('\n').map(|e| i + e).unwrap_or(b.len());
+                    i = src[i..].find('\n').map_or(b.len(), |e| i + e);
                 }
                 b'{' | b'(' | b'[' => {
                     depth += 1;
@@ -335,13 +329,10 @@ fn identifiers(code: &str) -> Vec<String> {
         match b[i] {
             b'"' | b'\'' => i = skip_literal(b, i),
             b'/' if i + 1 < b.len() && b[i + 1] == b'*' => {
-                i = code[i + 2..]
-                    .find("*/")
-                    .map(|e| i + 2 + e + 2)
-                    .unwrap_or(b.len());
+                i = code[i + 2..].find("*/").map_or(b.len(), |e| i + 2 + e + 2);
             }
             b'/' if i + 1 < b.len() && b[i + 1] == b'/' => {
-                i = code[i..].find('\n').map(|e| i + e).unwrap_or(b.len());
+                i = code[i..].find('\n').map_or(b.len(), |e| i + e);
             }
             c if c.is_ascii_alphabetic() || c == b'_' => {
                 let s = i;
@@ -424,7 +415,7 @@ fn decl_names(code: &str) -> Vec<String> {
         head.push(c as char);
         i += 1;
     }
-    let first = tokens.first().map(|s| s.as_str()).unwrap_or("");
+    let first = tokens.first().map_or("", String::as_str);
     let mut names = Vec::new();
     if first == "typedef" {
         if let Some(n) = paren_ident {

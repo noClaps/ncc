@@ -370,7 +370,7 @@ fn at(src: &str, needle: &str, nth: usize, delta: usize) -> Value {
     }
     let off = off + delta;
     let line = src[..off].matches('\n').count();
-    let col = off - src[..off].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let col = off - src[..off].rfind('\n').map_or(0, |i| i + 1);
     pos(line as u32, col as u32)
 }
 
@@ -1055,7 +1055,7 @@ fn diagnostics_and_code_actions() {
     // extract an expression into a variable
     s.change(src);
     let (a, b) = (at(src, "add(ps", 0, 0), at(src, "\nfor i", 0, 0));
-    let acts = s.actions((a.clone(), b.clone()), &[]);
+    let acts = s.actions((a, b), &[]);
     let ex = acts
         .as_array()
         .unwrap()
@@ -1630,7 +1630,7 @@ fn ssr_join_lines_and_pulled_diagnostics() {
                 );
                 text.split_inclusive('\n')
                     .take(l)
-                    .map(|x| x.len())
+                    .map(str::len)
                     .sum::<usize>()
                     + c
             };

@@ -146,7 +146,7 @@ fn main() -> ExitCode {
                     "-o" | "--output" => {
                         // the value is optional: take the next argument only when it is not the
                         // input file (the file is already known, or another argument follows)
-                        let next = rest.get(i + 1).map(|s| s.as_str());
+                        let next = rest.get(i + 1).map(String::as_str);
                         let takes = match next {
                             Some("-") => true,
                             Some(n) if n.starts_with('-') => false,
@@ -181,7 +181,7 @@ fn main() -> ExitCode {
             };
             driver::fmt(std::path::Path::new(&file), check, output)
         }
-        "lsp" => match rest.first().map(|s| s.as_str()) {
+        "lsp" => match rest.first().map(String::as_str) {
             Some("-h" | "--help") => {
                 println!("{HELP_LSP}");
                 ExitCode::SUCCESS

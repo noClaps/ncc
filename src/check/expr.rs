@@ -10,6 +10,18 @@ enum Target {
 }
 
 impl<'a> Checker<'a> {
+    /// A reference to the function `f` as a value.
+    fn fn_ref(&mut self, f: FuncId, name: &str, span: Span) -> Expr {
+        self.idx_fn_ref(f, name, span);
+        let (ps, r) = self.sigs[f].clone();
+        let ty = self.types.intern(TyKind::Fn(ps, r));
+        Expr {
+            kind: EK::FnRef(f),
+            ty,
+            span,
+        }
+    }
+
     pub fn check_expr(&mut self, e: &ast::Expr, expected: Option<TyId>) -> Result<Expr> {
         self.check_expr_opts(e, expected, true)
     }
@@ -385,8 +397,9 @@ impl<'a> Checker<'a> {
                 let exp_kind = exp.map(|t| self.types.kind(t).clone());
                 if items.is_empty() {
                     return match exp_kind {
-                        Some(TyKind::Array(_)) => mk(EK::Array(vec![]), exp.unwrap()),
-                        Some(TyKind::Fixed(_, 0)) => mk(EK::Array(vec![]), exp.unwrap()),
+                        Some(TyKind::Array(_) | TyKind::Fixed(_, 0)) => {
+                            mk(EK::Array(vec![]), exp.unwrap())
+                        }
                         Some(TyKind::Map(..)) => mk(EK::Map(vec![]), exp.unwrap()),
                         _ => err(span, "cannot infer the type of an empty array literal here"),
                     };
@@ -399,13 +412,12 @@ impl<'a> Checker<'a> {
                 let mut xs = Vec::new();
                 let mut et = elem;
                 for it in items {
-                    let x = match et {
-                        Some(t) => self.expect_expr(it, t)?,
-                        None => {
-                            let x = self.check_expr(it, None)?;
-                            et = Some(x.ty);
-                            x
-                        }
+                    let x = if let Some(t) = et {
+                        self.expect_expr(it, t)?
+                    } else {
+                        let x = self.check_expr(it, None)?;
+                        et = Some(x.ty);
+                        x
                     };
                     xs.push(x);
                 }
@@ -445,21 +457,19 @@ impl<'a> Checker<'a> {
                 };
                 let mut xs = Vec::new();
                 for (k, v) in entries {
-                    let kx = match kt {
-                        Some(t) => self.expect_expr(k, t)?,
-                        None => {
-                            let x = self.check_expr(k, None)?;
-                            kt = Some(x.ty);
-                            x
-                        }
+                    let kx = if let Some(t) = kt {
+                        self.expect_expr(k, t)?
+                    } else {
+                        let x = self.check_expr(k, None)?;
+                        kt = Some(x.ty);
+                        x
                     };
-                    let vx = match vt {
-                        Some(t) => self.expect_expr(v, t)?,
-                        None => {
-                            let x = self.check_expr(v, None)?;
-                            vt = Some(x.ty);
-                            x
-                        }
+                    let vx = if let Some(t) = vt {
+                        self.expect_expr(v, t)?
+                    } else {
+                        let x = self.check_expr(v, None)?;
+                        vt = Some(x.ty);
+                        x
                     };
                     xs.push((kx, vx));
                 }
@@ -555,7 +565,6 @@ impl<'a> Checker<'a> {
                         });
                         let blk = self.check_block(b);
                         self.ctx().jumps.pop();
-                        let blk = blk?;
                         if value_needed && self.block_completes(&blk) {
                             return err(
                                 b.span,
@@ -586,7 +595,7 @@ impl<'a> Checker<'a> {
                     self.ix.scopes.push(b.span);
                     let l = self.declare_local(name, ERROR, false, LocalKind::Normal, *name_span);
                     self.ix.scopes.pop();
-                    Some(l?)
+                    Some(l)
                 };
                 if inner != VOID {
                     self.ctx().jumps.push(JumpCtx {
@@ -600,7 +609,6 @@ impl<'a> Checker<'a> {
                     self.ctx().jumps.pop();
                 }
                 self.pop_scope();
-                let blk = blk?;
                 if value_needed && inner != VOID && self.block_completes(&blk) {
                     return err(
                         b.span,
@@ -710,23 +718,14 @@ impl<'a> Checker<'a> {
         }
         let m = self.module();
         match self.mods[m].syms.get(name).map(|e| e.sym.clone()) {
-            Some(Sym::Fn { func: Some(f), .. }) => {
-                self.idx_fn_ref(f, name, span);
-                let (ps, r) = self.sigs[f].clone();
-                let ty = self.types.intern(TyKind::Fn(ps, r));
-                Ok(Expr {
-                    kind: EK::FnRef(f),
-                    ty,
-                    span,
-                })
-            }
+            Some(Sym::Fn { func: Some(f), .. }) => Ok(self.fn_ref(f, name, span)),
             Some(Sym::Fn { func: None, .. }) => err(
                 span,
                 format!(
                     "generic function `{name}` requires explicit type arguments: `{name}<...>`"
                 ),
             ),
-            Some(Sym::Struct { .. }) | Some(Sym::Enum { .. }) | Some(Sym::Type(_)) => {
+            Some(Sym::Struct { .. } | Sym::Enum { .. } | Sym::Type(_)) => {
                 err(span, format!("`{name}` is a type, not a value"))
             }
             Some(Sym::Globals(_)) => unreachable!(),
@@ -754,9 +753,8 @@ impl<'a> Checker<'a> {
     ) -> Result<Expr> {
         let b = self.check_expr(base, None)?;
         let (result, fixed) = match self.types.kind(self.types.base(b.ty)).clone() {
-            TyKind::Array(_) => (b.ty, None),
+            TyKind::Array(_) | TyKind::Str => (b.ty, None),
             TyKind::Fixed(el, n) => (self.types.array(el), Some((el, n))),
-            TyKind::Str => (b.ty, None),
             _ => {
                 return err(
                     span,
@@ -862,9 +860,7 @@ impl<'a> Checker<'a> {
             },
         };
         match sym {
-            Some((_, Sym::Struct { .. }))
-            | Some((_, Sym::Enum { .. }))
-            | Some((_, Sym::Type(_))) => {
+            Some((_, Sym::Struct { .. } | Sym::Enum { .. } | Sym::Type(_))) => {
                 let te = ast::TypeExpr::Named {
                     module,
                     name,
@@ -923,14 +919,11 @@ impl<'a> Checker<'a> {
                     };
                     let x = &self.externs[id];
                     let (ps, r) = (x.params.clone(), x.ret);
-                    match self.ix.extern_decls.get(&id).cloned() {
-                        Some((def, detail)) => {
-                            self.idx_ref(span, Some(def), format!("extern {detail}"))
-                        }
-                        None => {
-                            let hover = format!("extern fn {}", x.name);
-                            self.idx_ref(span, None, hover)
-                        }
+                    if let Some((def, detail)) = self.ix.extern_decls.get(&id).cloned() {
+                        self.idx_ref(span, Some(def), format!("extern {detail}"));
+                    } else {
+                        let hover = format!("extern fn {}", x.name);
+                        self.idx_ref(span, None, hover);
                     }
                     return Ok(Target::Call(Callee::Extern(id), ps, r));
                 }
@@ -966,8 +959,7 @@ impl<'a> Checker<'a> {
                 .funcs
                 .get(f)
                 .and_then(|x| x.as_ref())
-                .map(|x| x.name.clone())
-                .unwrap_or_else(|| "fn".into());
+                .map_or_else(|| "fn".into(), |x| x.name.clone());
             self.idx_fn_ref(f, &fname, callee.span);
             let (ps, r) = self.sigs[f].clone();
             return Ok(Target::Call(Callee::Direct(f), ps, r));
@@ -1001,8 +993,7 @@ impl<'a> Checker<'a> {
     ) -> Result<(Target, Vec<Expr>)> {
         let target = self.resolve_target(callee)?;
         let params = match &target {
-            Target::Call(_, ps, _) => ps.clone(),
-            Target::Variant(_, _, ps) => ps.clone(),
+            Target::Call(_, ps, _) | Target::Variant(_, _, ps) => ps.clone(),
         };
         if params.len() != args.len() {
             return err(
@@ -1063,16 +1054,7 @@ impl<'a> Checker<'a> {
                         span,
                     })
                 }
-                Some((_, Sym::Fn { func: Some(f), .. })) => {
-                    self.idx_fn_ref(f, name, span);
-                    let (ps, r) = self.sigs[f].clone();
-                    let ty = self.types.intern(TyKind::Fn(ps, r));
-                    Ok(Expr {
-                        kind: EK::FnRef(f),
-                        ty,
-                        span,
-                    })
-                }
+                Some((_, Sym::Fn { func: Some(f), .. })) => Ok(self.fn_ref(f, name, span)),
                 Some((_, Sym::Fn { func: None, .. })) => err(
                     span,
                     format!("generic function `{alias}.{name}` requires explicit type arguments"),
@@ -1207,8 +1189,7 @@ impl<'a> Checker<'a> {
                 let kb = self.types.kind(b.ty).clone();
                 let want_dyn = expected
                     .map(|t| self.strip_opt(t))
-                    .map(|t| matches!(self.types.kind(t), TyKind::Array(_)))
-                    .unwrap_or(false);
+                    .is_some_and(|t| matches!(self.types.kind(t), TyKind::Array(_)));
                 let ty = match (&ka, &kb) {
                     (TyKind::Str, TyKind::Str) => STR,
                     (TyKind::Array(x), TyKind::Array(y)) if x == y => a.ty,
@@ -1582,7 +1563,7 @@ impl<'a> Checker<'a> {
                         };
                         pats.push(pat);
                     }
-                    let body = self.check_block(&arm.body)?;
+                    let body = self.check_block(&arm.body);
                     if value_ty.is_some() && self.block_completes(&body) {
                         return err(
                             arm.body.span,

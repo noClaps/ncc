@@ -84,14 +84,15 @@ pub fn purity(p: &Program) -> Vec<bool> {
         let mut ok = true;
         let mut cs = vec![];
         let mut visit = |e: &Expr| match &e.kind {
-            EK::Print(..) | EK::Async(..) | EK::Await(_) => ok = false,
-            EK::Call(Callee::Extern(_), _) => ok = false,
+            EK::Print(..) | EK::Async(..) | EK::Await(_) | EK::Call(Callee::Extern(_), _) => {
+                ok = false
+            }
             EK::Call(Callee::Direct(g), _) => cs.push(*g),
             EK::Var(VarRef::Global(g)) if p.globals[*g].mutable => ok = false,
             EK::Var(VarRef::Global(g))
                 if matches!(p.types.kind(p.globals[*g].ty), TyKind::Mutex(_)) =>
             {
-                ok = false
+                ok = false;
             }
             _ => {}
         };
@@ -131,24 +132,18 @@ fn stmt_pure(s: &Stmt) -> bool {
         return false;
     }
     match &s.kind {
-        SK::Lock { .. } | SK::Assert(_) => false,
-        SK::Let(Some(VarRef::Global(_)), _) => false,
+        SK::Lock { .. } | SK::Assert(_) | SK::Let(Some(VarRef::Global(_)), _) => false,
         SK::While { body, .. } | SK::For { body, .. } | SK::Block(body) => {
             body.stmts.iter().all(stmt_pure)
         }
         _ => {
             let mut ok = true;
             let mut check = |e: &Expr| {
-                let blocks: Vec<&Block> = match &e.kind {
-                    EK::If(i) => i.arms.iter().map(|a| &a.body).collect(),
-                    EK::Catch(_, _, b, _) => vec![b],
-                    EK::Else(_, Fallback::Block(b, _)) => vec![b],
-                    _ => vec![],
-                };
-                for b in blocks {
-                    if !b.stmts.iter().all(stmt_pure) {
-                        ok = false;
-                    }
+                if !flow::nested_blocks(e)
+                    .iter()
+                    .all(|b| b.stmts.iter().all(stmt_pure))
+                {
+                    ok = false;
                 }
             };
             flow::visit_stmt(s, &mut check);
@@ -210,7 +205,7 @@ impl<'p> Evaluator<'p> {
             tests: p.tests.clone(),
             target: p.target.clone(),
         };
-        let r = (|| {
+        let (funcs, mut errs) = {
             let mut ev = Evaluator::new(&snapshot, sm);
             // constants for immutable globals with constant initialisers (in main, in order)
             let main = &snapshot.funcs[snapshot.main];
@@ -241,28 +236,21 @@ impl<'p> Evaluator<'p> {
                     }
                 }
             }
-            let mut new_funcs = snapshot.funcs.clone();
-            for f in new_funcs.iter_mut() {
-                let mut consts: HashMap<LocalId, Val> = HashMap::new();
-                let mut body = f.body.clone();
-                ev.fold_block(&mut body, &f.locals, &mut consts)
-                    .map_err(|d| vec![d])?;
-                if fold {
-                    f.body = body;
-                }
+            let mut funcs = snapshot.funcs.clone();
+            for f in &mut funcs {
+                ev.fold_block(&mut f.body, &f.locals, &mut HashMap::new());
             }
-            if ev.errs.is_empty() {
-                Ok(new_funcs)
-            } else {
-                let mut errs = std::mem::take(&mut ev.errs);
-                errs.sort_by_key(|d| (d.span.file, d.span.start));
-                errs.dedup_by(|a, b| a.span == b.span && a.msg == b.msg);
-                Err(errs)
-            }
-        })();
+            (funcs, ev.errs)
+        };
         p.types = snapshot.types;
-        let funcs = r?;
-        p.funcs = funcs;
+        if !errs.is_empty() {
+            errs.sort_by_key(|d| (d.span.file, d.span.start));
+            errs.dedup_by(|a, b| a.span == b.span && a.msg == b.msg);
+            return Err(errs);
+        }
+        if fold {
+            p.funcs = funcs;
+        }
         Ok(())
     }
 
@@ -293,18 +281,12 @@ impl<'p> Evaluator<'p> {
         }
     }
 
-    fn fold_block(
-        &mut self,
-        b: &mut Block,
-        locals: &[Local],
-        consts: &mut HashMap<LocalId, Val>,
-    ) -> Result<(), Diag> {
-        for s in b.stmts.iter_mut() {
+    fn fold_block(&mut self, b: &mut Block, locals: &[Local], consts: &mut HashMap<LocalId, Val>) {
+        for s in &mut b.stmts {
             if let Err(d) = self.fold_stmt(s, locals, consts) {
                 self.errs.push(d);
             }
         }
-        Ok(())
     }
 
     fn fold_stmt(
@@ -326,7 +308,7 @@ impl<'p> Evaluator<'p> {
                 }
             }
             SK::Destructure(_, e) | SK::Expr(e) | SK::Throw(e) | SK::Assert(e) => {
-                self.fold_expr(e, locals, consts)?
+                self.fold_expr(e, locals, consts)?;
             }
             SK::Assign(p, e) => {
                 self.fold_place(p, locals, consts)?;
@@ -336,14 +318,14 @@ impl<'p> Evaluator<'p> {
             SK::Return(None) | SK::Break(_, None) | SK::Continue(_) => {}
             SK::While { cond, body, .. } => {
                 self.fold_expr(cond, locals, consts)?;
-                self.fold_block(body, locals, consts)?;
+                self.fold_block(body, locals, consts);
             }
             SK::For { iter, body, .. } => {
                 self.fold_expr(iter, locals, consts)?;
-                self.fold_block(body, locals, consts)?;
+                self.fold_block(body, locals, consts);
             }
-            SK::Lock { body, .. } => self.fold_block(body, locals, consts)?,
-            SK::Block(b) => self.fold_block(b, locals, consts)?,
+            SK::Lock { body, .. } => self.fold_block(body, locals, consts),
+            SK::Block(b) => self.fold_block(b, locals, consts),
         }
         Ok(())
     }
@@ -405,13 +387,13 @@ impl<'p> Evaluator<'p> {
         // nested blocks
         match &mut e.kind {
             EK::If(i) => {
-                for arm in i.arms.iter_mut() {
-                    self.fold_block(&mut arm.body, locals, consts)?;
+                for arm in &mut i.arms {
+                    self.fold_block(&mut arm.body, locals, consts);
                 }
                 self.select_arm(i);
             }
             EK::Else(_, Fallback::Block(b, _)) | EK::Catch(_, _, b, _) => {
-                self.fold_block(b, locals, consts)?
+                self.fold_block(b, locals, consts);
             }
             _ => {}
         }
@@ -660,11 +642,8 @@ impl<'p> Evaluator<'p> {
                 if !c {
                     return Ok(Flow::Normal);
                 }
-                match self.block(body, env)? {
-                    Flow::Normal => {}
-                    Flow::Break(j, None) if j == *id => return Ok(Flow::Normal),
-                    Flow::Continue(j) if j == *id => {}
-                    f => return Ok(f),
+                if let Some(f) = self.loop_body(*id, body, env)? {
+                    return Ok(f);
                 }
             },
             SK::For {
@@ -689,11 +668,8 @@ impl<'p> Evaluator<'p> {
                 for k in keys {
                     self.tick()?;
                     env.set(*var, k);
-                    match self.block(body, env)? {
-                        Flow::Normal => {}
-                        Flow::Break(j, None) if j == *id => return Ok(Flow::Normal),
-                        Flow::Continue(j) if j == *id => {}
-                        f => return Ok(f),
+                    if let Some(f) = self.loop_body(*id, body, env)? {
+                        return Ok(f);
                     }
                 }
                 Ok(Flow::Normal)
@@ -701,6 +677,16 @@ impl<'p> Evaluator<'p> {
             SK::Lock { .. } | SK::Assert(_) => Err(Stop::Unknown),
             SK::Block(b) => self.block(b, env),
         }
+    }
+
+    /// Run one iteration of loop `id`; `Some` is how the loop statement completes.
+    fn loop_body(&mut self, id: JumpId, body: &Block, env: &mut Env) -> R<Option<Flow>> {
+        Ok(match self.block(body, env)? {
+            Flow::Normal => None,
+            Flow::Break(j, None) if j == id => Some(Flow::Normal),
+            Flow::Continue(j) if j == id => None,
+            f => Some(f),
+        })
     }
 
     fn assign(&mut self, p: &Place, v: Val, env: &mut Env) -> R<()> {
@@ -746,7 +732,7 @@ impl<'p> Evaluator<'p> {
         let mut cur = env
             .locals
             .get(l)
-            .and_then(|x| x.clone())
+            .and_then(Clone::clone)
             .ok_or(Stop::Unknown)?;
         for st in path {
             cur = match (st, &cur) {
@@ -917,7 +903,7 @@ impl<'p> Evaluator<'p> {
                 }
                 env.locals
                     .get(*l)
-                    .and_then(|x| x.clone())
+                    .and_then(Clone::clone)
                     .ok_or(Stop::Unknown)?
             }
             EK::Var(VarRef::Global(g)) => self.gconst.get(g).cloned().ok_or(Stop::Unknown)?,
@@ -935,7 +921,7 @@ impl<'p> Evaluator<'p> {
                     caps.push(
                         env.locals
                             .get(c.outer)
-                            .and_then(|x| x.clone())
+                            .and_then(Clone::clone)
                             .ok_or(Stop::Unknown)?,
                     );
                 }
@@ -1470,8 +1456,9 @@ impl<'p> Evaluator<'p> {
                 }
             }
             (Val::None, _) => s.push_str("none"),
-            (Val::Some(x), TyKind::Opt(i)) => self.str_into(s, x, *i)?,
-            (Val::Ok(x), TyKind::ErrU(i)) => self.str_into(s, x, *i)?,
+            (Val::Some(x), TyKind::Opt(i)) | (Val::Ok(x), TyKind::ErrU(i)) => {
+                self.str_into(s, x, *i)?
+            }
             (Val::Err(m), _) => {
                 s.push_str("error: ");
                 s.push_str(m);
@@ -1603,7 +1590,6 @@ fn lit_to_val(l: &Lit) -> Val {
         Lit::Float(f) => Val::Float(*f),
         Lit::Char(c) => Val::Char(*c),
         Lit::Str(s) => Val::Str(s.as_str().into()),
-        Lit::Void => Val::Void,
     }
 }
 
@@ -1844,7 +1830,7 @@ pub fn fmt_float(v: f64) -> String {
     let (mant, exp) = sci.split_once('e').unwrap();
     let exp: i32 = exp.parse().unwrap();
     let neg = mant.starts_with('-');
-    let digits: String = mant.chars().filter(|c| c.is_ascii_digit()).collect();
+    let digits: String = mant.chars().filter(char::is_ascii_digit).collect();
     let prec = digits.len() as i32;
     let mut out = String::new();
     if neg {

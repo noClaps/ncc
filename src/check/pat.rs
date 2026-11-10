@@ -20,7 +20,7 @@ impl<'a> Checker<'a> {
                         "patterns with several alternatives cannot bind variables",
                     );
                 }
-                let l = self.declare_local(name, ty, false, LocalKind::Normal, span)?;
+                let l = self.declare_local(name, ty, false, LocalKind::Normal, span);
                 let label = format!("{} ", self.types.show(ty));
                 self.idx_hint(span.start, span.file, label, super::index::HintKind::Type);
                 Ok(Pat::Bind(l))

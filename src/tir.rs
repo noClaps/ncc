@@ -13,7 +13,6 @@ pub type ExternId = usize;
 pub type JumpId = usize;
 
 #[derive(Clone, Debug, PartialEq)]
-#[allow(dead_code)]
 pub enum Lit {
     Bool(bool),
     Byte(u8),
@@ -22,7 +21,6 @@ pub enum Lit {
     Float(f64),
     Char(u32),
     Str(String),
-    Void,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -237,7 +235,6 @@ pub struct Capture {
 }
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub struct Func {
     pub name: String,
     pub params: Vec<LocalId>,
@@ -245,21 +242,17 @@ pub struct Func {
     pub locals: Vec<Local>,
     pub captures: Vec<Capture>,
     pub body: Block,
-    pub span: Span,
     /// Index of the parent function for nested functions
     pub parent: Option<FuncId>,
     /// Local in this function that refers to the closure itself (recursive nested fns)
     pub self_local: Option<LocalId>,
-    pub is_never: bool,
 }
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub struct Global {
     pub name: String,
     pub ty: TyId,
     pub mutable: bool,
-    pub module: usize,
 }
 
 #[derive(Clone, Debug)]

@@ -120,7 +120,7 @@ const POSTFIX: &[(&str, &str, &str)] = &[
 ];
 
 /// Declarations visible at `off` in file `fid`, innermost (latest) first, one per name.
-fn visible(a: &Analysis, fid: u32, off: usize) -> Vec<&SymDecl> {
+pub(super) fn visible(a: &Analysis, fid: u32, off: usize) -> Vec<&SymDecl> {
     let mut ds: Vec<&SymDecl> = a
         .index
         .decls
@@ -144,11 +144,6 @@ fn visible(a: &Analysis, fid: u32, off: usize) -> Vec<&SymDecl> {
     let mut seen = HashSet::new();
     ds.retain(|d| seen.insert(d.name.clone()));
     ds
-}
-
-/// Declarations visible at `off`.
-pub(super) fn visible_decls(a: &Analysis, fid: u32, off: usize) -> Vec<&SymDecl> {
-    visible(a, fid, off)
 }
 
 /// Names visible at `off` (for suggestions).
@@ -254,7 +249,7 @@ impl Server {
         let path = uri_to_path(&pp.text_document.uri)?;
         let text = self.text_of(&path)?;
         let off = pos_to_offset(&text, pp.position);
-        let line_start = text[..off].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let line_start = text[..off].rfind('\n').map_or(0, |i| i + 1);
         let before = &text[line_start..off];
         let analysis = self.analyses.get(&path);
         let fid = analysis.and_then(|a| a.file_id(&path));
@@ -290,8 +285,7 @@ impl Server {
             .char_indices()
             .rev()
             .find(|(_, c)| !(c.is_alphanumeric() || *c == '_'))
-            .map(|(i, c)| i + c.len_utf8())
-            .unwrap_or(0);
+            .map_or(0, |(i, c)| i + c.len_utf8());
         let prefix_char = before[..word_start].chars().last();
 
         // `@builtin`
@@ -547,8 +541,7 @@ impl Server {
             i -= 1;
             match b[i] {
                 b')' | b']' | b'}' => depth += 1,
-                b'(' | b'[' if depth > 0 => depth -= 1,
-                b'{' if depth > 0 => depth -= 1,
+                b'(' | b'[' | b'{' if depth > 0 => depth -= 1,
                 b'{' => break i,
                 b'(' | b'[' => return None,
                 _ => {}
@@ -561,8 +554,7 @@ impl Server {
         }
         let name_start = t
             .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
-            .map(|i| i + 1)
-            .unwrap_or(0);
+            .map_or(0, |i| i + 1);
         let name = &t[name_start..];
         if !name.chars().next()?.is_uppercase() {
             return None;
@@ -783,14 +775,8 @@ impl Server {
                 }
             }
         }
-        let escaped = receiver
-            .replace('\\', "\\\\")
-            .replace('$', "\\$")
-            .replace('}', "\\}");
-        let range = Range::new(
-            super::offset_to_pos(text, start),
-            super::offset_to_pos(text, off),
-        );
+        let escaped = snippet_escape(receiver);
+        let range = super::range(text, start, off);
         let mut out = Vec::new();
         for (d, qual) in cands {
             let ps = super::calls::params(&d.detail);
@@ -893,20 +879,21 @@ impl Server {
     }
 }
 
+/// `s` as literal snippet text.
+fn snippet_escape(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('$', "\\$")
+        .replace('}', "\\}")
+}
+
 /// Postfix completions replacing `receiver.` with a snippet around the receiver (`x.if`).
 fn postfix_items(text: &str, start: usize, dot: usize, off: usize) -> Vec<CompletionItem> {
     let receiver = &text[start..dot];
     if receiver.contains('\n') {
         return vec![];
     }
-    let escaped = receiver
-        .replace('\\', "\\\\")
-        .replace('$', "\\$")
-        .replace('}', "\\}");
-    let range = Range::new(
-        super::offset_to_pos(text, start),
-        super::offset_to_pos(text, off),
-    );
+    let escaped = snippet_escape(receiver);
+    let range = super::range(text, start, off);
     POSTFIX
         .iter()
         .map(|(label, tmpl, desc)| CompletionItem {
@@ -1114,7 +1101,7 @@ fn unify(p: &str, c: &str, tps: &[String], binds: &mut HashMap<String, String>) 
 mod tests {
     #[test]
     fn first_argument_types() {
-        let t = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        let t = |names: &[&str]| names.iter().map(ToString::to_string).collect::<Vec<_>>();
         let b = |p: &str, ty: &str, tps: &[&str]| {
             super::accepts(p, ty, &t(tps)).map(|m| {
                 let mut v: Vec<(String, String)> = m.into_iter().collect();

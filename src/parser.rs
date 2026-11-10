@@ -220,7 +220,7 @@ impl Parser {
             return None;
         }
         let off = (self.toks[tok].span.start as usize).min(self.src.len());
-        Some(off - self.src[..off].rfind('\n').map(|i| i + 1).unwrap_or(0))
+        Some(off - self.src[..off].rfind('\n').map_or(0, |i| i + 1))
     }
 
     /// Brackets opened between `from` and `to` (token indices) that are still unclosed.
@@ -239,6 +239,24 @@ impl Parser {
     }
 
     /// Record an error and skip to the start of the next statement.
+    /// Skip to the end of the line, past brackets opened on it (`depth` were already open).
+    fn skip_line(&mut self, mut depth: i32) {
+        loop {
+            match self.peek() {
+                Tok::Eof => break,
+                Tok::Newline if depth <= 0 => {
+                    self.skip_nl();
+                    break;
+                }
+                Tok::LBrace | Tok::LParen | Tok::LBracket => depth += 1,
+                Tok::RBrace if depth <= 0 => break,
+                Tok::RBrace | Tok::RParen | Tok::RBracket => depth -= 1,
+                _ => {}
+            }
+            self.bump();
+        }
+    }
+
     fn recover(&mut self, d: Diag, start: usize) {
         let err_tok = self.pos.min(self.toks.len() - 1);
         let open = self.open_brackets(start, err_tok);
@@ -269,21 +287,7 @@ impl Parser {
         }
         self.errors.push(d);
         // skip to the end of the statement, including brackets it already opened
-        let mut depth: i32 = open.len() as i32;
-        loop {
-            match self.peek() {
-                Tok::Eof => break,
-                Tok::Newline if depth <= 0 => {
-                    self.skip_nl();
-                    break;
-                }
-                Tok::LBrace | Tok::LParen | Tok::LBracket => depth += 1,
-                Tok::RBrace if depth <= 0 => break,
-                Tok::RBrace | Tok::RParen | Tok::RBracket => depth -= 1,
-                _ => {}
-            }
-            self.bump();
-        }
+        self.skip_line(open.len() as i32);
         if self.pos == start && !self.at(&Tok::Eof) {
             self.bump();
             self.skip_nl();
@@ -293,21 +297,7 @@ impl Parser {
             while !matches!(self.peek(), Tok::Eof | Tok::RBrace)
                 && self.column(self.pos).is_some_and(|c| c > sc)
             {
-                let mut depth: i32 = 0;
-                loop {
-                    match self.peek() {
-                        Tok::Eof => break,
-                        Tok::Newline if depth <= 0 => {
-                            self.skip_nl();
-                            break;
-                        }
-                        Tok::LBrace | Tok::LParen | Tok::LBracket => depth += 1,
-                        Tok::RBrace if depth <= 0 => break,
-                        Tok::RBrace | Tok::RParen | Tok::RBracket => depth -= 1,
-                        _ => {}
-                    }
-                    self.bump();
-                }
+                self.skip_line(0);
             }
         }
     }
@@ -674,7 +664,8 @@ impl Parser {
                 self.bump();
                 let k = self.parse_type()?;
                 self.expect(&Tok::RBracket)?;
-                let v = self.parse_type_base_postfix_free()?;
+                // the value type binds all postfix sigils: `[str]int[]` is a map of int arrays
+                let v = self.parse_type()?;
                 TypeExpr::Map(Box::new(k), Box::new(v), start.to(self.prev_span()))
             }
             _ => self.parse_type_atom()?,
@@ -683,21 +674,15 @@ impl Parser {
         Ok(ty)
     }
 
-    /// The value type of a map binds all postfix sigils: `[str]int[]` is a map of int arrays.
-    fn parse_type_base_postfix_free(&mut self) -> Result<TypeExpr> {
-        self.parse_type()
-    }
-
     fn type_postfix(&mut self, mut ty: TypeExpr, start: Span) -> Result<TypeExpr> {
         loop {
             match self.peek() {
-                Tok::LBracket => match self.peek_n(1).clone() {
-                    Tok::RBracket => {
+                Tok::LBracket => {
+                    if self.peek_n(1).clone() == Tok::RBracket {
                         self.bump();
                         self.bump();
                         ty = TypeExpr::Array(Box::new(ty), None, start.to(self.prev_span()));
-                    }
-                    _ => {
+                    } else {
                         // `T[3]`, `T[N]`, `T[N - 1]`
                         let save = self.pos;
                         self.bump();
@@ -715,7 +700,7 @@ impl Parser {
                             }
                         }
                     }
-                },
+                }
                 Tok::Question => {
                     self.bump();
                     ty = TypeExpr::Optional(Box::new(ty), start.to(self.prev_span()));

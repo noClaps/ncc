@@ -328,7 +328,7 @@ impl Server {
                 let t = inner[l + a..l + b].to_string();
                 let n = names
                     .get(i)
-                    .map(|n| n.to_string())
+                    .map(ToString::to_string)
                     .unwrap_or(format!("a{i}"));
                 (t, n)
             })
@@ -346,7 +346,7 @@ impl Server {
         };
         let label = format!("fn({}){ret_part} {{}}", plain.join(", "));
         vec![CompletionItem {
-            label: label.clone(),
+            label,
             kind: Some(CompletionItemKind::SNIPPET),
             detail: Some(format!("function literal for `{ty}`")),
             filter_text: Some("fn".into()),

@@ -3,14 +3,8 @@
 use super::*;
 
 impl<'a> Checker<'a> {
-    pub fn check_block(&mut self, b: &ast::Block) -> Result<Block> {
+    pub fn check_block(&mut self, b: &ast::Block) -> Block {
         self.ix.scopes.push(b.span);
-        let r = self.check_block_inner(b);
-        self.ix.scopes.pop();
-        r
-    }
-
-    fn check_block_inner(&mut self, b: &ast::Block) -> Result<Block> {
         self.push_scope();
         let mut out = Vec::new();
         for s in &b.stmts {
@@ -22,7 +16,8 @@ impl<'a> Checker<'a> {
             self.report(r);
         }
         self.pop_scope();
-        Ok(Block { stmts: out })
+        self.ix.scopes.pop();
+        Block { stmts: out }
     }
 
     /// For the editor: link the variable names in a statement that failed to check to their
@@ -112,7 +107,7 @@ impl<'a> Checker<'a> {
                 mutable,
                 LocalKind::Normal,
                 span,
-            )?)))
+            ))))
         }
     }
 
@@ -400,7 +395,7 @@ impl<'a> Checker<'a> {
                     SK::While {
                         id,
                         cond: c,
-                        body: b?,
+                        body: b,
                     },
                 );
             }
@@ -430,7 +425,6 @@ impl<'a> Checker<'a> {
                 self.ix.scopes.push(body.span);
                 let v = self.declare_local(var, vty, false, LocalKind::Normal, *var_span);
                 self.ix.scopes.pop();
-                let v = v?;
                 let file = var_span.file;
                 let hint = format!("{} ", self.types.show(vty));
                 self.idx_hint(var_span.start, file, hint, index::HintKind::Type);
@@ -449,7 +443,7 @@ impl<'a> Checker<'a> {
                         var: v,
                         kind,
                         iter: it,
-                        body: b?,
+                        body: b,
                     },
                 );
             }
@@ -474,8 +468,7 @@ impl<'a> Checker<'a> {
                 };
                 let id = self.new_jump();
                 self.push_scope();
-                let alias =
-                    self.declare_local(name, inner, true, LocalKind::LockAlias, *name_span)?;
+                let alias = self.declare_local(name, inner, true, LocalKind::LockAlias, *name_span);
                 self.ctx().jumps.push(JumpCtx {
                     id,
                     kind: JumpKind::Lock,
@@ -490,12 +483,12 @@ impl<'a> Checker<'a> {
                         id,
                         mutex,
                         alias,
-                        body: b?,
+                        body: b,
                     },
                 );
             }
             S::Block(b) => {
-                let b = self.check_block(b)?;
+                let b = self.check_block(b);
                 push(out, SK::Block(b));
             }
             S::Fn(f) => {
@@ -555,9 +548,7 @@ impl<'a> Checker<'a> {
         let tp = self.tparams();
         let (params, ret) = self.resolve_sig(sig, m, &tp)?;
         let fty = self.types.intern(TyKind::Fn(params.clone(), ret));
-        let display = name
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "fn literal".to_string());
+        let display = name.unwrap_or("fn literal").to_string();
         let fid = self.reserve_fn(display.clone(), params.clone(), ret);
         self.ix.fn_spans.insert(fid, sig.span);
         self.ix
@@ -574,24 +565,16 @@ impl<'a> Checker<'a> {
         self.fns.push(ctx);
         let r = (|| {
             if let Some(n) = name {
-                let sl = self.declare_local(n, fty, false, LocalKind::Normal, sig.span)?;
+                let sl = self.declare_local(n, fty, false, LocalKind::Normal, sig.span);
                 self.ctx().self_local = Some(sl);
             }
-            let mut pids = Vec::new();
             self.ix.scopes.push(body.span);
-            for (i, p) in sig.params.iter().enumerate() {
-                let l = self.declare_local(&p.name, params[i], false, LocalKind::Param, p.span);
-                match l {
-                    Ok(l) => pids.push(l),
-                    Err(e) => {
-                        self.ix.scopes.pop();
-                        return Err(e);
-                    }
-                }
-            }
+            let pids: Vec<_> = (sig.params.iter().zip(&params))
+                .map(|(p, &ty)| self.declare_local(&p.name, ty, false, LocalKind::Param, p.span))
+                .collect();
             self.ix.scopes.pop();
             let before = self.errors.len();
-            let b = self.check_block(body)?;
+            let b = self.check_block(body);
             if self.errors.len() == before {
                 self.check_fn_end(&b, ret, sig.span, &display)?;
             }
@@ -599,7 +582,7 @@ impl<'a> Checker<'a> {
         })();
         let ctx = self.fns.pop().unwrap();
         let (pids, b) = r?;
-        self.finish_fn(ctx, display, pids, b, sig.span, Some(parent));
+        self.finish_fn(ctx, display, pids, b, Some(parent));
         Ok((fid, fty))
     }
 

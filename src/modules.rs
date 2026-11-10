@@ -157,22 +157,21 @@ impl Loader<'_> {
                 if self.root.is_none() {
                     self.root = Some(find_root(&self.entry_dir));
                 }
-                match self.root.as_ref().unwrap() {
-                    Some(r) => match from_root {
+                if let Some(r) = self.root.as_ref().unwrap() {
+                    match from_root {
                         Some(rel) => r.join(format!("{rel}.nc")),
                         None => r.join(".nc").join("deps").join(format!("{}.nc", im.path)),
-                    },
-                    None => {
-                        self.errors.push(Diag::new(
-                            im.span,
-                            format!(
-                                "cannot resolve import `{}`: no `.nc/config.toml` found in `{}` or any parent directory",
-                                im.path,
-                                self.entry_dir.display()
-                            ),
-                        ));
-                        continue;
                     }
+                } else {
+                    self.errors.push(Diag::new(
+                        im.span,
+                        format!(
+                            "cannot resolve import `{}`: no `.nc/config.toml` found in `{}` or any parent directory",
+                            im.path,
+                            self.entry_dir.display()
+                        ),
+                    ));
+                    continue;
                 }
             };
             let Ok(target) = std::fs::canonicalize(&target) else {

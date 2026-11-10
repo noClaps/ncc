@@ -65,8 +65,7 @@ impl SourceFile {
         let end = self
             .line_starts
             .get(line)
-            .map(|e| e - 1)
-            .unwrap_or(self.text.len());
+            .map_or(self.text.len(), |e| e - 1);
         &self.text[start..end.max(start)]
     }
 }

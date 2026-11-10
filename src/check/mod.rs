@@ -164,7 +164,7 @@ fn check_inner(graph: ModuleGraph, editor: bool) -> (Program, index::Index, Vec<
         broken: HashSet::new(),
         never_funcs: HashSet::new(),
         tests: vec![],
-        order: graph.order.clone(),
+        order: graph.order,
         ix: Default::default(),
         errors: vec![],
         editor,
@@ -252,13 +252,11 @@ impl<'a> Checker<'a> {
     fn run(&mut self) -> Program {
         // Phase A: declare names
         for m in 0..self.mods.len() {
-            let r = self.declare_names(m);
-            self.report(r);
+            self.declare_names(m);
         }
         // Phase B: resolve type definitions and function signatures
         for m in 0..self.mods.len() {
-            let r = self.resolve_decls(m);
-            self.report(r);
+            self.resolve_decls(m);
         }
         // Phase C: top-level statements, module by module in dependency order
         let main_ret = self.types.erru(VOID);
@@ -285,7 +283,7 @@ impl<'a> Checker<'a> {
         for m in 0..self.mods.len() {
             let items = self.mods[m].ast.items.clone();
             for it in &items {
-                if let ast::Item::Test(name, body, span) = it {
+                if let ast::Item::Test(name, body, _) = it {
                     let erru = self.types.erru(VOID);
                     let f = self.reserve_fn(format!("test {name}"), vec![], erru);
                     let mut ctx = self.new_ctx(f, m, erru, HashMap::new());
@@ -293,14 +291,7 @@ impl<'a> Checker<'a> {
                     self.fns.push(ctx);
                     let body = self.check_block(body);
                     let ctx = self.fns.pop().unwrap();
-                    let body = match body {
-                        Ok(b) => b,
-                        Err(d) => {
-                            self.errors.push(d);
-                            Block { stmts: vec![] }
-                        }
-                    };
-                    self.finish_fn(ctx, format!("test {name}"), vec![], body, *span, None);
+                    self.finish_fn(ctx, format!("test {name}"), vec![], body, None);
                     if m == 0 {
                         self.tests.push(Test {
                             name: name.clone(),
@@ -312,8 +303,7 @@ impl<'a> Checker<'a> {
         }
         // Phase D: function bodies (including generic instances discovered on the way)
         while let Some(p) = self.pending.pop() {
-            let r = self.check_fn_body(p);
-            self.report(r);
+            self.check_fn_body(p);
         }
         if self.editor {
             self.index_generic_bodies();
@@ -321,14 +311,7 @@ impl<'a> Checker<'a> {
 
         // assemble main
         let main_body = self.assemble_main();
-        self.finish_fn(
-            main_ctx,
-            "main".into(),
-            vec![],
-            main_body,
-            Span::default(),
-            None,
-        );
+        self.finish_fn(main_ctx, "main".into(), vec![], main_body, None);
         // functions whose checking failed early get empty bodies
         let sigs = self.sigs.clone();
         let funcs = std::mem::take(&mut self.funcs)
@@ -342,10 +325,8 @@ impl<'a> Checker<'a> {
                     locals: vec![],
                     captures: vec![],
                     body: Block { stmts: vec![] },
-                    span: Span::default(),
                     parent: None,
                     self_local: None,
-                    is_never: false,
                 })
             })
             .collect();
@@ -393,309 +374,300 @@ impl<'a> Checker<'a> {
         Ok(())
     }
 
-    fn declare_names(&mut self, m: usize) -> Result<()> {
+    fn declare_names(&mut self, m: usize) {
         let items = self.mods[m].ast.items.clone();
-        {
-            for (i, it) in items.iter().enumerate() {
-                let item_r: Result<()> = (|| {
-                    match it {
-                        ast::Item::Fn(f) => self.add_sym(
-                            m,
-                            &f.sig.name,
-                            Sym::Fn {
-                                decl: i,
-                                func: None,
-                            },
-                            f.public,
-                            f.sig.span,
-                        )?,
-                        ast::Item::Struct(s) => {
-                            let ty = if s.type_params.is_empty() {
-                                Some(self.types.new_struct(s.name.clone()))
-                            } else {
-                                None
-                            };
-                            self.add_sym(m, &s.name, Sym::Struct { decl: i, ty }, s.public, s.span)?
-                        }
-                        ast::Item::Enum(e) => {
-                            let ty = if e.type_params.is_empty() {
-                                Some(self.types.new_enum(e.name.clone()))
-                            } else {
-                                None
-                            };
-                            self.add_sym(m, &e.name, Sym::Enum { decl: i, ty }, e.public, e.span)?
-                        }
-                        ast::Item::Type(t) => {
-                            let ty = self.types.new_named(t.name.clone(), VOID);
-                            self.add_sym(m, &t.name, Sym::Type(ty), t.public, t.span)?
-                        }
-                        ast::Item::Extern(e) => {
-                            if self.mods[m].externs.contains_key(&e.alias)
-                                || self.mods[m].imports.contains_key(&e.alias)
-                            {
-                                return err(e.span, format!("duplicate alias `{}`", e.alias));
-                            }
-                            self.mods[m].externs.insert(e.alias.clone(), HashMap::new());
-                        }
-                        _ => {}
+        for (i, it) in items.iter().enumerate() {
+            let item_r: Result<()> = (|| {
+                match it {
+                    ast::Item::Fn(f) => self.add_sym(
+                        m,
+                        &f.sig.name,
+                        Sym::Fn {
+                            decl: i,
+                            func: None,
+                        },
+                        f.public,
+                        f.sig.span,
+                    )?,
+                    ast::Item::Struct(s) => {
+                        let ty = if s.type_params.is_empty() {
+                            Some(self.types.new_struct(s.name.clone()))
+                        } else {
+                            None
+                        };
+                        self.add_sym(m, &s.name, Sym::Struct { decl: i, ty }, s.public, s.span)?;
                     }
-                    Ok(())
-                })();
-                if let Err(d) = item_r {
-                    self.errors.push(d);
+                    ast::Item::Enum(e) => {
+                        let ty = if e.type_params.is_empty() {
+                            Some(self.types.new_enum(e.name.clone()))
+                        } else {
+                            None
+                        };
+                        self.add_sym(m, &e.name, Sym::Enum { decl: i, ty }, e.public, e.span)?;
+                    }
+                    ast::Item::Type(t) => {
+                        let ty = self.types.new_named(t.name.clone(), VOID);
+                        self.add_sym(m, &t.name, Sym::Type(ty), t.public, t.span)?;
+                    }
+                    ast::Item::Extern(e) => {
+                        if self.mods[m].externs.contains_key(&e.alias)
+                            || self.mods[m].imports.contains_key(&e.alias)
+                        {
+                            return err(e.span, format!("duplicate alias `{}`", e.alias));
+                        }
+                        self.mods[m].externs.insert(e.alias.clone(), HashMap::new());
+                    }
+                    _ => {}
                 }
+                Ok(())
+            })();
+            if let Err(d) = item_r {
+                self.errors.push(d);
             }
-            Ok(())
         }
     }
 
-    fn resolve_decls(&mut self, m: usize) -> Result<()> {
+    fn resolve_decls(&mut self, m: usize) {
         let items = self.mods[m].ast.items.clone();
-        {
-            let none = HashMap::new();
-            for it in items.iter() {
-                let item_r: Result<()> = (|| {
-                    match it {
-                        ast::Item::Type(t) => {
-                            let ty = match self.mods[m].syms[&t.name].sym {
-                                Sym::Type(ty) => ty,
-                                _ => unreachable!(),
-                            };
-                            let under = self.resolve_type(&t.ty, m, &none)?;
-                            if let TyKind::Named(n) = self.types.kind(ty).clone() {
-                                self.types.named[n as usize].underlying = under;
+        let none = HashMap::new();
+        for it in &items {
+            let item_r: Result<()> = (|| {
+                match it {
+                    ast::Item::Type(t) => {
+                        let ty = match self.mods[m].syms[&t.name].sym {
+                            Sym::Type(ty) => ty,
+                            _ => unreachable!(),
+                        };
+                        let under = self.resolve_type(&t.ty, m, &none)?;
+                        if let TyKind::Named(n) = self.types.kind(ty).clone() {
+                            self.types.named[n as usize].underlying = under;
+                        }
+                        self.ix.type_spans.insert(ty, t.span);
+                        let detail = self.type_detail(ty);
+                        let members = self.members_of(ty);
+                        self.idx_decl(&t.name, t.span, index::DeclKind::Type, detail, members);
+                        self.idx_last_ty(&t.name, ty);
+                        // reject cycles
+                        let mut seen = vec![ty];
+                        let mut cur = under;
+                        while let TyKind::Named(n) = self.types.kind(cur).clone() {
+                            if seen.contains(&cur) {
+                                return err(
+                                    t.span,
+                                    format!("type `{}` is defined in terms of itself", t.name),
+                                );
                             }
-                            self.ix.type_spans.insert(ty, t.span);
-                            let detail = self.type_detail(ty);
-                            let members = self.members_of(ty);
-                            self.idx_decl(&t.name, t.span, index::DeclKind::Type, detail, members);
-                            self.idx_last_ty(&t.name, ty);
-                            // reject cycles
-                            let mut seen = vec![ty];
-                            let mut cur = under;
-                            while let TyKind::Named(n) = self.types.kind(cur).clone() {
-                                if seen.contains(&cur) {
-                                    return err(
-                                        t.span,
-                                        format!("type `{}` is defined in terms of itself", t.name),
-                                    );
-                                }
-                                seen.push(cur);
-                                cur = self.types.named[n as usize].underlying;
-                            }
+                            seen.push(cur);
+                            cur = self.types.named[n as usize].underlying;
                         }
-                        ast::Item::Struct(s) if s.type_params.is_empty() => {
-                            let ty = match self.mods[m].syms[&s.name].sym {
-                                Sym::Struct { ty, .. } => ty.unwrap(),
-                                _ => unreachable!(),
-                            };
-                            self.fill_struct(ty, s, m, &none)?;
-                            let detail = self.type_detail(ty);
-                            self.idx_decl(&s.name, s.span, index::DeclKind::Struct, detail, vec![]);
-                            self.idx_last_ty(&s.name, ty);
-                        }
-                        ast::Item::Enum(e) if e.type_params.is_empty() => {
-                            let ty = match self.mods[m].syms[&e.name].sym {
-                                Sym::Enum { ty, .. } => ty.unwrap(),
-                                _ => unreachable!(),
-                            };
-                            self.fill_enum(ty, e, m, &none)?;
-                            let detail = self.type_detail(ty);
-                            let members: Vec<(String, String)> = e
-                                .variants
-                                .iter()
-                                .map(|v| {
-                                    let ps = self.types.enum_def(ty).map(|d| {
-                                        d.variants
-                                            .iter()
-                                            .find(|x| x.0 == v.0)
-                                            .map(|x| x.1.clone())
-                                            .unwrap_or_default()
-                                    });
-                                    let text = self.variant_text(&v.0, &ps.unwrap_or_default());
-                                    (v.0.clone(), format!("{}.{text}", e.name))
-                                })
-                                .collect();
-                            self.idx_decl(&e.name, e.span, index::DeclKind::Enum, detail, members);
-                            self.idx_last_ty(&e.name, ty);
-                        }
-                        _ => {}
                     }
-                    Ok(())
-                })();
-                if let Err(d) = item_r {
-                    self.errors.push(d);
-                }
-            }
-            for (i, it) in items.iter().enumerate() {
-                let item_r: Result<()> = (|| {
-                    match it {
-                        ast::Item::Fn(f) if f.sig.type_params.is_empty() => {
-                            let (params, ret) = self.resolve_sig(&f.sig, m, &none)?;
-                            let id = self.reserve_fn(f.sig.name.clone(), params, ret);
-                            if is_never_ret(&f.sig) {
-                                self.never_funcs.insert(id);
-                            }
-                            self.ix.fn_spans.insert(id, f.sig.span);
-                            let names: Vec<String> =
-                                f.sig.params.iter().map(|p| p.name.clone()).collect();
-                            self.ix.fn_params.insert(id, names.clone());
-                            let detail = self.fn_detail_named(&f.sig.name, id, &names);
-                            self.idx_decl(
-                                &f.sig.name,
-                                f.sig.span,
-                                index::DeclKind::Function,
-                                detail,
-                                vec![],
-                            );
-                            let ret = self.sigs[id].1;
-                            self.idx_last_ty(&f.sig.name, ret);
-                            if let Some(SymEntry {
-                                sym: Sym::Fn { func, .. },
-                                ..
-                            }) = self.mods[m].syms.get_mut(&f.sig.name)
-                            {
-                                *func = Some(id);
-                            }
-                            self.pending.push(PendingFn {
-                                func: id,
-                                module: m,
-                                decl: f.clone(),
-                                tparams: HashMap::new(),
-                            });
-                            let _ = i;
-                        }
-                        // generic declarations are only checked when instantiated; index
-                        // them so that uses link to them (and unused ones are found)
-                        ast::Item::Fn(f) => {
-                            // `fn map<type I, type O>(I[] arr, (fn(I) O) f) O[]`
-                            let tps: Vec<String> =
-                                f.sig.type_params.iter().map(|t| t.show()).collect();
-                            for t in &f.sig.type_params {
-                                self.idx_ref(t.span, Some(t.span), t.show());
-                            }
-                            let ps: Vec<String> = f
-                                .sig
-                                .params
-                                .iter()
-                                .map(|p| format!("{} {}", p.ty.show(), p.name))
-                                .collect();
-                            let ret = f.sig.ret.as_ref().map(|r| format!(" {}", r.show()));
-                            let detail = format!(
-                                "fn {}<{}>({}){}",
-                                f.sig.name,
-                                tps.join(", "),
-                                ps.join(", "),
-                                ret.unwrap_or_default()
-                            );
-                            self.idx_decl(
-                                &f.sig.name,
-                                f.sig.span,
-                                index::DeclKind::Function,
-                                detail,
-                                vec![],
-                            );
-                        }
-                        ast::Item::Struct(st) if !st.type_params.is_empty() => {
-                            for t in &st.type_params {
-                                self.idx_ref(t.span, Some(t.span), t.show());
-                            }
-                            let detail = format!(
-                                "struct {}{}",
-                                st.name,
-                                ast::GenericParam::list(&st.type_params)
-                            );
-                            self.idx_decl(
-                                &st.name,
-                                st.span,
-                                index::DeclKind::Struct,
-                                detail,
-                                vec![],
-                            );
-                        }
-                        ast::Item::Enum(en) if !en.type_params.is_empty() => {
-                            for t in &en.type_params {
-                                self.idx_ref(t.span, Some(t.span), t.show());
-                            }
-                            let detail = format!(
-                                "enum {}{}",
-                                en.name,
-                                ast::GenericParam::list(&en.type_params)
-                            );
-                            self.idx_decl(&en.name, en.span, index::DeclKind::Enum, detail, vec![]);
-                        }
-                        ast::Item::Extern(e) => {
-                            let dir = self.mods[m].path.parent().unwrap().to_path_buf();
-                            for f in &e.fns {
-                                let (params, ret) = self.resolve_sig(&f.sig, m, &none)?;
-                                let id = self.externs.len();
-                                let ps: Vec<String> = params
-                                    .iter()
-                                    .zip(&f.sig.params)
-                                    .map(|(t, p)| format!("{} {}", self.types.show(*t), p.name))
-                                    .collect();
-                                let detail = format!(
-                                    "fn {}.{}({}) {}",
-                                    e.alias,
-                                    f.sig.name,
-                                    ps.join(", "),
-                                    if ret == VOID {
-                                        String::new()
-                                    } else {
-                                        self.types.show(ret)
-                                    }
-                                );
-                                self.idx_decl(
-                                    &f.sig.name,
-                                    f.sig.span,
-                                    index::DeclKind::Function,
-                                    detail.trim_end().to_string(),
-                                    vec![],
-                                );
-                                self.idx_last_ty(&f.sig.name, ret);
-                                self.ix
-                                    .extern_decls
-                                    .insert(id, (f.sig.span, detail.trim_end().to_string()));
-                                if let Some(d) = self.ix.index.decls.last_mut() {
-                                    d.extern_alias = Some(e.alias.clone());
-                                }
-                                self.externs.push(Extern {
-                                    name: format!("{}.{}", e.alias, f.sig.name),
-                                    symbol: f.symbol.clone(),
-                                    params,
-                                    ret,
-                                    file: dir.join(&e.path),
+                    ast::Item::Struct(s) if s.type_params.is_empty() => {
+                        let ty = match self.mods[m].syms[&s.name].sym {
+                            Sym::Struct { ty, .. } => ty.unwrap(),
+                            _ => unreachable!(),
+                        };
+                        self.fill_struct(ty, s, m, &none)?;
+                        let detail = self.type_detail(ty);
+                        self.idx_decl(&s.name, s.span, index::DeclKind::Struct, detail, vec![]);
+                        self.idx_last_ty(&s.name, ty);
+                    }
+                    ast::Item::Enum(e) if e.type_params.is_empty() => {
+                        let ty = match self.mods[m].syms[&e.name].sym {
+                            Sym::Enum { ty, .. } => ty.unwrap(),
+                            _ => unreachable!(),
+                        };
+                        self.fill_enum(ty, e, m, &none)?;
+                        let detail = self.type_detail(ty);
+                        let members: Vec<(String, String)> = e
+                            .variants
+                            .iter()
+                            .map(|v| {
+                                let ps = self.types.enum_def(ty).map(|d| {
+                                    d.variants
+                                        .iter()
+                                        .find(|x| x.0 == v.0)
+                                        .map(|x| x.1.clone())
+                                        .unwrap_or_default()
                                 });
-                                let tab = self.mods[m].externs.get_mut(&e.alias).unwrap();
-                                if tab.insert(f.sig.name.clone(), id).is_some() {
-                                    return err(
-                                        f.sig.span,
-                                        format!("duplicate extern function `{}`", f.sig.name),
-                                    );
+                                let text = self.variant_text(&v.0, &ps.unwrap_or_default());
+                                (v.0.clone(), format!("{}.{text}", e.name))
+                            })
+                            .collect();
+                        self.idx_decl(&e.name, e.span, index::DeclKind::Enum, detail, members);
+                        self.idx_last_ty(&e.name, ty);
+                    }
+                    _ => {}
+                }
+                Ok(())
+            })();
+            if let Err(d) = item_r {
+                self.errors.push(d);
+            }
+        }
+        for it in &items {
+            let item_r: Result<()> = (|| {
+                match it {
+                    ast::Item::Fn(f) if f.sig.type_params.is_empty() => {
+                        let (params, ret) = self.resolve_sig(&f.sig, m, &none)?;
+                        let id = self.reserve_fn(f.sig.name.clone(), params, ret);
+                        if is_never_ret(&f.sig) {
+                            self.never_funcs.insert(id);
+                        }
+                        self.ix.fn_spans.insert(id, f.sig.span);
+                        let names: Vec<String> =
+                            f.sig.params.iter().map(|p| p.name.clone()).collect();
+                        self.ix.fn_params.insert(id, names.clone());
+                        let detail = self.fn_detail_named(&f.sig.name, id, &names);
+                        self.idx_decl(
+                            &f.sig.name,
+                            f.sig.span,
+                            index::DeclKind::Function,
+                            detail,
+                            vec![],
+                        );
+                        let ret = self.sigs[id].1;
+                        self.idx_last_ty(&f.sig.name, ret);
+                        if let Some(SymEntry {
+                            sym: Sym::Fn { func, .. },
+                            ..
+                        }) = self.mods[m].syms.get_mut(&f.sig.name)
+                        {
+                            *func = Some(id);
+                        }
+                        self.pending.push(PendingFn {
+                            func: id,
+                            module: m,
+                            decl: f.clone(),
+                            tparams: HashMap::new(),
+                        });
+                    }
+                    // generic declarations are only checked when instantiated; index
+                    // them so that uses link to them (and unused ones are found)
+                    ast::Item::Fn(f) => {
+                        // `fn map<type I, type O>(I[] arr, (fn(I) O) f) O[]`
+                        let tps: Vec<String> = f
+                            .sig
+                            .type_params
+                            .iter()
+                            .map(super::ast::GenericParam::show)
+                            .collect();
+                        for t in &f.sig.type_params {
+                            self.idx_ref(t.span, Some(t.span), t.show());
+                        }
+                        let ps: Vec<String> = f
+                            .sig
+                            .params
+                            .iter()
+                            .map(|p| format!("{} {}", p.ty.show(), p.name))
+                            .collect();
+                        let ret = f.sig.ret.as_ref().map(|r| format!(" {}", r.show()));
+                        let detail = format!(
+                            "fn {}<{}>({}){}",
+                            f.sig.name,
+                            tps.join(", "),
+                            ps.join(", "),
+                            ret.unwrap_or_default()
+                        );
+                        self.idx_decl(
+                            &f.sig.name,
+                            f.sig.span,
+                            index::DeclKind::Function,
+                            detail,
+                            vec![],
+                        );
+                    }
+                    ast::Item::Struct(st) if !st.type_params.is_empty() => {
+                        for t in &st.type_params {
+                            self.idx_ref(t.span, Some(t.span), t.show());
+                        }
+                        let detail = format!(
+                            "struct {}{}",
+                            st.name,
+                            ast::GenericParam::list(&st.type_params)
+                        );
+                        self.idx_decl(&st.name, st.span, index::DeclKind::Struct, detail, vec![]);
+                    }
+                    ast::Item::Enum(en) if !en.type_params.is_empty() => {
+                        for t in &en.type_params {
+                            self.idx_ref(t.span, Some(t.span), t.show());
+                        }
+                        let detail = format!(
+                            "enum {}{}",
+                            en.name,
+                            ast::GenericParam::list(&en.type_params)
+                        );
+                        self.idx_decl(&en.name, en.span, index::DeclKind::Enum, detail, vec![]);
+                    }
+                    ast::Item::Extern(e) => {
+                        let dir = self.mods[m].path.parent().unwrap().to_path_buf();
+                        for f in &e.fns {
+                            let (params, ret) = self.resolve_sig(&f.sig, m, &none)?;
+                            let id = self.externs.len();
+                            let ps: Vec<String> = params
+                                .iter()
+                                .zip(&f.sig.params)
+                                .map(|(t, p)| format!("{} {}", self.types.show(*t), p.name))
+                                .collect();
+                            let detail = format!(
+                                "fn {}.{}({}) {}",
+                                e.alias,
+                                f.sig.name,
+                                ps.join(", "),
+                                if ret == VOID {
+                                    String::new()
+                                } else {
+                                    self.types.show(ret)
                                 }
+                            );
+                            self.idx_decl(
+                                &f.sig.name,
+                                f.sig.span,
+                                index::DeclKind::Function,
+                                detail.trim_end().to_string(),
+                                vec![],
+                            );
+                            self.idx_last_ty(&f.sig.name, ret);
+                            self.ix
+                                .extern_decls
+                                .insert(id, (f.sig.span, detail.trim_end().to_string()));
+                            if let Some(d) = self.ix.index.decls.last_mut() {
+                                d.extern_alias = Some(e.alias.clone());
+                            }
+                            self.externs.push(Extern {
+                                name: format!("{}.{}", e.alias, f.sig.name),
+                                symbol: f.symbol.clone(),
+                                params,
+                                ret,
+                                file: dir.join(&e.path),
+                            });
+                            let tab = self.mods[m].externs.get_mut(&e.alias).unwrap();
+                            if tab.insert(f.sig.name.clone(), id).is_some() {
+                                return err(
+                                    f.sig.span,
+                                    format!("duplicate extern function `{}`", f.sig.name),
+                                );
                             }
                         }
-                        _ => {}
                     }
-                    Ok(())
-                })();
-                if let Err(d) = item_r {
-                    self.errors.push(d);
+                    _ => {}
                 }
+                Ok(())
+            })();
+            if let Err(d) = item_r {
+                self.errors.push(d);
             }
-            // reject infinitely sized structs
-            for it in items.iter() {
-                if let ast::Item::Struct(s) = it
-                    && let Some(SymEntry {
-                        sym: Sym::Struct { ty: Some(ty), .. },
-                        ..
-                    }) = self.mods[m].syms.get(&s.name)
-                    && let Err(d) = self.check_finite(*ty, s.span)
-                {
-                    self.errors.push(d);
-                }
+        }
+        // reject infinitely sized structs
+        for it in &items {
+            if let ast::Item::Struct(s) = it
+                && let Some(SymEntry {
+                    sym: Sym::Struct { ty: Some(ty), .. },
+                    ..
+                }) = self.mods[m].syms.get(&s.name)
+                && let Err(d) = self.check_finite(*ty, s.span)
+            {
+                self.errors.push(d);
             }
-            Ok(())
         }
     }
 
@@ -892,7 +864,6 @@ impl<'a> Checker<'a> {
         name: String,
         params: Vec<LocalId>,
         body: Block,
-        span: Span,
         parent: Option<FuncId>,
     ) {
         let (_, ret) = self.sigs[ctx.func].clone();
@@ -903,14 +874,12 @@ impl<'a> Checker<'a> {
             locals: ctx.locals,
             captures: ctx.captures,
             body,
-            span,
             parent,
             self_local: ctx.self_local,
-            is_never: ctx.is_never,
         });
     }
 
-    fn check_fn_body(&mut self, p: PendingFn) -> Result<()> {
+    fn check_fn_body(&mut self, p: PendingFn) {
         let (params, ret) = self.sigs[p.func].clone();
         let mut ctx = self.new_ctx(p.func, p.module, ret, p.tparams);
         ctx.tspans = (p.decl.sig.type_params.iter())
@@ -918,34 +887,20 @@ impl<'a> Checker<'a> {
             .collect();
         ctx.is_never = ret == NEVER;
         self.fns.push(ctx);
-        let mut pids = Vec::new();
         self.ix.scopes.push(p.decl.body.span);
-        for (i, prm) in p.decl.sig.params.iter().enumerate() {
-            let id = self.declare_local(&prm.name, params[i], false, LocalKind::Param, prm.span);
-            match id {
-                Ok(id) => pids.push(id),
-                Err(e) => {
-                    self.ix.scopes.pop();
-                    return Err(e);
-                }
-            }
-        }
+        let pids: Vec<_> = (p.decl.sig.params.iter().zip(&params))
+            .map(|(prm, &ty)| self.declare_local(&prm.name, ty, false, LocalKind::Param, prm.span))
+            .collect();
         self.ix.scopes.pop();
         let before = self.errors.len();
-        let body = self.check_block(&p.decl.body)?;
+        let body = self.check_block(&p.decl.body);
         // a missing-return error would only be noise when statements failed to check
         if self.errors.len() == before {
             let r = self.check_fn_end(&body, ret, p.decl.sig.span, &p.decl.sig.name);
             self.report(r);
         }
         let ctx = self.fns.pop().unwrap();
-        let name = self.fn_display_name(&p.decl.sig.name, p.func);
-        self.finish_fn(ctx, name, pids, body, p.decl.sig.span, None);
-        Ok(())
-    }
-
-    fn fn_display_name(&self, base: &str, _f: FuncId) -> String {
-        base.to_string()
+        self.finish_fn(ctx, p.decl.sig.name, pids, body, None);
     }
 
     pub fn check_fn_end(&mut self, body: &Block, ret: TyId, span: Span, name: &str) -> Result<()> {
@@ -1016,14 +971,13 @@ impl<'a> Checker<'a> {
         let mut decl2 = f.clone();
         decl2.sig.name = self.types_name(&f.sig.name, &args);
         let before = self.errors.len();
-        let r = self.check_fn_body(PendingFn {
+        self.check_fn_body(PendingFn {
             func: id,
             module: m,
             decl: decl2,
             tparams: tp,
         });
         self.fns = saved;
-        self.report(r);
         let inst = self.types_name(&f.sig.name, &args);
         for d in &mut self.errors[before..] {
             d.msg = format!("{} (in instantiation `{inst}`)", d.msg);
@@ -1219,14 +1173,13 @@ impl<'a> Checker<'a> {
                         .fn_params
                         .insert(id, f.sig.params.iter().map(|p| p.name.clone()).collect());
                     let saved = std::mem::take(&mut self.fns);
-                    let r = self.check_fn_body(PendingFn {
+                    self.check_fn_body(PendingFn {
                         func: id,
                         module: m,
                         decl: f.clone(),
                         tparams: tp,
                     });
                     self.fns = saved;
-                    self.report(r);
                 }
                 self.errors.truncate(before);
                 self.types.sym_consts.clear();
@@ -1364,26 +1317,23 @@ impl<'a> Checker<'a> {
                     targs.push(self.resolve_targ(a, m, tp)?);
                 }
                 let resolved = match self.lookup_sym(m, module.as_deref(), name, *span)? {
-                    Some((dm, Sym::Struct { decl, ty })) | Some((dm, Sym::Enum { decl, ty })) => {
-                        match ty {
-                            Some(t) => {
-                                if !targs.is_empty() {
-                                    return err(
-                                        *span,
-                                        format!("`{name}` does not take type arguments"),
-                                    );
-                                }
-                                t
+                    Some((dm, Sym::Struct { decl, ty } | Sym::Enum { decl, ty })) => {
+                        if let Some(t) = ty {
+                            if !targs.is_empty() {
+                                return err(
+                                    *span,
+                                    format!("`{name}` does not take type arguments"),
+                                );
                             }
-                            None => {
-                                if targs.is_empty() {
-                                    return err(
-                                        *span,
-                                        format!("generic type `{name}` requires type arguments"),
-                                    );
-                                }
-                                self.instantiate_type(dm, decl, targs, *span)?
+                            t
+                        } else {
+                            if targs.is_empty() {
+                                return err(
+                                    *span,
+                                    format!("generic type `{name}` requires type arguments"),
+                                );
                             }
+                            self.instantiate_type(dm, decl, targs, *span)?
                         }
                     }
                     Some((_, Sym::Type(t))) => {
@@ -1510,88 +1460,40 @@ impl<'a> Checker<'a> {
 
     /// Types supporting `==`.
     pub fn comparable(&self, t: TyId) -> bool {
-        self.comparable_guard(t, &mut vec![])
-    }
-
-    fn comparable_guard(&self, t: TyId, seen: &mut Vec<TyId>) -> bool {
-        if seen.contains(&t) {
-            return true;
-        }
-        match self.types.kind(t) {
-            TyKind::Struct(i) => {
-                seen.push(t);
-                let fs: Vec<TyId> = self.types.structs[*i as usize]
-                    .fields
-                    .iter()
-                    .map(|f| f.1)
-                    .collect();
-                let r = fs.iter().all(|f| self.comparable_guard(*f, seen));
-                seen.pop();
-                r
-            }
-            TyKind::Enum(i) => {
-                seen.push(t);
-                let vs: Vec<TyId> = self.types.enums[*i as usize]
-                    .variants
-                    .iter()
-                    .flat_map(|v| v.1.clone())
-                    .collect();
-                let r = vs.iter().all(|f| self.comparable_guard(*f, seen));
-                seen.pop();
-                r
-            }
-            TyKind::Array(e) | TyKind::Fixed(e, _) | TyKind::Opt(e) => {
-                self.comparable_guard(*e, seen)
-            }
-            TyKind::Map(k, v) => self.comparable_guard(*k, seen) && self.comparable_guard(*v, seen),
-            TyKind::Tuple(ts) => ts.clone().iter().all(|x| self.comparable_guard(*x, seen)),
-            TyKind::Named(_) => self.comparable_guard(self.types.base(t), seen),
-            TyKind::ErrU(e) => *e == VOID || self.comparable_guard(*e, seen),
-            TyKind::Fn(..) | TyKind::Fut(_) | TyKind::Mutex(_) | TyKind::Void | TyKind::Never => {
-                false
-            }
-            _ => true,
-        }
+        self.plain(t, &mut vec![])
     }
 
     /// Types that can be converted to `str` (printing, format strings).
     pub fn printable(&self, t: TyId) -> bool {
-        self.printable_guard(t, &mut vec![])
+        self.plain(t, &mut vec![])
     }
-    fn printable_guard(&self, t: TyId, seen: &mut Vec<TyId>) -> bool {
+
+    /// Whether `t` contains no functions, futures, mutexes, `void` or `never` (except as the
+    /// value of `!void`).
+    fn plain(&self, t: TyId, seen: &mut Vec<TyId>) -> bool {
         if seen.contains(&t) {
             return true;
         }
-        match self.types.kind(t) {
+        let ty = &self.types;
+        match ty.kind(t) {
             TyKind::Fn(..) | TyKind::Fut(_) | TyKind::Mutex(_) | TyKind::Void | TyKind::Never => {
                 false
             }
-            TyKind::ErrU(e) => *e == VOID || self.printable_guard(*e, seen),
-            TyKind::Named(_) => self.printable_guard(self.types.base(t), seen),
-            TyKind::Array(e) | TyKind::Fixed(e, _) | TyKind::Opt(e) => {
-                self.printable_guard(*e, seen)
-            }
-            TyKind::Map(k, v) => self.printable_guard(*k, seen) && self.printable_guard(*v, seen),
-            TyKind::Tuple(ts) => ts.clone().iter().all(|x| self.printable_guard(*x, seen)),
+            TyKind::ErrU(e) => *e == VOID || self.plain(*e, seen),
+            TyKind::Named(_) => self.plain(ty.base(t), seen),
+            TyKind::Array(e) | TyKind::Fixed(e, _) | TyKind::Opt(e) => self.plain(*e, seen),
+            TyKind::Map(k, v) => self.plain(*k, seen) && self.plain(*v, seen),
+            TyKind::Tuple(ts) => ts.iter().all(|x| self.plain(*x, seen)),
             TyKind::Struct(i) => {
                 seen.push(t);
-                let fs: Vec<TyId> = self.types.structs[*i as usize]
-                    .fields
-                    .iter()
-                    .map(|f| f.1)
-                    .collect();
-                let r = fs.iter().all(|f| self.printable_guard(*f, seen));
+                let r = (ty.structs[*i as usize].fields.iter()).all(|f| self.plain(f.1, seen));
                 seen.pop();
                 r
             }
             TyKind::Enum(i) => {
                 seen.push(t);
-                let vs: Vec<TyId> = self.types.enums[*i as usize]
-                    .variants
-                    .iter()
-                    .flat_map(|v| v.1.clone())
-                    .collect();
-                let r = vs.iter().all(|f| self.printable_guard(*f, seen));
+                let r = (ty.enums[*i as usize].variants.iter())
+                    .all(|v| v.1.iter().all(|f| self.plain(*f, seen)));
                 seen.pop();
                 r
             }
@@ -1625,7 +1527,7 @@ impl<'a> Checker<'a> {
         mutable: bool,
         kind: LocalKind,
         span: Span,
-    ) -> Result<LocalId> {
+    ) -> LocalId {
         let ctx = self.ctx();
         let id = ctx.locals.len();
         ctx.locals.push(Local {
@@ -1643,7 +1545,7 @@ impl<'a> Checker<'a> {
         let scope = self.ix.scopes.last().copied();
         let param = kind == LocalKind::Param;
         self.idx_var_decl(name, span, ty, mutable, param, scope);
-        Ok(id)
+        id
     }
 
     /// Whether a declaration in the current scope should create a global.
@@ -1665,7 +1567,6 @@ impl<'a> Checker<'a> {
             name: name.to_string(),
             ty,
             mutable,
-            module: m,
         });
         self.ix.global_spans.insert(id, span);
         self.idx_var_decl(name, span, ty, mutable, false, None);

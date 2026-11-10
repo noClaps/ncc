@@ -3,7 +3,6 @@
 use crate::diag::Span;
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub enum TypeExpr {
     /// `int`, `Foo`, `Matrix<int>`, `mod.Foo<T>`
     Named {
@@ -87,16 +86,18 @@ impl GenericParam {
         }
         format!(
             "<{}>",
-            ps.iter().map(|p| p.show()).collect::<Vec<_>>().join(", ")
+            ps.iter()
+                .map(GenericParam::show)
+                .collect::<Vec<_>>()
+                .join(", ")
         )
     }
 }
 
-#[allow(dead_code)]
 impl TypeExpr {
     /// The type as NC source (`int[]`, `[str]int`, `(fn(int) str)`, `Matrix<T>`).
     pub fn show(&self) -> String {
-        let list = |ts: &[TypeExpr]| ts.iter().map(|t| t.show()).collect::<Vec<_>>().join(", ");
+        let list = |ts: &[TypeExpr]| ts.iter().map(TypeExpr::show).collect::<Vec<_>>().join(", ");
         match self {
             TypeExpr::Named {
                 module, name, args, ..
@@ -112,6 +113,8 @@ impl TypeExpr {
             TypeExpr::Array(e, None, _) => format!("{}[]", e.show()),
             TypeExpr::Map(k, v, _) => format!("[{}]{}", k.show(), v.show()),
             TypeExpr::Optional(i, _) => format!("{}?", i.show()),
+            // a bare `!` return type (parsed with the span of the `!` for its `void`)
+            TypeExpr::ErrorUnion(i, sp) if i.span() == *sp => "!".into(),
             TypeExpr::ErrorUnion(i, _) => format!("{}!", i.show()),
             TypeExpr::Tuple(ts, _) => format!("({})", list(ts)),
             TypeExpr::Fn(ps, Some(r), _) => format!("(fn({}) {})", list(ps), r.show()),
@@ -256,7 +259,6 @@ pub enum StrSeg {
 }
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub struct IfExpr {
     pub label: Option<String>,
     pub scrutinee: Option<Expr>,
@@ -265,7 +267,6 @@ pub struct IfExpr {
 }
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub struct Arm {
     /// Comma-separated alternatives; `_` is `ExprKind::Wildcard`
     pub patterns: Vec<Expr>,

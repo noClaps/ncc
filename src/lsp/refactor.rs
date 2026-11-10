@@ -5,33 +5,19 @@
 //! Refactors: convert between `//` and `///` comments, convert an integer literal's base,
 //! interpolate a selection into its string, extract a constant, match on a call's result.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+use std::fmt::Write;
 
 use lsp_types::*;
 
 use super::nav::{Node, item_spans, walk};
-use super::{Analysis, Server, offset_to_pos, path_to_uri, pos_to_offset, uri_to_path};
+use super::{
+    Analysis, Server, edit_action, line_end, line_start, path_to_uri, pos_to_offset, range,
+    uri_to_path,
+};
 use crate::ast::{self, ExprKind as E, StmtKind as S};
-use crate::check::index::DeclKind;
+use crate::check::index::{DeclKind, SymDecl};
 use crate::lexer::Tok;
-
-fn line_start(text: &str, off: usize) -> usize {
-    text[..off.min(text.len())]
-        .rfind('\n')
-        .map(|i| i + 1)
-        .unwrap_or(0)
-}
-
-fn line_end(text: &str, off: usize) -> usize {
-    text[off.min(text.len())..]
-        .find('\n')
-        .map(|i| off + i + 1)
-        .unwrap_or(text.len())
-}
-
-fn range(text: &str, s: usize, e: usize) -> Range {
-    Range::new(offset_to_pos(text, s), offset_to_pos(text, e))
-}
 
 /// The extent (start, end) of the top-level item containing `off`.
 fn item_extent(module: &ast::Module, off: u32) -> Option<(u32, u32)> {
@@ -63,31 +49,6 @@ fn int_in_base(v: u128, base: u32, unsigned: bool) -> String {
     } else {
         digits
     }
-}
-
-// `WorkspaceEdit::changes` is keyed by `Uri`, as defined by lsp-types
-#[allow(clippy::mutable_key_type)]
-fn edit_action(
-    title: String,
-    kind: CodeActionKind,
-    changes: Vec<(Uri, TextEdit)>,
-    diag: Option<&Diagnostic>,
-) -> CodeActionOrCommand {
-    let mut map: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
-    for (u, e) in changes {
-        map.entry(u).or_default().push(e);
-    }
-    CodeActionOrCommand::CodeAction(CodeAction {
-        title,
-        kind: Some(kind),
-        diagnostics: diag.map(|d| vec![d.clone()]),
-        edit: Some(WorkspaceEdit {
-            changes: Some(map),
-            ..Default::default()
-        }),
-        is_preferred: diag.map(|_| true),
-        ..Default::default()
-    })
 }
 
 impl Server {
@@ -135,9 +96,8 @@ impl Server {
             .filter(|n| n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
         {
             // after the top-level item that uses it
-            let at = item_extent(module, off)
-                .map(|(_, hi)| line_end(text, hi as usize))
-                .unwrap_or(text.len());
+            let at =
+                item_extent(module, off).map_or(text.len(), |(_, hi)| line_end(text, hi as usize));
             let lead = if text[..at].ends_with('\n') { "" } else { "\n" };
             for kind in ["struct", "enum"] {
                 out.push(edit_action(
@@ -513,35 +473,14 @@ fn match_on_call(
     if edecl.kind != DeclKind::Enum || ty.ty != edecl.name {
         return None;
     }
-    let prefix = if edecl.span.file == fid {
-        edecl.name.clone()
-    } else {
-        let epath = &a.sm.file(edecl.span.file).path;
-        let alias = a.imports.iter().find(|(_, p)| *p == epath)?.0;
-        format!("{alias}.{}", edecl.name)
-    };
     let ls = line_start(text, x.span.start as usize);
     let indent = &text[ls..x.span.start as usize];
     if !indent.trim().is_empty() {
         return None;
     }
-    let mut body = format!(
-        "if {} {{\n",
-        &text[x.span.start as usize..x.span.end as usize]
-    );
-    for (m, detail) in &edecl.members {
-        let arity = detail
-            .split_once('(')
-            .map(|(_, ps)| ps.trim_end_matches(')').split(',').count())
-            .unwrap_or(0);
-        let pat = if arity == 0 {
-            format!("{prefix}.{m}")
-        } else {
-            format!("{prefix}.{m}({})", vec!["_"; arity].join(", "))
-        };
-        body.push_str(&format!("{indent}  {pat} -> {{}}\n"));
-    }
-    body.push_str(&format!("{indent}}}"));
+    let subject = &text[x.span.start as usize..x.span.end as usize];
+    let body = enum_match(a, fid, edecl, subject, indent)?;
+    let body = body.trim_start().trim_end_matches('\n').to_string();
     Some(edit_action(
         "Match on the result".into(),
         CodeActionKind::REFACTOR_REWRITE,
@@ -554,6 +493,39 @@ fn match_on_call(
         )],
         None,
     ))
+}
+
+/// `if <subject> {` with an empty branch per variant of the enum `edecl`, each line (the first
+/// included) indented by `indent`.
+pub(super) fn enum_match(
+    a: &Analysis,
+    fid: u32,
+    edecl: &SymDecl,
+    subject: &str,
+    indent: &str,
+) -> Option<String> {
+    // the enum as written from this file
+    let prefix = if edecl.span.file == fid {
+        edecl.name.clone()
+    } else {
+        let epath = &a.sm.file(edecl.span.file).path;
+        let alias = a.imports.iter().find(|(_, p)| *p == epath)?.0;
+        format!("{alias}.{}", edecl.name)
+    };
+    let mut body = format!("{indent}if {subject} {{\n");
+    for (m, detail) in &edecl.members {
+        let arity = detail
+            .split_once('(')
+            .map_or(0, |(_, ps)| ps.trim_end_matches(')').split(',').count());
+        let pat = if arity == 0 {
+            format!("{prefix}.{m}")
+        } else {
+            format!("{prefix}.{m}({})", vec!["_"; arity].join(", "))
+        };
+        writeln!(body, "{indent}  {pat} -> {{}}").unwrap();
+    }
+    writeln!(body, "{indent}}}").unwrap();
+    Some(body)
 }
 
 // ------------------------------------------------------------------ exit points

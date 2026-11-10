@@ -291,8 +291,7 @@ impl<'a> Printer<'a> {
                 // skip the closing brace of the import block
                 let close = self.src[last_end..]
                     .find('}')
-                    .map(|k| last_end + k + 1)
-                    .unwrap_or(last_end);
+                    .map_or(last_end, |k| last_end + k + 1);
                 self.cursor = close;
                 self.trailing_comment(close);
                 i = j;
@@ -319,8 +318,7 @@ impl<'a> Printer<'a> {
                         .push_str(&format!("{INDENT}{sig} = {}\n", quote(&f.symbol)));
                     let end = self.src[f.sig.span.end as usize..]
                         .find('\n')
-                        .map(|k| f.sig.span.end as usize + k)
-                        .unwrap_or(self.src.len());
+                        .map_or(self.src.len(), |k| f.sig.span.end as usize + k);
                     self.cursor = end;
                     self.trailing_comment(f.sig.span.end as usize);
                 }
@@ -336,7 +334,7 @@ impl<'a> Printer<'a> {
                 ));
                 for (i, (ty, name, sp)) in s.fields.iter().enumerate() {
                     self.flush_comments(sp.start as usize, 1, i == 0);
-                    let t = self.ty(ty);
+                    let t = ty.show();
                     self.out.push_str(&format!("{INDENT}{t} {name}\n"));
                     self.cursor = sp.end as usize;
                     self.trailing_comment(sp.end as usize);
@@ -358,17 +356,13 @@ impl<'a> Printer<'a> {
                     } else {
                         format!(
                             "({})",
-                            tys.iter()
-                                .map(|t| self.ty(t))
-                                .collect::<Vec<_>>()
-                                .join(", ")
+                            tys.iter().map(|t| t.show()).collect::<Vec<_>>().join(", ")
                         )
                     };
                     self.out.push_str(&format!("{INDENT}{name}{payload}\n"));
                     let line_end = self.src[sp.end as usize..]
                         .find('\n')
-                        .map(|k| sp.end as usize + k)
-                        .unwrap_or(self.src.len());
+                        .map_or(self.src.len(), |k| sp.end as usize + k);
                     self.cursor = line_end;
                     self.trailing_comment(sp.end as usize);
                 }
@@ -377,7 +371,7 @@ impl<'a> Printer<'a> {
             }
             Item::Type(t) => {
                 let vis = if t.public { "pub " } else { "" };
-                let ty = self.ty(&t.ty);
+                let ty = t.ty.show();
                 self.out.push_str(&format!("{vis}type {} = {ty}\n", t.name));
             }
             Item::Fn(f) => {
@@ -412,7 +406,7 @@ impl<'a> Printer<'a> {
             .map(|p| {
                 (
                     p.span.start as usize,
-                    Box::new(move |pr: &mut Self, _: usize| format!("{} {}", pr.ty(&p.ty), p.name))
+                    Box::new(move |_: &mut Self, _: usize| format!("{} {}", p.ty.show(), p.name))
                         as EntryFn<'_, 'a>,
                 )
             })
@@ -440,60 +434,9 @@ impl<'a> Printer<'a> {
         };
         if let Some(r) = &s.ret {
             out.push(' ');
-            out.push_str(&self.ret_ty(r));
+            out.push_str(&r.show());
         }
         out
-    }
-
-    fn ret_ty(&self, t: &TypeExpr) -> String {
-        // a bare `!` return type
-        if let TypeExpr::ErrorUnion(_, sp) = t
-            && self.text(*sp).trim() == "!"
-        {
-            return "!".into();
-        }
-        self.ty(t)
-    }
-
-    fn ty(&self, t: &TypeExpr) -> String {
-        match t {
-            TypeExpr::Named {
-                module, name, args, ..
-            } => {
-                let m = module.as_ref().map(|m| format!("{m}.")).unwrap_or_default();
-                if args.is_empty() {
-                    format!("{m}{name}")
-                } else {
-                    format!(
-                        "{m}{name}<{}>",
-                        args.iter()
-                            .map(|a| self.ty(a))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )
-                }
-            }
-            TypeExpr::Array(e, n, _) => match n {
-                Some(n) => format!("{}[{}]", self.ty(e), n.show()),
-                None => format!("{}[]", self.ty(e)),
-            },
-            TypeExpr::Map(k, v, _) => format!("[{}]{}", self.ty(k), self.ty(v)),
-            TypeExpr::Optional(i, _) => format!("{}?", self.ty(i)),
-            TypeExpr::ErrorUnion(i, _) => format!("{}!", self.ty(i)),
-            TypeExpr::Tuple(ts, _) => format!(
-                "({})",
-                ts.iter().map(|t| self.ty(t)).collect::<Vec<_>>().join(", ")
-            ),
-            TypeExpr::Fn(ps, r, _) => {
-                let ps = ps.iter().map(|t| self.ty(t)).collect::<Vec<_>>().join(", ");
-                match r {
-                    Some(r) => format!("(fn({ps}) {})", self.ret_ty(r)),
-                    None => format!("(fn({ps}))"),
-                }
-            }
-            TypeExpr::Fut(i, _) => format!("fut {}", self.ty(i)),
-            TypeExpr::Const(c) => c.show(),
-        }
     }
 
     // ------------------------------------------------------------------ blocks and statements
@@ -558,7 +501,7 @@ impl<'a> Printer<'a> {
                 }
                 let ts: Vec<String> = targets
                     .iter()
-                    .map(|t| format!("{} {}", self.ty(&t.ty), t.name))
+                    .map(|t| format!("{} {}", t.ty.show(), t.name))
                     .collect();
                 out.push_str(&ts.join(", "));
                 out.push_str(" = ");
@@ -755,10 +698,7 @@ impl<'a> Printer<'a> {
                 let base = self.paren(inner, indent, prec(inner) < POSTFIX);
                 format!(
                     "{base}<{}>",
-                    args.iter()
-                        .map(|t| self.ty(t))
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    args.iter().map(|t| t.show()).collect::<Vec<_>>().join(", ")
                 )
             }
             ExprKind::Builtin(name, ty, args) => {
@@ -766,7 +706,7 @@ impl<'a> Printer<'a> {
                 if let Some(t) = ty {
                     entries.push((
                         t.span().start as usize,
-                        Box::new(move |p: &mut Self, _: usize| p.ty(t)) as EntryFn<'_, 'a>,
+                        Box::new(move |_: &mut Self, _: usize| t.show()) as EntryFn<'_, 'a>,
                     ));
                 }
                 for a in args {
@@ -893,8 +833,7 @@ impl<'a> Printer<'a> {
         self.cursor = i
             .arms
             .first()
-            .map(|a| a.span.start as usize)
-            .unwrap_or(i.span.end as usize);
+            .map_or(i.span.end as usize, |a| a.span.start as usize);
         for (k, arm) in i.arms.iter().enumerate() {
             self.entry_start(arm.span.start as usize, indent + 1, k == 0);
             let pats = self.list(&arm.patterns, indent + 1).join(", ");
@@ -969,7 +908,7 @@ mod tests {
     use super::format;
 
     fn fmt(s: &str) -> String {
-        format(s).unwrap_or_else(|e| panic!("{:?}", e))
+        format(s).unwrap_or_else(|e| panic!("{e:?}"))
     }
 
     #[test]

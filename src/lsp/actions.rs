@@ -13,7 +13,10 @@ use std::path::{Path, PathBuf};
 use lsp_types::*;
 
 use super::nav::{Node, walk};
-use super::{Analysis, Server, name_span, offset_to_pos, pos_to_offset, span_range, uri_to_path};
+use super::{
+    Analysis, Server, edit_action, indent_at, line_end, line_start, name_span, offset_to_pos,
+    pos_to_offset, range, span_range, uri_to_path,
+};
 use crate::ast::{self, ExprKind as E, StmtKind as S};
 use crate::check::index::DeclKind;
 use crate::diag::Span;
@@ -21,26 +24,6 @@ use crate::lexer::Tok;
 
 const UNUSED_IMPORT: &str = "unused-import";
 const UNREACHABLE_BRANCH: &str = "unreachable-branch";
-
-fn line_start(text: &str, off: usize) -> usize {
-    text[..off.min(text.len())]
-        .rfind('\n')
-        .map(|i| i + 1)
-        .unwrap_or(0)
-}
-
-fn line_end(text: &str, off: usize) -> usize {
-    text[off.min(text.len())..]
-        .find('\n')
-        .map(|i| off + i + 1)
-        .unwrap_or(text.len())
-}
-
-fn indent_at(text: &str, off: usize) -> &str {
-    let s = line_start(text, off);
-    let l = &text[s..];
-    &l[..l.len() - l.trim_start_matches([' ', '\t']).len()]
-}
 
 // ------------------------------------------------------------------ warnings
 
@@ -71,7 +54,7 @@ fn unused_imports(text: &str) -> Vec<(Span, Span, String)> {
             }
         }
     }
-    used.extend(used_owned.iter().map(|s| s.as_str()));
+    used.extend(used_owned.iter().map(String::as_str));
     let mut out = Vec::new();
     for it in &module.items {
         if let ast::Item::Import(im) = it
@@ -184,13 +167,12 @@ pub(super) fn warnings(a: &Analysis, entry: &Path) -> Vec<(PathBuf, Diagnostic)>
 fn remove_import(text: &str, span: Span) -> TextEdit {
     let (s, e) = (span.start as usize, span.end as usize);
     let open = text[..s].rfind("import").unwrap_or(s);
-    let close = text[e..].find('}').map(|i| e + i + 1).unwrap_or(e);
+    let close = text[e..].find('}').map_or(e, |i| e + i + 1);
     let inner = &text[open..close];
     let entries = inner.matches(" as ").count();
-    let range = |a: usize, b: usize| Range::new(offset_to_pos(text, a), offset_to_pos(text, b));
     if entries <= 1 {
         return TextEdit::new(
-            range(line_start(text, open), line_end(text, close)),
+            range(text, line_start(text, open), line_end(text, close)),
             String::new(),
         );
     }
@@ -199,18 +181,45 @@ fn remove_import(text: &str, span: Span) -> TextEdit {
     let line = text[ls..le].trim();
     let entry = text[s..e].trim();
     if line.trim_end_matches(',') == entry {
-        return TextEdit::new(range(ls, le), String::new());
+        return TextEdit::new(range(text, ls, le), String::new());
     }
     // `a, b` on one line: remove the following comma, or the preceding one for the last entry
     let after = &text[e..];
     let trail = after.len() - after.trim_start_matches(',').trim_start_matches(' ').len();
     if after.starts_with(',') {
-        TextEdit::new(range(s, e + trail), String::new())
+        TextEdit::new(range(text, s, e + trail), String::new())
     } else {
         let before = text[..s].trim_end_matches(' ');
-        let b = before.strip_suffix(',').map(|b| b.len()).unwrap_or(s);
-        TextEdit::new(range(b, e), String::new())
+        let b = before.strip_suffix(',').map_or(s, str::len);
+        TextEdit::new(range(text, b, e), String::new())
     }
+}
+
+/// The innermost statement containing `s..e` that sits directly in a block or at the top level.
+fn block_stmt_around(module: &ast::Module, s: u32, e: u32) -> Option<&ast::Stmt> {
+    let mut in_block: HashSet<(u32, u32)> = (module.items.iter())
+        .filter_map(|it| match it {
+            ast::Item::Stmt(st) => Some((st.span.start, st.span.end)),
+            _ => None,
+        })
+        .collect();
+    walk(module, &mut |n| {
+        if let Node::Block(b) = n {
+            in_block.extend(b.stmts.iter().map(|st| (st.span.start, st.span.end)));
+        }
+    });
+    let mut stmt: Option<&ast::Stmt> = None;
+    walk(module, &mut |n| {
+        if let Node::Stmt(st) = n
+            && st.span.start <= s
+            && e <= st.span.end
+            && in_block.contains(&(st.span.start, st.span.end))
+            && stmt.is_none_or(|o| o.span.start <= st.span.start)
+        {
+            stmt = Some(st);
+        }
+    });
+    stmt
 }
 
 /// Modules `file` could import, as (name, import path): siblings (`./name`), other project files
@@ -315,7 +324,7 @@ pub(super) fn add_import(text: &str, module: &ast::Module, path: &str, alias: &s
     let at = match last {
         // after the `}` closing the block of the last import
         Some(e) => {
-            let close = text[e..].find('}').map(|i| e + i).unwrap_or(e);
+            let close = text[e..].find('}').map_or(e, |i| e + i);
             line_end(text, close)
         }
         None => 0,
@@ -479,10 +488,7 @@ impl Server {
                     "Remove the unreachable branch".into(),
                     CodeActionKind::QUICKFIX,
                     Some(d),
-                    vec![TextEdit::new(
-                        Range::new(offset_to_pos(&text, s), offset_to_pos(&text, e)),
-                        String::new(),
-                    )],
+                    vec![TextEdit::new(range(&text, s, e), String::new())],
                     true,
                 ));
             } else if code == UNUSED_IMPORT {
@@ -573,18 +579,16 @@ impl Server {
                     }
                 });
                 if let Some(sig) = best {
-                    let (at, ins) = match &sig.ret {
-                        Some(r) => (r.span().end as usize, "!".to_string()),
-                        None => {
-                            // `fn f(...)` -> `fn f(...) void!` (the span covers the name)
-                            let from = sig.span.end as usize;
-                            let brace = text[from..].find('{').map(|i| from + i);
-                            let close =
-                                brace.and_then(|b| text[from..b].rfind(')').map(|i| from + i));
-                            match close {
-                                Some(c) => (c + 1, " void!".to_string()),
-                                None => (sig.span.end as usize, String::new()),
-                            }
+                    let (at, ins) = if let Some(r) = &sig.ret {
+                        (r.span().end as usize, "!".to_string())
+                    } else {
+                        // `fn f(...)` -> `fn f(...) void!` (the span covers the name)
+                        let from = sig.span.end as usize;
+                        let brace = text[from..].find('{').map(|i| from + i);
+                        let close = brace.and_then(|b| text[from..b].rfind(')').map(|i| from + i));
+                        match close {
+                            Some(c) => (c + 1, " void!".to_string()),
+                            None => (sig.span.end as usize, String::new()),
                         }
                     };
                     if !ins.is_empty() {
@@ -623,13 +627,10 @@ impl Server {
                     }
                 });
                 if let Some(ife) = target {
-                    let arm_indent = ife
-                        .arms
-                        .first()
-                        .map(|a| indent_at(&text, a.span.start as usize).to_string())
-                        .unwrap_or_else(|| {
-                            format!("{}  ", indent_at(&text, ife.span.start as usize))
-                        });
+                    let arm_indent = ife.arms.first().map_or_else(
+                        || format!("{}  ", indent_at(&text, ife.span.start as usize)),
+                        |a| indent_at(&text, a.span.start as usize).to_string(),
+                    );
                     let end = ife.span.end as usize;
                     let close = text[..end].rfind('}').unwrap_or(end);
                     let at = line_start(&text, close);
@@ -777,10 +778,10 @@ impl Server {
         let inner = text[..close].trim_end();
         let multiline = text[lit.span.start as usize..close].contains('\n');
         if multiline {
-            let indent = fields
-                .first()
-                .map(|f| indent_at(text, f.2.start as usize).to_string())
-                .unwrap_or_else(|| format!("{}  ", indent_at(text, lit.span.start as usize)));
+            let indent = fields.first().map_or_else(
+                || format!("{}  ", indent_at(text, lit.span.start as usize)),
+                |f| indent_at(text, f.2.start as usize).to_string(),
+            );
             let comma = if inner.ends_with(',') || inner.ends_with('{') {
                 ""
             } else {
@@ -789,14 +790,14 @@ impl Server {
             let body: Vec<String> = missing.iter().map(|m| format!("{indent}{m},")).collect();
             let at = inner.len();
             return Some(TextEdit::new(
-                Range::new(offset_to_pos(text, at), offset_to_pos(text, at)),
+                range(text, at, at),
                 format!("{comma}\n{}", body.join("\n")),
             ));
         }
         let sep = if inner.ends_with('{') { "" } else { ", " };
         let at = inner.len();
         Some(TextEdit::new(
-            Range::new(offset_to_pos(text, at), offset_to_pos(text, at)),
+            range(text, at, at),
             format!("{sep}{}", missing.join(", ")),
         ))
     }
@@ -851,8 +852,7 @@ impl Server {
                 .map(|(m, detail)| {
                     let arity = detail
                         .split_once('(')
-                        .map(|(_, ps)| ps.trim_end_matches(')').split(',').count())
-                        .unwrap_or(0);
+                        .map_or(0, |(_, ps)| ps.trim_end_matches(')').split(',').count());
                     if arity == 0 {
                         format!("{prefix}.{m}")
                     } else {
@@ -886,32 +886,7 @@ impl Server {
         if matches!(x.ty.as_str(), "void" | "never") || x.ty.starts_with("fn") {
             return None;
         }
-        // the innermost statement around the selection that sits directly in a block
-        let mut stmt: Option<&ast::Stmt> = None;
-        let mut in_block: HashSet<(u32, u32)> = HashSet::new();
-        walk(module, &mut |n| {
-            if let Node::Block(b) = n {
-                for st in &b.stmts {
-                    in_block.insert((st.span.start, st.span.end));
-                }
-            }
-        });
-        for it in &module.items {
-            if let ast::Item::Stmt(st) = it {
-                in_block.insert((st.span.start, st.span.end));
-            }
-        }
-        walk(module, &mut |n| {
-            if let Node::Stmt(st) = n
-                && st.span.start <= s
-                && e <= st.span.end
-                && in_block.contains(&(st.span.start, st.span.end))
-                && stmt.is_none_or(|o| o.span.start <= st.span.start)
-            {
-                stmt = Some(st);
-            }
-        });
-        let st = stmt?;
+        let st = block_stmt_around(module, s, e)?;
         // a pattern, or a condition evaluated on every loop iteration, cannot be extracted
         if let S::While { cond, .. } = &st.kind
             && cond.span.start <= s
@@ -932,32 +907,18 @@ impl Server {
         let indent = indent_at(text, st.span.start as usize);
         let expr = &text[s as usize..e as usize];
         let decl = format!("{indent}{} {name} = {expr}\n", x.ty);
-        let mut changes = HashMap::new();
-        changes.insert(
-            uri.clone(),
+        Some(edit_action(
+            "Extract into a variable".into(),
+            CodeActionKind::REFACTOR_EXTRACT,
             vec![
-                TextEdit::new(
-                    Range::new(offset_to_pos(text, at), offset_to_pos(text, at)),
-                    decl,
-                ),
-                TextEdit::new(
-                    Range::new(
-                        offset_to_pos(text, s as usize),
-                        offset_to_pos(text, e as usize),
-                    ),
-                    name,
+                (uri.clone(), TextEdit::new(range(text, at, at), decl)),
+                (
+                    uri.clone(),
+                    TextEdit::new(range(text, s as usize, e as usize), name),
                 ),
             ],
-        );
-        Some(CodeActionOrCommand::CodeAction(CodeAction {
-            title: "Extract into a variable".into(),
-            kind: Some(CodeActionKind::REFACTOR_EXTRACT),
-            edit: Some(WorkspaceEdit {
-                changes: Some(changes),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }))
+            None,
+        ))
     }
 
     /// "Generate function" for a call to an unknown name: a function after the current item,
@@ -988,7 +949,7 @@ impl Server {
         let E::Call(_, args) = &call.kind else {
             return None;
         };
-        let visible = super::complete::visible_decls(a, fid, at as usize);
+        let visible = super::complete::visible(a, fid, at as usize);
         let mut params = Vec::new();
         let mut used = HashSet::new();
         for (i, arg) in args.iter().enumerate() {
@@ -1013,8 +974,7 @@ impl Server {
             })
             .unwrap_or_else(|| "int".into());
             let mut pname = match &arg.kind {
-                E::Ident(n) => n.clone(),
-                E::Field(_, n) => n.clone(),
+                E::Ident(n) | E::Field(_, n) => n.clone(),
                 _ => format!("arg{}", i + 1),
             };
             while !used.insert(pname.clone()) {
@@ -1081,18 +1041,15 @@ impl Server {
             "\n"
         };
         let body = format!("{lead}\nfn {name}({}){ret} {{\n}}\n", params.join(", "));
-        let p = offset_to_pos(text, item_end);
-        let mut changes = HashMap::new();
-        changes.insert(uri.clone(), vec![TextEdit::new(Range::new(p, p), body)]);
-        Some(CodeActionOrCommand::CodeAction(CodeAction {
-            title: format!("Generate function `{name}`"),
-            kind: Some(CodeActionKind::QUICKFIX),
-            edit: Some(WorkspaceEdit {
-                changes: Some(changes),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }))
+        Some(edit_action(
+            format!("Generate function `{name}`"),
+            CodeActionKind::QUICKFIX,
+            vec![(
+                uri.clone(),
+                TextEdit::new(range(text, item_end, item_end), body),
+            )],
+            None,
+        ))
     }
 
     /// "Match on `x`" for a variable of an enum type: an `if` with a branch per variant after the
@@ -1122,72 +1079,20 @@ impl Server {
         if edecl.kind != DeclKind::Enum || d.ty.as_deref() != Some(edecl.name.as_str()) {
             return None;
         }
-        // the enum as written from this file
-        let prefix = if edecl.span.file == fid {
-            edecl.name.clone()
-        } else {
-            let epath = &a.sm.file(edecl.span.file).path;
-            let alias = a.imports.iter().find(|(_, p)| *p == epath)?.0;
-            format!("{alias}.{}", edecl.name)
-        };
-        // the statement around the cursor that sits directly in a block or at the top level
-        let mut in_block: HashSet<(u32, u32)> = HashSet::new();
-        walk(module, &mut |n| {
-            if let Node::Block(b) = n {
-                for st in &b.stmts {
-                    in_block.insert((st.span.start, st.span.end));
-                }
-            }
-        });
-        for it in &module.items {
-            if let ast::Item::Stmt(st) = it {
-                in_block.insert((st.span.start, st.span.end));
-            }
-        }
-        let mut stmt: Option<&ast::Stmt> = None;
-        walk(module, &mut |n| {
-            if let Node::Stmt(st) = n
-                && st.span.start <= off
-                && off <= st.span.end
-                && in_block.contains(&(st.span.start, st.span.end))
-                && stmt.is_none_or(|o| o.span.start <= st.span.start)
-            {
-                stmt = Some(st);
-            }
-        });
-        let st = stmt?;
-        let indent = indent_at(text, st.span.start as usize).to_string();
-        let mut body = format!("{indent}if {} {{\n", d.name);
-        for (m, detail) in &edecl.members {
-            let arity = detail
-                .split_once('(')
-                .map(|(_, ps)| ps.trim_end_matches(')').split(',').count())
-                .unwrap_or(0);
-            let pat = if arity == 0 {
-                format!("{prefix}.{m}")
-            } else {
-                format!("{prefix}.{m}({})", vec!["_"; arity].join(", "))
-            };
-            body.push_str(&format!("{indent}  {pat} -> {{}}\n"));
-        }
-        body.push_str(&format!("{indent}}}\n"));
+        let st = block_stmt_around(module, off, off)?;
+        let indent = indent_at(text, st.span.start as usize);
+        let body = super::refactor::enum_match(a, fid, edecl, &d.name, indent)?;
         let at = line_end(text, st.span.end as usize);
         let lead = if text[..at].ends_with('\n') { "" } else { "\n" };
-        let p = offset_to_pos(text, at);
-        let mut changes = HashMap::new();
-        changes.insert(
-            uri.clone(),
-            vec![TextEdit::new(Range::new(p, p), format!("{lead}{body}"))],
-        );
-        Some(CodeActionOrCommand::CodeAction(CodeAction {
-            title: format!("Match on `{}`", d.name),
-            kind: Some(CodeActionKind::REFACTOR_REWRITE),
-            edit: Some(WorkspaceEdit {
-                changes: Some(changes),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }))
+        Some(edit_action(
+            format!("Match on `{}`", d.name),
+            CodeActionKind::REFACTOR_REWRITE,
+            vec![(
+                uri.clone(),
+                TextEdit::new(range(text, at, at), format!("{lead}{body}")),
+            )],
+            None,
+        ))
     }
 
     /// "Inline variable" on an immutable variable declared with a single name.
@@ -1274,21 +1179,13 @@ impl Server {
             line_start(text, st.span.start as usize),
             line_end(text, st.span.end as usize),
         );
-        edits.push(TextEdit::new(
-            Range::new(offset_to_pos(text, ls), offset_to_pos(text, le)),
-            String::new(),
-        ));
-        let mut changes = HashMap::new();
-        changes.insert(uri.clone(), edits);
-        Some(CodeActionOrCommand::CodeAction(CodeAction {
-            title: format!("Inline `{}`", d.name),
-            kind: Some(CodeActionKind::REFACTOR_INLINE),
-            edit: Some(WorkspaceEdit {
-                changes: Some(changes),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }))
+        edits.push(TextEdit::new(range(text, ls, le), String::new()));
+        Some(edit_action(
+            format!("Inline `{}`", d.name),
+            CodeActionKind::REFACTOR_INLINE,
+            edits.into_iter().map(|e| (uri.clone(), e)).collect(),
+            None,
+        ))
     }
 }
 

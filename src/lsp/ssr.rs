@@ -13,7 +13,7 @@ use lsp_types::*;
 use serde::Deserialize;
 
 use super::nav::{Node, walk};
-use super::{Server, offset_to_pos, path_to_uri, pos_to_offset, uri_to_path};
+use super::{Server, line_end, offset_to_pos, path_to_uri, pos_to_offset, range, uri_to_path};
 use crate::ast::{self, ExprKind as E};
 use crate::lexer::Tok;
 
@@ -255,12 +255,7 @@ impl Server {
                 };
                 let edits: Vec<TextEdit> = ssr_file(&text, &pat, &tmpl)
                     .into_iter()
-                    .map(|(s, e, t)| {
-                        TextEdit::new(
-                            Range::new(offset_to_pos(&text, s), offset_to_pos(&text, e)),
-                            t,
-                        )
-                    })
+                    .map(|(s, e, t)| TextEdit::new(range(&text, s, e), t))
                     .collect();
                 if !edits.is_empty() {
                     changes.insert(path_to_uri(&f), edits);
@@ -283,14 +278,12 @@ impl Server {
         let mut edits = Vec::new();
         for r in p.ranges {
             let s = pos_to_offset(&text, r.start);
-            let mut e = pos_to_offset(&text, r.end);
-            if r.end.line == r.start.line {
+            let e = if r.end.line == r.start.line {
                 // through the end of the next line break
-                e = text[s..]
-                    .find('\n')
-                    .map(|i| s + i + 1)
-                    .unwrap_or(text.len());
-            }
+                line_end(&text, s)
+            } else {
+                pos_to_offset(&text, r.end)
+            };
             let mut i = s;
             while let Some(k) = text[i..e.min(text.len())].find('\n') {
                 let nl = i + k;
@@ -299,7 +292,7 @@ impl Server {
                     - text[nl + 1..].trim_start_matches([' ', '\t']).len();
                 let mut next = &text[after_start..];
                 let mut del_end = after_start;
-                let prev_line = &text[before.rfind('\n').map(|x| x + 1).unwrap_or(0)..before.len()];
+                let prev_line = &text[before.rfind('\n').map_or(0, |x| x + 1)..before.len()];
                 if prev_line.trim_start().starts_with("//") && next.starts_with("//") {
                     let n = next.len() - next.trim_start_matches('/').len();
                     next = next[n..].trim_start();

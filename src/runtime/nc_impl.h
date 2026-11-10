@@ -575,10 +575,6 @@ nc_arr *nc_arr_new(const nc_ti *ti, int64_t cap) {
 void nc_arr_retain(nc_arr *a) {
   if (a) nc_inc(&a->rc);
 }
-static inline nc_arr *nc_arr_rt(nc_arr *a) {
-  nc_arr_retain(a);
-  return a;
-}
 void nc_arr_release(nc_arr *a) {
   if (a && nc_dec(&a->rc)) {
     if (a->ti->release)
@@ -921,10 +917,6 @@ static inline void nc_env_release(nc_env *e) {
     e->drop(e);
     free(e);
   }
-}
-static inline nc_fn nc_fn_rt(nc_fn f) {
-  nc_env_rt(f.env);
-  return f;
 }
 static inline void nc_fn_release(nc_fn f) { nc_env_release(f.env); }
 

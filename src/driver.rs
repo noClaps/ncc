@@ -61,8 +61,7 @@ fn frontend(file: &Path, sm: &mut SourceMap, release: bool, codegen: bool) -> Op
     });
     let errors = match r {
         Ok((p, errors)) if errors.is_empty() => return Some(p),
-        Ok((_, errors)) => errors,
-        Err(errors) => errors,
+        Ok((_, errors)) | Err(errors) => errors,
     };
     for d in &errors {
         eprintln!("{}\n", d.render(sm));
@@ -78,7 +77,7 @@ fn uses_target(p: &Program) -> bool {
     for f in &p.funcs {
         for s in &f.body.stmts {
             crate::check::flow::visit_stmt(s, &mut |e| {
-                found |= matches!(e.kind, crate::tir::EK::Target)
+                found |= matches!(e.kind, crate::tir::EK::Target);
             });
         }
     }
@@ -118,12 +117,11 @@ fn detect_target() -> Result<(String, String), String> {
     ]
     .iter()
     .find(|(m, _)| defined(m))
-    .map(|(_, n)| *n)
-    .unwrap_or("unknown");
+    .map_or("unknown", |(_, n)| *n);
     let riscv64 = macros
         .lines()
         .any(|l| l.starts_with("#define __riscv_xlen 64"));
-    let cpu = [
+    let cpu = match [
         ("__aarch64__", "aarch64"),
         ("__x86_64__", "x86_64"),
         ("__i386__", "x86"),
@@ -134,17 +132,13 @@ fn detect_target() -> Result<(String, String), String> {
     ]
     .iter()
     .find(|(m, _)| defined(m))
-    .map(|(_, n)| n.to_string())
-    .unwrap_or_else(|| {
-        if riscv64 {
-            "riscv64".into()
-        } else if defined("__riscv") {
-            "riscv32".into()
-        } else {
-            "unknown".into()
-        }
-    });
-    Ok((os.to_string(), cpu))
+    {
+        Some((_, n)) => n,
+        None if riscv64 => "riscv64",
+        None if defined("__riscv") => "riscv32",
+        None => "unknown",
+    };
+    Ok((os.to_string(), cpu.to_string()))
 }
 
 /// The C compiler command from `$CC`, falling back to `cc`.
@@ -153,7 +147,7 @@ fn cc_command() -> (String, Vec<String>) {
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "cc".into());
-    let mut parts = cc.split_whitespace().map(|s| s.to_string());
+    let mut parts = cc.split_whitespace().map(ToString::to_string);
     let prog = parts.next().unwrap();
     (prog, parts.collect())
 }
@@ -222,26 +216,23 @@ fn compile(
     }
     args.push("-w".into());
     args.push(format!("-I{}", tmp.0.display()));
-    match format {
-        Format::Asm => {
-            args.push("-S".into());
-            args.push(main_c.display().to_string());
+    if format == Format::Asm {
+        args.push("-S".into());
+        args.push(main_c.display().to_string());
+    } else {
+        args.push(main_c.display().to_string());
+        let mut seen = Vec::new();
+        for x in &p.externs {
+            if !seen.contains(&x.file) {
+                seen.push(x.file.clone());
+            }
         }
-        _ => {
-            args.push(main_c.display().to_string());
-            let mut seen = Vec::new();
-            for x in &p.externs {
-                if !seen.contains(&x.file) {
-                    seen.push(x.file.clone());
-                }
+        for f in seen {
+            if !f.is_file() {
+                eprintln!("error: extern implementation `{}` not found", f.display());
+                return false;
             }
-            for f in seen {
-                if !f.is_file() {
-                    eprintln!("error: extern implementation `{}` not found", f.display());
-                    return false;
-                }
-                args.push(f.display().to_string());
-            }
+            args.push(f.display().to_string());
         }
     }
     args.push("-o".into());
@@ -274,19 +265,16 @@ pub fn check(o: &Options) -> ExitCode {
 fn format_from_ext(p: &Path) -> Format {
     match p.extension().and_then(|e| e.to_str()) {
         Some("c") => Format::C,
-        Some("s") | Some("asm") => Format::Asm,
+        Some("s" | "asm") => Format::Asm,
         _ => Format::Exe,
     }
 }
 
 pub fn build(o: &Options) -> ExitCode {
     let file = o.file.as_ref().unwrap();
-    let format = o.format.unwrap_or_else(|| {
-        o.output
-            .as_deref()
-            .map(format_from_ext)
-            .unwrap_or(Format::Exe)
-    });
+    let format = o
+        .format
+        .unwrap_or_else(|| o.output.as_deref().map_or(Format::Exe, format_from_ext));
     let out = o.output.clone().unwrap_or_else(|| {
         let stem = file.with_extension("");
         match format {
@@ -308,13 +296,14 @@ pub fn build(o: &Options) -> ExitCode {
 
 fn run_exe(exe: &Path, args: &[String]) -> ExitCode {
     match Command::new(exe).args(args).status() {
-        Ok(s) => match s.code() {
-            Some(c) => ExitCode::from(c as u8),
-            None => {
+        Ok(s) => {
+            if let Some(c) = s.code() {
+                ExitCode::from(c as u8)
+            } else {
                 eprintln!("error: program terminated by a signal");
                 ExitCode::from(134)
             }
-        },
+        }
         Err(e) => {
             eprintln!("error: cannot run program: {e}");
             ExitCode::FAILURE

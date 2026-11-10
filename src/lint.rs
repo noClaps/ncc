@@ -14,10 +14,10 @@ fn shared_accesses(p: &Program, f: FuncId) -> Vec<(String, Span)> {
         if let EK::Var(v) = &e.kind {
             match v {
                 VarRef::Global(g) if p.globals[*g].mutable => {
-                    out.push((p.globals[*g].name.clone(), e.span))
+                    out.push((p.globals[*g].name.clone(), e.span));
                 }
                 VarRef::Local(l) if matches!(func.locals[*l].kind, LocalKind::CapRef(_)) => {
-                    out.push((func.locals[*l].name.clone(), e.span))
+                    out.push((func.locals[*l].name.clone(), e.span));
                 }
                 _ => {}
             }
@@ -32,12 +32,12 @@ fn shared_accesses(p: &Program, f: FuncId) -> Vec<(String, Span)> {
             if let SK::Assign(pl, _) = &s.kind {
                 match flow::place_root(pl) {
                     Some(VarRef::Global(g)) if p.globals[g].mutable => {
-                        out.push((p.globals[g].name.clone(), s.span))
+                        out.push((p.globals[g].name.clone(), s.span));
                     }
                     Some(VarRef::Local(l))
                         if matches!(func.locals[l].kind, LocalKind::CapRef(_)) =>
                     {
-                        out.push((func.locals[l].name.clone(), s.span))
+                        out.push((func.locals[l].name.clone(), s.span));
                     }
                     _ => {}
                 }
@@ -50,12 +50,8 @@ fn shared_accesses(p: &Program, f: FuncId) -> Vec<(String, Span)> {
                 _ => {}
             }
             let mut nested: Vec<Block> = Vec::new();
-            flow::visit_stmt(s, &mut |e: &Expr| match &e.kind {
-                EK::If(i) => nested.extend(i.arms.iter().map(|a| a.body.clone())),
-                EK::Catch(_, _, b, _) | EK::Else(_, Fallback::Block(b, _)) => {
-                    nested.push(b.clone())
-                }
-                _ => {}
+            flow::visit_stmt(s, &mut |e: &Expr| {
+                nested.extend(flow::nested_blocks(e).into_iter().cloned());
             });
             for b in &nested {
                 places(b, func, p, out);

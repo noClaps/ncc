@@ -10,7 +10,7 @@ use crate::types::NEVER;
 pub fn visit_stmt(s: &Stmt, f: &mut dyn FnMut(&Expr)) {
     match &s.kind {
         SK::Let(_, e) | SK::Destructure(_, e) | SK::Expr(e) | SK::Throw(e) | SK::Assert(e) => {
-            visit_expr(e, f)
+            visit_expr(e, f);
         }
         SK::Assign(p, e) => {
             visit_place(p, f);
@@ -18,7 +18,7 @@ pub fn visit_stmt(s: &Stmt, f: &mut dyn FnMut(&Expr)) {
         }
         SK::Return(e) | SK::Break(_, e) => {
             if let Some(e) = e {
-                visit_expr(e, f)
+                visit_expr(e, f);
             }
         }
         SK::Continue(_) => {}
@@ -57,7 +57,7 @@ pub fn visit_block(b: &Block, f: &mut dyn FnMut(&Expr)) {
 
 fn visit_callee(c: &Callee, f: &mut dyn FnMut(&Expr)) {
     if let Callee::Value(e) = c {
-        visit_expr(e, f)
+        visit_expr(e, f);
     }
 }
 
@@ -67,7 +67,7 @@ pub fn visit_pat(p: &Pat, f: &mut dyn FnMut(&Expr)) {
         Pat::Value(e) | Pat::Cond(e) => visit_expr(e, f),
         Pat::Tuple(ps) | Pat::Struct(ps) | Pat::Array(ps) | Pat::Variant(_, ps) => {
             for p in ps {
-                visit_pat(p, f)
+                visit_pat(p, f);
             }
         }
     }
@@ -108,7 +108,7 @@ pub fn visit_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
         EK::Call(c, args) | EK::Async(c, args) => {
             visit_callee(c, f);
             for a in args {
-                visit_expr(a, f)
+                visit_expr(a, f);
             }
         }
         EK::Print(_, _, args)
@@ -118,7 +118,7 @@ pub fn visit_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
         | EK::Struct(args)
         | EK::Variant(_, args) => {
             for a in args {
-                visit_expr(a, f)
+                visit_expr(a, f);
             }
         }
         EK::Map(es) => {
@@ -129,7 +129,7 @@ pub fn visit_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
         }
         EK::If(i) => {
             if let Some(s) = &i.scrutinee {
-                visit_expr(s, f)
+                visit_expr(s, f);
             }
             for arm in &i.arms {
                 for p in &arm.patterns {
@@ -183,6 +183,15 @@ pub fn place_root(p: &Place) -> Option<VarRef> {
 }
 
 /// Globals written (declared or assigned) by a statement, including nested blocks.
+/// The blocks directly inside an expression: `if` arms, `catch` and `else` blocks.
+pub fn nested_blocks(e: &Expr) -> Vec<&Block> {
+    match &e.kind {
+        EK::If(i) => i.arms.iter().map(|a| &a.body).collect(),
+        EK::Catch(_, _, b, _) | EK::Else(_, Fallback::Block(b, _)) => vec![b],
+        _ => vec![],
+    }
+}
+
 pub fn writes_stmt(s: &Stmt, out: &mut HashSet<GlobalId>) {
     match &s.kind {
         SK::Let(Some(VarRef::Global(g)), _) => {
@@ -209,16 +218,9 @@ pub fn writes_stmt(s: &Stmt, out: &mut HashSet<GlobalId>) {
     }
     // assignments nested in if-arms / catch blocks
     let mut nested = |e: &Expr| {
-        let blocks: Vec<&Block> = match &e.kind {
-            EK::If(i) => i.arms.iter().map(|a| &a.body).collect(),
-            EK::Catch(_, _, b, _) => vec![b],
-            EK::Else(_, Fallback::Block(b, _)) => vec![b],
-            _ => vec![],
-        };
-        for b in blocks {
+        for b in nested_blocks(e) {
             for s in &b.stmts {
-                if matches!(s.kind, SK::Assign(..))
-                    && let SK::Assign(p, _) = &s.kind
+                if let SK::Assign(p, _) = &s.kind
                     && let Some(VarRef::Global(g)) = place_root(p)
                 {
                     out.insert(g);
@@ -248,16 +250,16 @@ impl<'a> Checker<'a> {
     fn stmt_completes(&self, s: &Stmt) -> bool {
         match &s.kind {
             SK::Return(_) | SK::Throw(_) | SK::Break(..) | SK::Continue(_) => false,
-            SK::Expr(e) | SK::Let(_, e) | SK::Destructure(_, e) => self.expr_completes(e),
-            SK::Assign(_, e) => self.expr_completes(e),
+            SK::Expr(e) | SK::Let(_, e) | SK::Destructure(_, e) | SK::Assign(_, e) => {
+                self.expr_completes(e)
+            }
             SK::Block(b) => self.block_completes(b),
             SK::While { id, cond, .. } => {
                 let infinite = matches!(cond.kind, EK::Lit(Lit::Bool(true)));
                 !infinite || self.broken.contains(id)
             }
-            SK::For { .. } => true,
+            SK::For { .. } | SK::Assert(_) => true,
             SK::Lock { id, body, .. } => self.block_completes(body) || self.broken.contains(id),
-            SK::Assert(_) => true,
         }
     }
 

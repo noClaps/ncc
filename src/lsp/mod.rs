@@ -150,7 +150,7 @@ struct Server {
 
 pub fn run() -> ExitCode {
     let (connection, io_threads) = Connection::stdio();
-    let caps = ServerCapabilities {
+    let mut caps = ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Options(
             TextDocumentSyncOptions {
                 open_close: Some(true),
@@ -191,7 +191,6 @@ pub fn run() -> ExitCode {
             first_trigger_character: "}".into(),
             more_trigger_character: None,
         }),
-        linked_editing_range_provider: None,
         workspace: Some(WorkspaceServerCapabilities {
             workspace_folders: None,
             file_operations: Some(WorkspaceFileOperationsServerCapabilities {
@@ -216,8 +215,7 @@ pub fn run() -> ExitCode {
         })),
         signature_help_provider: Some(SignatureHelpOptions {
             trigger_characters: Some(vec!["(".into(), ",".into()]),
-            retrigger_characters: None,
-            work_done_progress_options: Default::default(),
+            ..Default::default()
         }),
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
         workspace_symbol_provider: Some(OneOf::Left(true)),
@@ -229,13 +227,11 @@ pub fn run() -> ExitCode {
                 CodeActionKind::REFACTOR_REWRITE,
                 CodeActionKind::SOURCE_ORGANIZE_IMPORTS,
             ]),
-            work_done_progress_options: Default::default(),
-            resolve_provider: Some(false),
+            ..Default::default()
         })),
         document_formatting_provider: Some(OneOf::Left(true)),
         ..Default::default()
     };
-    let mut caps = caps;
     let r = (|| -> Result<(), Box<dyn std::error::Error + Sync + Send>> {
         let (id, params) = connection.initialize_start()?;
         let mut server = Server::default();
@@ -249,7 +245,7 @@ pub fn run() -> ExitCode {
                     identifier: Some("ncc".into()),
                     inter_file_dependencies: true,
                     workspace_diagnostics: false,
-                    work_done_progress_options: Default::default(),
+                    ..Default::default()
                 }));
         }
         let init = serde_json::json!({
@@ -283,23 +279,18 @@ pub fn run() -> ExitCode {
                         )
                     });
                     connection.sender.send(Message::Response(resp))?;
-                    for out in std::mem::take(&mut server.outbox) {
-                        connection.sender.send(Message::Notification(out))?;
-                    }
                 }
                 Message::Notification(n) => {
                     let outs = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         server.notification(n)
                     }))
                     .unwrap_or_default();
-                    for out in outs {
-                        connection.sender.send(Message::Notification(out))?;
-                    }
-                    for out in std::mem::take(&mut server.outbox) {
-                        connection.sender.send(Message::Notification(out))?;
-                    }
+                    server.outbox.splice(0..0, outs);
                 }
                 Message::Response(_) => {}
+            }
+            for out in std::mem::take(&mut server.outbox) {
+                connection.sender.send(Message::Notification(out))?;
             }
         }
         Ok(())
@@ -344,7 +335,7 @@ fn path_to_uri(p: &Path) -> Uri {
     for b in p.to_string_lossy().bytes() {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' => {
-                s.push(b as char)
+                s.push(b as char);
             }
             _ => s.push_str(&format!("%{b:02X}")),
         }
@@ -357,7 +348,7 @@ fn offset_to_pos(text: &str, offset: usize) -> Position {
     let offset = offset.min(text.len());
     let before = &text[..offset];
     let line = before.matches('\n').count();
-    let line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
     let col: usize = text[line_start..offset].encode_utf16().count();
     Position::new(line as u32, col as u32)
 }
@@ -381,11 +372,55 @@ fn pos_to_offset(text: &str, pos: Position) -> usize {
     text.len()
 }
 
+fn range(text: &str, s: usize, e: usize) -> Range {
+    Range::new(offset_to_pos(text, s), offset_to_pos(text, e))
+}
+
 fn span_range(text: &str, span: Span) -> Range {
-    Range::new(
-        offset_to_pos(text, span.start as usize),
-        offset_to_pos(text, span.end as usize),
-    )
+    range(text, span.start as usize, span.end as usize)
+}
+
+// `WorkspaceEdit::changes` is keyed by `Uri`, as defined by lsp-types
+#[allow(clippy::mutable_key_type)]
+fn edit_action(
+    title: String,
+    kind: CodeActionKind,
+    changes: Vec<(Uri, TextEdit)>,
+    diag: Option<&Diagnostic>,
+) -> CodeActionOrCommand {
+    let mut map: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
+    for (u, e) in changes {
+        map.entry(u).or_default().push(e);
+    }
+    CodeActionOrCommand::CodeAction(CodeAction {
+        title,
+        kind: Some(kind),
+        diagnostics: diag.map(|d| vec![d.clone()]),
+        edit: Some(WorkspaceEdit {
+            changes: Some(map),
+            ..Default::default()
+        }),
+        is_preferred: diag.map(|_| true),
+        ..Default::default()
+    })
+}
+
+/// Offset of the start of the line containing `off`.
+fn line_start(text: &str, off: usize) -> usize {
+    text[..off.min(text.len())].rfind('\n').map_or(0, |i| i + 1)
+}
+
+/// Offset just past the newline ending the line containing `off`.
+fn line_end(text: &str, off: usize) -> usize {
+    text[off.min(text.len())..]
+        .find('\n')
+        .map_or(text.len(), |i| off + i + 1)
+}
+
+/// The leading whitespace of the line containing `off`.
+fn indent_at(text: &str, off: usize) -> &str {
+    let l = &text[line_start(text, off)..];
+    &l[..l.len() - l.trim_start_matches([' ', '\t']).len()]
 }
 
 impl Server {
@@ -924,7 +959,7 @@ impl Server {
                     kind: MarkupKind::Markdown,
                     value: format!("```nc\n{}\n```\n\n---\n\n{doc}", &text[s..e]),
                 }),
-                range: Some(Range::new(offset_to_pos(&text, s), offset_to_pos(&text, e))),
+                range: Some(range(&text, s, e)),
             });
         }
         // the type of the innermost expression under the cursor
@@ -1024,9 +1059,8 @@ impl Server {
                     | SymbolKind::CONSTANT
                     | SymbolKind::MODULE
             );
-            let selection_range = name_span(&text, span, name, first)
-                .map(|s| span_range(&text, s))
-                .unwrap_or(range);
+            let selection_range =
+                name_span(&text, span, name, first).map_or(range, |s| span_range(&text, s));
             DocumentSymbol {
                 name: if name.is_empty() {
                     "_".into()
@@ -1166,7 +1200,7 @@ impl Server {
                         }
                     }
                     ast::StmtKind::FnVar { name, .. } => {
-                        out.push(sym(name, SymbolKind::FUNCTION, s.span, None, None))
+                        out.push(sym(name, SymbolKind::FUNCTION, s.span, None, None));
                     }
                     ast::StmtKind::Fn(f) => out.push(fn_symbol(f)),
                     _ => {}
@@ -1311,47 +1345,35 @@ impl Server {
 
     fn highlights(&self, p: DocumentHighlightParams) -> Option<Vec<DocumentHighlight>> {
         let pp = p.text_document_position_params;
+        let text_highlights = |ranges: Vec<Range>| {
+            let kind = Some(DocumentHighlightKind::TEXT);
+            Some(
+                ranges
+                    .into_iter()
+                    .map(|range| DocumentHighlight { range, kind })
+                    .collect(),
+            )
+        };
         // `fn`/`return`/`throw`/`try`: the function and its exit points
         if let Some(path) = uri_to_path(&pp.text_document.uri)
             && let Some(text) = self.text_of(&path)
-            && !in_string_or_comment(&text, pos_to_offset(&text, pp.position))
+            && let off = pos_to_offset(&text, pp.position)
+            && !in_string_or_comment(&text, off)
         {
             let (module, _) = crate::parser::parse_module_recover(&text, 0);
-            if let Some(ranges) =
-                refactor::exit_points(&module, &text, pos_to_offset(&text, pp.position))
-            {
-                return Some(
-                    ranges
-                        .into_iter()
-                        .map(|range| DocumentHighlight {
-                            range,
-                            kind: Some(DocumentHighlightKind::TEXT),
-                        })
-                        .collect(),
-                );
+            if let Some(ranges) = refactor::exit_points(&module, &text, off) {
+                return text_highlights(ranges);
             }
         }
         if let Some((_, ranges)) = self.alias_at(&pp.text_document.uri, pp.position) {
-            return Some(
-                ranges
-                    .into_iter()
-                    .map(|range| DocumentHighlight {
-                        range,
-                        kind: Some(DocumentHighlightKind::TEXT),
-                    })
-                    .collect(),
-            );
+            return text_highlights(ranges);
         }
         let path = uri_to_path(&pp.text_document.uri)?;
         let (key, name, first) = self.symbol_at(&pp.text_document.uri, pp.position)?;
-        Some(
-            self.occurrences(&key, &name, first)
-                .into_iter()
+        text_highlights(
+            (self.occurrences(&key, &name, first).into_iter())
                 .filter(|(p, _)| *p == path)
-                .map(|(_, range)| DocumentHighlight {
-                    range,
-                    kind: Some(DocumentHighlightKind::TEXT),
-                })
+                .map(|(_, range)| range)
                 .collect(),
         )
     }
@@ -1473,7 +1495,7 @@ impl Server {
                 kind: MarkupKind::Markdown,
                 value: format!("```nc\n{sig}\n```\n\n---\n\n{doc}"),
             }),
-            range: Some(Range::new(offset_to_pos(&text, s), offset_to_pos(&text, e))),
+            range: Some(range(&text, s, e)),
         })
     }
 
@@ -1520,13 +1542,11 @@ impl Server {
         }
         // runs of comment lines
         let mut run: Option<(u32, u32)> = None;
-        for (i, l) in text.lines().enumerate() {
+        // (a trailing non-comment line ends the last run)
+        for (i, l) in text.lines().chain([""]).enumerate() {
             let i = i as u32;
             if l.trim_start().starts_with("//") {
-                run = Some(match run {
-                    Some((s, _)) => (s, i),
-                    None => (i, i),
-                });
+                run = Some((run.map_or(i, |r| r.0), i));
             } else if let Some((s, e)) = run.take()
                 && e > s
             {
@@ -1537,16 +1557,6 @@ impl Server {
                     ..Default::default()
                 });
             }
-        }
-        if let Some((s, e)) = run
-            && e > s
-        {
-            out.push(FoldingRange {
-                start_line: s,
-                end_line: e,
-                kind: Some(FoldingRangeKind::Comment),
-                ..Default::default()
-            });
         }
         Some(out)
     }
@@ -1612,7 +1622,7 @@ impl Server {
         let close = toks
             .iter()
             .position(|t| t.tok == crate::lexer::Tok::RBrace && t.span.end as usize == off)?;
-        let ls = text[..off - 1].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let ls = line_start(&text, off - 1);
         if !text[ls..off - 1].trim().is_empty() {
             return Some(vec![]);
         }
@@ -1629,17 +1639,12 @@ impl Server {
             crate::lexer::Tok::LBrace => true,
             _ => false,
         })?;
-        let ols = text[..open.span.start as usize]
-            .rfind('\n')
-            .map(|i| i + 1)
-            .unwrap_or(0);
-        let line = &text[ols..];
-        let indent = &line[..line.len() - line.trim_start_matches([' ', '\t']).len()];
+        let indent = indent_at(&text, open.span.start as usize);
         if &text[ls..off - 1] == indent {
             return Some(vec![]);
         }
         Some(vec![TextEdit::new(
-            Range::new(offset_to_pos(&text, ls), offset_to_pos(&text, off - 1)),
+            range(&text, ls, off - 1),
             indent.to_string(),
         )])
     }

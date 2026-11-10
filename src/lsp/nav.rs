@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use lsp_types::*;
 
 use super::{
-    Analysis, Server, name_span, offset_to_pos, path_to_uri, pos_to_offset, span_range, uri_to_path,
+    Analysis, Server, name_span, offset_to_pos, path_to_uri, pos_to_offset, range, span_range,
+    uri_to_path,
 };
 use crate::ast::{self, ExprKind as E, StmtKind as S};
 use crate::check::index::DeclKind;
@@ -22,20 +23,19 @@ impl Server {
             Some((a, r)) => r.type_def.map(|d| (a, d)),
             None => None,
         };
-        let (a, def) = match target {
-            Some(t) => t,
-            None => {
-                let (a, fid, text) = self.fresh(&pp.text_document.uri)?;
-                let off = pos_to_offset(text, pp.position) as u32;
-                let e = a
-                    .index
-                    .exprs
-                    .iter()
-                    .filter(|e| e.span.file == fid && e.span.start <= off && off < e.span.end)
-                    .filter(|e| e.type_def.is_some())
-                    .min_by_key(|e| e.span.end - e.span.start)?;
-                (a, e.type_def?)
-            }
+        let (a, def) = if let Some(t) = target {
+            t
+        } else {
+            let (a, fid, text) = self.fresh(&pp.text_document.uri)?;
+            let off = pos_to_offset(text, pp.position) as u32;
+            let e = a
+                .index
+                .exprs
+                .iter()
+                .filter(|e| e.span.file == fid && e.span.start <= off && off < e.span.end)
+                .filter(|e| e.type_def.is_some())
+                .min_by_key(|e| e.span.end - e.span.start)?;
+            (a, e.type_def?)
         };
         let f = a.sm.file(def.file);
         let span = a
@@ -63,8 +63,7 @@ impl Server {
                 // `extern "f.c" as name {`: the alias before the brace
                 let head_end = text[x.span.start as usize..]
                     .find('{')
-                    .map(|i| x.span.start + i as u32)
-                    .unwrap_or(x.span.end);
+                    .map_or(x.span.end, |i| x.span.start + i as u32);
                 Some(Span::new(
                     x.span.file,
                     x.span.start as usize,
@@ -270,35 +269,34 @@ impl Server {
                 if !seen.insert((at_file.path.clone(), c.at.start)) {
                     continue;
                 }
-                let (ck, item) = match c
+                let (ck, item) = if let Some((s, item)) = c
                     .caller
                     .and_then(|s| Some((s, Self::hierarchy_item(a, s)?)))
                 {
-                    Some((s, item)) => ((a.sm.file(s.file).path.clone(), s.start), item),
-                    None => {
-                        // the top level of a file (or a test)
-                        let path = at_file.path.clone();
-                        let name = path
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .into_owned();
-                        let whole = Range::new(
-                            Position::new(0, 0),
-                            offset_to_pos(&at_file.text, at_file.text.len()),
-                        );
-                        let item = CallHierarchyItem {
-                            name,
-                            kind: SymbolKind::FILE,
-                            tags: None,
-                            detail: Some("top level".into()),
-                            uri: path_to_uri(&path),
-                            range: whole,
-                            selection_range: Range::new(Position::new(0, 0), Position::new(0, 0)),
-                            data: None,
-                        };
-                        ((path, u32::MAX), item)
-                    }
+                    ((a.sm.file(s.file).path.clone(), s.start), item)
+                } else {
+                    // the top level of a file (or a test)
+                    let path = at_file.path.clone();
+                    let name = path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned();
+                    let whole = Range::new(
+                        Position::new(0, 0),
+                        offset_to_pos(&at_file.text, at_file.text.len()),
+                    );
+                    let item = CallHierarchyItem {
+                        name,
+                        kind: SymbolKind::FILE,
+                        tags: None,
+                        detail: Some("top level".into()),
+                        uri: path_to_uri(&path),
+                        range: whole,
+                        selection_range: Range::new(Position::new(0, 0), Position::new(0, 0)),
+                        data: None,
+                    };
+                    ((path, u32::MAX), item)
                 };
                 by_caller
                     .entry(ck)
@@ -412,7 +410,7 @@ impl Server {
             if let Some(i) = seg.find(&quoted) {
                 let s = span.start as usize + i + 1;
                 out.push(DocumentLink {
-                    range: Range::new(offset_to_pos(&text, s), offset_to_pos(&text, s + lit.len())),
+                    range: range(&text, s, s + lit.len()),
                     target: Some(path_to_uri(&target)),
                     tooltip: Some(target.display().to_string()),
                     data: None,
@@ -439,7 +437,7 @@ impl Server {
             let lit = &text[s..s + len];
             if let Some(target) = resolve_relative(&dir, lit) {
                 out.push(DocumentLink {
-                    range: Range::new(offset_to_pos(&text, s), offset_to_pos(&text, s + len)),
+                    range: range(&text, s, s + len),
                     target: Some(path_to_uri(&target)),
                     tooltip: Some(target.display().to_string()),
                     data: None,
@@ -656,7 +654,7 @@ pub fn stmt_spans<'a>(s: &'a ast::Stmt, out: &mut dyn FnMut(Node<'a>)) {
             expr_spans(value, out);
         }
         S::FnVar { value, .. } | S::Discard(value) | S::Expr(value) | S::Throw(value) => {
-            expr_spans(value, out)
+            expr_spans(value, out);
         }
         S::Assert(e) => expr_spans(e, out),
         S::Assign { target, value } => {

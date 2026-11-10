@@ -311,13 +311,7 @@ impl Types {
             TyKind::Fixed(e, n) => format!("{}[{}]", self.show(*e), self.show_size(*n)),
             TyKind::Map(k, v) => format!("[{}]{}", self.show(*k), self.show(*v)),
             TyKind::Opt(i) => format!("{}?", self.show(*i)),
-            TyKind::ErrU(i) => {
-                if *i == VOID {
-                    "void!".into()
-                } else {
-                    format!("{}!", self.show(*i))
-                }
-            }
+            TyKind::ErrU(i) => format!("{}!", self.show(*i)),
             TyKind::Tuple(ts) => format!(
                 "({})",
                 ts.iter()

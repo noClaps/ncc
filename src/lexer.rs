@@ -152,12 +152,7 @@ pub fn comments(src: &str) -> Vec<(usize, usize)> {
             Ok(_) => {}
             Err(_) => {
                 if lx.pos <= start {
-                    lx.pos = start
-                        + src[start..]
-                            .chars()
-                            .next()
-                            .map(|c| c.len_utf8())
-                            .unwrap_or(1);
+                    lx.pos = start + src[start..].chars().next().map_or(1, char::len_utf8);
                 }
             }
         }
@@ -191,11 +186,7 @@ pub fn lex_all(src: &str, file: u32, base: usize) -> (Vec<Token>, Vec<crate::dia
                 errors.push(d);
                 if lx.pos <= start {
                     // skip one character to make progress
-                    let ch = src[start..]
-                        .chars()
-                        .next()
-                        .map(|c| c.len_utf8())
-                        .unwrap_or(1);
+                    let ch = src[start..].chars().next().map_or(1, char::len_utf8);
                     lx.pos = start + ch;
                 }
             }
@@ -343,11 +334,10 @@ impl<'a> Lexer<'a> {
                 self.pos += 1;
             }
             let mut digits: String = self.src[s..self.pos].replace('_', "");
-            let mut unsigned = false;
             // a trailing `u` suffix (`u` is never a digit in any of these radixes)
-            if digits.ends_with('u') {
+            let unsigned = digits.ends_with('u');
+            if unsigned {
                 digits.pop();
-                unsigned = true;
             }
             if digits.is_empty() {
                 return err(self.span(start), "expected digits after number prefix");
@@ -370,10 +360,11 @@ impl<'a> Lexer<'a> {
         let mant_end = self.pos;
         let mut exp: Option<i64> = None;
         if matches!(self.peek(), b'e' | b'E') {
-            let mut k = 1;
-            if matches!(self.peek_at(1), b'+' | b'-') {
-                k = 2;
-            }
+            let k = if matches!(self.peek_at(1), b'+' | b'-') {
+                2
+            } else {
+                1
+            };
             if self.peek_at(k).is_ascii_digit() {
                 let es = self.pos + 1;
                 self.pos += k;
@@ -409,22 +400,16 @@ impl<'a> Lexer<'a> {
                     crate::diag::Diag::new(self.span(start), "integer literal too large")
                 })?;
             }
-            let mut unsigned = false;
-            if self.peek() == b'u' && !self.peek_at(1).is_ascii_alphanumeric() {
-                self.pos += 1;
-                unsigned = true;
-            }
+            let unsigned = self.peek() == b'u' && !self.peek_at(1).is_ascii_alphanumeric();
+            self.pos += usize::from(unsigned);
             if self.peek().is_ascii_alphanumeric() {
                 return err(self.span(start), "invalid number literal");
             }
             return Ok(Tok::Int(v, unsigned));
         }
         let text = self.src[start..self.pos].replace('_', "");
-        let mut unsigned = false;
-        if self.peek() == b'u' && !self.peek_at(1).is_ascii_alphanumeric() {
-            self.pos += 1;
-            unsigned = true;
-        }
+        let unsigned = self.peek() == b'u' && !self.peek_at(1).is_ascii_alphanumeric();
+        self.pos += usize::from(unsigned);
         if self.peek().is_ascii_alphabetic() {
             return err(self.span(start), "invalid number literal");
         }

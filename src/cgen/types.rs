@@ -48,10 +48,6 @@ impl<'t> TypeGen<'t> {
     }
 
     /// Helper id: nominal types share their underlying type's helpers.
-    pub fn all_decls(&self) -> String {
-        format!("{}{}", self.decls, self.late_decls)
-    }
-
     pub fn hid(&self, t: TyId) -> TyId {
         self.t.base(t)
     }
@@ -67,16 +63,18 @@ impl<'t> TypeGen<'t> {
             return n.clone();
         }
         let base = match self.t.kind(t).clone() {
-            TyKind::Void => "void".into(),
-            TyKind::Never => "never".into(),
-            TyKind::Bool => "bool".into(),
-            TyKind::Byte => "byte".into(),
-            TyKind::Int => "int".into(),
-            TyKind::UInt => "uint".into(),
-            TyKind::Float => "float".into(),
-            TyKind::Char => "char".into(),
-            TyKind::Str => "str".into(),
-            TyKind::Error => "error".into(),
+            TyKind::Void
+            | TyKind::Never
+            | TyKind::Bool
+            | TyKind::Byte
+            | TyKind::Int
+            | TyKind::UInt
+            | TyKind::Float
+            | TyKind::Char
+            | TyKind::Str
+            | TyKind::Error
+            | TyKind::Struct(_)
+            | TyKind::Enum(_) => ident(&self.t.show(t)),
             TyKind::Array(e) => format!("arr_{}", self.mangle(e)),
             TyKind::Fixed(e, n) => format!("arr{n}_{}", self.mangle(e)),
             TyKind::Map(k, v) => format!("map_{}_{}", self.mangle(k), self.mangle(v)),
@@ -93,12 +91,11 @@ impl<'t> TypeGen<'t> {
             }
             TyKind::Fut(i) => format!("fut_{}", self.mangle(i)),
             TyKind::Mutex(i) => format!("mutex_{}", self.mangle(i)),
-            TyKind::Struct(_) | TyKind::Enum(_) => ident(&self.t.show(t)),
             TyKind::Named(_) => unreachable!(),
             TyKind::Const(_, v) if v < 0 => format!("m{}", -v),
             TyKind::Const(_, v) => v.to_string(),
         };
-        let mut name = base.clone();
+        let mut name = base;
         if name.len() > 60 {
             name = format!("{}_{t}", &name[..40]);
         }
@@ -366,7 +363,7 @@ impl<'t> TypeGen<'t> {
                 s("return nc_hash_u64(x);"),
                 s("nc_sb_bool(sb, x);"),
             ),
-            TyKind::Byte => (
+            TyKind::Byte | TyKind::UInt => (
                 s(""),
                 s(""),
                 s("return a == b;"),
@@ -379,13 +376,6 @@ impl<'t> TypeGen<'t> {
                 s("return a == b;"),
                 s("return nc_hash_u64((uint64_t)x);"),
                 s("nc_sb_i64(sb, x);"),
-            ),
-            TyKind::UInt => (
-                s(""),
-                s(""),
-                s("return a == b;"),
-                s("return nc_hash_u64(x);"),
-                s("nc_sb_u64(sb, x);"),
             ),
             TyKind::Char => (
                 s(""),
@@ -635,7 +625,7 @@ pub fn c_escape_bytes(b: &[u8]) -> String {
                 out.push(c as char);
             }
             _ => {
-                write!(out, "\\{:03o}", c).unwrap();
+                write!(out, "\\{c:03o}").unwrap();
                 prev_octal = true;
                 continue;
             }

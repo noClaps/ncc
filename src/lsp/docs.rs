@@ -120,11 +120,11 @@ pub const KEYWORD_DOCS: &[(&str, &str)] = &[
 /// The raw doc comment lines (without `///`) above the line that contains `span.start`.
 fn doc_lines(text: &str, span: Span) -> Vec<&str> {
     let start = (span.start as usize).min(text.len());
-    let line_start = text[..start].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let line_start = text[..start].rfind('\n').map_or(0, |i| i + 1);
     let mut lines = Vec::new();
     let mut end = line_start;
     while end > 0 {
-        let prev_start = text[..end - 1].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let prev_start = text[..end - 1].rfind('\n').map_or(0, |i| i + 1);
         let line = text[prev_start..end - 1].trim();
         let Some(rest) = line.strip_prefix("///") else {
             break;
@@ -206,7 +206,7 @@ pub fn param_docs(doc: &str) -> Vec<String> {
     list.lines()
         .take_while(|l| !l.starts_with("**Returns**"))
         .filter_map(|l| l.strip_prefix("- "))
-        .map(|s| s.to_string())
+        .map(ToString::to_string)
         .collect()
 }
 
