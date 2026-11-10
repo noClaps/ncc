@@ -32,6 +32,23 @@ pub fn find_root(start: &Path) -> Option<PathBuf> {
     None
 }
 
+/// The file an import path names, from the importing file's directory: `./x` and `../x` are
+/// relative, `.../x` is from the project root and anything else is a dependency. `None` when
+/// the path needs the project root (given lazily by `root`) and there is none.
+pub fn import_file(
+    dir: &Path,
+    path: &str,
+    root: impl FnOnce() -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    Some(if let Some(rel) = path.strip_prefix(".../") {
+        root()?.join(format!("{rel}.nc"))
+    } else if path.starts_with("./") || path.starts_with("../") {
+        dir.join(format!("{}.nc", path.strip_prefix("./").unwrap_or(path)))
+    } else {
+        root()?.join(".nc").join("deps").join(format!("{path}.nc"))
+    })
+}
+
 /// Load the module graph, preferring in-memory contents from `overlay` (keyed by canonical path).
 /// Every parse and import error across all modules is reported.
 /// Returns the graph of everything that could be loaded together with those errors; fails
@@ -145,34 +162,21 @@ impl Loader<'_> {
             .collect();
         let dir = path.parent().unwrap().to_path_buf();
         for im in imports {
-            let from_root = im.path.strip_prefix(".../");
-            let target = if from_root.is_none()
-                && (im.path.starts_with("./") || im.path.starts_with("../"))
-            {
-                dir.join(format!(
-                    "{}.nc",
-                    im.path.strip_prefix("./").unwrap_or(&im.path)
-                ))
-            } else {
-                if self.root.is_none() {
-                    self.root = Some(find_root(&self.entry_dir));
-                }
-                if let Some(r) = self.root.as_ref().unwrap() {
-                    match from_root {
-                        Some(rel) => r.join(format!("{rel}.nc")),
-                        None => r.join(".nc").join("deps").join(format!("{}.nc", im.path)),
-                    }
-                } else {
-                    self.errors.push(Diag::new(
-                        im.span,
-                        format!(
-                            "cannot resolve import `{}`: no `.nc/config.toml` found in `{}` or any parent directory",
-                            im.path,
-                            self.entry_dir.display()
-                        ),
-                    ));
-                    continue;
-                }
+            let root = &mut self.root;
+            let entry_dir = &self.entry_dir;
+            let target = import_file(&dir, &im.path, || {
+                root.get_or_insert_with(|| find_root(entry_dir)).clone()
+            });
+            let Some(target) = target else {
+                self.errors.push(Diag::new(
+                    im.span,
+                    format!(
+                        "cannot resolve import `{}`: no `.nc/config.toml` found in `{}` or any parent directory",
+                        im.path,
+                        self.entry_dir.display()
+                    ),
+                ));
+                continue;
             };
             let Ok(target) = std::fs::canonicalize(&target) else {
                 self.errors.push(Diag::new(

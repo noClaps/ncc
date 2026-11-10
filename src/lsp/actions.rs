@@ -32,7 +32,6 @@ const UNREACHABLE_BRANCH: &str = "unreachable-branch";
 fn unused_imports(text: &str) -> Vec<(Span, Span, String)> {
     let (module, _) = crate::parser::parse_module_recover(text, 0);
     let (toks, _) = crate::lexer::lex_all(text, 0, 0);
-    let mut used: HashSet<&str> = HashSet::new();
     let note = |toks: &[crate::lexer::Token], used: &mut HashSet<String>| {
         for (i, t) in toks.iter().enumerate() {
             if let Tok::Ident(n) = &t.tok
@@ -42,24 +41,23 @@ fn unused_imports(text: &str) -> Vec<(Span, Span, String)> {
             }
         }
     };
-    let mut used_owned = HashSet::new();
-    note(&toks, &mut used_owned);
+    let mut used = HashSet::new();
+    note(&toks, &mut used);
     // names used inside string interpolations
     for t in &toks {
         if let Tok::Str(parts) = &t.tok {
             for p in parts {
                 if let crate::lexer::StrPart::Expr(src, off) = p {
                     let (inner, _) = crate::lexer::lex_all(src, 0, *off);
-                    note(&inner, &mut used_owned);
+                    note(&inner, &mut used);
                 }
             }
         }
     }
-    used.extend(used_owned.iter().map(String::as_str));
     let mut out = Vec::new();
     for it in &module.items {
         if let ast::Item::Import(im) = it
-            && !used.contains(im.alias.as_str())
+            && !used.contains(&im.alias)
         {
             let ns = name_span(text, im.span, &im.alias, false).unwrap_or(im.span);
             out.push((im.span, ns, im.alias.clone()));
@@ -505,10 +503,9 @@ impl Server {
                         }
                         // a call to a function that does not exist yet
                         if text[s + i + name.len()..].starts_with('(')
-                            && let Some(x) =
-                                self.generate_function(a, fid, &module, &text, s + i, name, &uri)
+                            && let Some(mut x) =
+                                generate_function(a, fid, &module, &text, s + i, name, &uri)
                         {
-                            let mut x = x;
                             if let CodeActionOrCommand::CodeAction(ca) = &mut x {
                                 ca.diagnostics = Some(vec![d.clone()]);
                             }
@@ -562,7 +559,13 @@ impl Server {
                 }
             } else if msg.starts_with("missing field `") && msg.contains("` in `") {
                 if let Some(a) = fresh.map(|f| f.0)
-                    && let Some(edit) = self.add_missing_fields(a, &module, &text, d)
+                    && let Some(edit) = add_missing_fields(
+                        a,
+                        &module,
+                        &text,
+                        pos_to_offset(&text, d.range.start) as u32,
+                        default_value,
+                    )
                 {
                     out.push(action(
                         "Add missing fields".into(),
@@ -599,7 +602,8 @@ impl Server {
                         close
                     };
                     let lead = if at == close { "\n" } else { "" };
-                    let missing = fresh.and_then(|(a, ..)| self.missing_variants(a, ife, &text));
+                    let missing =
+                        fresh.and_then(|(a, fid, _)| missing_variants(a, fid, ife, &text));
                     if let Some(vs) = missing.filter(|v| !v.is_empty()) {
                         let arms: String = vs
                             .iter()
@@ -669,483 +673,414 @@ impl Server {
                 pos_to_offset(ftext, p.range.start) as u32,
                 pos_to_offset(ftext, p.range.end) as u32,
             );
-            if let Some(x) = self.extract_variable(a, fid, &module, ftext, s, e, &uri) {
-                out.push(x);
-            }
-            if let Some(x) = self.inline_variable(a, fid, &module, ftext, s, &uri) {
-                out.push(x);
-            }
-            if let Some(x) = self.match_on_value(a, fid, &module, ftext, s, &uri) {
-                out.push(x);
-            }
+            out.extend(extract_variable(a, fid, &module, ftext, s, e, &uri));
+            out.extend(inline_variable(a, fid, &module, ftext, s, &uri));
+            out.extend(match_on_value(a, fid, &module, ftext, s, &uri));
         }
         out.extend(self.more_actions(&p, &module, &text));
         Some(out)
     }
+}
 
-    /// The `.field = value` entries missing from the struct literal of a diagnostic.
-    fn add_missing_fields(
-        &self,
-        a: &Analysis,
-        module: &ast::Module,
-        text: &str,
-        d: &Diagnostic,
-    ) -> Option<TextEdit> {
-        let off = pos_to_offset(text, d.range.start) as u32;
-        let mut lit: Option<&ast::Expr> = None;
-        walk(module, &mut |n| {
-            if let Node::Expr(e) = n
-                && let E::Struct(..) = &e.kind
-                && e.span.start <= off
-                && off < e.span.end
-                && lit.is_none_or(|l| l.span.start <= e.span.start)
-            {
-                lit = Some(e);
-            }
-        });
-        let lit = lit?;
-        let E::Struct(tyx, fields) = &lit.kind else {
-            return None;
-        };
-        // the literal failed to check, so it has no recorded type: find the struct by name
-        let mut t = tyx.as_ref();
-        if let E::Generic(inner, _) = &t.kind {
-            t = inner;
-        }
-        let name = match &t.kind {
-            E::Ident(n) | E::Field(_, n) => n,
-            _ => return None,
-        };
-        let decl = a
-            .index
-            .decls
-            .iter()
-            .filter(|d| &d.name == name && d.kind == DeclKind::Struct)
-            .max_by_key(|d| d.span.file == lit.span.file)?;
-        let members = a.index.types.get(decl.ty.as_ref()?)?;
-        let present: HashSet<&str> = fields.iter().map(|f| f.0.as_str()).collect();
-        let missing: Vec<String> = members
-            .iter()
-            .filter(|m| !present.contains(m.name.as_str()))
-            .map(|m| format!(".{} = {}", m.name, default_value(&m.ty)))
-            .collect();
-        if missing.is_empty() {
-            return None;
-        }
-        let end = lit.span.end as usize;
-        let close = text[..end].rfind('}')?;
-        let inner = text[..close].trim_end();
-        let multiline = text[lit.span.start as usize..close].contains('\n');
-        if multiline {
-            let indent = fields.first().map_or_else(
-                || format!("{}  ", indent_at(text, lit.span.start as usize)),
-                |f| indent_at(text, f.2.start as usize).to_string(),
-            );
-            let comma = if inner.ends_with(',') || inner.ends_with('{') {
-                ""
-            } else {
-                ","
-            };
-            let body: Vec<String> = missing.iter().map(|m| format!("{indent}{m},")).collect();
-            let at = inner.len();
-            return Some(TextEdit::new(
-                range(text, at, at),
-                format!("{comma}\n{}", body.join("\n")),
-            ));
-        }
-        let sep = if inner.ends_with('{') { "" } else { ", " };
-        let at = inner.len();
-        Some(TextEdit::new(
-            range(text, at, at),
-            format!("{sep}{}", missing.join(", ")),
-        ))
-    }
-
-    /// Variants of the enum matched by an `if` that no branch names.
-    fn missing_variants(&self, a: &Analysis, ife: &ast::IfExpr, text: &str) -> Option<Vec<String>> {
-        let scrut = ife.scrutinee.as_ref()?;
-        let ty = a
-            .index
-            .exprs
-            .iter()
-            .find(|x| x.span.start == scrut.span.start && x.span.end == scrut.span.end)?;
-        let def = ty.type_def?;
-        let decl = a.decl(def)?;
-        if decl.kind != DeclKind::Enum || ty.ty.ends_with("[]") {
-            return None;
-        }
-        // variant names a branch matches with `Enum.Variant` or `Enum.Variant(...)`
-        let mut named = HashSet::new();
-        for arm in &ife.arms {
-            for p in &arm.patterns {
-                let mut pe = p;
-                if let E::Call(c, _) = &pe.kind {
-                    pe = c;
-                }
-                if let E::Field(_, v) = &pe.kind {
-                    named.insert(v.clone());
-                }
-                if matches!(p.kind, E::Wildcard) {
-                    return Some(vec![]);
-                }
-            }
-        }
-        // the enum's name as written in the scrutinee's module (`Status`, `m.Status`)
-        let prefix = ife
-            .arms
-            .iter()
-            .flat_map(|a| &a.patterns)
-            .find_map(|p| {
-                let pe = if let E::Call(c, _) = &p.kind { c } else { p };
-                if let E::Field(b, _) = &pe.kind {
-                    Some(text[b.span.start as usize..b.span.end as usize].to_string())
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| decl.name.clone());
-        Some(
-            decl.members
-                .iter()
-                .filter(|(m, _)| !named.contains(m))
-                .map(|(m, detail)| {
-                    let arity = detail
-                        .split_once('(')
-                        .map_or(0, |(_, ps)| ps.trim_end_matches(')').split(',').count());
-                    if arity == 0 {
-                        format!("{prefix}.{m}")
-                    } else {
-                        format!("{prefix}.{m}({})", vec!["_"; arity].join(", "))
-                    }
-                })
-                .collect(),
-        )
-    }
-
-    /// "Extract into a variable" for a selection that is exactly a typed expression.
-    #[allow(clippy::too_many_arguments, clippy::mutable_key_type)]
-    fn extract_variable(
-        &self,
-        a: &Analysis,
-        fid: u32,
-        module: &ast::Module,
-        text: &str,
-        s: u32,
-        e: u32,
-        uri: &Uri,
-    ) -> Option<CodeActionOrCommand> {
-        if s >= e {
-            return None;
-        }
-        let x = a
-            .index
-            .exprs
-            .iter()
-            .find(|x| x.span.file == fid && x.span.start == s && x.span.end == e)?;
-        if matches!(x.ty.as_str(), "void" | "never") || x.ty.starts_with("fn") {
-            return None;
-        }
-        let st = block_stmt_around(module, s, e)?;
-        // a pattern, or a condition evaluated on every loop iteration, cannot be extracted
-        if let S::While { cond, .. } = &st.kind
-            && cond.span.start <= s
-            && e <= cond.span.end
+/// The `.field = value` entries missing from the struct literal or pattern around `off`, with
+/// `value(field type)` as each value.
+pub(super) fn add_missing_fields(
+    a: &Analysis,
+    module: &ast::Module,
+    text: &str,
+    off: u32,
+    value: impl Fn(&str) -> String,
+) -> Option<TextEdit> {
+    let mut lit: Option<&ast::Expr> = None;
+    walk(module, &mut |n| {
+        if let Node::Expr(e) = n
+            && let E::Struct(..) = &e.kind
+            && e.span.start <= off
+            && off < e.span.end
+            && lit.is_none_or(|l| l.span.start <= e.span.start)
         {
-            return None;
+            lit = Some(e);
         }
-        let taken: HashSet<String> = super::complete::visible_names(a, fid, s as usize)
-            .into_iter()
-            .collect();
-        let mut name = "value".to_string();
-        let mut k = 2;
-        while taken.contains(&name) {
-            name = format!("value{k}");
-            k += 1;
-        }
-        let at = line_start(text, st.span.start as usize);
-        let indent = indent_at(text, st.span.start as usize);
-        let expr = &text[s as usize..e as usize];
-        let decl = format!("{indent}{} {name} = {expr}\n", x.ty);
-        Some(edit_action(
-            "Extract into a variable".into(),
-            CodeActionKind::REFACTOR_EXTRACT,
-            vec![
-                (uri.clone(), TextEdit::new(range(text, at, at), decl)),
-                (
-                    uri.clone(),
-                    TextEdit::new(range(text, s as usize, e as usize), name),
-                ),
-            ],
-            None,
-        ))
+    });
+    let lit = lit?;
+    let E::Struct(tyx, fields) = &lit.kind else {
+        return None;
+    };
+    // the literal failed to check, so it has no recorded type: find the struct by name
+    let mut t = tyx.as_ref();
+    if let E::Generic(inner, _) = &t.kind {
+        t = inner;
     }
-
-    /// "Generate function" for a call to an unknown name: a function after the current item,
-    /// with parameters typed from the arguments and the return type from the context.
-    #[allow(clippy::too_many_arguments, clippy::mutable_key_type)]
-    fn generate_function(
-        &self,
-        a: &Analysis,
-        fid: u32,
-        module: &ast::Module,
-        text: &str,
-        at: usize,
-        name: &str,
-        uri: &Uri,
-    ) -> Option<CodeActionOrCommand> {
-        let at = at as u32;
-        let mut call: Option<&ast::Expr> = None;
-        walk(module, &mut |n| {
-            if let Node::Expr(e) = n
-                && let E::Call(c, _) = &e.kind
-                && matches!(&c.kind, E::Ident(n) if n == name)
-                && c.span.start == at
-            {
-                call = Some(e);
-            }
-        });
-        let call = call?;
-        let E::Call(_, args) = &call.kind else {
-            return None;
-        };
-        let visible = super::complete::visible(a, fid, at as usize);
-        let mut params = Vec::new();
-        let mut used = HashSet::new();
-        for (i, arg) in args.iter().enumerate() {
-            let ty = match &arg.kind {
-                E::Int(..) => Some("int".to_string()),
-                E::Float(_) => Some("float".into()),
-                E::Str(_) => Some("str".into()),
-                E::Bool(_) => Some("bool".into()),
-                E::Char(_) => Some("char".into()),
-                E::Ident(n) => visible
-                    .iter()
-                    .find(|d| &d.name == n)
-                    .and_then(|d| d.ty.clone()),
-                _ => None,
-            }
-            .or_else(|| {
-                a.index
-                    .exprs
-                    .iter()
-                    .find(|x| x.span.start == arg.span.start && x.span.end == arg.span.end)
-                    .map(|x| x.ty.clone())
-            })
-            .unwrap_or_else(|| "int".into());
-            let mut pname = match &arg.kind {
-                E::Ident(n) | E::Field(_, n) => n.clone(),
-                _ => format!("arg{}", i + 1),
-            };
-            while !used.insert(pname.clone()) {
-                pname.push('_');
-            }
-            params.push(format!("{ty} {pname}"));
-        }
-        // the return type: the declared type of `T x = name(...)`, or the enclosing function's
-        // return type for `return name(...)`
-        let mut ret: Option<String> = None;
-        walk(module, &mut |n| {
-            if let Node::Stmt(st) = n
-                && let S::VarDecl { targets, value, .. } = &st.kind
-                && targets.len() == 1
-                && value.span == call.span
-            {
-                let t = targets[0].ty.span();
-                ret = Some(text[t.start as usize..t.end as usize].to_string());
-            }
-        });
-        if ret.is_none() {
-            // `return name(...)` inside a function with a return type
-            let mut fsig: Option<&ast::FnSig> = None;
-            let mut is_return = false;
-            walk(module, &mut |n| match n {
-                Node::Fn(sig) if sig.span.start <= at => {
-                    if fsig.is_none_or(|f| f.span.start < sig.span.start) {
-                        fsig = Some(sig);
-                    }
-                }
-                Node::Stmt(st) => {
-                    if let S::Return(Some(v)) = &st.kind
-                        && v.span == call.span
-                    {
-                        is_return = true;
-                    }
-                }
-                _ => {}
-            });
-            if is_return && let Some(r) = fsig.and_then(|f| f.ret.as_ref()) {
-                let sp = r.span();
-                ret = Some(text[sp.start as usize..sp.end as usize].to_string());
-            }
-        }
-        // after the top-level item containing the call
-        let mut item_end = text.len();
-        for it in &module.items {
-            let mut lo = u32::MAX;
-            let mut hi = 0;
-            super::nav::item_spans(it, &mut |n| {
-                if let Node::Span(sp) = n {
-                    lo = lo.min(sp.start);
-                    hi = hi.max(sp.end);
-                }
-            });
-            if lo <= at && at <= hi {
-                item_end = line_end(text, hi as usize);
-            }
-        }
-        let ret = ret.map(|r| format!(" {r}")).unwrap_or_default();
-        let lead = if text[..item_end].ends_with('\n') {
+    let name = match &t.kind {
+        E::Ident(n) | E::Field(_, n) => n,
+        _ => return None,
+    };
+    let decl = a
+        .index
+        .decls
+        .iter()
+        .filter(|d| &d.name == name && d.kind == DeclKind::Struct)
+        .max_by_key(|d| d.span.file == lit.span.file)?;
+    let members = a.index.types.get(decl.ty.as_ref()?)?;
+    let present: HashSet<&str> = fields.iter().map(|f| f.0.as_str()).collect();
+    let missing: Vec<String> = members
+        .iter()
+        .filter(|m| !present.contains(m.name.as_str()))
+        .map(|m| format!(".{} = {}", m.name, value(&m.ty)))
+        .collect();
+    if missing.is_empty() {
+        return None;
+    }
+    let end = lit.span.end as usize;
+    let close = text[..end].rfind('}')?;
+    let inner = text[..close].trim_end();
+    let multiline = text[lit.span.start as usize..close].contains('\n');
+    if multiline {
+        let indent = fields.first().map_or_else(
+            || format!("{}  ", indent_at(text, lit.span.start as usize)),
+            |f| indent_at(text, f.2.start as usize).to_string(),
+        );
+        let comma = if inner.ends_with(',') || inner.ends_with('{') {
             ""
         } else {
-            "\n"
+            ","
         };
-        let body = format!("{lead}\nfn {name}({}){ret} {{\n}}\n", params.join(", "));
-        Some(edit_action(
-            format!("Generate function `{name}`"),
-            CodeActionKind::QUICKFIX,
-            vec![(
-                uri.clone(),
-                TextEdit::new(range(text, item_end, item_end), body),
-            )],
-            None,
-        ))
+        let body: Vec<String> = missing.iter().map(|m| format!("{indent}{m},")).collect();
+        let at = inner.len();
+        return Some(TextEdit::new(
+            range(text, at, at),
+            format!("{comma}\n{}", body.join("\n")),
+        ));
     }
+    let sep = if inner.ends_with('{') { "" } else { ", " };
+    let at = inner.len();
+    Some(TextEdit::new(
+        range(text, at, at),
+        format!("{sep}{}", missing.join(", ")),
+    ))
+}
 
-    /// "Match on `x`" for a variable of an enum type: an `if` with a branch per variant after the
-    /// statement at the cursor.
-    #[allow(clippy::mutable_key_type)]
-    fn match_on_value(
-        &self,
-        a: &Analysis,
-        fid: u32,
-        module: &ast::Module,
-        text: &str,
-        off: u32,
-        uri: &Uri,
-    ) -> Option<CodeActionOrCommand> {
-        let r = a
-            .index
-            .refs
-            .iter()
-            .filter(|r| r.span.file == fid && r.span.start <= off && off <= r.span.end)
-            .min_by_key(|r| r.span.end - r.span.start)?;
-        let d = a.decl(r.def?)?;
-        if d.kind != DeclKind::Variable {
-            return None;
-        }
-        let edecl = a.decl(r.type_def?)?;
-        // only plain enum values (not arrays or optionals of them)
-        if edecl.kind != DeclKind::Enum || d.ty.as_deref() != Some(edecl.name.as_str()) {
-            return None;
-        }
-        let st = block_stmt_around(module, off, off)?;
-        let indent = indent_at(text, st.span.start as usize);
-        let body = super::refactor::enum_match(a, fid, edecl, &d.name, indent)?;
-        let at = line_end(text, st.span.end as usize);
-        let lead = if text[..at].ends_with('\n') { "" } else { "\n" };
-        Some(edit_action(
-            format!("Match on `{}`", d.name),
-            CodeActionKind::REFACTOR_REWRITE,
-            vec![(
-                uri.clone(),
-                TextEdit::new(range(text, at, at), format!("{lead}{body}")),
-            )],
-            None,
-        ))
+/// Variants of the enum matched by an `if` that no branch names.
+fn missing_variants(a: &Analysis, fid: u32, ife: &ast::IfExpr, text: &str) -> Option<Vec<String>> {
+    let scrut = ife.scrutinee.as_ref()?;
+    let ty = a.expr_ty(fid, scrut.span.start, scrut.span.end)?;
+    let def = ty.type_def?;
+    let decl = a.decl(def)?;
+    if decl.kind != DeclKind::Enum || ty.ty.ends_with("[]") {
+        return None;
     }
-
-    /// "Inline variable" on an immutable variable declared with a single name.
-    #[allow(clippy::mutable_key_type)]
-    fn inline_variable(
-        &self,
-        a: &Analysis,
-        fid: u32,
-        module: &ast::Module,
-        text: &str,
-        off: u32,
-        uri: &Uri,
-    ) -> Option<CodeActionOrCommand> {
-        let r = a
-            .index
-            .refs
-            .iter()
-            .filter(|r| r.span.file == fid && r.span.start <= off && off <= r.span.end)
-            .min_by_key(|r| r.span.end - r.span.start)?;
-        let def = r.def?;
-        let d = a.decl(def)?;
-        if d.kind != DeclKind::Variable || d.mutable || def.file != fid {
-            return None;
-        }
-        // its declaration statement
-        let mut decl: Option<(&ast::Stmt, &ast::Expr)> = None;
-        walk(module, &mut |n| {
-            if let Node::Stmt(st) = n
-                && let S::VarDecl {
-                    targets,
-                    value,
-                    mutex: false,
-                    public: false,
-                    ..
-                } = &st.kind
-                && targets.len() == 1
-                && targets[0].span == def
-            {
-                decl = Some((st, value));
+    // variant names a branch matches with `Enum.Variant` or `Enum.Variant(...)`
+    let mut named = HashSet::new();
+    for arm in &ife.arms {
+        for p in &arm.patterns {
+            let mut pe = p;
+            if let E::Call(c, _) = &pe.kind {
+                pe = c;
             }
-        });
-        if decl.is_none() {
-            for it in &module.items {
-                if let ast::Item::Stmt(st) = it
-                    && let S::VarDecl {
-                        targets,
-                        value,
-                        mutex: false,
-                        public: false,
-                        ..
-                    } = &st.kind
-                    && targets.len() == 1
-                    && targets[0].span == def
-                {
-                    decl = Some((st, value));
+            if let E::Field(_, v) = &pe.kind {
+                named.insert(v.clone());
+            }
+            if matches!(p.kind, E::Wildcard) {
+                return Some(vec![]);
+            }
+        }
+    }
+    // the enum's name as written in the scrutinee's module (`Status`, `m.Status`)
+    let prefix = ife
+        .arms
+        .iter()
+        .flat_map(|a| &a.patterns)
+        .find_map(|p| {
+            let pe = if let E::Call(c, _) = &p.kind { c } else { p };
+            if let E::Field(b, _) = &pe.kind {
+                Some(text[b.span.start as usize..b.span.end as usize].to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| decl.name.clone());
+    Some(
+        decl.members
+            .iter()
+            .filter(|(m, _)| !named.contains(m))
+            .map(|(m, detail)| super::refactor::variant_pattern(&prefix, m, detail))
+            .collect(),
+    )
+}
+
+/// "Extract into a variable" for a selection that is exactly a typed expression.
+#[allow(clippy::too_many_arguments, clippy::mutable_key_type)]
+fn extract_variable(
+    a: &Analysis,
+    fid: u32,
+    module: &ast::Module,
+    text: &str,
+    s: u32,
+    e: u32,
+    uri: &Uri,
+) -> Option<CodeActionOrCommand> {
+    if s >= e {
+        return None;
+    }
+    let x = a.expr_ty(fid, s, e)?;
+    if matches!(x.ty.as_str(), "void" | "never") || x.ty.starts_with("fn") {
+        return None;
+    }
+    let st = block_stmt_around(module, s, e)?;
+    // a pattern, or a condition evaluated on every loop iteration, cannot be extracted
+    if let S::While { cond, .. } = &st.kind
+        && cond.span.start <= s
+        && e <= cond.span.end
+    {
+        return None;
+    }
+    let taken: HashSet<String> = super::complete::visible_names(a, fid, s as usize)
+        .into_iter()
+        .collect();
+    let mut name = "value".to_string();
+    let mut k = 2;
+    while taken.contains(&name) {
+        name = format!("value{k}");
+        k += 1;
+    }
+    let at = line_start(text, st.span.start as usize);
+    let indent = indent_at(text, st.span.start as usize);
+    let expr = &text[s as usize..e as usize];
+    let decl = format!("{indent}{} {name} = {expr}\n", x.ty);
+    Some(edit_action(
+        "Extract into a variable".into(),
+        CodeActionKind::REFACTOR_EXTRACT,
+        vec![
+            (uri.clone(), TextEdit::new(range(text, at, at), decl)),
+            (
+                uri.clone(),
+                TextEdit::new(range(text, s as usize, e as usize), name),
+            ),
+        ],
+        None,
+    ))
+}
+
+/// "Generate function" for a call to an unknown name: a function after the current item,
+/// with parameters typed from the arguments and the return type from the context.
+#[allow(clippy::too_many_arguments, clippy::mutable_key_type)]
+fn generate_function(
+    a: &Analysis,
+    fid: u32,
+    module: &ast::Module,
+    text: &str,
+    at: usize,
+    name: &str,
+    uri: &Uri,
+) -> Option<CodeActionOrCommand> {
+    let at = at as u32;
+    let mut call: Option<&ast::Expr> = None;
+    walk(module, &mut |n| {
+        if let Node::Expr(e) = n
+            && let E::Call(c, _) = &e.kind
+            && matches!(&c.kind, E::Ident(n) if n == name)
+            && c.span.start == at
+        {
+            call = Some(e);
+        }
+    });
+    let call = call?;
+    let E::Call(_, args) = &call.kind else {
+        return None;
+    };
+    let visible = super::complete::visible(a, fid, at as usize);
+    let mut params = Vec::new();
+    let mut used = HashSet::new();
+    for (i, arg) in args.iter().enumerate() {
+        let ty = match &arg.kind {
+            E::Int(..) => Some("int".to_string()),
+            E::Float(_) => Some("float".into()),
+            E::Str(_) => Some("str".into()),
+            E::Bool(_) => Some("bool".into()),
+            E::Char(_) => Some("char".into()),
+            E::Ident(n) => visible
+                .iter()
+                .find(|d| &d.name == n)
+                .and_then(|d| d.ty.clone()),
+            _ => None,
+        }
+        .or_else(|| {
+            a.expr_ty(fid, arg.span.start, arg.span.end)
+                .map(|x| x.ty.clone())
+        })
+        .unwrap_or_else(|| "int".into());
+        let mut pname = match &arg.kind {
+            E::Ident(n) | E::Field(_, n) => n.clone(),
+            _ => format!("arg{}", i + 1),
+        };
+        while !used.insert(pname.clone()) {
+            pname.push('_');
+        }
+        params.push(format!("{ty} {pname}"));
+    }
+    // the return type: the declared type of `T x = name(...)`, or the enclosing function's
+    // return type for `return name(...)`
+    let mut ret: Option<String> = None;
+    walk(module, &mut |n| {
+        if let Node::Stmt(st) = n
+            && let S::VarDecl { targets, value, .. } = &st.kind
+            && targets.len() == 1
+            && value.span == call.span
+        {
+            let t = targets[0].ty.span();
+            ret = Some(text[t.start as usize..t.end as usize].to_string());
+        }
+    });
+    if ret.is_none() {
+        // `return name(...)` inside a function with a return type
+        let mut fsig: Option<&ast::FnSig> = None;
+        let mut is_return = false;
+        walk(module, &mut |n| match n {
+            Node::Fn(sig) if sig.span.start <= at => {
+                if fsig.is_none_or(|f| f.span.start < sig.span.start) {
+                    fsig = Some(sig);
                 }
             }
+            Node::Stmt(st) => {
+                if let S::Return(Some(v)) = &st.kind
+                    && v.span == call.span
+                {
+                    is_return = true;
+                }
+            }
+            _ => {}
+        });
+        if is_return && let Some(r) = fsig.and_then(|f| f.ret.as_ref()) {
+            let sp = r.span();
+            ret = Some(text[sp.start as usize..sp.end as usize].to_string());
         }
-        let (st, value) = decl?;
-        let uses: Vec<Span> = {
-            let mut seen = HashSet::new();
-            a.index
-                .refs
-                .iter()
-                .filter(|r| r.def == Some(def) && r.span != def && seen.insert(r.span))
-                .map(|r| r.span)
-                .collect()
-        };
-        // used from another file (a module-level variable): leave it
-        if uses.is_empty() || uses.iter().any(|u| u.file != fid) {
-            return None;
-        }
-        let vtext = &text[value.span.start as usize..value.span.end as usize];
-        let replacement = if atomic(value) {
-            vtext.to_string()
-        } else {
-            format!("({vtext})")
-        };
-        let mut edits: Vec<TextEdit> = uses
-            .iter()
-            .map(|u| TextEdit::new(span_range(text, *u), replacement.clone()))
-            .collect();
-        let (ls, le) = (
-            line_start(text, st.span.start as usize),
-            line_end(text, st.span.end as usize),
-        );
-        edits.push(TextEdit::new(range(text, ls, le), String::new()));
-        Some(edit_action(
-            format!("Inline `{}`", d.name),
-            CodeActionKind::REFACTOR_INLINE,
-            edits.into_iter().map(|e| (uri.clone(), e)).collect(),
-            None,
-        ))
     }
+    // after the top-level item containing the call
+    let item_end = super::refactor::item_extent(module, at)
+        .map_or(text.len(), |(_, hi)| line_end(text, hi as usize));
+    let ret = ret.map(|r| format!(" {r}")).unwrap_or_default();
+    let lead = if text[..item_end].ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    let body = format!("{lead}\nfn {name}({}){ret} {{\n}}\n", params.join(", "));
+    Some(edit_action(
+        format!("Generate function `{name}`"),
+        CodeActionKind::QUICKFIX,
+        vec![(
+            uri.clone(),
+            TextEdit::new(range(text, item_end, item_end), body),
+        )],
+        None,
+    ))
+}
+
+/// "Match on `x`" for a variable of an enum type: an `if` with a branch per variant after the
+/// statement at the cursor.
+#[allow(clippy::mutable_key_type)]
+fn match_on_value(
+    a: &Analysis,
+    fid: u32,
+    module: &ast::Module,
+    text: &str,
+    off: u32,
+    uri: &Uri,
+) -> Option<CodeActionOrCommand> {
+    let r = a.ref_at(fid, off)?;
+    let d = a.decl(r.def?)?;
+    if d.kind != DeclKind::Variable {
+        return None;
+    }
+    let edecl = a.decl(r.type_def?)?;
+    // only plain enum values (not arrays or optionals of them)
+    if edecl.kind != DeclKind::Enum || d.ty.as_deref() != Some(edecl.name.as_str()) {
+        return None;
+    }
+    let st = block_stmt_around(module, off, off)?;
+    let indent = indent_at(text, st.span.start as usize);
+    let body = super::refactor::enum_match(a, fid, edecl, &d.name, indent)?;
+    let at = line_end(text, st.span.end as usize);
+    let lead = if text[..at].ends_with('\n') { "" } else { "\n" };
+    Some(edit_action(
+        format!("Match on `{}`", d.name),
+        CodeActionKind::REFACTOR_REWRITE,
+        vec![(
+            uri.clone(),
+            TextEdit::new(range(text, at, at), format!("{lead}{body}")),
+        )],
+        None,
+    ))
+}
+
+/// "Inline variable" on an immutable variable declared with a single name.
+#[allow(clippy::mutable_key_type)]
+fn inline_variable(
+    a: &Analysis,
+    fid: u32,
+    module: &ast::Module,
+    text: &str,
+    off: u32,
+    uri: &Uri,
+) -> Option<CodeActionOrCommand> {
+    let r = a.ref_at(fid, off)?;
+    let def = r.def?;
+    let d = a.decl(def)?;
+    if d.kind != DeclKind::Variable || d.mutable || def.file != fid {
+        return None;
+    }
+    // its declaration statement
+    let mut decl: Option<(&ast::Stmt, &ast::Expr)> = None;
+    walk(module, &mut |n| {
+        if let Node::Stmt(st) = n
+            && let S::VarDecl {
+                targets,
+                value,
+                mutex: false,
+                public: false,
+                ..
+            } = &st.kind
+            && targets.len() == 1
+            && targets[0].span == def
+        {
+            decl = Some((st, value));
+        }
+    });
+    let (st, value) = decl?;
+    let uses: Vec<Span> = {
+        let mut seen = HashSet::new();
+        a.index
+            .refs
+            .iter()
+            .filter(|r| r.def == Some(def) && r.span != def && seen.insert(r.span))
+            .map(|r| r.span)
+            .collect()
+    };
+    // used from another file (a module-level variable): leave it
+    if uses.is_empty() || uses.iter().any(|u| u.file != fid) {
+        return None;
+    }
+    let vtext = &text[value.span.start as usize..value.span.end as usize];
+    let replacement = if atomic(value) {
+        vtext.to_string()
+    } else {
+        format!("({vtext})")
+    };
+    let mut edits: Vec<TextEdit> = uses
+        .iter()
+        .map(|u| TextEdit::new(span_range(text, *u), replacement.clone()))
+        .collect();
+    let (ls, le) = (
+        line_start(text, st.span.start as usize),
+        line_end(text, st.span.end as usize),
+    );
+    edits.push(TextEdit::new(range(text, ls, le), String::new()));
+    Some(edit_action(
+        format!("Inline `{}`", d.name),
+        CodeActionKind::REFACTOR_INLINE,
+        edits.into_iter().map(|e| (uri.clone(), e)).collect(),
+        None,
+    ))
 }
 
 #[cfg(test)]

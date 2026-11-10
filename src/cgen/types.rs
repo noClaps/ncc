@@ -201,7 +201,7 @@ impl<'t> TypeGen<'t> {
         // definitions
         match &kind {
             // `nc.h` defines the optionals and error unions of built-in types
-            TyKind::Opt(i) | TyKind::ErrU(i) if self.in_header(&kind, *i, &name) => {}
+            TyKind::Opt(i) | TyKind::ErrU(i) if in_header(&kind, *i, &name) => {}
             TyKind::Opt(i) if !self.t.opt_boxed(t) => {
                 let ic = self.ct(*i);
                 writeln!(
@@ -271,25 +271,6 @@ impl<'t> TypeGen<'t> {
             _ => {}
         }
         self.helpers(t, &ct, &kind);
-    }
-
-    /// Is this optional or error union (named `name`) one that `nc.h` defines?
-    fn in_header(&self, kind: &TyKind, inner: TyId, name: &str) -> bool {
-        let prim = match inner {
-            VOID => "void",
-            BOOL => "bool",
-            BYTE => "byte",
-            INT => "int",
-            UINT => "uint",
-            FLOAT => "float",
-            CHAR => "char",
-            STR => "str",
-            _ => return false,
-        };
-        match kind {
-            TyKind::Opt(_) => inner != VOID && name == format!("opt_{prim}"),
-            _ => name == format!("err_{prim}"),
-        }
     }
 
     fn helpers(&mut self, t: TyId, ct: &str, kind: &TyKind) {
@@ -638,4 +619,23 @@ pub fn c_escape_bytes(b: &[u8]) -> String {
 pub fn c_ident(s: &str) -> String {
     let i = ident(s);
     if i.is_empty() { "anon".into() } else { i }
+}
+
+/// Is this optional or error union (named `name`) one that `nc.h` defines?
+fn in_header(kind: &TyKind, inner: TyId, name: &str) -> bool {
+    let prim = match inner {
+        VOID => "void",
+        BOOL => "bool",
+        BYTE => "byte",
+        INT => "int",
+        UINT => "uint",
+        FLOAT => "float",
+        CHAR => "char",
+        STR => "str",
+        _ => return false,
+    };
+    match kind {
+        TyKind::Opt(_) => inner != VOID && name == format!("opt_{prim}"),
+        _ => name == format!("err_{prim}"),
+    }
 }

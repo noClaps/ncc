@@ -114,6 +114,28 @@ struct Analysis {
 }
 
 impl Analysis {
+    /// The type of the expression spanning `start..end` in file `fid`.
+    fn expr_ty(&self, fid: u32, start: u32, end: u32) -> Option<&crate::check::index::ExprTy> {
+        self.index
+            .exprs
+            .iter()
+            .find(|x| x.span.file == fid && x.span.start == start && x.span.end == end)
+    }
+
+    /// The innermost reference at offset `off` of file `fid`.
+    fn ref_at(&self, fid: u32, off: u32) -> Option<&crate::check::index::SymRef> {
+        self.index
+            .refs
+            .iter()
+            .filter(|r| {
+                r.span.file == fid
+                    && r.span.start <= off
+                    && off <= r.span.end
+                    && r.span.end > r.span.start
+            })
+            .min_by_key(|r| r.span.end - r.span.start)
+    }
+
     fn decl(&self, span: Span) -> Option<&crate::check::index::SymDecl> {
         self.decl_at.get(&span).map(|&i| &self.index.decls[i])
     }
@@ -895,20 +917,10 @@ impl Server {
     ) -> Option<(&Analysis, &crate::check::index::SymRef)> {
         let path = uri_to_path(uri)?;
         let a = self.analyses.get(&path)?;
-        let fid = a.sm.files.iter().position(|f| f.path == path)? as u32;
+        let fid = a.file_id(&path)?;
         let text = &a.sm.file(fid).text;
         let off = pos_to_offset(text, pos) as u32;
-        a.index
-            .refs
-            .iter()
-            .filter(|r| {
-                r.span.file == fid
-                    && r.span.start <= off
-                    && off <= r.span.end
-                    && r.span.end > r.span.start
-            })
-            .min_by_key(|r| r.span.end - r.span.start)
-            .map(|r| (a, r))
+        a.ref_at(fid, off).map(|r| (a, r))
     }
 
     fn hover(&self, p: HoverParams) -> Option<Hover> {
@@ -1562,7 +1574,7 @@ impl Server {
     }
 
     #[allow(deprecated)]
-    fn workspace_symbols(&self, p: WorkspaceSymbolParams) -> Option<WorkspaceSymbolResponse> {
+    fn workspace_symbols(&self, p: WorkspaceSymbolParams) -> WorkspaceSymbolResponse {
         let q = p.query.to_lowercase();
         let mut seen = HashSet::new();
         let mut out = Vec::new();
@@ -1600,7 +1612,7 @@ impl Server {
             }
         }
         out.sort_by(|a, b| a.name.cmp(&b.name));
-        Some(WorkspaceSymbolResponse::Flat(out))
+        WorkspaceSymbolResponse::Flat(out)
     }
 }
 

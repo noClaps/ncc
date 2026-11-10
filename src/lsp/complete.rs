@@ -9,6 +9,7 @@ use lsp_types::*;
 use super::{Analysis, BUILTINS, KEYWORDS, Server, TYPES, docs, pos_to_offset, uri_to_path};
 use crate::ast;
 use crate::check::index::{DeclKind, SymDecl};
+use crate::diag::Span;
 
 /// Keyword snippets: label, snippet body, description.
 const SNIPPETS: &[(&str, &str, &str)] = &[
@@ -159,16 +160,6 @@ fn param_names(detail: &str) -> Vec<String> {
 }
 
 impl Server {
-    fn doc_of(&self, a: &Analysis, d: &SymDecl) -> Option<Documentation> {
-        let text = &a.sm.file(d.span.file).text;
-        docs::doc_comment(text, d.span).map(|value| {
-            Documentation::MarkupContent(MarkupContent {
-                kind: MarkupKind::Markdown,
-                value,
-            })
-        })
-    }
-
     /// A completion for a declaration; with a qualifier (`alias`), the item inserts
     /// `alias.name` and is found by typing the name.
     fn decl_item(
@@ -198,7 +189,7 @@ impl Server {
             insert_text: qualifier.map(|_| full.clone()),
             kind: Some(kind),
             detail: Some(d.detail.clone()),
-            documentation: self.doc_of(a, d),
+            documentation: doc_at(a, d.span),
             sort_text: Some(format!(
                 "{}{}",
                 match (d.kind, d.scope.is_some(), qualifier.is_some()) {
@@ -222,20 +213,13 @@ impl Server {
             };
             let targs: Vec<String> = tps.iter().map(|t| slot(t)).collect();
             let args: Vec<String> = ps.iter().map(|p| slot(p)).collect();
-            let generics = if targs.is_empty() {
-                String::new()
-            } else {
-                format!("<{}>", targs.join(", "))
-            };
-            item.insert_text = Some(format!("{full}{generics}({})$0", args.join(", ")));
+            item.insert_text = Some(format!(
+                "{full}{}({})$0",
+                generic_args(&targs),
+                args.join(", ")
+            ));
             item.insert_text_format = Some(InsertTextFormat::SNIPPET);
-            if !ps.is_empty() {
-                item.command = Some(Command::new(
-                    "Trigger parameter hints".into(),
-                    "editor.action.triggerParameterHints".into(),
-                    None,
-                ));
-            }
+            item.command = (!ps.is_empty()).then(param_hints);
         }
         item
     }
@@ -300,7 +284,7 @@ impl Server {
                 return Some(CompletionResponse::Array(items));
             };
             let dot = line_start + word_start - 1;
-            if let Some(fields) = self.struct_literal_fields(a, &text, dot) {
+            if let Some(fields) = struct_literal_fields(a, &text, dot) {
                 return Some(CompletionResponse::Array(fields));
             }
             let head = &text[..dot];
@@ -344,16 +328,8 @@ impl Server {
                     .find(|(n, _)| n == name)
             {
                 let dir = path.parent()?;
-                let file = if let Some(rel) = ipath.strip_prefix(".../") {
-                    crate::modules::find_root(dir)?.join(format!("{rel}.nc"))
-                } else if let Some(rel) = ipath.strip_prefix("./") {
-                    dir.join(format!("{rel}.nc"))
-                } else {
-                    crate::modules::find_root(dir)?
-                        .join(".nc")
-                        .join("deps")
-                        .join(format!("{ipath}.nc"))
-                };
+                let file =
+                    crate::modules::import_file(dir, &ipath, || crate::modules::find_root(dir))?;
                 let (module, _) = crate::parser::parse_module_recover(&text, 0);
                 let edit = super::actions::add_import(&text, &module, &ipath, name);
                 let mut names: Vec<String> = public_names(&std::fs::read_to_string(file).ok()?)
@@ -415,23 +391,8 @@ impl Server {
                 }
             }
             for (alias, mpath) in &a.imports {
-                let Some(mfid) = a.file_id(mpath) else {
-                    continue;
-                };
-                let Some(facts) = a.index.modules.iter().find(|m| m.file == mfid) else {
-                    continue;
-                };
-                let mut seen = HashSet::new();
-                for d in &a.index.decls {
-                    if d.span.file == mfid
-                        && d.scope.is_none()
-                        && d.extern_alias.is_none()
-                        && !matches!(d.kind, DeclKind::Field | DeclKind::Variant)
-                        && facts.public.contains(&d.name)
-                        && seen.insert(d.name.clone())
-                    {
-                        items.push(self.decl_item(a, d, call_parens, Some(alias)));
-                    }
+                for d in public_decls(a, mpath) {
+                    items.push(self.decl_item(a, d, call_parens, Some(alias)));
                 }
             }
             // modules that are not imported yet: accepting one adds the import
@@ -512,80 +473,6 @@ impl Server {
         Some(CompletionResponse::Array(items))
     }
 
-    /// Fields of the struct literal or pattern around a `.` that starts a field (`Point{.x = 1, .`).
-    fn struct_literal_fields(
-        &self,
-        a: &Analysis,
-        text: &str,
-        dot: usize,
-    ) -> Option<Vec<CompletionItem>> {
-        let prev = text[..dot].trim_end();
-        if !(prev.ends_with('{') || prev.ends_with(',')) {
-            return None;
-        }
-        // the unclosed `{` around the cursor
-        let b = text.as_bytes();
-        let mut depth = 0;
-        let mut i = dot;
-        let open = loop {
-            if i == 0 {
-                return None;
-            }
-            i -= 1;
-            match b[i] {
-                b')' | b']' | b'}' => depth += 1,
-                b'(' | b'[' | b'{' if depth > 0 => depth -= 1,
-                b'{' => break i,
-                b'(' | b'[' => return None,
-                _ => {}
-            }
-        };
-        // the type before it: `Name`, `Name<int>` or `mod.Name`
-        let mut t = text[..open].trim_end();
-        if t.ends_with('>') {
-            t = &t[..t.rfind('<')?];
-        }
-        let name_start = t
-            .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
-            .map_or(0, |i| i + 1);
-        let name = &t[name_start..];
-        if !name.chars().next()?.is_uppercase() {
-            return None;
-        }
-        let d = a
-            .index
-            .decls
-            .iter()
-            .find(|d| d.name == name && d.kind == DeclKind::Struct)?;
-        let members = a.index.types.get(d.ty.as_ref()?)?;
-        let present: HashSet<&str> = text[open..dot]
-            .split('.')
-            .skip(1)
-            .filter_map(|s| s.split(|c: char| c == '=' || c.is_whitespace()).next())
-            .collect();
-        Some(
-            members
-                .iter()
-                .filter(|m| !present.contains(m.name.as_str()))
-                .map(|m| CompletionItem {
-                    label: m.name.clone(),
-                    kind: Some(CompletionItemKind::FIELD),
-                    detail: Some(m.detail.clone()),
-                    insert_text: Some(format!("{} = ", m.name)),
-                    documentation: m.def.and_then(|def| {
-                        docs::doc_comment(&a.sm.file(def.file).text, def).map(|value| {
-                            Documentation::MarkupContent(MarkupContent {
-                                kind: MarkupKind::Markdown,
-                                value,
-                            })
-                        })
-                    }),
-                    ..Default::default()
-                })
-                .collect(),
-        )
-    }
-
     /// Members after a receiver chain: module members, enum variants or the members of the
     /// receiver's type.
     fn member_items(
@@ -626,21 +513,12 @@ impl Server {
             rest = &rest[2..];
         } else if let Some(mpath) = a.imports.get(first) {
             let mfid = a.file_id(mpath)?;
-            let public = public_names(&self.text_of(mpath)?);
             if rest.is_empty() {
-                let mut seen = HashSet::new();
-                let mut out = Vec::new();
-                for d in &a.index.decls {
-                    if d.span.file == mfid
-                        && d.scope.is_none()
-                        && !matches!(d.kind, DeclKind::Field | DeclKind::Variant)
-                        && public.contains(&d.name)
-                        && seen.insert(d.name.clone())
-                    {
-                        out.push(self.decl_item(a, d, call_parens, None));
-                    }
-                }
-                return Some((out, None));
+                let items = public_decls(a, mpath)
+                    .into_iter()
+                    .map(|d| self.decl_item(a, d, call_parens, None))
+                    .collect();
+                return Some((items, None));
             }
             let Seg::Name(n) = &rest[0] else { return None };
             let d = a
@@ -702,14 +580,7 @@ impl Server {
                 kind: Some(CompletionItemKind::FIELD),
                 sort_text: Some(format!("0{}", m.name)),
                 detail: Some(m.detail.clone()),
-                documentation: m.def.and_then(|def| {
-                    docs::doc_comment(&a.sm.file(def.file).text, def).map(|value| {
-                        Documentation::MarkupContent(MarkupContent {
-                            kind: MarkupKind::Markdown,
-                            value,
-                        })
-                    })
-                }),
+                documentation: m.def.and_then(|def| doc_at(a, def)),
                 ..Default::default()
             })
             .collect();
@@ -751,19 +622,8 @@ impl Server {
         let mut aliases: Vec<(&String, &std::path::PathBuf)> = a.imports.iter().collect();
         aliases.sort();
         for (alias, mpath) in aliases {
-            let (Some(mfid), Some(mtext)) = (a.file_id(mpath), self.text_of(mpath)) else {
-                continue;
-            };
-            let public = public_names(&mtext);
-            let mut seen = HashSet::new();
-            for d in &a.index.decls {
-                if d.span.file == mfid
-                    && d.scope.is_none()
-                    && d.kind == DeclKind::Function
-                    && d.extern_alias.is_none()
-                    && public.contains(&d.name)
-                    && seen.insert(d.name.clone())
-                {
+            for d in public_decls(a, mpath) {
+                if d.kind == DeclKind::Function {
                     cands.push((d, Some(alias.clone())));
                 }
             }
@@ -796,16 +656,11 @@ impl Server {
                     None => slot(t),
                 })
                 .collect();
-            let generics = if targs.is_empty() {
-                String::new()
-            } else {
-                format!("<{}>", targs.join(", "))
-            };
             let mut args = vec![escaped.clone()];
             args.extend(ps[1..].iter().map(|(_, n)| slot(n)));
             let (new_text, format) = if self.snippets {
                 (
-                    format!("{full}{generics}({})$0", args.join(", ")),
+                    format!("{full}{}({})$0", generic_args(&targs), args.join(", ")),
                     InsertTextFormat::SNIPPET,
                 )
             } else {
@@ -813,13 +668,8 @@ impl Server {
                     .iter()
                     .map(|t| binds.get(t).cloned().unwrap_or_else(|| t.clone()))
                     .collect();
-                let generics = if plain.is_empty() {
-                    String::new()
-                } else {
-                    format!("<{}>", plain.join(", "))
-                };
                 (
-                    format!("{full}{generics}({receiver})"),
+                    format!("{full}{}({receiver})", generic_args(&plain)),
                     InsertTextFormat::PLAIN_TEXT,
                 )
             };
@@ -827,18 +677,12 @@ impl Server {
                 label: full,
                 kind: Some(CompletionItemKind::FUNCTION),
                 detail: Some(d.detail.clone()),
-                documentation: self.doc_of(a, d),
+                documentation: doc_at(a, d.span),
                 filter_text: Some(format!("{receiver}.{}", d.name)),
                 sort_text: Some(format!("5{}", d.name)),
                 insert_text_format: Some(format),
                 text_edit: Some(CompletionTextEdit::Edit(TextEdit::new(range, new_text))),
-                command: (ps.len() > 1 && self.snippets).then(|| {
-                    Command::new(
-                        "Trigger parameter hints".into(),
-                        "editor.action.triggerParameterHints".into(),
-                        None,
-                    )
-                }),
+                command: (ps.len() > 1 && self.snippets).then(param_hints),
                 ..Default::default()
             });
         }
@@ -859,7 +703,7 @@ impl Server {
                     label: m.clone(),
                     kind: Some(CompletionItemKind::ENUM_MEMBER),
                     detail: Some(detail.clone()),
-                    documentation: variant.and_then(|v| self.doc_of(a, v)),
+                    documentation: variant.and_then(|v| doc_at(a, v.span)),
                     ..Default::default()
                 };
                 if payload && self.snippets {
@@ -870,6 +714,46 @@ impl Server {
             })
             .collect()
     }
+}
+
+/// Public top-level declarations of an imported module, one per name.
+fn public_decls<'a>(a: &'a Analysis, mpath: &Path) -> Vec<&'a SymDecl> {
+    let Some(mfid) = a.file_id(mpath) else {
+        return vec![];
+    };
+    let Some(facts) = a.index.modules.iter().find(|m| m.file == mfid) else {
+        return vec![];
+    };
+    let mut seen = HashSet::new();
+    a.index
+        .decls
+        .iter()
+        .filter(|d| {
+            d.span.file == mfid
+                && d.scope.is_none()
+                && d.extern_alias.is_none()
+                && !matches!(d.kind, DeclKind::Field | DeclKind::Variant)
+                && facts.public.contains(&d.name)
+                && seen.insert(d.name.clone())
+        })
+        .collect()
+}
+
+/// `<A, B>`, or nothing without generic arguments.
+fn generic_args(args: &[String]) -> String {
+    if args.is_empty() {
+        String::new()
+    } else {
+        format!("<{}>", args.join(", "))
+    }
+}
+
+fn param_hints() -> Command {
+    Command::new(
+        "Trigger parameter hints".into(),
+        "editor.action.triggerParameterHints".into(),
+        None,
+    )
 }
 
 /// `s` as literal snippet text.
@@ -1088,6 +972,78 @@ fn unify(p: &str, c: &str, tps: &[String], binds: &mut HashMap<String, String>) 
     }
     let ch = p.chars().next().unwrap();
     c.starts_with(ch) && unify(&p[ch.len_utf8()..], &c[ch.len_utf8()..], tps, binds)
+}
+
+/// The doc comment of the declaration at `span`, as Markdown.
+fn doc_at(a: &Analysis, span: Span) -> Option<Documentation> {
+    docs::doc_comment(&a.sm.file(span.file).text, span).map(|value| {
+        Documentation::MarkupContent(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value,
+        })
+    })
+}
+
+/// Fields of the struct literal or pattern around a `.` that starts a field (`Point{.x = 1, .`).
+fn struct_literal_fields(a: &Analysis, text: &str, dot: usize) -> Option<Vec<CompletionItem>> {
+    let prev = text[..dot].trim_end();
+    if !(prev.ends_with('{') || prev.ends_with(',')) {
+        return None;
+    }
+    // the unclosed `{` around the cursor
+    let b = text.as_bytes();
+    let mut depth = 0;
+    let mut i = dot;
+    let open = loop {
+        if i == 0 {
+            return None;
+        }
+        i -= 1;
+        match b[i] {
+            b')' | b']' | b'}' => depth += 1,
+            b'(' | b'[' | b'{' if depth > 0 => depth -= 1,
+            b'{' => break i,
+            b'(' | b'[' => return None,
+            _ => {}
+        }
+    };
+    // the type before it: `Name`, `Name<int>` or `mod.Name`
+    let mut t = text[..open].trim_end();
+    if t.ends_with('>') {
+        t = &t[..t.rfind('<')?];
+    }
+    let name_start = t
+        .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .map_or(0, |i| i + 1);
+    let name = &t[name_start..];
+    if !name.chars().next()?.is_uppercase() {
+        return None;
+    }
+    let d = a
+        .index
+        .decls
+        .iter()
+        .find(|d| d.name == name && d.kind == DeclKind::Struct)?;
+    let members = a.index.types.get(d.ty.as_ref()?)?;
+    let present: HashSet<&str> = text[open..dot]
+        .split('.')
+        .skip(1)
+        .filter_map(|s| s.split(|c: char| c == '=' || c.is_whitespace()).next())
+        .collect();
+    Some(
+        members
+            .iter()
+            .filter(|m| !present.contains(m.name.as_str()))
+            .map(|m| CompletionItem {
+                label: m.name.clone(),
+                kind: Some(CompletionItemKind::FIELD),
+                detail: Some(m.detail.clone()),
+                insert_text: Some(format!("{} = ", m.name)),
+                documentation: m.def.and_then(|def| doc_at(a, def)),
+                ..Default::default()
+            })
+            .collect(),
+    )
 }
 
 #[cfg(test)]

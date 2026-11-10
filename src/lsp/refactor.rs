@@ -20,7 +20,7 @@ use crate::check::index::{DeclKind, SymDecl};
 use crate::lexer::Tok;
 
 /// The extent (start, end) of the top-level item containing `off`.
-fn item_extent(module: &ast::Module, off: u32) -> Option<(u32, u32)> {
+pub(super) fn item_extent(module: &ast::Module, off: u32) -> Option<(u32, u32)> {
     for it in &module.items {
         let (mut lo, mut hi) = (u32::MAX, 0);
         item_spans(it, &mut |n| {
@@ -199,59 +199,12 @@ impl Server {
         off: u32,
         d: &Diagnostic,
     ) -> Option<CodeActionOrCommand> {
-        let path = uri_to_path(uri)?;
-        let a = self.analyses.get(&path)?;
-        let mut lit: Option<&ast::Expr> = None;
-        walk(module, &mut |n| {
-            if let Node::Expr(e) = n
-                && let E::Struct(..) = &e.kind
-                && e.span.start <= off
-                && off < e.span.end
-                && lit.is_none_or(|l| l.span.start <= e.span.start)
-            {
-                lit = Some(e);
-            }
-        });
-        let lit = lit?;
-        let E::Struct(tyx, fields) = &lit.kind else {
-            return None;
-        };
-        let name = match &tyx.kind {
-            E::Ident(n) | E::Field(_, n) => n,
-            E::Generic(inner, _) => match &inner.kind {
-                E::Ident(n) | E::Field(_, n) => n,
-                _ => return None,
-            },
-            _ => return None,
-        };
-        let decl = a
-            .index
-            .decls
-            .iter()
-            .find(|x| &x.name == name && x.kind == DeclKind::Struct)?;
-        let present: HashSet<&str> = fields.iter().map(|f| f.0.as_str()).collect();
-        let missing: Vec<String> = a
-            .index
-            .types
-            .get(decl.ty.as_ref()?)?
-            .iter()
-            .filter(|m| !present.contains(m.name.as_str()))
-            .map(|m| format!(".{} = _", m.name))
-            .collect();
-        if missing.is_empty() {
-            return None;
-        }
-        let close = text[..lit.span.end as usize].rfind('}')?;
-        let inner = text[..close].trim_end();
-        let sep = if inner.ends_with('{') { "" } else { ", " };
-        let at = inner.len();
+        let a = self.analyses.get(&uri_to_path(uri)?)?;
+        let edit = super::actions::add_missing_fields(a, module, text, off, |_| "_".into())?;
         Some(edit_action(
             "Fill in the missing fields with `_`".into(),
             CodeActionKind::QUICKFIX,
-            vec![(
-                uri.clone(),
-                TextEdit::new(range(text, at, at), format!("{sep}{}", missing.join(", "))),
-            )],
+            vec![(uri.clone(), edit)],
             Some(d),
         ))
     }
@@ -285,20 +238,14 @@ fn convert_comment(uri: &Uri, text: &str, off: usize) -> Option<CodeActionOrComm
     while hi + 1 < comments.len() && adjacent(hi, hi + 1) {
         hi += 1;
     }
+    let (len, new) = if doc { (3, "//") } else { (2, "///") };
     let edits = (lo..=hi)
         .map(|k| {
             let s = comments[k].0;
-            if doc {
-                (
-                    uri.clone(),
-                    TextEdit::new(range(text, s, s + 3), "//".into()),
-                )
-            } else {
-                (
-                    uri.clone(),
-                    TextEdit::new(range(text, s, s + 2), "///".into()),
-                )
-            }
+            (
+                uri.clone(),
+                TextEdit::new(range(text, s, s + len), new.into()),
+            )
         })
         .collect();
     let title = if doc {
@@ -393,11 +340,7 @@ fn extract_constant(
         return None;
     }
     let (s32, e32) = (s as u32, e as u32);
-    let x = a
-        .index
-        .exprs
-        .iter()
-        .find(|x| x.span.file == fid && x.span.start == s32 && x.span.end == e32)?;
+    let x = a.expr_ty(fid, s32, e32)?;
     if matches!(x.ty.as_str(), "void" | "never")
         || x.ty.starts_with("fn")
         || x.ty.starts_with("fut")
@@ -465,10 +408,7 @@ fn match_on_call(
         }
     });
     let x = target?;
-    let ty =
-        a.index.exprs.iter().find(|t| {
-            t.span.file == fid && t.span.start == x.span.start && t.span.end == x.span.end
-        })?;
+    let ty = a.expr_ty(fid, x.span.start, x.span.end)?;
     let edecl = a.decl(ty.type_def?)?;
     if edecl.kind != DeclKind::Enum || ty.ty != edecl.name {
         return None;
@@ -514,18 +454,24 @@ pub(super) fn enum_match(
     };
     let mut body = format!("{indent}if {subject} {{\n");
     for (m, detail) in &edecl.members {
-        let arity = detail
-            .split_once('(')
-            .map_or(0, |(_, ps)| ps.trim_end_matches(')').split(',').count());
-        let pat = if arity == 0 {
-            format!("{prefix}.{m}")
-        } else {
-            format!("{prefix}.{m}({})", vec!["_"; arity].join(", "))
-        };
+        let pat = variant_pattern(&prefix, m, detail);
         writeln!(body, "{indent}  {pat} -> {{}}").unwrap();
     }
     writeln!(body, "{indent}}}").unwrap();
     Some(body)
+}
+
+/// A pattern matching variant `m` of the enum written `prefix`, with `_` for each value of its
+/// payload (`detail` is the variant's signature, `Shape.Circle(float)`).
+pub(super) fn variant_pattern(prefix: &str, m: &str, detail: &str) -> String {
+    let arity = detail
+        .split_once('(')
+        .map_or(0, |(_, ps)| ps.trim_end_matches(')').split(',').count());
+    if arity == 0 {
+        format!("{prefix}.{m}")
+    } else {
+        format!("{prefix}.{m}({})", vec!["_"; arity].join(", "))
+    }
 }
 
 // ------------------------------------------------------------------ exit points

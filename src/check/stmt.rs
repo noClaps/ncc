@@ -559,7 +559,7 @@ impl Checker {
         }
         let parent = self.ctx_ref().func;
         let tspans = self.ctx_ref().tspans.clone();
-        let mut ctx = self.new_ctx(fid, m, ret, tp);
+        let mut ctx = FnCtx::new(fid, m, ret, tp);
         ctx.tspans = tspans;
         ctx.is_never = ret == NEVER;
         self.fns.push(ctx);
@@ -667,7 +667,7 @@ impl Checker {
                 let (p, ty) = self.check_place(base)?;
                 match self.types.kind(ty).clone() {
                     TyKind::Tuple(ts) => {
-                        let i = self.tuple_index(idx, ts.len())?;
+                        let i = tuple_index(idx, ts.len())?;
                         Ok((Place::TupleIndex(Box::new(p), i), ts[i]))
                     }
                     TyKind::Map(k, v) => {
@@ -692,17 +692,6 @@ impl Checker {
         }
     }
 
-    pub fn tuple_index(&mut self, idx: &ast::Expr, len: usize) -> Result<usize> {
-        match idx.kind {
-            ast::ExprKind::Int(v, _) if (v as usize) < len => Ok(v as usize),
-            ast::ExprKind::Int(v, _) => err(
-                idx.span,
-                format!("tuple index {v} out of range for a tuple of {len} elements"),
-            ),
-            _ => err(idx.span, "tuple indexes must be integer literals"),
-        }
-    }
-
     /// Index into an array or string; `$` refers to the base's last index.
     pub fn seq_index(&mut self, idx: &ast::Expr, base_ty: TyId) -> Result<Expr> {
         self.ctx().dollar.push(base_ty);
@@ -719,5 +708,16 @@ impl Checker {
             );
         }
         Ok(i)
+    }
+}
+
+pub(super) fn tuple_index(idx: &ast::Expr, len: usize) -> Result<usize> {
+    match idx.kind {
+        ast::ExprKind::Int(v, _) if (v as usize) < len => Ok(v as usize),
+        ast::ExprKind::Int(v, _) => err(
+            idx.span,
+            format!("tuple index {v} out of range for a tuple of {len} elements"),
+        ),
+        _ => err(idx.span, "tuple indexes must be integer literals"),
     }
 }

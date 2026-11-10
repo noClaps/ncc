@@ -207,7 +207,7 @@ impl<'p> CGen<'p> {
                 let erru = self.p.funcs[self.p.main].ret;
                 let proto = format!("static {} nc_test_init(void)", self.tg.ct(erru));
                 writeln!(self.protos, "{proto};").unwrap();
-                self.gen_fn(self.p.main, Some(("nc_test_init".into(), body)));
+                self.gen_fn(self.p.main, Some(("nc_test_init", body)));
                 self.test_main()
             }
         };
@@ -405,15 +405,6 @@ impl<'p> CGen<'p> {
         format!("rt_{}({})", self.h(ty), v.code)
     }
 
-    fn release_code(&self, c: &Clean) -> String {
-        match c.kind {
-            CleanKind::Cell => format!("nc_cell_release({});", c.var),
-            CleanKind::Arr => format!("nc_arr_release({});", c.var),
-            CleanKind::Release(h) => format!("rl_{h}({});", c.var),
-            CleanKind::Unlock => format!("pthread_mutex_unlock(&{}->mu);", c.var),
-        }
-    }
-
     /// Emit releases for all live entries above `height` (without popping them).
     fn unwind_to(&mut self, height: usize) {
         let entries: Vec<Clean> = self.cleanup[height..]
@@ -423,7 +414,7 @@ impl<'p> CGen<'p> {
             .cloned()
             .collect();
         for c in entries {
-            let code = self.release_code(&c);
+            let code = release_code(&c);
             self.line(code);
         }
     }
@@ -435,7 +426,7 @@ impl<'p> CGen<'p> {
         for c in entries.into_iter().rev() {
             if c.temp {
                 if !c.moved {
-                    let code = self.release_code(&c);
+                    let code = release_code(&c);
                     self.line(code);
                 }
             } else {
@@ -487,7 +478,7 @@ impl<'p> CGen<'p> {
         format!("static {rc} {}({ps})", self.fname(i))
     }
 
-    fn gen_fn(&mut self, i: FuncId, override_body: Option<(String, Block)>) {
+    fn gen_fn(&mut self, i: FuncId, init_body: Option<(&str, Block)>) {
         let f = &self.p.funcs[i];
         self.func = i;
         self.out.clear();
@@ -496,15 +487,16 @@ impl<'p> CGen<'p> {
         self.jumps.clear();
         self.dollar.clear();
         let mut proto = self.fn_proto(i, f);
-        let body = match &override_body {
+        let is_init = init_body.is_some();
+        let body = match init_body {
             Some((name, b)) => {
                 proto = proto.replacen(&self.fname(i), name, 1);
-                b.clone()
+                b
             }
             None => f.body.clone(),
         };
         // environment struct
-        if !f.captures.is_empty() && override_body.is_none() {
+        if !f.captures.is_empty() && !is_init {
             let en = self.env_name(i);
             let mut s = format!("struct {en} {{\n  nc_env h;\n");
             let mut drop = format!(
@@ -540,10 +532,10 @@ impl<'p> CGen<'p> {
             self.env_defs.push_str(&s);
             self.env_defs.push_str(&drop);
         }
-        if self.value_fns.contains(&i) && override_body.is_none() {
+        if self.value_fns.contains(&i) && !is_init {
             self.line("(void)env;");
         }
-        if !f.captures.is_empty() && override_body.is_none() {
+        if !f.captures.is_empty() && !is_init {
             let en = self.env_name(i);
             self.line(format!("struct {en} *E = (struct {en} *)env;"));
         }
@@ -553,11 +545,7 @@ impl<'p> CGen<'p> {
             self.line(format!("nc_fn {n} = {{(void *){fname}, env}};"));
             self.line(format!("(void){n};"));
         }
-        let ret = if override_body.is_some() {
-            f.ret
-        } else {
-            self.fn_ret(i)
-        };
+        let ret = if is_init { f.ret } else { self.fn_ret(i) };
         let h = self.cleanup.len();
         self.block_stmts(&body);
         self.end_scope(h);
@@ -571,9 +559,10 @@ impl<'p> CGen<'p> {
             _ => self.line("unreachable();"),
         }
         let body_text = std::mem::take(&mut self.out);
-        let name = match &override_body {
-            Some(_) => "test initialiser".to_string(),
-            None => self.p.funcs[i].name.clone(),
+        let name = if is_init {
+            "test initialiser".to_string()
+        } else {
+            self.p.funcs[i].name.clone()
         };
         writeln!(
             self.funcs_out,
@@ -2188,4 +2177,13 @@ fn block_throws(b: &Block) -> bool {
         flow::visit_stmt(s, &mut |e| found |= matches!(e.kind, EK::Try(_)));
     }
     found
+}
+
+fn release_code(c: &Clean) -> String {
+    match c.kind {
+        CleanKind::Cell => format!("nc_cell_release({});", c.var),
+        CleanKind::Arr => format!("nc_arr_release({});", c.var),
+        CleanKind::Release(h) => format!("rl_{h}({});", c.var),
+        CleanKind::Unlock => format!("pthread_mutex_unlock(&{}->mu);", c.var),
+    }
 }

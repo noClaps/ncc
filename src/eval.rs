@@ -75,13 +75,10 @@ pub fn purity(p: &Program) -> Vec<bool> {
     let mut pure = vec![true; n];
     let mut calls: Vec<Vec<FuncId>> = vec![vec![]; n];
     for (i, f) in p.funcs.iter().enumerate() {
-        if f.locals
+        let mut ok = !f
+            .locals
             .iter()
-            .any(|l| matches!(l.kind, LocalKind::CapRef(_) | LocalKind::LockAlias))
-        {
-            pure[i] = false;
-        }
-        let mut ok = true;
+            .any(|l| matches!(l.kind, LocalKind::CapRef(_) | LocalKind::LockAlias));
         let mut cs = vec![];
         let mut visit = |e: &Expr| match &e.kind {
             EK::Print(..) | EK::Async(..) | EK::Await(_) | EK::Call(Callee::Extern(_), _) => {
@@ -99,14 +96,7 @@ pub fn purity(p: &Program) -> Vec<bool> {
         for s in &f.body.stmts {
             flow::visit_stmt(s, &mut visit);
         }
-        for s in &f.body.stmts {
-            if !stmt_pure(s) {
-                ok = false;
-            }
-        }
-        if !ok {
-            pure[i] = false;
-        }
+        pure[i] = ok && f.body.stmts.iter().all(stmt_pure);
         calls[i] = cs;
     }
     loop {
@@ -163,10 +153,6 @@ impl<'p> Evaluator<'p> {
         format!("{}:{l}", path.display())
     }
 
-    fn panic<T>(&self, msg: &str, span: Span) -> R<T> {
-        Err(Stop::Panic(msg.to_string(), span))
-    }
-
     fn tick(&mut self) -> R<()> {
         if self.fuel == 0 {
             return Err(Stop::Unknown);
@@ -209,12 +195,8 @@ impl<'p> Evaluator<'p> {
                         if let Some(VarRef::Global(g)) = t
                             && !snapshot.globals[*g].mutable
                         {
-                            let v = if *count == 1 {
-                                items[*start].clone()
-                            } else {
-                                Val::Tuple(Rc::new(items[*start..*start + *count].to_vec()))
-                            };
-                            ev.gconst.insert(*g, v);
+                            ev.gconst
+                                .insert(*g, destructure_part(&items, *start, *count));
                         }
                     }
                 }
@@ -281,13 +263,12 @@ impl<'p> Evaluator<'p> {
         match &mut s.kind {
             SK::Let(v, e) => {
                 self.fold_expr(e, locals, consts)?;
-                if let (Some(VarRef::Local(l)), EK::Lit(_)) = (v, &e.kind)
+                if let (Some(VarRef::Local(l)), EK::Lit(lit)) = (v, &e.kind)
                     && !locals[*l].mutable
                     && !locals[*l].boxed
                     && locals[*l].kind == LocalKind::Normal
-                    && let Some(val) = lit_val(e)
                 {
-                    consts.insert(*l, val);
+                    consts.insert(*l, lit_to_val(lit));
                 }
             }
             SK::Destructure(_, e) | SK::Expr(e) | SK::Throw(e) | SK::Assert(e) => {
@@ -395,40 +376,22 @@ impl<'p> Evaluator<'p> {
             EK::Call(Callee::Direct(f), args) => self.pure[*f] && args.iter().all(is_lit_tree),
             _ => false,
         };
-        if !foldable {
-            return Ok(());
+        if foldable
+            && let Some(v) = self.try_const(e)?
+            && let Some(x) = val_expr(&v, e.ty, e.span, &self.p.types)
+        {
+            *e = x;
         }
-        self.fuel = CALL_FUEL;
-        let mut env = Env {
-            locals: vec![],
-            dollar: vec![],
-        };
-        match self.expr(e, &mut env, true) {
-            Ok(v) => {
-                if let Some(x) = val_expr(&v, e.ty, e.span, &self.p.types) {
-                    *e = x;
-                }
-                Ok(())
-            }
-            Err(Stop::Unknown) => Ok(()),
-            Err(Stop::Panic(m, sp)) => Err(self.panic_diag(e.span, &m, sp)),
-        }
+        Ok(())
     }
 
     /// When an `if` is decided at compile time, keep only the arm that runs.
     fn select_arm(&mut self, i: &mut If) {
         let scrut = match &i.scrutinee {
-            Some(s) if is_lit_tree(s) => {
-                let mut env = Env {
-                    locals: vec![],
-                    dollar: vec![],
-                };
-                self.fuel = CALL_FUEL;
-                match self.expr(s, &mut env, true) {
-                    Ok(v) => Some(v),
-                    Err(_) => return,
-                }
-            }
+            Some(s) if is_lit_tree(s) => match self.try_const(s) {
+                Ok(Some(v)) => Some(v),
+                _ => return,
+            },
             Some(_) => return,
             None => None,
         };
@@ -445,16 +408,10 @@ impl<'p> Evaluator<'p> {
                         }),
                         None,
                     ) => Some(*b),
-                    (Pat::Value(e), Some(v)) if is_lit_tree(e) => {
-                        let mut env = Env {
-                            locals: vec![],
-                            dollar: vec![],
-                        };
-                        match self.expr(e, &mut env, true) {
-                            Ok(x) => Some(val_eq(&x, v)),
-                            Err(_) => None,
-                        }
-                    }
+                    (Pat::Value(e), Some(v)) if is_lit_tree(e) => match self.try_const(e) {
+                        Ok(Some(x)) => Some(val_eq(&x, v)),
+                        _ => None,
+                    },
                     _ => None,
                 };
                 match m {
@@ -516,19 +473,12 @@ impl<'p> Evaluator<'p> {
     }
 
     /// Call a function, producing its result value (wrapping error unions).
-    fn invoke(&mut self, f: FuncId, args: Vec<Val>, caps: &[Val], span: Span) -> R<Val> {
+    fn invoke(&mut self, f: FuncId, args: Vec<Val>, caps: &[Val]) -> R<Val> {
         let ret = self.p.funcs[f].ret;
         let throws = matches!(self.p.types.kind(ret), TyKind::ErrU(_));
         match self.call_fn(f, args, caps)? {
             Flow::Return(v) => Ok(if throws { Val::Ok(Box::new(v)) } else { v }),
-            Flow::Throw(e) => {
-                if throws {
-                    Ok(Val::Err(e))
-                } else {
-                    let _ = span;
-                    Err(Stop::Unknown)
-                }
-            }
+            Flow::Throw(e) if throws => Ok(Val::Err(e)),
             _ => Err(Stop::Unknown),
         }
     }
@@ -568,11 +518,7 @@ impl<'p> Evaluator<'p> {
                     return Err(Stop::Unknown);
                 };
                 for (v, start, count) in ts {
-                    let part = if *count == 1 {
-                        items[*start].clone()
-                    } else {
-                        Val::Tuple(Rc::new(items[*start..*start + *count].to_vec()))
-                    };
+                    let part = destructure_part(&items, *start, *count);
                     match v {
                         Some(VarRef::Local(l)) => env.set(*l, part),
                         Some(VarRef::Global(_)) => return Err(Stop::Unknown),
@@ -699,7 +645,7 @@ impl<'p> Evaluator<'p> {
             Place::Index(b, idx) => {
                 let r = self.place_path(b, env, path)?;
                 // `$` refers to the current base value
-                let base = self.read_path(r, path, env)?;
+                let base = read_path(r, path, env)?;
                 env.dollar.push(base);
                 let i = self.expr(idx, env, false);
                 env.dollar.pop();
@@ -707,32 +653,6 @@ impl<'p> Evaluator<'p> {
                 Ok(r)
             }
         }
-    }
-
-    fn read_path(&self, r: VarRef, path: &[PathStep], env: &Env) -> R<Val> {
-        let VarRef::Local(l) = r else {
-            return Err(Stop::Unknown);
-        };
-        let mut cur = env
-            .locals
-            .get(l)
-            .and_then(Clone::clone)
-            .ok_or(Stop::Unknown)?;
-        for st in path {
-            cur = match (st, &cur) {
-                (PathStep::Elem(i), Val::Tuple(xs) | Val::Struct(xs)) => xs[*i].clone(),
-                (PathStep::Index(k, _), Val::Map(m)) => m
-                    .iter()
-                    .find(|(kk, _)| kk == k)
-                    .map(|x| x.1.clone())
-                    .ok_or(Stop::Unknown)?,
-                (PathStep::Index(i, _), Val::Arr(a)) => {
-                    a.get(idx_of(i)? as usize).cloned().ok_or(Stop::Unknown)?
-                }
-                _ => return Err(Stop::Unknown),
-            };
-        }
-        Ok(cur)
     }
 
     /// Evaluate an expression; `Err(flow)` carries a control transfer (return/throw/break).
@@ -750,11 +670,7 @@ impl<'p> Evaluator<'p> {
                         if let Some(l) = local {
                             env.set(*l, Val::Str(msg));
                         }
-                        match self.block(b, env)? {
-                            Flow::Break(j, Some(v)) if j == *id => Ok(Ok(v)),
-                            Flow::Normal => Ok(Ok(Val::Void)),
-                            f => Ok(Err(f)),
-                        }
+                        self.block_value(b, *id, env)
                     }
                     _ => Err(Stop::Unknown),
                 }
@@ -768,11 +684,7 @@ impl<'p> Evaluator<'p> {
                     Val::Some(v) => Ok(Ok(*v)),
                     Val::None => match fb {
                         Fallback::Expr(x) => self.expr_flow(x, env),
-                        Fallback::Block(b, id) => match self.block(b, env)? {
-                            Flow::Break(j, Some(v)) if j == *id => Ok(Ok(v)),
-                            Flow::Normal => Ok(Ok(Val::Void)),
-                            f => Ok(Err(f)),
-                        },
+                        Fallback::Block(b, id) => self.block_value(b, *id, env),
                     },
                     _ => Err(Stop::Unknown),
                 }
@@ -819,14 +731,19 @@ impl<'p> Evaluator<'p> {
                 }
             }
             if matched {
-                return match self.block(&arm.body, env)? {
-                    Flow::Break(j, v) if j == i.id => Ok(Ok(v.unwrap_or(Val::Void))),
-                    Flow::Normal => Ok(Ok(Val::Void)),
-                    f => Ok(Err(f)),
-                };
+                return self.block_value(&arm.body, i.id, env);
             }
         }
         Err(Stop::Unknown)
+    }
+
+    /// Run a block producing a value with `break <value>` to `id` (void when it completes).
+    fn block_value(&mut self, b: &Block, id: JumpId, env: &mut Env) -> R<Result<Val, Flow>> {
+        Ok(match self.block(b, env)? {
+            Flow::Break(j, v) if j == id => Ok(v.unwrap_or(Val::Void)),
+            Flow::Normal => Ok(Val::Void),
+            f => Err(f),
+        })
     }
 
     fn pat_match(&mut self, p: &Pat, v: &Val, env: &mut Env) -> R<bool> {
@@ -841,37 +758,23 @@ impl<'p> Evaluator<'p> {
                 val_eq(&x, v)
             }
             (Pat::Tuple(ps), Val::Tuple(xs)) | (Pat::Struct(ps), Val::Struct(xs)) => {
-                for (p, x) in ps.iter().zip(xs.iter()) {
-                    if !self.pat_match(p, x, env)? {
-                        return Ok(false);
-                    }
-                }
-                true
+                self.pats_match(ps, xs, env)?
             }
             (Pat::Array(ps), Val::Arr(xs)) => {
-                if ps.len() != xs.len() {
-                    return Ok(false);
-                }
-                for (p, x) in ps.iter().zip(xs.iter()) {
-                    if !self.pat_match(p, x, env)? {
-                        return Ok(false);
-                    }
-                }
-                true
+                ps.len() == xs.len() && self.pats_match(ps, xs, env)?
             }
-            (Pat::Variant(i, ps), Val::Variant(j, xs)) => {
-                if i != j {
-                    return Ok(false);
-                }
-                for (p, x) in ps.iter().zip(xs.iter()) {
-                    if !self.pat_match(p, x, env)? {
-                        return Ok(false);
-                    }
-                }
-                true
-            }
+            (Pat::Variant(i, ps), Val::Variant(j, xs)) => i == j && self.pats_match(ps, xs, env)?,
             _ => return Err(Stop::Unknown),
         })
+    }
+
+    fn pats_match(&mut self, ps: &[Pat], xs: &[Val], env: &mut Env) -> R<bool> {
+        for (p, x) in ps.iter().zip(xs) {
+            if !self.pat_match(p, x, env)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Evaluate a value expression. With `const_only`, variables are not available.
@@ -916,7 +819,7 @@ impl<'p> Evaluator<'p> {
                 match (op, v) {
                     (UnOp::Neg, Val::Int(i)) => match i.checked_neg() {
                         Some(x) => Val::Int(x),
-                        None => return self.panic("integer overflow", span),
+                        None => return panic("integer overflow", span),
                     },
                     (UnOp::Neg, Val::Float(f)) => Val::Float(-f),
                     (UnOp::Not, Val::Bool(b)) => Val::Bool(!b),
@@ -939,20 +842,17 @@ impl<'p> Evaluator<'p> {
             EK::Binary(op, a, b) => {
                 let x = self.expr(a, env, const_only)?;
                 let y = self.expr(b, env, const_only)?;
-                self.binop(*op, x, y, span)?
+                binop(*op, x, y, span)?
             }
             EK::Call(c, args) => {
                 if const_only && !args.iter().all(is_lit_tree) {
                     return Err(Stop::Unknown);
                 }
-                let mut vs = Vec::new();
-                for a in args {
-                    vs.push(self.expr(a, env, const_only)?);
-                }
+                let vs = self.exprs(args, env, const_only)?;
                 match c {
-                    Callee::Direct(f) => self.invoke(*f, vs, &[], span)?,
+                    Callee::Direct(f) => self.invoke(*f, vs, &[])?,
                     Callee::Value(fe) => match self.expr(fe, env, const_only)? {
-                        Val::Fn(f, caps) => self.invoke(f, vs, &caps, span)?,
+                        Val::Fn(f, caps) => self.invoke(f, vs, &caps)?,
                         _ => return Err(Stop::Unknown),
                     },
                     Callee::Extern(_) => return Err(Stop::Unknown),
@@ -989,20 +889,20 @@ impl<'p> Evaluator<'p> {
                 match base {
                     Val::Map(m) => match m.iter().find(|(k, _)| val_eq(k, &i)) {
                         Some((_, v)) => v.clone(),
-                        None => return self.panic("key not found in map", span),
+                        None => return panic("key not found in map", span),
                     },
                     Val::Arr(a) => {
                         let k = idx_checked(&i, idx.span)?;
                         match a.get(k as usize) {
                             Some(v) if (k as usize) < a.len() => v.clone(),
-                            _ => return self.panic("index out of bounds", span),
+                            _ => return panic("index out of bounds", span),
                         }
                     }
                     Val::Str(s) => {
                         let k = idx_checked(&i, idx.span)?;
                         match s.chars().nth(k as usize) {
                             Some(c) => Val::Char(c as u32),
-                            None => return self.panic("string index out of bounds", span),
+                            None => return panic("string index out of bounds", span),
                         }
                     }
                     _ => return Err(Stop::Unknown),
@@ -1023,7 +923,7 @@ impl<'p> Evaluator<'p> {
                 // inclusive bounds: `l <= h < len`
                 let h = idx_checked(&h?, hi.span)? as usize;
                 if l > h || h >= len {
-                    return self.panic("slice out of bounds", span);
+                    return panic("slice out of bounds", span);
                 }
                 let end = h + 1;
                 match base {
@@ -1041,7 +941,7 @@ impl<'p> Evaluator<'p> {
                     _ => return Err(Stop::Unknown),
                 };
                 if len == 0 {
-                    return self.panic("`$` used on an empty sequence", span);
+                    return panic("`$` used on an empty sequence", span);
                 }
                 Val::UInt(len as u64 - 1)
             }
@@ -1085,217 +985,12 @@ impl<'p> Evaluator<'p> {
                 ])),
                 None => return Err(Stop::Unknown),
             },
-            EK::Embed(bytes, _) => Val::Arr(Rc::new(bytes.iter().map(|b| Val::Byte(*b)).collect())),
+            EK::Embed(bytes, _) => byte_arr(bytes),
         })
     }
 
     fn exprs(&mut self, xs: &[Expr], env: &mut Env, const_only: bool) -> R<Vec<Val>> {
-        let mut out = Vec::new();
-        for x in xs {
-            out.push(self.expr(x, env, const_only)?);
-        }
-        Ok(out)
-    }
-
-    fn binop(&mut self, op: BinOp, x: Val, y: Val, span: Span) -> R<Val> {
-        use BinOp::*;
-        let ovf = |s: &Self| s.panic::<Val>("integer overflow", span);
-        Ok(match (op, x, y) {
-            (Eq, a, b) => Val::Bool(val_eq(&a, &b)),
-            (Ne, a, b) => Val::Bool(!val_eq(&a, &b)),
-            (Concat, Val::Str(a), Val::Str(b)) => Val::Str(format!("{a}{b}").into()),
-            (Concat, Val::Arr(a), Val::Arr(b)) => {
-                let mut v = (*a).clone();
-                v.extend(b.iter().cloned());
-                Val::Arr(Rc::new(v))
-            }
-            (Concat, Val::Map(a), Val::Map(b)) => {
-                let mut v = (*a).clone();
-                for (k, x) in b.iter() {
-                    map_set(&mut v, k.clone(), x.clone());
-                }
-                Val::Map(Rc::new(v))
-            }
-            (In, a, Val::Arr(b)) => Val::Bool(b.iter().any(|x| val_eq(x, &a))),
-            (In, a, Val::Map(b)) => Val::Bool(b.iter().any(|(k, _)| val_eq(k, &a))),
-            (In, Val::Char(c), Val::Str(s)) => {
-                Val::Bool(char::from_u32(c).is_some_and(|c| s.contains(c)))
-            }
-            (In, Val::Str(a), Val::Str(s)) => Val::Bool(s.contains(&*a)),
-            (op, Val::Int(a), Val::Int(b)) => match op {
-                Add => a
-                    .checked_add(b)
-                    .map(Val::Int)
-                    .map_or_else(|| ovf(self), Ok)?,
-                Sub => a
-                    .checked_sub(b)
-                    .map(Val::Int)
-                    .map_or_else(|| ovf(self), Ok)?,
-                Mul => a
-                    .checked_mul(b)
-                    .map(Val::Int)
-                    .map_or_else(|| ovf(self), Ok)?,
-                Div => {
-                    if b == 0 {
-                        return self.panic("division by zero", span);
-                    }
-                    a.checked_div(b)
-                        .map(Val::Int)
-                        .map_or_else(|| ovf(self), Ok)?
-                }
-                Mod => {
-                    if b == 0 {
-                        return self.panic("division by zero", span);
-                    }
-                    Val::Int(if b == -1 { 0 } else { a % b })
-                }
-                Pow => {
-                    if b < 0 {
-                        return self.panic("negative exponent", span);
-                    }
-                    let mut r: i64 = 1;
-                    for _ in 0..b.min(64) {
-                        r = match r.checked_mul(a) {
-                            Some(r) => r,
-                            None => return ovf(self),
-                        };
-                        if r == 0 || r == 1 && a == 1 {
-                            break;
-                        }
-                    }
-                    if b > 64 && !(a == 0 || a == 1 || a == -1) {
-                        return ovf(self);
-                    }
-                    if b > 64 && a == -1 {
-                        r = if b % 2 == 0 { 1 } else { -1 };
-                    }
-                    Val::Int(r)
-                }
-                Shl => {
-                    if !(0..64).contains(&b) {
-                        return self.panic("shift amount out of range", span);
-                    }
-                    if b == 63 {
-                        match a {
-                            0 => Val::Int(0),
-                            -1 => Val::Int(i64::MIN),
-                            _ => return ovf(self),
-                        }
-                    } else {
-                        a.checked_mul(1i64 << b)
-                            .map(Val::Int)
-                            .map_or_else(|| ovf(self), Ok)?
-                    }
-                }
-                Shr => {
-                    if !(0..64).contains(&b) {
-                        return self.panic("shift amount out of range", span);
-                    }
-                    Val::Int(a >> b)
-                }
-                BitAnd => Val::Int(a & b),
-                BitOr => Val::Int(a | b),
-                BitXor => Val::Int(a ^ b),
-                Lt => Val::Bool(a < b),
-                Gt => Val::Bool(a > b),
-                Le => Val::Bool(a <= b),
-                Ge => Val::Bool(a >= b),
-                _ => return Err(Stop::Unknown),
-            },
-            (op, Val::UInt(a), Val::UInt(b)) => {
-                self.unsigned(op, a as u128, b as u128, u64::MAX as u128, span, |v| {
-                    Val::UInt(v as u64)
-                })?
-            }
-            (op, Val::Byte(a), Val::Byte(b)) => {
-                self.unsigned(op, a as u128, b as u128, 255, span, |v| Val::Byte(v as u8))?
-            }
-            (op, Val::Float(a), Val::Float(b)) => match op {
-                Add => Val::Float(a + b),
-                Sub => Val::Float(a - b),
-                Mul => Val::Float(a * b),
-                Div => Val::Float(a / b),
-                Pow => Val::Float(a.powf(b)),
-                Lt => Val::Bool(a < b),
-                Gt => Val::Bool(a > b),
-                Le => Val::Bool(a <= b),
-                Ge => Val::Bool(a >= b),
-                _ => return Err(Stop::Unknown),
-            },
-            (op, Val::Char(a), Val::Char(b)) => match op {
-                Lt => Val::Bool(a < b),
-                Gt => Val::Bool(a > b),
-                Le => Val::Bool(a <= b),
-                Ge => Val::Bool(a >= b),
-                _ => return Err(Stop::Unknown),
-            },
-            _ => return Err(Stop::Unknown),
-        })
-    }
-
-    fn unsigned(
-        &self,
-        op: BinOp,
-        a: u128,
-        b: u128,
-        max: u128,
-        span: Span,
-        mk: impl Fn(u128) -> Val,
-    ) -> R<Val> {
-        use BinOp::*;
-        let bits = if max == 255 { 8 } else { 64 };
-        let chk = |v: Option<u128>| -> R<Val> {
-            match v {
-                Some(v) if v <= max => Ok(mk(v)),
-                _ => Err(Stop::Panic("integer overflow".into(), span)),
-            }
-        };
-        match op {
-            Add => chk(a.checked_add(b)),
-            Sub => chk(a.checked_sub(b)),
-            Mul => chk(a.checked_mul(b)),
-            Div | Mod => {
-                if b == 0 {
-                    return self.panic("division by zero", span);
-                }
-                Ok(mk(if op == Div { a / b } else { a % b }))
-            }
-            Pow => {
-                let mut r: u128 = 1;
-                let mut i = 0;
-                while i < b {
-                    r = match r.checked_mul(a) {
-                        Some(r) if r <= max => r,
-                        _ => return self.panic("integer overflow", span),
-                    };
-                    if r == 0 || r == 1 {
-                        break;
-                    }
-                    i += 1;
-                }
-                Ok(mk(r))
-            }
-            Shl => {
-                if b >= bits {
-                    return self.panic("shift amount out of range", span);
-                }
-                chk(Some(a << b))
-            }
-            Shr => {
-                if b >= bits {
-                    return self.panic("shift amount out of range", span);
-                }
-                Ok(mk(a >> b))
-            }
-            BitAnd => Ok(mk(a & b)),
-            BitOr => Ok(mk(a | b)),
-            BitXor => Ok(mk(a ^ b)),
-            Lt => Ok(Val::Bool(a < b)),
-            Gt => Ok(Val::Bool(a > b)),
-            Le => Ok(Val::Bool(a <= b)),
-            Ge => Ok(Val::Bool(a >= b)),
-            _ => Err(Stop::Unknown),
-        }
+        xs.iter().map(|x| self.expr(x, env, const_only)).collect()
     }
 
     fn cast(&mut self, v: Val, from: TyId, to: TyId, span: Span) -> R<Val> {
@@ -1311,53 +1006,43 @@ impl<'p> Evaluator<'p> {
             (Val::Byte(b), TyKind::UInt) => Val::UInt(b as u64),
             (Val::Int(i), TyKind::UInt) => {
                 if i < 0 {
-                    return self.panic("negative value cannot be converted to uint", span);
+                    return panic("negative value cannot be converted to uint", span);
                 }
                 Val::UInt(i as u64)
             }
             (Val::Int(i), TyKind::Float) => Val::Float(i as f64),
             (Val::UInt(u), TyKind::Int) => {
                 if u > i64::MAX as u64 {
-                    return self.panic("value out of range for int", span);
+                    return panic("value out of range for int", span);
                 }
                 Val::Int(u as i64)
             }
             (Val::UInt(u), TyKind::Float) => Val::Float(u as f64),
             (Val::Float(f), TyKind::Int) => {
                 if !(f > -9223372036854775809.0 && f < 9223372036854775808.0) {
-                    return self.panic("float value out of range for int", span);
+                    return panic("float value out of range for int", span);
                 }
                 Val::Int(f as i64)
             }
             (Val::Float(f), TyKind::UInt) => {
                 if !(f > -1.0 && f < 18446744073709551616.0) {
-                    return self.panic("float value out of range for uint", span);
+                    return panic("float value out of range for uint", span);
                 }
                 Val::UInt(f as u64)
             }
-            (Val::Char(c), TyKind::Array(_)) => {
-                let s = char::from_u32(c).ok_or(Stop::Unknown)?.to_string();
-                Val::Arr(Rc::new(s.bytes().map(Val::Byte).collect()))
-            }
-            (Val::Int(i), TyKind::Array(_)) => Val::Arr(Rc::new(
-                i.to_le_bytes().iter().map(|b| Val::Byte(*b)).collect(),
-            )),
-            (Val::UInt(i), TyKind::Array(_)) => Val::Arr(Rc::new(
-                i.to_le_bytes().iter().map(|b| Val::Byte(*b)).collect(),
-            )),
-            (Val::Float(f), TyKind::Array(_)) => Val::Arr(Rc::new(
-                f.to_bits()
-                    .to_le_bytes()
-                    .iter()
-                    .map(|b| Val::Byte(*b))
-                    .collect(),
-            )),
+            (Val::Char(c), TyKind::Array(_)) => byte_arr(
+                char::from_u32(c)
+                    .ok_or(Stop::Unknown)?
+                    .to_string()
+                    .as_bytes(),
+            ),
+            (Val::Int(i), TyKind::Array(_)) => byte_arr(&i.to_le_bytes()),
+            (Val::UInt(i), TyKind::Array(_)) => byte_arr(&i.to_le_bytes()),
+            (Val::Float(f), TyKind::Array(_)) => byte_arr(&f.to_bits().to_le_bytes()),
             (Val::Str(s), TyKind::Array(e)) if *e == CHAR => {
                 Val::Arr(Rc::new(s.chars().map(|c| Val::Char(c as u32)).collect()))
             }
-            (Val::Str(s), TyKind::Array(_)) => {
-                Val::Arr(Rc::new(s.bytes().map(Val::Byte).collect()))
-            }
+            (Val::Str(s), TyKind::Array(_)) => byte_arr(s.as_bytes()),
             (v, _) => v,
         })
     }
@@ -1383,12 +1068,7 @@ impl<'p> Evaluator<'p> {
             (Val::Str(x), _) => s.push_str(x),
             (Val::Arr(xs), TyKind::Array(e) | TyKind::Fixed(e, _)) => {
                 s.push('[');
-                for (i, x) in xs.iter().enumerate() {
-                    if i > 0 {
-                        s.push_str(", ");
-                    }
-                    self.str_into(s, x, *e)?;
-                }
+                self.items_into(s, xs, |_| (None, *e))?;
                 s.push(']');
             }
             (Val::Arr(xs), TyKind::Str) => {
@@ -1400,42 +1080,24 @@ impl<'p> Evaluator<'p> {
             (Val::Map(_), _) => return Err(Stop::Unknown),
             (Val::Tuple(xs), TyKind::Tuple(ts)) => {
                 s.push('(');
-                for (i, x) in xs.iter().enumerate() {
-                    if i > 0 {
-                        s.push_str(", ");
-                    }
-                    self.str_into(s, x, ts[i])?;
-                }
+                self.items_into(s, xs, |i| (None, ts[i]))?;
                 s.push(')');
             }
             (Val::Struct(xs), TyKind::Struct(si)) => {
                 let def = &t.structs[*si as usize];
                 s.push_str(&def.name);
                 s.push('{');
-                for (i, x) in xs.iter().enumerate() {
-                    if i > 0 {
-                        s.push_str(", ");
-                    }
-                    s.push('.');
-                    s.push_str(&def.fields[i].0);
-                    s.push_str(" = ");
-                    self.str_into(s, x, def.fields[i].1)?;
-                }
+                self.items_into(s, xs, |i| (Some(&def.fields[i].0), def.fields[i].1))?;
                 s.push('}');
             }
             (Val::Variant(vi, xs), TyKind::Enum(ei)) => {
-                let def = &t.enums[*ei as usize];
-                s.push_str(&def.name);
+                let (name, tys) = &t.enums[*ei as usize].variants[*vi];
+                s.push_str(&t.enums[*ei as usize].name);
                 s.push('.');
-                s.push_str(&def.variants[*vi].0);
+                s.push_str(name);
                 if !xs.is_empty() {
                     s.push('(');
-                    for (i, x) in xs.iter().enumerate() {
-                        if i > 0 {
-                            s.push_str(", ");
-                        }
-                        self.str_into(s, x, def.variants[*vi].1[i])?;
-                    }
+                    self.items_into(s, xs, |i| (None, tys[i]))?;
                     s.push(')');
                 }
             }
@@ -1448,6 +1110,26 @@ impl<'p> Evaluator<'p> {
                 s.push_str(m);
             }
             _ => return Err(Stop::Unknown),
+        }
+        Ok(())
+    }
+
+    /// Comma-separated values, each with its type and an optional field name (`.name = `).
+    fn items_into<'a>(
+        &self,
+        s: &mut String,
+        xs: &[Val],
+        item: impl Fn(usize) -> (Option<&'a String>, TyId),
+    ) -> R<()> {
+        for (i, x) in xs.iter().enumerate() {
+            if i > 0 {
+                s.push_str(", ");
+            }
+            let (field, ty) = item(i);
+            if let Some(f) = field {
+                s.push_str(&format!(".{f} = "));
+            }
+            self.str_into(s, x, ty)?;
         }
         Ok(())
     }
@@ -1485,7 +1167,7 @@ fn set_path(slot: &mut Val, path: &[PathStep], v: Val) -> R<()> {
             let k = idx_checked(i, *isp)? as usize;
             let xs = Rc::make_mut(xs);
             if k >= xs.len() {
-                return Err(Stop::Panic("index out of bounds".into(), *isp));
+                return panic("index out of bounds", *isp);
             }
             set_path(&mut xs[k], &path[1..], v)
         }
@@ -1507,20 +1189,12 @@ fn set_path(slot: &mut Val, path: &[PathStep], v: Val) -> R<()> {
             };
             let mut chars: Vec<char> = s.chars().collect();
             if k >= chars.len() {
-                return Err(Stop::Panic("string index out of bounds".into(), *isp));
+                return panic("string index out of bounds", *isp);
             }
             chars[k] = char::from_u32(c).ok_or(Stop::Unknown)?;
             *s = chars.into_iter().collect::<String>().into();
             Ok(())
         }
-        _ => Err(Stop::Unknown),
-    }
-}
-
-fn idx_of(v: &Val) -> R<u64> {
-    match v {
-        Val::UInt(u) => Ok(*u),
-        Val::Int(i) if *i >= 0 => Ok(*i as u64),
         _ => Err(Stop::Unknown),
     }
 }
@@ -1574,13 +1248,6 @@ fn lit_to_val(l: &Lit) -> Val {
         Lit::Float(f) => Val::Float(*f),
         Lit::Char(c) => Val::Char(*c),
         Lit::Str(s) => Val::Str(s.as_str().into()),
-    }
-}
-
-fn lit_val(e: &Expr) -> Option<Val> {
-    match &e.kind {
-        EK::Lit(l) => Some(lit_to_val(l)),
-        _ => None,
     }
 }
 
@@ -1706,99 +1373,36 @@ fn for_children(e: &mut Expr, f: &mut dyn FnMut(&mut Expr)) {
 
 /// Convert a value back into an IR expression (literals only).
 fn val_expr(v: &Val, ty: TyId, span: Span, t: &Types) -> Option<Expr> {
-    let lit = |l| {
-        Some(Expr {
-            kind: EK::Lit(l),
-            ty,
-            span,
-        })
-    };
     let b = t.base(ty);
-    match v {
-        Val::Bool(x) => lit(Lit::Bool(*x)),
-        Val::Byte(x) => lit(Lit::Byte(*x)),
-        Val::Int(x) => lit(Lit::Int(*x)),
-        Val::UInt(x) => lit(Lit::UInt(*x)),
-        Val::Float(x) => lit(Lit::Float(*x)),
-        Val::Char(x) => lit(Lit::Char(*x)),
-        Val::Str(s) if b == STR || b == ERROR => lit(Lit::Str(s.to_string())),
-        Val::None if matches!(t.kind(b), TyKind::Opt(_)) => Some(Expr {
-            kind: EK::None,
-            ty,
-            span,
-        }),
-        Val::Some(x) => match t.kind(b) {
-            TyKind::Opt(i) => {
-                let inner = val_expr(x, *i, span, t)?;
-                Some(Expr {
-                    kind: EK::Some(Box::new(inner)),
-                    ty,
-                    span,
-                })
-            }
-            _ => None,
-        },
-        Val::Tuple(xs) => match t.kind(b) {
-            TyKind::Tuple(ts) => {
-                let items: Option<Vec<Expr>> = xs
-                    .iter()
-                    .zip(ts)
-                    .map(|(x, et)| val_expr(x, *et, span, t))
-                    .collect();
-                Some(Expr {
-                    kind: EK::Tuple(items?),
-                    ty,
-                    span,
-                })
-            }
-            _ => None,
-        },
-        Val::Struct(xs) => match t.kind(b) {
-            TyKind::Struct(si) => {
-                let fs = &t.structs[*si as usize].fields;
-                let items: Option<Vec<Expr>> = xs
-                    .iter()
-                    .zip(fs)
-                    .map(|(x, (_, ft))| val_expr(x, *ft, span, t))
-                    .collect();
-                Some(Expr {
-                    kind: EK::Struct(items?),
-                    ty,
-                    span,
-                })
-            }
-            _ => None,
-        },
-        Val::Arr(xs) => {
-            let et = t.elem(b)?;
-            if b == STR {
-                return None;
-            }
-            let items: Option<Vec<Expr>> = xs.iter().map(|x| val_expr(x, et, span, t)).collect();
-            Some(Expr {
-                kind: EK::Array(items?),
-                ty,
-                span,
-            })
+    let items = |xs: &[Val], tys: &mut dyn Iterator<Item = TyId>| -> Option<Vec<Expr>> {
+        xs.iter()
+            .zip(tys)
+            .map(|(x, et)| val_expr(x, et, span, t))
+            .collect()
+    };
+    let kind = match (v, t.kind(b)) {
+        (Val::Bool(x), _) => EK::Lit(Lit::Bool(*x)),
+        (Val::Byte(x), _) => EK::Lit(Lit::Byte(*x)),
+        (Val::Int(x), _) => EK::Lit(Lit::Int(*x)),
+        (Val::UInt(x), _) => EK::Lit(Lit::UInt(*x)),
+        (Val::Float(x), _) => EK::Lit(Lit::Float(*x)),
+        (Val::Char(x), _) => EK::Lit(Lit::Char(*x)),
+        (Val::Str(s), _) if b == STR || b == ERROR => EK::Lit(Lit::Str(s.to_string())),
+        (Val::None, TyKind::Opt(_)) => EK::None,
+        (Val::Some(x), TyKind::Opt(i)) => EK::Some(Box::new(val_expr(x, *i, span, t)?)),
+        (Val::Tuple(xs), TyKind::Tuple(ts)) => EK::Tuple(items(xs, &mut ts.iter().copied())?),
+        (Val::Struct(xs), TyKind::Struct(si)) => {
+            let fs = &t.structs[*si as usize].fields;
+            EK::Struct(items(xs, &mut fs.iter().map(|f| f.1))?)
         }
-        Val::Variant(i, xs) => match t.kind(b) {
-            TyKind::Enum(ei) => {
-                let ps = &t.enums[*ei as usize].variants[*i].1;
-                let items: Option<Vec<Expr>> = xs
-                    .iter()
-                    .zip(ps)
-                    .map(|(x, pt)| val_expr(x, *pt, span, t))
-                    .collect();
-                Some(Expr {
-                    kind: EK::Variant(*i, items?),
-                    ty,
-                    span,
-                })
-            }
-            _ => None,
-        },
-        _ => None,
-    }
+        (Val::Arr(xs), _) if b != STR => EK::Array(items(xs, &mut std::iter::repeat(t.elem(b)?))?),
+        (Val::Variant(i, xs), TyKind::Enum(ei)) => {
+            let ps = &t.enums[*ei as usize].variants[*i].1;
+            EK::Variant(*i, items(xs, &mut ps.iter().copied())?)
+        }
+        _ => return None,
+    };
+    Some(Expr { kind, ty, span })
 }
 
 /// Float formatting identical to the runtime's `nc_sb_f64`.
@@ -1854,4 +1458,237 @@ pub fn fmt_float(v: f64) -> String {
         out.push_str(&format!("{:02}", exp.abs()));
     }
     out
+}
+
+fn panic<T>(msg: &str, span: Span) -> R<T> {
+    Err(Stop::Panic(msg.to_string(), span))
+}
+
+fn read_path(r: VarRef, path: &[PathStep], env: &Env) -> R<Val> {
+    let VarRef::Local(l) = r else {
+        return Err(Stop::Unknown);
+    };
+    let mut cur = env
+        .locals
+        .get(l)
+        .and_then(Clone::clone)
+        .ok_or(Stop::Unknown)?;
+    for st in path {
+        cur = match (st, &cur) {
+            (PathStep::Elem(i), Val::Tuple(xs) | Val::Struct(xs)) => xs[*i].clone(),
+            (PathStep::Index(k, _), Val::Map(m)) => m
+                .iter()
+                .find(|(kk, _)| kk == k)
+                .map(|x| x.1.clone())
+                .ok_or(Stop::Unknown)?,
+            (PathStep::Index(i, sp), Val::Arr(a)) => a
+                .get(idx_checked(i, *sp)? as usize)
+                .cloned()
+                .ok_or(Stop::Unknown)?,
+            _ => return Err(Stop::Unknown),
+        };
+    }
+    Ok(cur)
+}
+
+fn byte_arr(bytes: &[u8]) -> Val {
+    Val::Arr(Rc::new(bytes.iter().map(|b| Val::Byte(*b)).collect()))
+}
+
+/// Part `start..start + count` of a destructured tuple: one value, or a tuple of several.
+fn destructure_part(items: &[Val], start: usize, count: usize) -> Val {
+    if count == 1 {
+        items[start].clone()
+    } else {
+        Val::Tuple(Rc::new(items[start..start + count].to_vec()))
+    }
+}
+
+fn unsigned(
+    op: BinOp,
+    a: u128,
+    b: u128,
+    max: u128,
+    span: Span,
+    mk: impl Fn(u128) -> Val,
+) -> R<Val> {
+    use BinOp::*;
+    let bits = if max == 255 { 8 } else { 64 };
+    let chk = |v: Option<u128>| -> R<Val> {
+        match v {
+            Some(v) if v <= max => Ok(mk(v)),
+            _ => Err(Stop::Panic("integer overflow".into(), span)),
+        }
+    };
+    match op {
+        Add => chk(a.checked_add(b)),
+        Sub => chk(a.checked_sub(b)),
+        Mul => chk(a.checked_mul(b)),
+        Div | Mod => {
+            if b == 0 {
+                return panic("division by zero", span);
+            }
+            Ok(mk(if op == Div { a / b } else { a % b }))
+        }
+        Pow => {
+            let mut r: u128 = 1;
+            let mut i = 0;
+            while i < b {
+                r = match r.checked_mul(a) {
+                    Some(r) if r <= max => r,
+                    _ => return panic("integer overflow", span),
+                };
+                if r == 0 || r == 1 {
+                    break;
+                }
+                i += 1;
+            }
+            Ok(mk(r))
+        }
+        Shl => {
+            if b >= bits {
+                return panic("shift amount out of range", span);
+            }
+            chk(Some(a << b))
+        }
+        Shr => {
+            if b >= bits {
+                return panic("shift amount out of range", span);
+            }
+            Ok(mk(a >> b))
+        }
+        BitAnd => Ok(mk(a & b)),
+        BitOr => Ok(mk(a | b)),
+        BitXor => Ok(mk(a ^ b)),
+        Lt => Ok(Val::Bool(a < b)),
+        Gt => Ok(Val::Bool(a > b)),
+        Le => Ok(Val::Bool(a <= b)),
+        Ge => Ok(Val::Bool(a >= b)),
+        _ => Err(Stop::Unknown),
+    }
+}
+
+fn binop(op: BinOp, x: Val, y: Val, span: Span) -> R<Val> {
+    use BinOp::*;
+    let ovf = || panic::<Val>("integer overflow", span);
+    Ok(match (op, x, y) {
+        (Eq, a, b) => Val::Bool(val_eq(&a, &b)),
+        (Ne, a, b) => Val::Bool(!val_eq(&a, &b)),
+        (Concat, Val::Str(a), Val::Str(b)) => Val::Str(format!("{a}{b}").into()),
+        (Concat, Val::Arr(a), Val::Arr(b)) => {
+            let mut v = (*a).clone();
+            v.extend(b.iter().cloned());
+            Val::Arr(Rc::new(v))
+        }
+        (Concat, Val::Map(a), Val::Map(b)) => {
+            let mut v = (*a).clone();
+            for (k, x) in b.iter() {
+                map_set(&mut v, k.clone(), x.clone());
+            }
+            Val::Map(Rc::new(v))
+        }
+        (In, a, Val::Arr(b)) => Val::Bool(b.iter().any(|x| val_eq(x, &a))),
+        (In, a, Val::Map(b)) => Val::Bool(b.iter().any(|(k, _)| val_eq(k, &a))),
+        (In, Val::Char(c), Val::Str(s)) => {
+            Val::Bool(char::from_u32(c).is_some_and(|c| s.contains(c)))
+        }
+        (In, Val::Str(a), Val::Str(s)) => Val::Bool(s.contains(&*a)),
+        (op, Val::Int(a), Val::Int(b)) => match op {
+            Add => a.checked_add(b).map(Val::Int).map_or_else(ovf, Ok)?,
+            Sub => a.checked_sub(b).map(Val::Int).map_or_else(ovf, Ok)?,
+            Mul => a.checked_mul(b).map(Val::Int).map_or_else(ovf, Ok)?,
+            Div => {
+                if b == 0 {
+                    return panic("division by zero", span);
+                }
+                a.checked_div(b).map(Val::Int).map_or_else(ovf, Ok)?
+            }
+            Mod => {
+                if b == 0 {
+                    return panic("division by zero", span);
+                }
+                Val::Int(if b == -1 { 0 } else { a % b })
+            }
+            Pow => {
+                if b < 0 {
+                    return panic("negative exponent", span);
+                }
+                let mut r: i64 = 1;
+                for _ in 0..b.min(64) {
+                    r = match r.checked_mul(a) {
+                        Some(r) => r,
+                        None => return ovf(),
+                    };
+                    if r == 0 || r == 1 && a == 1 {
+                        break;
+                    }
+                }
+                if b > 64 && !(a == 0 || a == 1 || a == -1) {
+                    return ovf();
+                }
+                if b > 64 && a == -1 {
+                    r = if b % 2 == 0 { 1 } else { -1 };
+                }
+                Val::Int(r)
+            }
+            Shl => {
+                if !(0..64).contains(&b) {
+                    return panic("shift amount out of range", span);
+                }
+                if b == 63 {
+                    match a {
+                        0 => Val::Int(0),
+                        -1 => Val::Int(i64::MIN),
+                        _ => return ovf(),
+                    }
+                } else {
+                    a.checked_mul(1i64 << b)
+                        .map(Val::Int)
+                        .map_or_else(ovf, Ok)?
+                }
+            }
+            Shr => {
+                if !(0..64).contains(&b) {
+                    return panic("shift amount out of range", span);
+                }
+                Val::Int(a >> b)
+            }
+            BitAnd => Val::Int(a & b),
+            BitOr => Val::Int(a | b),
+            BitXor => Val::Int(a ^ b),
+            Lt => Val::Bool(a < b),
+            Gt => Val::Bool(a > b),
+            Le => Val::Bool(a <= b),
+            Ge => Val::Bool(a >= b),
+            _ => return Err(Stop::Unknown),
+        },
+        (op, Val::UInt(a), Val::UInt(b)) => {
+            unsigned(op, a as u128, b as u128, u64::MAX as u128, span, |v| {
+                Val::UInt(v as u64)
+            })?
+        }
+        (op, Val::Byte(a), Val::Byte(b)) => {
+            unsigned(op, a as u128, b as u128, 255, span, |v| Val::Byte(v as u8))?
+        }
+        (op, Val::Float(a), Val::Float(b)) => match op {
+            Add => Val::Float(a + b),
+            Sub => Val::Float(a - b),
+            Mul => Val::Float(a * b),
+            Div => Val::Float(a / b),
+            Pow => Val::Float(a.powf(b)),
+            Lt => Val::Bool(a < b),
+            Gt => Val::Bool(a > b),
+            Le => Val::Bool(a <= b),
+            Ge => Val::Bool(a >= b),
+            _ => return Err(Stop::Unknown),
+        },
+        (op, Val::Char(a), Val::Char(b)) => match op {
+            Lt => Val::Bool(a < b),
+            Gt => Val::Bool(a > b),
+            Le => Val::Bool(a <= b),
+            Ge => Val::Bool(a >= b),
+            _ => return Err(Stop::Unknown),
+        },
+        _ => return Err(Stop::Unknown),
+    })
 }

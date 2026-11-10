@@ -1,5 +1,6 @@
 //! Expression checking.
 
+use super::stmt::tuple_index;
 use super::*;
 use crate::ast::{BinOp, ExprKind as E, UnOp};
 
@@ -144,7 +145,7 @@ impl Checker {
             UINT
         } else {
             match expected.map(|t| self.strip_opt(t)) {
-                Some(t) if self.types.is_integer(self.types.base(t)) => t,
+                Some(t) if is_integer(self.types.base(t)) => t,
                 Some(t) if self.types.base(t) == FLOAT => {
                     return err(
                         span,
@@ -300,7 +301,7 @@ impl Checker {
                 let x = self.check_expr(inner, expected)?;
                 let ok = match op {
                     UnOp::Neg => x.ty == INT || x.ty == FLOAT,
-                    UnOp::BitNot => self.types.is_integer(x.ty),
+                    UnOp::BitNot => is_integer(x.ty),
                     UnOp::Not => x.ty == BOOL,
                 };
                 if !ok {
@@ -342,7 +343,7 @@ impl Checker {
                 let b = self.check_expr(base, None)?;
                 match self.types.kind(b.ty).clone() {
                     TyKind::Tuple(ts) => {
-                        let i = self.tuple_index(idx, ts.len())?;
+                        let i = tuple_index(idx, ts.len())?;
                         mk(EK::TupleIndex(Box::new(b), i), ts[i])
                     }
                     TyKind::Map(k, v) => {
@@ -1274,7 +1275,7 @@ impl Checker {
                 let ok = if matches!(op, Eq | Ne) {
                     self.comparable(a.ty)
                 } else {
-                    self.types.is_numeric(a.ty) || a.ty == CHAR
+                    is_numeric(a.ty) || a.ty == CHAR
                 };
                 if !ok {
                     return err(
@@ -1303,14 +1304,14 @@ impl Checker {
                 }
                 let t = a.ty;
                 let ok = match op {
-                    Add | Sub | Mul | Div | Pow => self.types.is_numeric(t),
+                    Add | Sub | Mul | Div | Pow => is_numeric(t),
                     Mod => {
                         if t == FLOAT {
                             return err(span, "`%` is not supported for `float`");
                         }
-                        self.types.is_integer(t)
+                        is_integer(t)
                     }
-                    Shl | Shr | BitAnd | BitOr | BitXor => self.types.is_integer(t),
+                    Shl | Shr | BitAnd | BitOr | BitXor => is_integer(t),
                     _ => unreachable!(),
                 };
                 if !ok {

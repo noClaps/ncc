@@ -89,6 +89,28 @@ pub struct FnCtx {
     pub dollar: Vec<TyId>,
 }
 
+impl FnCtx {
+    pub fn new(func: FuncId, module: usize, ret: TyId, tparams: HashMap<String, TyId>) -> FnCtx {
+        FnCtx {
+            func,
+            locals: vec![],
+            scopes: vec![vec![]],
+            captures: vec![],
+            cap_map: HashMap::new(),
+            ret,
+            jumps: vec![],
+            module,
+            tparams,
+            tspans: HashMap::new(),
+            is_test: false,
+            is_main: false,
+            is_never: false,
+            self_local: None,
+            dollar: vec![],
+        }
+    }
+}
+
 struct PendingFn {
     func: FuncId,
     module: usize,
@@ -259,7 +281,7 @@ impl Checker {
         // Phase C: top-level statements, module by module in dependency order
         let main_ret = self.types.erru(VOID);
         let main = self.reserve_fn(vec![], main_ret);
-        let mut main_ctx = self.new_ctx(main, 0, main_ret, HashMap::new());
+        let mut main_ctx = FnCtx::new(main, 0, main_ret, HashMap::new());
         main_ctx.is_main = true;
         self.fns.push(main_ctx);
         let order = self.order.clone();
@@ -284,7 +306,7 @@ impl Checker {
                 if let ast::Item::Test(name, body, _) = it {
                     let erru = self.types.erru(VOID);
                     let f = self.reserve_fn(vec![], erru);
-                    let mut ctx = self.new_ctx(f, m, erru, HashMap::new());
+                    let mut ctx = FnCtx::new(f, m, erru, HashMap::new());
                     ctx.is_test = true;
                     self.fns.push(ctx);
                     let body = self.check_block(body);
@@ -830,32 +852,6 @@ impl Checker {
         self.funcs.len() - 1
     }
 
-    pub fn new_ctx(
-        &mut self,
-        func: FuncId,
-        module: usize,
-        ret: TyId,
-        tparams: HashMap<String, TyId>,
-    ) -> FnCtx {
-        FnCtx {
-            func,
-            locals: vec![],
-            scopes: vec![vec![]],
-            captures: vec![],
-            cap_map: HashMap::new(),
-            ret,
-            jumps: vec![],
-            module,
-            tparams,
-            tspans: HashMap::new(),
-            is_test: false,
-            is_main: false,
-            is_never: false,
-            self_local: None,
-            dollar: vec![],
-        }
-    }
-
     pub fn finish_fn(
         &mut self,
         ctx: FnCtx,
@@ -879,7 +875,7 @@ impl Checker {
 
     fn check_fn_body(&mut self, p: PendingFn) {
         let (params, ret) = self.sigs[p.func].clone();
-        let mut ctx = self.new_ctx(p.func, p.module, ret, p.tparams);
+        let mut ctx = FnCtx::new(p.func, p.module, ret, p.tparams);
         ctx.tspans = (p.decl.sig.type_params.iter())
             .map(|t| (t.name.clone(), t.span))
             .collect();

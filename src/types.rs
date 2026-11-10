@@ -158,13 +158,6 @@ impl Types {
         t
     }
 
-    pub fn is_integer(&self, t: TyId) -> bool {
-        matches!(t, BYTE | INT | UINT)
-    }
-    pub fn is_numeric(&self, t: TyId) -> bool {
-        matches!(t, BYTE | INT | UINT | FLOAT)
-    }
-
     /// Element type for indexable sequences (arrays, fixed arrays, str).
     pub fn elem(&self, t: TyId) -> Option<TyId> {
         match self.kind(self.base(t)) {
@@ -339,4 +332,12 @@ impl Types {
             TyKind::Const(_, v) => v.to_string(),
         }
     }
+}
+
+pub fn is_integer(t: TyId) -> bool {
+    matches!(t, BYTE | INT | UINT)
+}
+
+pub fn is_numeric(t: TyId) -> bool {
+    matches!(t, BYTE | INT | UINT | FLOAT)
 }
