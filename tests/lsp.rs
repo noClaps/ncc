@@ -163,6 +163,102 @@ fn language_server() {
         .collect();
     assert_eq!(names, ["Point", "add", "p", "total"]);
 
+    let doc = json!({"uri": uri});
+
+    // references to `add`: its declaration and the call
+    let refs = c.request(
+        "textDocument/references",
+        json!({"textDocument": doc, "position": pos(10, 13), "context": {"includeDeclaration": true}}),
+    );
+    let lines: Vec<u64> = refs
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["range"]["start"]["line"].as_u64().unwrap())
+        .collect();
+    assert_eq!(lines, [5, 10], "{refs}");
+
+    // highlights of `p`: declaration and two uses
+    let hl = c.request(
+        "textDocument/documentHighlight",
+        json!({"textDocument": doc, "position": pos(9, 6)}),
+    );
+    assert_eq!(hl.as_array().unwrap().len(), 3, "{hl}");
+
+    // rename the field `x`: declaration, struct literal and field access
+    let prep = c.request(
+        "textDocument/prepareRename",
+        json!({"textDocument": doc, "position": pos(1, 6)}),
+    );
+    assert_eq!(prep["placeholder"], "x", "{prep}");
+    let edit = c.request(
+        "textDocument/rename",
+        json!({"textDocument": doc, "position": pos(1, 6), "newName": "horizontal"}),
+    );
+    let edits = edit["changes"][&uri].as_array().unwrap();
+    let mut at: Vec<(u64, u64)> = edits
+        .iter()
+        .map(|e| {
+            (
+                e["range"]["start"]["line"].as_u64().unwrap(),
+                e["range"]["start"]["character"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    at.sort();
+    assert_eq!(at, [(1, 6), (9, 17), (10, 18)], "{edit}");
+    assert!(edits.iter().all(|e| e["newText"] == "horizontal"));
+
+    // signature help inside `add(p.x, |`
+    let sig = c.request(
+        "textDocument/signatureHelp",
+        json!({"textDocument": doc, "position": pos(10, 21)}),
+    );
+    assert_eq!(
+        sig["signatures"][0]["label"], "fn add(int a, int b) int",
+        "{sig}"
+    );
+    assert_eq!(sig["activeParameter"], 1);
+
+    // folding: the struct and the function body
+    let folds = c.request("textDocument/foldingRange", json!({"textDocument": doc}));
+    let starts: Vec<u64> = folds
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["startLine"].as_u64().unwrap())
+        .collect();
+    assert!(starts.contains(&0) && starts.contains(&5), "{folds}");
+
+    // workspace symbols
+    let ws = c.request("workspace/symbol", json!({"query": "ad"}));
+    assert_eq!(ws[0]["name"], "add", "{ws}");
+
+    // builtin hover
+    let h = c.request(
+        "textDocument/hover",
+        json!({"textDocument": doc, "position": pos(11, 3)}),
+    );
+    assert!(
+        h["contents"]["value"]
+            .as_str()
+            .unwrap()
+            .contains("fn @println"),
+        "{h}"
+    );
+
+    // quick fix for an unused value
+    let actions = c.request(
+        "textDocument/codeAction",
+        json!({"textDocument": doc, "range": {"start": pos(11, 0), "end": pos(11, 1)}, "context": {"diagnostics": [
+            {"range": {"start": pos(11, 0), "end": pos(11, 5)}, "message": "return value of function not used (type `int`); assign it to `_` to discard it"}
+        ]}}),
+    );
+    assert_eq!(
+        actions[0]["edit"]["changes"][&uri][0]["newText"], "_ = ",
+        "{actions}"
+    );
+
     // member completion after `p.`
     let edited = format!("{src}int z = p.\n");
     c.notify(

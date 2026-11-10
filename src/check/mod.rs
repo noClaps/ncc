@@ -452,7 +452,9 @@ impl<'a> Checker<'a> {
                                 self.never_funcs.insert(id);
                             }
                             self.ix.fn_spans.insert(id, f.sig.span);
-                            let detail = self.fn_detail(&f.sig.name, id);
+                            let names: Vec<String> =
+                                f.sig.params.iter().map(|p| p.name.clone()).collect();
+                            let detail = self.fn_detail_named(&f.sig.name, id, &names);
                             self.idx_decl(
                                 &f.sig.name,
                                 f.sig.span,

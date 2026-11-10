@@ -79,6 +79,21 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Like `fn_detail`, with parameter names (`fn add(int a, int b) int`).
+    pub fn fn_detail_named(&self, name: &str, f: FuncId, params: &[String]) -> String {
+        let (ps, r) = &self.sigs[f];
+        let ps: Vec<String> = ps
+            .iter()
+            .zip(params)
+            .map(|(p, n)| format!("{} {n}", self.types.show(*p)))
+            .collect();
+        if *r == VOID {
+            format!("fn {name}({})", ps.join(", "))
+        } else {
+            format!("fn {name}({}) {}", ps.join(", "), self.types.show(*r))
+        }
+    }
+
     pub fn type_detail(&self, t: TyId) -> String {
         match self.types.kind(t) {
             TyKind::Struct(i) => {

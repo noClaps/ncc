@@ -474,6 +474,12 @@ impl<'a> Checker<'a> {
                     let Some(i) = def.fields.iter().position(|(n, _)| n == name) else {
                         return err(*fsp, format!("`{}` has no field `{name}`", def.name));
                     };
+                    // `.name`: the field reference covers the dot and the name
+                    let name_span = Span {
+                        end: fsp.end + 1 + name.len() as u32,
+                        ..*fsp
+                    };
+                    self.idx_field_ref(ty, i, name_span);
                     if vals[i].is_some() {
                         return err(*fsp, format!("field `{name}` is set more than once"));
                     }

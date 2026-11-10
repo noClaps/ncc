@@ -76,6 +76,20 @@ pub fn run() -> ExitCode {
             trigger_characters: Some(vec![".".into(), "@".into()]),
             ..Default::default()
         }),
+        references_provider: Some(OneOf::Left(true)),
+        document_highlight_provider: Some(OneOf::Left(true)),
+        rename_provider: Some(OneOf::Right(RenameOptions {
+            prepare_provider: Some(true),
+            work_done_progress_options: Default::default(),
+        })),
+        signature_help_provider: Some(SignatureHelpOptions {
+            trigger_characters: Some(vec!["(".into(), ",".into()]),
+            retrigger_characters: None,
+            work_done_progress_options: Default::default(),
+        }),
+        folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
+        workspace_symbol_provider: Some(OneOf::Left(true)),
+        code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
         ..Default::default()
     };
     let init = serde_json::json!({
@@ -367,6 +381,46 @@ impl Server {
             Completion::METHOD => serde_json::from_value::<CompletionParams>(req.params)
                 .ok()
                 .map(|p| serde_json::to_value(self.completion(p)).unwrap()),
+            "textDocument/references" => serde_json::from_value::<ReferenceParams>(req.params)
+                .ok()
+                .map(|p| serde_json::to_value(self.references(p)).unwrap()),
+            "textDocument/documentHighlight" => {
+                serde_json::from_value::<DocumentHighlightParams>(req.params)
+                    .ok()
+                    .map(|p| serde_json::to_value(self.highlights(p)).unwrap())
+            }
+            "textDocument/prepareRename" => {
+                serde_json::from_value::<TextDocumentPositionParams>(req.params)
+                    .ok()
+                    .map(|p| serde_json::to_value(self.prepare_rename(p)).unwrap())
+            }
+            "textDocument/rename" => match serde_json::from_value::<RenameParams>(req.params) {
+                Ok(p) => match self.rename(p) {
+                    Ok(edit) => Some(serde_json::to_value(edit).unwrap()),
+                    Err(msg) => {
+                        return Response::new_err(
+                            id,
+                            lsp_server::ErrorCode::InvalidParams as i32,
+                            msg,
+                        );
+                    }
+                },
+                Err(_) => None,
+            },
+            "textDocument/signatureHelp" => {
+                serde_json::from_value::<SignatureHelpParams>(req.params)
+                    .ok()
+                    .map(|p| serde_json::to_value(self.signature_help(p)).unwrap())
+            }
+            "textDocument/foldingRange" => serde_json::from_value::<FoldingRangeParams>(req.params)
+                .ok()
+                .map(|p| serde_json::to_value(self.folding(p)).unwrap()),
+            "workspace/symbol" => serde_json::from_value::<WorkspaceSymbolParams>(req.params)
+                .ok()
+                .map(|p| serde_json::to_value(self.workspace_symbols(p)).unwrap()),
+            "textDocument/codeAction" => serde_json::from_value::<CodeActionParams>(req.params)
+                .ok()
+                .map(|p| serde_json::to_value(self.code_actions(p)).unwrap()),
             _ => return method_not_found(id, &req.method),
         };
         match result {
@@ -405,6 +459,9 @@ impl Server {
 
     fn hover(&self, p: HoverParams) -> Option<Hover> {
         let pp = p.text_document_position_params;
+        if let Some(h) = self.builtin_hover(&pp) {
+            return Some(h);
+        }
         let (a, r) = self.lookup(&pp.text_document.uri, pp.position)?;
         let text = &a.sm.file(r.span.file).text;
         Some(Hover {
@@ -695,6 +752,468 @@ impl Server {
         }
         Some(CompletionResponse::Array(items))
     }
+}
+
+// ------------------------------------------------------------------ navigation and editing
+
+/// A symbol's identity across analyses: its definition's file and offset.
+type SymKey = (PathBuf, u32);
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Byte ranges of whole-word occurrences of `name` in `text[start..end]`.
+fn word_occurrences(text: &str, start: usize, end: usize, name: &str) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let bytes = text.as_bytes();
+    let end = end.min(text.len());
+    let mut from = start;
+    while let Some(i) = text[from..end].find(name) {
+        let s = from + i;
+        let e = s + name.len();
+        let before_ok = s == 0 || !is_ident_byte(bytes[s - 1]);
+        let after_ok = e >= bytes.len() || !is_ident_byte(bytes[e]);
+        if before_ok && after_ok {
+            out.push((s, e));
+        }
+        from = s + 1;
+    }
+    out
+}
+
+/// The identifier itself within a reference or declaration span. Types and `struct`/`enum`/`type`
+/// declarations put the name first (`Matrix<int>`); everything else ends with it (`p.x`, `int a`).
+fn name_span(text: &str, span: Span, name: &str, name_first: bool) -> Option<Span> {
+    let occ = word_occurrences(text, span.start as usize, span.end as usize, name);
+    let (s, e) = if name_first {
+        *occ.first()?
+    } else {
+        *occ.last()?
+    };
+    Some(Span::new(span.file, s, e))
+}
+
+fn word_at(text: &str, off: usize) -> Option<(usize, usize)> {
+    let b = text.as_bytes();
+    let mut s = off.min(b.len());
+    while s > 0 && (is_ident_byte(b[s - 1]) || b[s - 1] == b'@') {
+        s -= 1;
+    }
+    let mut e = off.min(b.len());
+    while e < b.len() && is_ident_byte(b[e]) {
+        e += 1;
+    }
+    (s < e).then_some((s, e))
+}
+
+impl Server {
+    fn key_of(a: &Analysis, def: Span) -> SymKey {
+        (a.sm.file(def.file).path.clone(), def.start)
+    }
+
+    /// The symbol at a position: its key, name and whether its name comes first in spans.
+    fn symbol_at(&self, uri: &Uri, pos: Position) -> Option<(SymKey, String, bool)> {
+        let (a, r) = self.lookup(uri, pos)?;
+        let def = r.def?;
+        let decl = a.index.decls.iter().find(|d| d.span == def)?;
+        let name_first = matches!(
+            decl.kind,
+            DeclKind::Struct | DeclKind::Enum | DeclKind::Type
+        );
+        Some((Self::key_of(a, def), decl.name.clone(), name_first))
+    }
+
+    /// Every occurrence of a symbol (declaration and uses) in all analysed files.
+    fn occurrences(&self, key: &SymKey, name: &str, name_first: bool) -> Vec<(PathBuf, Range)> {
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for a in self.analyses.values() {
+            for r in &a.index.refs {
+                let Some(def) = r.def else { continue };
+                if &Self::key_of(a, def) != key {
+                    continue;
+                }
+                let f = a.sm.file(r.span.file);
+                // a reference to a type shows the type's declaration: its name comes first
+                let first = name_first || r.span == def && name_first;
+                let Some(ns) = name_span(&f.text, r.span, name, first || is_type_ref(&r.hover))
+                else {
+                    continue;
+                };
+                if seen.insert((f.path.clone(), ns.start)) {
+                    out.push((f.path.clone(), span_range(&f.text, ns)));
+                }
+            }
+        }
+        out.sort_by(|a, b| {
+            (&a.0, a.1.start.line, a.1.start.character).cmp(&(
+                &b.0,
+                b.1.start.line,
+                b.1.start.character,
+            ))
+        });
+        out
+    }
+
+    fn references(&self, p: ReferenceParams) -> Option<Vec<Location>> {
+        let pp = p.text_document_position;
+        let (key, name, first) = self.symbol_at(&pp.text_document.uri, pp.position)?;
+        let mut locs: Vec<Location> = self
+            .occurrences(&key, &name, first)
+            .into_iter()
+            .map(|(path, range)| Location::new(path_to_uri(&path), range))
+            .collect();
+        if !p.context.include_declaration {
+            let decl_line = self
+                .occurrences(&key, &name, first)
+                .into_iter()
+                .find(|(path, _)| *path == key.0);
+            if let Some((_, r)) = decl_line {
+                locs.retain(|l| l.range != r || uri_to_path(&l.uri).as_ref() != Some(&key.0));
+            }
+        }
+        Some(locs)
+    }
+
+    fn highlights(&self, p: DocumentHighlightParams) -> Option<Vec<DocumentHighlight>> {
+        let pp = p.text_document_position_params;
+        let path = uri_to_path(&pp.text_document.uri)?;
+        let (key, name, first) = self.symbol_at(&pp.text_document.uri, pp.position)?;
+        Some(
+            self.occurrences(&key, &name, first)
+                .into_iter()
+                .filter(|(p, _)| *p == path)
+                .map(|(_, range)| DocumentHighlight {
+                    range,
+                    kind: Some(DocumentHighlightKind::TEXT),
+                })
+                .collect(),
+        )
+    }
+
+    fn prepare_rename(&self, p: TextDocumentPositionParams) -> Option<PrepareRenameResponse> {
+        let path = uri_to_path(&p.text_document.uri)?;
+        let (key, name, first) = self.symbol_at(&p.text_document.uri, p.position)?;
+        let text = self.text_of(&path)?;
+        let off = pos_to_offset(&text, p.position);
+        // the cursor must be on the name itself
+        self.occurrences(&key, &name, first)
+            .into_iter()
+            .filter(|(p, _)| *p == path)
+            .map(|(_, r)| r)
+            .find(|r| pos_to_offset(&text, r.start) <= off && off <= pos_to_offset(&text, r.end))
+            .map(|range| PrepareRenameResponse::RangeWithPlaceholder {
+                range,
+                placeholder: name,
+            })
+    }
+
+    // `WorkspaceEdit::changes` is keyed by `Uri`, as defined by lsp-types
+    #[allow(clippy::mutable_key_type)]
+    fn rename(&self, p: RenameParams) -> Result<Option<WorkspaceEdit>, String> {
+        let pp = p.text_document_position;
+        let new = p.new_name.trim();
+        let valid = new
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && new.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            && new != "_";
+        if !valid || crate::parser::is_keyword(new) {
+            return Err(format!("`{new}` is not a valid name"));
+        }
+        let Some((key, name, first)) = self.symbol_at(&pp.text_document.uri, pp.position) else {
+            return Ok(None);
+        };
+        let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
+        for (path, range) in self.occurrences(&key, &name, first) {
+            changes
+                .entry(path_to_uri(&path))
+                .or_default()
+                .push(TextEdit::new(range, new.to_string()));
+        }
+        Ok(Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }))
+    }
+
+    fn builtin_hover(&self, pp: &TextDocumentPositionParams) -> Option<Hover> {
+        let path = uri_to_path(&pp.text_document.uri)?;
+        let text = self.text_of(&path)?;
+        let off = pos_to_offset(&text, pp.position);
+        let (s, e) = word_at(&text, off)?;
+        let word = text[s..e].strip_prefix('@')?;
+        let (_, sig) = BUILTINS.iter().find(|(n, _)| *n == word)?;
+        Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: format!("```nc\n{sig}\n```"),
+            }),
+            range: Some(Range::new(offset_to_pos(&text, s), offset_to_pos(&text, e))),
+        })
+    }
+
+    fn signature_help(&self, p: SignatureHelpParams) -> Option<SignatureHelp> {
+        let pp = p.text_document_position_params;
+        let path = uri_to_path(&pp.text_document.uri)?;
+        let text = self.text_of(&path)?;
+        let off = pos_to_offset(&text, pp.position);
+        // find the unclosed `(` before the cursor and count the commas at its level
+        let b = text.as_bytes();
+        let (mut depth, mut commas, mut i) = (0i32, 0u32, off);
+        let open = loop {
+            if i == 0 {
+                return None;
+            }
+            i -= 1;
+            match b[i] {
+                b')' | b']' | b'}' => depth += 1,
+                b'(' | b'[' | b'{' if depth > 0 => depth -= 1,
+                b'(' => break i,
+                b'[' | b'{' => return None,
+                b',' if depth == 0 => commas += 1,
+                b'\n' if depth == 0 && i + 1 < off && text[i + 1..off].trim().is_empty() => {}
+                _ => {}
+            }
+        };
+        let mut e = open;
+        while e > 0 && b[e - 1] == b' ' {
+            e -= 1;
+        }
+        // skip explicit generic arguments: `map<int, str>(`
+        if e > 0 && b[e - 1] == b'>' {
+            let mut d = 0;
+            while e > 0 {
+                e -= 1;
+                match b[e] {
+                    b'>' => d += 1,
+                    b'<' => {
+                        d -= 1;
+                        if d == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut s = e;
+        while s > 0 && (is_ident_byte(b[s - 1]) || b[s - 1] == b'@') {
+            s -= 1;
+        }
+        let name = &text[s..e];
+        let label = if let Some(bi) = name.strip_prefix('@') {
+            BUILTINS.iter().find(|(n, _)| *n == bi)?.1.to_string()
+        } else {
+            let a = self.analyses.get(&path)?;
+            let fid =
+                a.sm.files
+                    .iter()
+                    .position(|f| f.path == path)
+                    .map(|i| i as u32);
+            a.index
+                .decls
+                .iter()
+                .filter(|d| d.name == name && d.kind == DeclKind::Function)
+                .max_by_key(|d| Some(d.span.file) == fid)?
+                .detail
+                .clone()
+        };
+        // parameter label offsets within `fn name(a, b) ret`
+        let lp = label.find('(')?;
+        let rp = label.rfind(')')?;
+        let mut params = Vec::new();
+        let mut start = lp + 1;
+        let mut depth = 0;
+        for (k, c) in label[lp + 1..rp].char_indices() {
+            let k = lp + 1 + k;
+            match c {
+                '(' | '[' => depth += 1,
+                ')' | ']' => depth -= 1,
+                ',' if depth == 0 => {
+                    params.push((start, k));
+                    start = k + 2;
+                }
+                _ => {}
+            }
+        }
+        if start < rp {
+            params.push((start, rp));
+        }
+        let parameters = params
+            .iter()
+            .map(|(s, e)| ParameterInformation {
+                label: ParameterLabel::LabelOffsets([
+                    label[..*s].encode_utf16().count() as u32,
+                    label[..*e].encode_utf16().count() as u32,
+                ]),
+                documentation: None,
+            })
+            .collect();
+        Some(SignatureHelp {
+            signatures: vec![SignatureInformation {
+                label,
+                documentation: None,
+                parameters: Some(parameters),
+                active_parameter: Some(commas),
+            }],
+            active_signature: Some(0),
+            active_parameter: Some(commas),
+        })
+    }
+
+    fn folding(&self, p: FoldingRangeParams) -> Option<Vec<FoldingRange>> {
+        let path = uri_to_path(&p.text_document.uri)?;
+        let text = self.text_of(&path)?;
+        let (toks, _) = crate::lexer::lex_all(&text, 0, 0);
+        let line = |off: u32| offset_to_pos(&text, off as usize).line;
+        let mut out = Vec::new();
+        let mut stack: Vec<u32> = Vec::new();
+        for t in &toks {
+            match t.tok {
+                crate::lexer::Tok::LBrace
+                | crate::lexer::Tok::LBracket
+                | crate::lexer::Tok::LParen => stack.push(t.span.start),
+                crate::lexer::Tok::RBrace
+                | crate::lexer::Tok::RBracket
+                | crate::lexer::Tok::RParen => {
+                    if let Some(open) = stack.pop() {
+                        let (a, b) = (line(open), line(t.span.start));
+                        if b > a {
+                            out.push(FoldingRange {
+                                start_line: a,
+                                end_line: b.saturating_sub(1).max(a),
+                                ..Default::default()
+                            });
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        // runs of comment lines
+        let mut run: Option<(u32, u32)> = None;
+        for (i, l) in text.lines().enumerate() {
+            let i = i as u32;
+            if l.trim_start().starts_with("//") {
+                run = Some(match run {
+                    Some((s, _)) => (s, i),
+                    None => (i, i),
+                });
+            } else if let Some((s, e)) = run.take()
+                && e > s
+            {
+                out.push(FoldingRange {
+                    start_line: s,
+                    end_line: e,
+                    kind: Some(FoldingRangeKind::Comment),
+                    ..Default::default()
+                });
+            }
+        }
+        if let Some((s, e)) = run
+            && e > s
+        {
+            out.push(FoldingRange {
+                start_line: s,
+                end_line: e,
+                kind: Some(FoldingRangeKind::Comment),
+                ..Default::default()
+            });
+        }
+        Some(out)
+    }
+
+    #[allow(deprecated)]
+    fn workspace_symbols(&self, p: WorkspaceSymbolParams) -> Option<WorkspaceSymbolResponse> {
+        let q = p.query.to_lowercase();
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for a in self.analyses.values() {
+            for d in &a.index.decls {
+                let kind = match d.kind {
+                    DeclKind::Function => SymbolKind::FUNCTION,
+                    DeclKind::Struct => SymbolKind::STRUCT,
+                    DeclKind::Enum => SymbolKind::ENUM,
+                    DeclKind::Type => SymbolKind::TYPE_PARAMETER,
+                    _ => continue,
+                };
+                if !d.name.to_lowercase().contains(&q) {
+                    continue;
+                }
+                let f = a.sm.file(d.span.file);
+                if !seen.insert((f.path.clone(), d.span.start)) {
+                    continue;
+                }
+                let first = matches!(d.kind, DeclKind::Struct | DeclKind::Enum | DeclKind::Type);
+                let span = name_span(&f.text, d.span, &d.name, first).unwrap_or(d.span);
+                out.push(SymbolInformation {
+                    name: d.name.clone(),
+                    kind,
+                    tags: None,
+                    deprecated: None,
+                    location: Location::new(path_to_uri(&f.path), span_range(&f.text, span)),
+                    container_name: f.path.file_name().map(|n| n.to_string_lossy().into_owned()),
+                });
+            }
+        }
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        Some(WorkspaceSymbolResponse::Flat(out))
+    }
+
+    // `WorkspaceEdit::changes` is keyed by `Uri`, as defined by lsp-types
+    #[allow(clippy::mutable_key_type)]
+    fn code_actions(&self, p: CodeActionParams) -> Option<CodeActionResponse> {
+        let path = uri_to_path(&p.text_document.uri)?;
+        let text = self.text_of(&path)?;
+        let mut out = Vec::new();
+        for d in &p.context.diagnostics {
+            let fix = |title: String, at: Position, insert: &str| {
+                let mut changes = HashMap::new();
+                changes.insert(
+                    p.text_document.uri.clone(),
+                    vec![TextEdit::new(Range::new(at, at), insert.to_string())],
+                );
+                CodeActionOrCommand::CodeAction(CodeAction {
+                    title,
+                    kind: Some(CodeActionKind::QUICKFIX),
+                    diagnostics: Some(vec![d.clone()]),
+                    edit: Some(WorkspaceEdit {
+                        changes: Some(changes),
+                        ..Default::default()
+                    }),
+                    is_preferred: Some(true),
+                    ..Default::default()
+                })
+            };
+            if d.message.contains("declare it with `mut`")
+                && d.message.contains("immutable variable")
+            {
+                // insert `mut` at the variable's declaration
+                if let Some((a, r)) = self.lookup(&p.text_document.uri, d.range.start)
+                    && let Some(def) = r.def
+                    && a.sm.file(def.file).path == path
+                {
+                    let at = offset_to_pos(&text, def.start as usize);
+                    out.push(fix("Make the variable mutable".into(), at, "mut "));
+                }
+            } else if d.message.contains("not used") || d.message.starts_with("unused value") {
+                out.push(fix(
+                    "Discard the value with `_ =`".into(),
+                    d.range.start,
+                    "_ = ",
+                ));
+            }
+        }
+        Some(out)
+    }
+}
+
+/// Hover text of a reference to a type (whose spans start with the name).
+fn is_type_ref(hover: &str) -> bool {
+    hover.starts_with("struct ") || hover.starts_with("enum ") || hover.starts_with("type ")
 }
 
 fn publish(path: &Path, diagnostics: Vec<Diagnostic>) -> Notification {
