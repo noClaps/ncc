@@ -1310,6 +1310,36 @@ impl Server {
         let Some((key, name, first)) = self.symbol_at(&pp.text_document.uri, pp.position) else {
             return Ok(None);
         };
+        // a name that is already declared where the symbol is declared would clash
+        if let Some(a) = self.analyses.get(&key.0)
+            && let Some(fid) = a.file_id(&key.0)
+            && let Some(d) = a.decl_at.keys().find(|s| s.file == fid && s.start == key.1)
+            && let Some(decl) = a.decl(*d)
+        {
+            let clash = a.index.decls.iter().any(|o| {
+                o.name == new
+                    && o.span.file == fid
+                    && o.scope == decl.scope
+                    && !matches!(o.kind, DeclKind::Field | DeclKind::Variant)
+                    && !matches!(decl.kind, DeclKind::Field | DeclKind::Variant)
+            }) || a.index.decls.iter().any(|o| {
+                // fields and variants clash only with their siblings
+                o.name == new
+                    && matches!(decl.kind, DeclKind::Field | DeclKind::Variant)
+                    && o.kind == decl.kind
+                    && o.span.file == fid
+                    && a.index.decls.iter().any(|p| {
+                        matches!(p.kind, DeclKind::Struct | DeclKind::Enum)
+                            && p.span.start <= o.span.start
+                            && o.span.end <= p.span.end
+                            && p.span.start <= decl.span.start
+                            && decl.span.end <= p.span.end
+                    })
+            });
+            if clash {
+                return Err(format!("`{new}` is already declared here"));
+            }
+        }
         let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
         for (path, range) in self.occurrences(&key, &name, first) {
             changes
@@ -1344,14 +1374,32 @@ impl Server {
         let path = uri_to_path(&pp.text_document.uri)?;
         let text = self.text_of(&path)?;
         let off = pos_to_offset(&text, pp.position);
-        // find the unclosed `(` before the cursor and count the commas at its level
+        // find the unclosed `(` before the cursor and count the commas at its level, skipping
+        // string and character literals and comments
         let b = text.as_bytes();
+        let mut skip = vec![false; b.len()];
+        let (toks, _) = crate::lexer::lex_all(&text, 0, 0);
+        for t in &toks {
+            if matches!(
+                t.tok,
+                crate::lexer::Tok::Str(_) | crate::lexer::Tok::Char(_)
+            ) {
+                let (s, e) = (t.span.start as usize, (t.span.end as usize).min(b.len()));
+                skip[s..e].iter_mut().for_each(|x| *x = true);
+            }
+        }
+        for (s, e) in crate::lexer::comments(&text) {
+            skip[s..e.min(b.len())].iter_mut().for_each(|x| *x = true);
+        }
         let (mut depth, mut commas, mut i) = (0i32, 0u32, off);
         let open = loop {
             if i == 0 {
                 return None;
             }
             i -= 1;
+            if skip[i] {
+                continue;
+            }
             match b[i] {
                 b')' | b']' | b'}' => depth += 1,
                 b'(' | b'[' | b'{' if depth > 0 => depth -= 1,

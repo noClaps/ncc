@@ -734,6 +734,28 @@ fn hover_hints_and_navigation() {
         "{sig}"
     );
 
+    // commas in strings do not count as argument separators
+    let text = format!("{src}int q = add(\"a,b\".len, 1)\n");
+    s.change(&text);
+    let sig = s.req(
+        "textDocument/signatureHelp",
+        json!({"position": at(&text, ".len, 1", 0, 3)}),
+    );
+    assert_eq!(sig["activeParameter"], 0, "{sig}");
+    s.change(src);
+
+    // renaming to a name that is already declared is refused
+    let r = s.c.request(
+        "textDocument/rename",
+        json!({"textDocument": {"uri": s.uri}, "position": at(src, "twice(int", 0, 0), "newName": "add"}),
+    );
+    assert!(r.is_null(), "{r}");
+    let r = s.c.request(
+        "textDocument/rename",
+        json!({"textDocument": {"uri": s.uri}, "position": at(src, "twice(int", 0, 0), "newName": "double"}),
+    );
+    assert_eq!(r["changes"][&s.uri].as_array().unwrap().len(), 2, "{r}");
+
     // references and rename include files that are not open
     let refs = s.req(
         "textDocument/references",
