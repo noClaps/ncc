@@ -83,7 +83,6 @@ Arguments:
 
 Options:
   -r, --release             Run the file in release mode.
-  -f, --format <c|asm|exe>  The format to compile to. (default: exe)
   -h, --help                Show this help and exit.
 ```
 

@@ -120,3 +120,19 @@ A: `==`/`!=` compare structurally on every type except functions and futures. Th
 
 **Q: How do `@as` conversions behave at the edges?**
 A: Checked, little-endian. Conversions that don't fit panic (a negative `int` to `uint`, an out-of-range or NaN `float` to `int`). `float` to `int` truncates toward 0. `int`/`uint`/`float` to `byte[]` gives 8 bytes, little-endian. `char`/`str` to `byte[]` gives UTF-8. `byte` to `char` gives the scalar with that value. `bool` to `int` gives 0/1.
+
+## CLI
+
+**Q: What does `ncc run -f c|asm` do?**
+A: `ncc run` has no `-f` option. Removed it from `docs/compiler.md`.
+
+**Q: What does `ncc test` print and return?**
+A: One line per test in source order: `PASS name`, or `FAIL name: <assert at file:line | error msg | panic msg>`. Then a summary, `N passed, M failed`. Exits with 1 if any test failed. A panic fails only that test. Only tests in the given file run, not tests in imported modules.
+
+## Closures
+
+**Q: How do nested and anonymous functions capture outer variables?**
+A: Outer `mut` variables are shared by reference and kept alive by refcount even if the function value escapes its scope. Immutable variables are captured by value. This applies to named nested functions and to `fn(...) {}` literals alike.
+
+**Q: How do optionals, error unions, functions and futures print?**
+A: An optional prints `none` or the inner value. An error union prints the value or `error: msg`. Everything else (functions, futures, mutexes, void) is a compile error.
