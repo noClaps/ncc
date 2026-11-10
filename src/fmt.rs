@@ -36,19 +36,21 @@ pub fn format(src: &str) -> Result<String, Vec<Diag>> {
     // print, then break the outermost one-line list of each line that is too long, until
     // every line fits or nothing more can be broken
     let mut force: HashSet<usize> = HashSet::new();
+    let mut out = String::new();
     for _ in 0..200 {
         let mut p = Printer {
             src,
-            comments: comments.clone(),
+            comments: &comments,
             next: 0,
             out: String::new(),
             cursor: 0,
-            force: force.clone(),
+            force: &force,
         };
         p.module(&module);
+        out = p.out;
         let mut added = false;
-        for line in p.out.lines() {
-            if width(line) <= MAX_WIDTH {
+        for line in out.lines() {
+            if strip_marks(line).chars().count() <= MAX_WIDTH {
                 continue;
             }
             if let Some(id) = marks(line).into_iter().find(|id| !force.contains(id)) {
@@ -57,19 +59,10 @@ pub fn format(src: &str) -> Result<String, Vec<Diag>> {
             }
         }
         if !added {
-            return Ok(strip_marks(&p.out));
+            break;
         }
     }
-    let mut p = Printer {
-        src,
-        comments,
-        next: 0,
-        out: String::new(),
-        cursor: 0,
-        force,
-    };
-    p.module(&module);
-    Ok(strip_marks(&p.out))
+    Ok(strip_marks(&out))
 }
 
 /// A single argument that is itself bracketed (`f([...])`, `f(T{...})`, `f(fn() {...})`):
@@ -85,21 +78,6 @@ fn hugs(args: &[Expr]) -> bool {
             ..
         }]
     )
-}
-
-/// Display width of a line, without markers.
-fn width(line: &str) -> usize {
-    let mut n = 0;
-    let mut in_mark = false;
-    for c in line.chars() {
-        match c {
-            MARK_START => in_mark = true,
-            MARK_END => in_mark = false,
-            _ if !in_mark => n += 1,
-            _ => {}
-        }
-    }
-    n
 }
 
 /// Ids of the one-line lists in a line, outermost (leftmost) first.
@@ -133,14 +111,14 @@ fn strip_marks(s: &str) -> String {
 
 struct Printer<'a> {
     src: &'a str,
-    comments: Vec<(usize, usize)>,
+    comments: &'a [(usize, usize)],
     /// next comment to print
     next: usize,
     out: String,
     /// end of the last printed source construct (for blank line detection)
     cursor: usize,
     /// ids of bracketed lists to print one entry per line because a line was too long
-    force: HashSet<usize>,
+    force: &'a HashSet<usize>,
 }
 
 const INDENT: &str = "  ";
@@ -148,6 +126,24 @@ const INDENT: &str = "  ";
 /// A list entry: its source offset and a printer for it at a given indentation.
 type EntryFn<'e, 'a> = Box<dyn Fn(&mut Printer<'a>, usize) -> String + 'e>;
 type Entry<'e, 'a> = (usize, EntryFn<'e, 'a>);
+
+fn entry<'e, 'a>(
+    start: usize,
+    f: impl Fn(&mut Printer<'a>, usize) -> String + 'e,
+) -> Entry<'e, 'a> {
+    (start, Box::new(f))
+}
+
+/// One entry per expression.
+fn expr_entries<'e, 'a>(xs: &'e [Expr]) -> Vec<Entry<'e, 'a>> {
+    xs.iter()
+        .map(|x| entry(x.span.start as usize, move |p, i| p.expr(x, i)))
+        .collect()
+}
+
+fn vis(public: bool) -> &'static str {
+    if public { "pub " } else { "" }
+}
 
 fn ind(n: usize) -> String {
     INDENT.repeat(n)
@@ -192,14 +188,7 @@ impl<'a> Printer<'a> {
             return false;
         }
         let gap = &self.src[a..b];
-        let mut newlines = 0;
-        for line in gap.split('\n').skip(1) {
-            newlines += 1;
-            if newlines >= 1 && line.trim().is_empty() && gap.matches('\n').count() >= 2 {
-                return true;
-            }
-        }
-        false
+        gap.matches('\n').count() >= 2 && gap.split('\n').skip(1).any(|l| l.trim().is_empty())
     }
 
     /// Print comments that start before `before`, each on its own line.
@@ -236,13 +225,21 @@ impl<'a> Printer<'a> {
         }
     }
 
-    /// Print a sequence of statements-like entries (start, end, printer) at `indent`.
+    /// Before an entry of a block or module at `start`: the comments before it, and a blank
+    /// line kept from the source.
     fn entry_start(&mut self, start: usize, indent: usize, first: bool) {
         self.flush_comments(start, indent, first && self.cursor_is_block_start());
         // keep a blank line from the source, except right after an opening brace
         if self.blank_between(self.cursor, start) && !self.cursor_is_block_start() {
             self.out.push('\n');
         }
+    }
+
+    /// The end of the source line containing `off`.
+    fn line_end(&self, off: usize) -> usize {
+        self.src[off..]
+            .find('\n')
+            .map_or(self.src.len(), |k| off + k)
     }
 
     fn cursor_is_block_start(&self) -> bool {
@@ -316,21 +313,18 @@ impl<'a> Printer<'a> {
                     let sig = self.sig(&f.sig, true, 1);
                     self.out
                         .push_str(&format!("{INDENT}{sig} = {}\n", quote(&f.symbol)));
-                    let end = self.src[f.sig.span.end as usize..]
-                        .find('\n')
-                        .map_or(self.src.len(), |k| f.sig.span.end as usize + k);
-                    self.cursor = end;
+                    self.cursor = self.line_end(f.sig.span.end as usize);
                     self.trailing_comment(f.sig.span.end as usize);
                 }
                 self.flush_comments(e.span.end as usize, 1, false);
                 self.out.push_str("}\n");
             }
             Item::Struct(s) => {
-                let vis = if s.public { "pub " } else { "" };
                 self.out.push_str(&format!(
-                    "{vis}struct {}{} {{\n",
+                    "{}struct {}{} {{\n",
+                    vis(s.public),
                     s.name,
-                    tparams(&s.type_params)
+                    GenericParam::list(&s.type_params)
                 ));
                 for (i, (ty, name, sp)) in s.fields.iter().enumerate() {
                     self.flush_comments(sp.start as usize, 1, i == 0);
@@ -343,11 +337,11 @@ impl<'a> Printer<'a> {
                 self.out.push_str("}\n");
             }
             Item::Enum(e) => {
-                let vis = if e.public { "pub " } else { "" };
                 self.out.push_str(&format!(
-                    "{vis}enum {}{} {{\n",
+                    "{}enum {}{} {{\n",
+                    vis(e.public),
                     e.name,
-                    tparams(&e.type_params)
+                    GenericParam::list(&e.type_params)
                 ));
                 for (i, (name, tys, sp)) in e.variants.iter().enumerate() {
                     self.flush_comments(sp.start as usize, 1, i == 0);
@@ -360,19 +354,16 @@ impl<'a> Printer<'a> {
                         )
                     };
                     self.out.push_str(&format!("{INDENT}{name}{payload}\n"));
-                    let line_end = self.src[sp.end as usize..]
-                        .find('\n')
-                        .map_or(self.src.len(), |k| sp.end as usize + k);
-                    self.cursor = line_end;
+                    self.cursor = self.line_end(sp.end as usize);
                     self.trailing_comment(sp.end as usize);
                 }
                 self.flush_comments(e.span.end as usize, 1, false);
                 self.out.push_str("}\n");
             }
             Item::Type(t) => {
-                let vis = if t.public { "pub " } else { "" };
                 let ty = t.ty.show();
-                self.out.push_str(&format!("{vis}type {} = {ty}\n", t.name));
+                self.out
+                    .push_str(&format!("{}type {} = {ty}\n", vis(t.public), t.name));
             }
             Item::Fn(f) => {
                 let text = self.fn_decl(f, 0);
@@ -392,23 +383,20 @@ impl<'a> Printer<'a> {
     }
 
     fn fn_decl(&mut self, f: &FnDecl, indent: usize) -> String {
-        let vis = if f.public { "pub " } else { "" };
         let sig = self.sig(&f.sig, true, indent);
         let body = self.block(&f.body, indent, false);
-        format!("{vis}{sig} {body}")
+        format!("{}{sig} {body}", vis(f.public))
     }
 
     /// `fn name<type T>(T a) R` (or `fn(T a) R` for literals)
     fn sig(&mut self, s: &FnSig, named: bool, indent: usize) -> String {
-        let entries: Vec<Entry<'_, 'a>> = s
+        let entries = s
             .params
             .iter()
             .map(|p| {
-                (
-                    p.span.start as usize,
-                    Box::new(move |_: &mut Self, _: usize| format!("{} {}", p.ty.show(), p.name))
-                        as EntryFn<'_, 'a>,
-                )
+                entry(p.span.start as usize, move |_, _| {
+                    format!("{} {}", p.ty.show(), p.name)
+                })
             })
             .collect();
         // the parameter list ends at the `)` after the last parameter
@@ -428,7 +416,11 @@ impl<'a> Printer<'a> {
             SIG_ID + s.span.start as usize,
         );
         let mut out = if named {
-            format!("fn {}{}{params}", s.name, tparams(&s.type_params))
+            format!(
+                "fn {}{}{params}",
+                s.name,
+                GenericParam::list(&s.type_params)
+            )
         } else {
             format!("fn{params}")
         };
@@ -672,16 +664,7 @@ impl<'a> Printer<'a> {
                 let multi = (self.multiline(e.span) && args.len() > 1 && self.args_multiline(e))
                     || (self.force.contains(&(e.span.end as usize)) && !args.is_empty());
                 if multi {
-                    let entries: Vec<Entry<'_, 'a>> = args
-                        .iter()
-                        .map(|a| {
-                            (
-                                a.span.start as usize,
-                                Box::new(move |p: &mut Self, i: usize| p.expr(a, i))
-                                    as EntryFn<'_, 'a>,
-                            )
-                        })
-                        .collect();
+                    let entries = expr_entries(args);
                     let list = self.bracketed("(", ")", entries, true, indent, e.span.end as usize);
                     format!("{callee}{list}")
                 } else if args.is_empty() {
@@ -702,19 +685,11 @@ impl<'a> Printer<'a> {
                 )
             }
             ExprKind::Builtin(name, ty, args) => {
-                let mut entries: Vec<Entry<'_, 'a>> = Vec::new();
+                let mut entries = Vec::new();
                 if let Some(t) = ty {
-                    entries.push((
-                        t.span().start as usize,
-                        Box::new(move |_: &mut Self, _: usize| t.show()) as EntryFn<'_, 'a>,
-                    ));
+                    entries.push(entry(t.span().start as usize, move |_, _| t.show()));
                 }
-                for a in args {
-                    entries.push((
-                        a.span.start as usize,
-                        Box::new(move |p: &mut Self, i: usize| p.expr(a, i)) as EntryFn<'_, 'a>,
-                    ));
-                }
+                entries.extend(expr_entries(args));
                 if ty.is_none() && hugs(args) {
                     return format!("@{name}({})", self.list(args, indent).join(", "));
                 }
@@ -740,15 +715,7 @@ impl<'a> Printer<'a> {
             ExprKind::Tuple(items) => format!("({})", self.list(items, indent).join(", ")),
             ExprKind::Array(items) => {
                 let multi = self.multiline(e.span);
-                let entries = items
-                    .iter()
-                    .map(|a| {
-                        (
-                            a.span.start as usize,
-                            Box::new(move |p: &mut Self, i: usize| p.expr(a, i)) as EntryFn<'_, 'a>,
-                        )
-                    })
-                    .collect();
+                let entries = expr_entries(items);
                 self.bracketed("[", "]", entries, multi, indent, e.span.end as usize)
             }
             ExprKind::Map(entries) => {
@@ -756,12 +723,9 @@ impl<'a> Printer<'a> {
                 let entries = entries
                     .iter()
                     .map(|(k, v)| {
-                        (
-                            k.span.start as usize,
-                            Box::new(move |p: &mut Self, i: usize| {
-                                format!("{}: {}", p.expr(k, i), p.expr(v, i))
-                            }) as EntryFn<'_, 'a>,
-                        )
+                        entry(k.span.start as usize, move |p, i| {
+                            format!("{}: {}", p.expr(k, i), p.expr(v, i))
+                        })
                     })
                     .collect();
                 self.bracketed("[", "]", entries, multi, indent, e.span.end as usize)
@@ -772,12 +736,9 @@ impl<'a> Printer<'a> {
                 let entries = fields
                     .iter()
                     .map(|(name, v, sp)| {
-                        (
-                            sp.start as usize,
-                            Box::new(move |p: &mut Self, i: usize| {
-                                format!(".{name} = {}", p.expr(v, i))
-                            }) as EntryFn<'_, 'a>,
-                        )
+                        entry(sp.start as usize, move |p, i| {
+                            format!(".{name} = {}", p.expr(v, i))
+                        })
                     })
                     .collect();
                 let body = self.bracketed("{", "}", entries, multi, indent, e.span.end as usize);
@@ -806,9 +767,14 @@ impl<'a> Printer<'a> {
                 let block = self.block(b, indent, true);
                 format!("{value} catch {name} {block}")
             }
-            ExprKind::Try(x) => format!("try {}", self.paren(x, indent, prec(x) < UNARY)),
-            ExprKind::Async(x) => format!("async {}", self.paren(x, indent, prec(x) < UNARY)),
-            ExprKind::Await(x) => format!("await {}", self.paren(x, indent, prec(x) < UNARY)),
+            ExprKind::Try(x) | ExprKind::Async(x) | ExprKind::Await(x) => {
+                let kw = match e.kind {
+                    ExprKind::Try(_) => "try",
+                    ExprKind::Async(_) => "async",
+                    _ => "await",
+                };
+                format!("{kw} {}", self.paren(x, indent, prec(x) < UNARY))
+            }
         }
     }
 
@@ -850,10 +816,6 @@ impl<'a> Printer<'a> {
         out.push('}');
         out
     }
-}
-
-fn tparams(ps: &[GenericParam]) -> String {
-    GenericParam::list(ps)
 }
 
 /// Source range of an item (for comments and blank lines).

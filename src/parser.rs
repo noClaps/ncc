@@ -4,7 +4,7 @@ use crate::ast::*;
 use crate::diag::{Diag, Result, Span, err};
 use crate::lexer::{StrPart, Tok, Token, lex};
 
-const KEYWORDS: &[&str] = &[
+pub const KEYWORDS: &[&str] = &[
     "fn", "return", "if", "else", "while", "for", "in", "break", "continue", "mut", "mutex",
     "lock", "struct", "enum", "type", "import", "as", "extern", "pub", "test", "assert", "true",
     "false", "none", "and", "or", "not", "try", "catch", "throw", "async", "await", "fut",
@@ -34,16 +34,8 @@ pub struct Parser {
 /// parsed and every error found.
 pub fn parse_module_recover(src: &str, file: u32) -> (Module, Vec<Diag>) {
     let (toks, lex_errors) = crate::lexer::lex_all(src, file, 0);
-    let mut p = Parser {
-        toks,
-        pos: 0,
-        file,
-        no_struct: false,
-        errors: lex_errors,
-        src: src.to_string(),
-        stmt_start: 0,
-        recovered: false,
-    };
+    let mut p = Parser::new(toks, file, src.to_string());
+    p.errors = lex_errors;
     let m = p.module();
     let mut errors = p.errors;
     errors.dedup_by(|a, b| a.span == b.span && a.msg == b.msg);
@@ -51,6 +43,59 @@ pub fn parse_module_recover(src: &str, file: u32) -> (Module, Vec<Diag>) {
 }
 
 impl Parser {
+    fn new(toks: Vec<Token>, file: u32, src: String) -> Parser {
+        Parser {
+            toks,
+            pos: 0,
+            file,
+            no_struct: false,
+            errors: vec![],
+            src,
+            stmt_start: 0,
+            recovered: false,
+        }
+    }
+
+    /// Run `f` with struct literals allowed (`no_struct` false) or not, restoring the setting.
+    fn with_no_struct<T>(&mut self, no_struct: bool, f: impl FnOnce(&mut Self) -> T) -> T {
+        let saved = std::mem::replace(&mut self.no_struct, no_struct);
+        let r = f(self);
+        self.no_struct = saved;
+        r
+    }
+
+    /// Comma-separated items up to `close` (consumed), with newlines allowed around them and
+    /// an optional trailing comma.
+    fn list<T>(
+        &mut self,
+        close: &Tok,
+        mut item: impl FnMut(&mut Self) -> Result<T>,
+    ) -> Result<Vec<T>> {
+        let mut out = Vec::new();
+        self.skip_nl();
+        while !self.at(close) {
+            out.push(item(self)?);
+            self.skip_nl();
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+            self.skip_nl();
+        }
+        self.expect(close)?;
+        Ok(out)
+    }
+
+    /// `<A, 3>` after a type or function name: generic arguments.
+    fn generic_args(&mut self) -> Result<Vec<TypeExpr>> {
+        self.expect(&Tok::Lt)?;
+        let mut args = vec![self.generic_arg()?];
+        while self.eat(&Tok::Comma) {
+            args.push(self.generic_arg()?);
+        }
+        self.expect_gt()?;
+        Ok(args)
+    }
+
     fn peek(&self) -> &Tok {
         &self.toks[self.pos].tok
     }
@@ -124,22 +169,11 @@ impl Parser {
                 self.bump();
                 Ok(())
             }
-            Tok::Shr => {
-                let sp = self.span();
-                self.toks[self.pos].tok = Tok::Gt;
-                self.toks[self.pos].span = Span {
-                    start: sp.start + 1,
-                    ..sp
-                };
-                Ok(())
-            }
-            Tok::Ge => {
-                let sp = self.span();
-                self.toks[self.pos].tok = Tok::Assign;
-                self.toks[self.pos].span = Span {
-                    start: sp.start + 1,
-                    ..sp
-                };
+            // keep what follows the `>`: `>>` -> `>`, `>=` -> `=`
+            t @ (Tok::Shr | Tok::Ge) => {
+                let tok = &mut self.toks[self.pos];
+                tok.tok = if t == Tok::Shr { Tok::Gt } else { Tok::Assign };
+                tok.span.start += 1;
                 Ok(())
             }
             t => err(self.span(), format!("expected `>`, found {}", t.describe())),
@@ -238,7 +272,6 @@ impl Parser {
         open
     }
 
-    /// Record an error and skip to the start of the next statement.
     /// Skip to the end of the line, past brackets opened on it (`depth` were already open).
     fn skip_line(&mut self, mut depth: i32) {
         loop {
@@ -257,6 +290,7 @@ impl Parser {
         }
     }
 
+    /// Record an error and skip to the start of the next statement.
     fn recover(&mut self, d: Diag, start: usize) {
         let err_tok = self.pos.min(self.toks.len() - 1);
         let open = self.open_brackets(start, err_tok);
@@ -315,18 +349,7 @@ impl Parser {
             self.skip_nl();
             while !self.at(&Tok::RBrace) {
                 let sp = self.span();
-                let path = match self.bump().tok {
-                    Tok::Str(parts) => match parts.as_slice() {
-                        [StrPart::Lit(s)] => s.clone(),
-                        _ => return err(sp, "import path must be a plain string literal"),
-                    },
-                    t => {
-                        return err(
-                            sp,
-                            format!("expected import path string, found {}", t.describe()),
-                        );
-                    }
-                };
+                let path = self.plain_string("import path")?;
                 self.expect_kw("as")?;
                 let (alias, asp) = self.ident()?;
                 items.push(Item::Import(Import {
@@ -404,19 +427,11 @@ impl Parser {
             let mut variants = Vec::new();
             while !self.at(&Tok::RBrace) {
                 let (vname, vsp) = self.ident()?;
-                let mut tys = Vec::new();
-                if self.eat(&Tok::LParen) {
-                    self.skip_nl();
-                    while !self.at(&Tok::RParen) {
-                        tys.push(self.parse_type()?);
-                        self.skip_nl();
-                        if !self.eat(&Tok::Comma) {
-                            break;
-                        }
-                        self.skip_nl();
-                    }
-                    self.expect(&Tok::RParen)?;
-                }
+                let tys = if self.eat(&Tok::LParen) {
+                    self.list(&Tok::RParen, Self::parse_type)?
+                } else {
+                    vec![]
+                };
                 variants.push((vname, tys, vsp));
                 self.eat(&Tok::Comma);
                 self.end_stmt()?;
@@ -539,32 +554,35 @@ impl Parser {
 
     /// A compile-time integer: literals, generic constants, `+ - * / %` and parentheses.
     fn const_expr(&mut self) -> Result<ConstExpr> {
-        let mut l = self.const_term()?;
-        loop {
-            let op = match self.peek() {
-                Tok::Plus => BinOp::Add,
-                Tok::Minus => BinOp::Sub,
-                _ => return Ok(l),
-            };
-            self.bump();
-            let r = self.const_term()?;
-            l = ConstExpr::Bin(op, Box::new(l), Box::new(r));
-        }
+        self.const_binary(Self::const_term, |t| match t {
+            Tok::Plus => Some(BinOp::Add),
+            Tok::Minus => Some(BinOp::Sub),
+            _ => None,
+        })
     }
 
     fn const_term(&mut self) -> Result<ConstExpr> {
-        let mut l = self.const_atom()?;
-        loop {
-            let op = match self.peek() {
-                Tok::Star => BinOp::Mul,
-                Tok::Slash => BinOp::Div,
-                Tok::Percent => BinOp::Mod,
-                _ => return Ok(l),
-            };
+        self.const_binary(Self::const_atom, |t| match t {
+            Tok::Star => Some(BinOp::Mul),
+            Tok::Slash => Some(BinOp::Div),
+            Tok::Percent => Some(BinOp::Mod),
+            _ => None,
+        })
+    }
+
+    /// Left-associative operators `op` between operands parsed by `operand`.
+    fn const_binary(
+        &mut self,
+        operand: fn(&mut Self) -> Result<ConstExpr>,
+        op: fn(&Tok) -> Option<BinOp>,
+    ) -> Result<ConstExpr> {
+        let mut l = operand(self)?;
+        while let Some(o) = op(self.peek()) {
             self.bump();
-            let r = self.const_atom()?;
-            l = ConstExpr::Bin(op, Box::new(l), Box::new(r));
+            let r = operand(self)?;
+            l = ConstExpr::Bin(o, Box::new(l), Box::new(r));
         }
+        Ok(l)
     }
 
     fn const_atom(&mut self) -> Result<ConstExpr> {
@@ -616,19 +634,11 @@ impl Parser {
 
     fn params_and_ret(&mut self) -> Result<(Vec<Param>, Option<TypeExpr>)> {
         self.expect(&Tok::LParen)?;
-        self.skip_nl();
-        let mut params = Vec::new();
-        while !self.at(&Tok::RParen) {
-            let ty = self.parse_type()?;
-            let (name, sp) = self.ident()?;
-            params.push(Param { ty, name, span: sp });
-            self.skip_nl();
-            if !self.eat(&Tok::Comma) {
-                break;
-            }
-            self.skip_nl();
-        }
-        self.expect(&Tok::RParen)?;
+        let params = self.list(&Tok::RParen, |p| {
+            let ty = p.parse_type()?;
+            let (name, span) = p.ident()?;
+            Ok(Param { ty, name, span })
+        })?;
         let ret = self.ret_type()?;
         Ok((params, ret))
     }
@@ -722,20 +732,16 @@ impl Parser {
                 if self.at_kw("fn") {
                     self.bump();
                     self.expect(&Tok::LParen)?;
-                    let mut params = Vec::new();
-                    while !self.at(&Tok::RParen) {
-                        params.push(self.parse_type()?);
+                    let params = self.list(&Tok::RParen, |p| {
+                        let ty = p.parse_type()?;
                         // optional parameter name
-                        if let Tok::Ident(s) = self.peek()
+                        if let Tok::Ident(s) = p.peek()
                             && !is_keyword(s)
                         {
-                            self.bump();
+                            p.bump();
                         }
-                        if !self.eat(&Tok::Comma) {
-                            break;
-                        }
-                    }
-                    self.expect(&Tok::RParen)?;
+                        Ok(ty)
+                    })?;
                     let ret = self.ret_type()?;
                     self.expect(&Tok::RParen)?;
                     return Ok(TypeExpr::Fn(
@@ -744,14 +750,7 @@ impl Parser {
                         start.to(self.prev_span()),
                     ));
                 }
-                let mut tys = Vec::new();
-                while !self.at(&Tok::RParen) {
-                    tys.push(self.parse_type()?);
-                    if !self.eat(&Tok::Comma) {
-                        break;
-                    }
-                }
-                self.expect(&Tok::RParen)?;
+                let tys = self.list(&Tok::RParen, Self::parse_type)?;
                 if tys.len() < 2 {
                     return err(
                         start.to(self.prev_span()),
@@ -770,17 +769,11 @@ impl Parser {
                     } else {
                         (None, s)
                     };
-                let mut args = Vec::new();
-                if self.at(&Tok::Lt) {
-                    self.bump();
-                    loop {
-                        args.push(self.generic_arg()?);
-                        if !self.eat(&Tok::Comma) {
-                            break;
-                        }
-                    }
-                    self.expect_gt()?;
-                }
+                let args = if self.at(&Tok::Lt) {
+                    self.generic_args()?
+                } else {
+                    vec![]
+                };
                 Ok(TypeExpr::Named {
                     module,
                     name,
@@ -796,25 +789,24 @@ impl Parser {
 
     fn block(&mut self) -> Result<Block> {
         let start = self.expect(&Tok::LBrace)?;
-        let saved = self.no_struct;
-        self.no_struct = false;
-        self.skip_nl();
-        let mut stmts = Vec::new();
-        while !self.at(&Tok::RBrace) {
-            if self.at(&Tok::Eof) {
-                return err(start, "unclosed block");
+        self.with_no_struct(false, |p| {
+            p.skip_nl();
+            let mut stmts = Vec::new();
+            while !p.at(&Tok::RBrace) {
+                if p.at(&Tok::Eof) {
+                    return err(start, "unclosed block");
+                }
+                let at = p.pos;
+                match p.stmt(false).and_then(|s| p.end_stmt().map(|_| s)) {
+                    Ok(s) => stmts.push(s),
+                    Err(d) => p.recover(d, at),
+                }
             }
-            let at = self.pos;
-            match self.stmt(false).and_then(|s| self.end_stmt().map(|_| s)) {
-                Ok(s) => stmts.push(s),
-                Err(d) => self.recover(d, at),
-            }
-        }
-        let end = self.bump().span;
-        self.no_struct = saved;
-        Ok(Block {
-            stmts,
-            span: start.to(end),
+            let end = p.bump().span;
+            Ok(Block {
+                stmts,
+                span: start.to(end),
+            })
         })
     }
 
@@ -1049,11 +1041,7 @@ impl Parser {
     // ---------------------------------------------------------------- expressions
 
     fn no_struct_expr(&mut self) -> Result<Expr> {
-        let saved = self.no_struct;
-        self.no_struct = true;
-        let r = self.expr();
-        self.no_struct = saved;
-        r
+        self.with_no_struct(true, Self::expr)
     }
 
     pub fn expr(&mut self) -> Result<Expr> {
@@ -1137,7 +1125,6 @@ impl Parser {
             let rhs = self.binary(prec + 1)?;
             last_cmp = prec == 3;
             let sp = lhs.span.to(rhs.span);
-            let _ = opsp;
             lhs = Expr {
                 kind: ExprKind::Binary(op, Box::new(lhs), Box::new(rhs)),
                 span: sp,
@@ -1193,43 +1180,21 @@ impl Parser {
 
     fn unary(&mut self) -> Result<Expr> {
         let start = self.span();
-        let mk = |p: &Self, kind| Expr {
-            kind,
-            span: start.to(p.prev_span()),
+        let wrap: fn(Box<Expr>) -> ExprKind = match self.peek() {
+            Tok::Minus => |e| ExprKind::Unary(UnOp::Neg, e),
+            Tok::Bang => |e| ExprKind::Unary(UnOp::BitNot, e),
+            Tok::Ident(k) if k == "not" => |e| ExprKind::Unary(UnOp::Not, e),
+            Tok::Ident(k) if k == "try" => ExprKind::Try,
+            Tok::Ident(k) if k == "async" => ExprKind::Async,
+            Tok::Ident(k) if k == "await" => ExprKind::Await,
+            _ => return self.postfix(),
         };
-        match self.peek().clone() {
-            Tok::Minus => {
-                self.bump();
-                let e = self.unary()?;
-                Ok(mk(self, ExprKind::Unary(UnOp::Neg, Box::new(e))))
-            }
-            Tok::Bang => {
-                self.bump();
-                let e = self.unary()?;
-                Ok(mk(self, ExprKind::Unary(UnOp::BitNot, Box::new(e))))
-            }
-            Tok::Ident(k) if k == "not" => {
-                self.bump();
-                let e = self.unary()?;
-                Ok(mk(self, ExprKind::Unary(UnOp::Not, Box::new(e))))
-            }
-            Tok::Ident(k) if k == "try" => {
-                self.bump();
-                let e = self.unary()?;
-                Ok(mk(self, ExprKind::Try(Box::new(e))))
-            }
-            Tok::Ident(k) if k == "async" => {
-                self.bump();
-                let e = self.unary()?;
-                Ok(mk(self, ExprKind::Async(Box::new(e))))
-            }
-            Tok::Ident(k) if k == "await" => {
-                self.bump();
-                let e = self.unary()?;
-                Ok(mk(self, ExprKind::Await(Box::new(e))))
-            }
-            _ => self.postfix(),
-        }
+        self.bump();
+        let e = self.unary()?;
+        Ok(Expr {
+            kind: wrap(Box::new(e)),
+            span: start.to(self.prev_span()),
+        })
     }
 
     fn is_struct_lit_start(&self) -> bool {
@@ -1254,10 +1219,7 @@ impl Parser {
             match self.peek().clone() {
                 Tok::LParen => {
                     self.bump();
-                    let saved = self.no_struct;
-                    self.no_struct = false;
-                    let args = self.expr_list(&Tok::RParen)?;
-                    self.no_struct = saved;
+                    let args = self.with_no_struct(false, |p| p.list(&Tok::RParen, Self::expr))?;
                     e = Expr {
                         kind: ExprKind::Call(Box::new(e), args),
                         span: start.to(self.prev_span()),
@@ -1265,29 +1227,31 @@ impl Parser {
                 }
                 Tok::LBracket => {
                     self.bump();
-                    let saved = self.no_struct;
-                    self.no_struct = false;
-                    self.skip_nl();
                     // `x[i]`, or a slice `x[a:b]` (both bounds are required)
-                    let missing = "a slice needs both bounds: `x[start:end]`";
-                    if self.at(&Tok::Colon) {
-                        return err(self.span(), missing);
-                    }
-                    let lo = Box::new(self.expr()?);
-                    self.skip_nl();
-                    let kind = if self.eat(&Tok::Colon) {
-                        self.skip_nl();
-                        if self.at(&Tok::RBracket) {
-                            return err(self.span(), missing);
+                    let (lo, hi) = self.with_no_struct(false, |p| {
+                        let missing = "a slice needs both bounds: `x[start:end]`";
+                        p.skip_nl();
+                        if p.at(&Tok::Colon) {
+                            return err(p.span(), missing);
                         }
-                        let hi = Box::new(self.expr()?);
-                        self.skip_nl();
-                        ExprKind::Slice(Box::new(e), lo, hi)
-                    } else {
-                        ExprKind::Index(Box::new(e), lo)
-                    };
-                    self.no_struct = saved;
+                        let lo = Box::new(p.expr()?);
+                        p.skip_nl();
+                        let mut hi = None;
+                        if p.eat(&Tok::Colon) {
+                            p.skip_nl();
+                            if p.at(&Tok::RBracket) {
+                                return err(p.span(), missing);
+                            }
+                            hi = Some(Box::new(p.expr()?));
+                            p.skip_nl();
+                        }
+                        Ok((lo, hi))
+                    })?;
                     self.expect(&Tok::RBracket)?;
+                    let kind = match hi {
+                        Some(hi) => ExprKind::Slice(Box::new(e), lo, hi),
+                        None => ExprKind::Index(Box::new(e), lo),
+                    };
                     e = Expr {
                         kind,
                         span: start.to(self.prev_span()),
@@ -1305,19 +1269,7 @@ impl Parser {
                     // speculative generic arguments
                     let save = self.pos;
                     let saved_toks = self.toks.clone();
-                    let attempt: Result<Vec<TypeExpr>> = (|| {
-                        self.bump();
-                        let mut args = Vec::new();
-                        loop {
-                            args.push(self.generic_arg()?);
-                            if !self.eat(&Tok::Comma) {
-                                break;
-                            }
-                        }
-                        self.expect_gt()?;
-                        Ok(args)
-                    })();
-                    match attempt {
+                    match self.generic_args() {
                         Ok(args) if matches!(self.peek(), Tok::LParen | Tok::LBrace | Tok::Dot) => {
                             e = Expr {
                                 kind: ExprKind::Generic(Box::new(e), args),
@@ -1338,23 +1290,13 @@ impl Parser {
                     ) && self.is_struct_lit_start() =>
                 {
                     self.bump();
-                    self.skip_nl();
-                    let mut fields = Vec::new();
-                    while !self.at(&Tok::RBrace) {
-                        let fsp = self.expect(&Tok::Dot)?;
-                        let (name, _) = self.ident()?;
-                        self.expect(&Tok::Assign)?;
-                        self.skip_nl();
-                        let v = self.expr()?;
-                        fields.push((name, v, fsp));
-                        self.skip_nl();
-                        if !self.eat(&Tok::Comma) {
-                            break;
-                        }
-                        self.skip_nl();
-                    }
-                    self.skip_nl();
-                    self.expect(&Tok::RBrace)?;
+                    let fields = self.list(&Tok::RBrace, |p| {
+                        let fsp = p.expect(&Tok::Dot)?;
+                        let (name, _) = p.ident()?;
+                        p.expect(&Tok::Assign)?;
+                        p.skip_nl();
+                        Ok((name, p.expr()?, fsp))
+                    })?;
                     e = Expr {
                         kind: ExprKind::Struct(Box::new(e), fields),
                         span: start.to(self.prev_span()),
@@ -1366,19 +1308,19 @@ impl Parser {
         Ok(e)
     }
 
-    fn expr_list(&mut self, close: &Tok) -> Result<Vec<Expr>> {
-        let mut out = Vec::new();
-        self.skip_nl();
-        while !self.at(close) {
-            out.push(self.expr()?);
+    /// The expressions of a list after its first one (`, b, c)`), up to `close` (consumed).
+    fn rest_of_list(&mut self, first: Expr, close: &Tok) -> Result<Vec<Expr>> {
+        let mut items = vec![first];
+        while self.eat(&Tok::Comma) {
             self.skip_nl();
-            if !self.eat(&Tok::Comma) {
+            if self.at(close) {
                 break;
             }
+            items.push(self.expr()?);
             self.skip_nl();
         }
         self.expect(close)?;
-        Ok(out)
+        Ok(items)
     }
 
     fn primary(&mut self) -> Result<Expr> {
@@ -1405,16 +1347,7 @@ impl Parser {
                         StrPart::Lit(s) => segs.push(StrSeg::Lit(s)),
                         StrPart::Expr(text, off) => {
                             let toks = lex(&text, self.file, off)?;
-                            let mut sub = Parser {
-                                toks,
-                                pos: 0,
-                                file: self.file,
-                                no_struct: false,
-                                errors: vec![],
-                                src: String::new(),
-                                stmt_start: 0,
-                                recovered: false,
-                            };
+                            let mut sub = Parser::new(toks, self.file, String::new());
                             sub.skip_nl();
                             let e = sub.expr()?;
                             sub.skip_nl();
@@ -1446,7 +1379,7 @@ impl Parser {
                         self.expect(&Tok::Comma)?;
                     }
                 }
-                let args = self.expr_list(&Tok::RParen)?;
+                let args = self.list(&Tok::RParen, Self::expr)?;
                 ExprKind::Builtin(name, ty, args)
             }
             Tok::LParen => {
@@ -1457,17 +1390,7 @@ impl Parser {
                 let first = self.expr()?;
                 self.skip_nl();
                 let kind = if self.at(&Tok::Comma) {
-                    let mut items = vec![first];
-                    while self.eat(&Tok::Comma) {
-                        self.skip_nl();
-                        if self.at(&Tok::RParen) {
-                            break;
-                        }
-                        items.push(self.expr()?);
-                        self.skip_nl();
-                    }
-                    self.expect(&Tok::RParen)?;
-                    ExprKind::Tuple(items)
+                    ExprKind::Tuple(self.rest_of_list(first, &Tok::RParen)?)
                 } else {
                     self.expect(&Tok::RParen)?;
                     self.no_struct = saved;
@@ -1512,17 +1435,7 @@ impl Parser {
                         self.expect(&Tok::RBracket)?;
                         ExprKind::Map(entries)
                     } else {
-                        let mut items = vec![first];
-                        while self.eat(&Tok::Comma) {
-                            self.skip_nl();
-                            if self.at(&Tok::RBracket) {
-                                break;
-                            }
-                            items.push(self.expr()?);
-                            self.skip_nl();
-                        }
-                        self.expect(&Tok::RBracket)?;
-                        ExprKind::Array(items)
+                        ExprKind::Array(self.rest_of_list(first, &Tok::RBracket)?)
                     }
                 };
                 self.no_struct = saved;

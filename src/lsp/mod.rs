@@ -44,11 +44,7 @@ use crate::check::index::{DeclKind, Index};
 use crate::diag::{Diag, SourceMap, Span};
 use crate::lexer::Tok;
 
-const KEYWORDS: &[&str] = &[
-    "fn", "return", "if", "else", "while", "for", "in", "break", "continue", "mut", "mutex",
-    "lock", "struct", "enum", "type", "import", "as", "extern", "pub", "test", "assert", "true",
-    "false", "none", "and", "or", "not", "try", "catch", "throw", "async", "await", "fut",
-];
+use crate::parser::KEYWORDS;
 const TYPES: &[&str] = &[
     "int", "uint", "byte", "float", "bool", "char", "str", "void", "error", "never",
 ];
