@@ -3,6 +3,7 @@ mod cgen;
 mod check;
 mod diag;
 mod driver;
+mod eval;
 mod lexer;
 mod modules;
 mod parser;

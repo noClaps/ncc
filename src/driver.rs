@@ -23,8 +23,11 @@ pub struct Options {
 }
 
 /// Parse and type-check a program, printing diagnostics on failure.
-fn frontend(file: &Path, sm: &mut SourceMap) -> Option<Program> {
-    let r = crate::modules::load(sm, file).and_then(crate::check::check);
+fn frontend(file: &Path, sm: &mut SourceMap, release: bool) -> Option<Program> {
+    let r = crate::modules::load(sm, file).and_then(crate::check::check).and_then(|mut p| {
+        crate::eval::Evaluator::run(&mut p, sm, release)?;
+        Ok(p)
+    });
     match r {
         Ok(p) => Some(p),
         Err(d) => {
@@ -140,13 +143,9 @@ fn compile(p: &Program, sm: &SourceMap, mode: Mode, release: bool, format: Forma
     }
 }
 
-fn optimize(p: &mut Program, release: bool) {
-    let _ = (p, release);
-}
-
 pub fn check(o: &Options) -> ExitCode {
     let mut sm = SourceMap::default();
-    match frontend(o.file.as_ref().unwrap(), &mut sm) {
+    match frontend(o.file.as_ref().unwrap(), &mut sm, false) {
         Some(_) => ExitCode::SUCCESS,
         None => ExitCode::FAILURE,
     }
@@ -172,8 +171,7 @@ pub fn build(o: &Options) -> ExitCode {
         }
     });
     let mut sm = SourceMap::default();
-    let Some(mut p) = frontend(file, &mut sm) else { return ExitCode::FAILURE };
-    optimize(&mut p, o.release);
+    let Some(p) = frontend(file, &mut sm, o.release) else { return ExitCode::FAILURE };
     if compile(&p, &sm, Mode::Run, o.release, format, &out) { ExitCode::SUCCESS } else { ExitCode::FAILURE }
 }
 
@@ -196,8 +194,7 @@ fn run_exe(exe: &Path) -> ExitCode {
 fn build_and_run(o: &Options, mode: Mode) -> ExitCode {
     let file = o.file.as_ref().unwrap();
     let mut sm = SourceMap::default();
-    let Some(mut p) = frontend(file, &mut sm) else { return ExitCode::FAILURE };
-    optimize(&mut p, o.release);
+    let Some(p) = frontend(file, &mut sm, o.release) else { return ExitCode::FAILURE };
     let tmp = match TempDir::new() {
         Ok(t) => t,
         Err(e) => {
