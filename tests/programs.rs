@@ -312,3 +312,49 @@ fn fmt_command() {
     assert!(!st.success());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Unused code is a warning in debug builds and an error in release builds.
+#[test]
+fn unused_code() {
+    let dir = std::env::temp_dir().join(format!("ncc-unused-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("main.nc");
+    std::fs::write(
+        &src,
+        "fn dead(int x, int _ok) int {\n  int y = 1\n  return 0\n}\n\
+         fn helper() int {\n  return 2\n}\n\
+         pub fn api() int {\n  return 3\n}\n\
+         struct Unused {\n  int a\n}\n\
+         int _quiet = 1\n\
+         @println(\"hi\")\n\
+         test \"t\" {\n  assert helper() == 2\n}\n",
+    )
+    .unwrap();
+    let expected = [
+        "unused function `dead`",
+        "unused parameter `x`",
+        "unused variable `y`",
+        "unused struct `Unused`",
+    ];
+    // debug: warnings, and the program still runs
+    let (stdout, stderr, code) = run(&["run"], &src);
+    assert_eq!((stdout.as_str(), code), ("hi\n", 0), "{stderr}");
+    for e in expected {
+        assert!(stderr.contains(&format!("warning: {e}")), "{e}:\n{stderr}");
+    }
+    // helpers used by tests, `pub` items and `_` names are not reported
+    for quiet in ["helper", "api", "_ok", "_quiet"] {
+        assert!(
+            !stderr.contains(&format!("`{quiet}`")),
+            "{quiet}:\n{stderr}"
+        );
+    }
+    // release: errors, and nothing is built
+    let (_, stderr, code) = run(&["build", "-r"], &src);
+    assert_ne!(code, 0);
+    for e in expected {
+        assert!(stderr.contains(&format!("error: {e}")), "{e}:\n{stderr}");
+    }
+    assert!(stderr.contains("found 4 errors"), "{stderr}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

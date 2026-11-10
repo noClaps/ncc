@@ -142,7 +142,8 @@ pub enum ExprKind {
     FnLit(Box<FnSig>, Block),
     If(Box<IfExpr>),
     Else(Box<Expr>, ElseFallback),
-    Catch(Box<Expr>, String, Block),
+    /// value, error variable name and its span, handler
+    Catch(Box<Expr>, String, Span, Block),
     Try(Box<Expr>),
     Async(Box<Expr>),
     Await(Box<Expr>),

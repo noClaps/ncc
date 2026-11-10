@@ -101,6 +101,20 @@ pub struct Index {
     pub returns: HashMap<String, String>,
     pub hints: Vec<Hint>,
     pub calls: Vec<Call>,
+    /// per module, for the unused-code lint
+    pub modules: Vec<ModFacts>,
+}
+
+/// What the unused-code lint needs to know about a module.
+#[derive(Clone, Debug, Default)]
+pub struct ModFacts {
+    pub file: u32,
+    /// part of the project (not a dependency under `.nc/deps`)
+    pub project: bool,
+    /// names of the module's `pub` items
+    pub public: std::collections::HashSet<String>,
+    /// imports: alias, the import's span, and whether the alias is used
+    pub imports: Vec<(String, Span, bool)>,
 }
 
 #[derive(Default)]
@@ -113,6 +127,8 @@ pub struct IndexState {
     pub field_spans: HashMap<TyId, Vec<Span>>,
     pub variant_spans: HashMap<TyId, Vec<Span>>,
     pub fn_params: HashMap<FuncId, Vec<String>>,
+    /// import aliases used in each module: (module, alias)
+    pub used_aliases: std::cell::RefCell<std::collections::HashSet<(usize, String)>>,
     /// extern functions: declaration span and hover text
     pub extern_decls: HashMap<usize, (Span, String)>,
     /// innermost scopes being checked, for the visibility of local variables

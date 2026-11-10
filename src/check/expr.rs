@@ -566,7 +566,7 @@ impl<'a> Checker<'a> {
                 };
                 mk(EK::Else(Box::new(o), fallback), inner)
             }
-            E::Catch(x, name, b) => {
+            E::Catch(x, name, name_span, b) => {
                 let v = self.check_expr(x, None)?;
                 let TyKind::ErrU(inner) = *self.types.kind(v.ty) else {
                     return err(
@@ -583,7 +583,7 @@ impl<'a> Checker<'a> {
                     None
                 } else {
                     self.ix.scopes.push(b.span);
-                    let l = self.declare_local(name, ERROR, false, LocalKind::Normal, span);
+                    let l = self.declare_local(name, ERROR, false, LocalKind::Normal, *name_span);
                     self.ix.scopes.pop();
                     Some(l?)
                 };
@@ -739,6 +739,7 @@ impl<'a> Checker<'a> {
             if (self.mods[m].imports.contains_key(n) || self.mods[m].externs.contains_key(n))
                 && self.resolve_var(n, e.span)?.is_none()
             {
+                self.ix.used_aliases.borrow_mut().insert((m, n.clone()));
                 return Ok(Some(n.clone()));
             }
         }

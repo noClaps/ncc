@@ -691,7 +691,7 @@ impl<'a> Printer<'a> {
                 };
                 format!("{value} else {fallback}")
             }
-            ExprKind::Catch(v, name, b) => {
+            ExprKind::Catch(v, name, _, b) => {
                 let value = self.expr(v, indent);
                 let block = self.block(b, indent, true);
                 format!("{value} catch {name} {block}")

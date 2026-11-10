@@ -1,9 +1,13 @@
 test "shadowing" {
   int a = 10
+  assert a == 10
   mut int a = 20
+  a = a + 1
+  assert a == 21
   str a = "hi"
   {
     str a = "annyeonghaseyo"
+    assert a.len == 14
   }
   assert a == "hi"
 }
@@ -126,7 +130,7 @@ test "converting int to float" {
 }
 
 fn opt_set_default(int? opt, int default) int {
-  int out = opt else default
+  int _out = opt else default
   int out = opt else {
     break default
   }

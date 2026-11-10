@@ -149,3 +149,141 @@ fn collect(
     });
     asyncs.extend(found);
 }
+
+// ------------------------------------------------------------------ unused code
+
+/// What an unused-code diagnostic is about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnusedKind {
+    Variable,
+    Parameter,
+    Function,
+    Type,
+    Import,
+}
+
+impl UnusedKind {
+    /// The diagnostic code the language server attaches (and its quick fixes look for).
+    pub fn code(self) -> &'static str {
+        match self {
+            UnusedKind::Variable => "unused-variable",
+            UnusedKind::Parameter => "unused-parameter",
+            UnusedKind::Function => "unused-function",
+            UnusedKind::Type => "unused-type",
+            UnusedKind::Import => "unused-import",
+        }
+    }
+}
+
+pub struct Unused {
+    pub diag: Diag,
+    pub kind: UnusedKind,
+}
+
+/// The span of `name` as a whole word inside `span` (the first or the last occurrence).
+fn name_in(text: &str, span: Span, name: &str, first: bool) -> Option<Span> {
+    let (s, e) = (span.start as usize, (span.end as usize).min(text.len()));
+    let seg = text.get(s..e)?;
+    let ident = |c: char| c.is_alphanumeric() || c == '_';
+    let mut found = None;
+    for (i, _) in seg.match_indices(name) {
+        let before = seg[..i].chars().next_back();
+        let after = seg[i + name.len()..].chars().next();
+        if before.is_some_and(ident) || after.is_some_and(ident) {
+            continue;
+        }
+        found = Some(i);
+        if first {
+            break;
+        }
+    }
+    found.map(|i| Span::new(span.file, s + i, s + i + name.len()))
+}
+
+/// Unused local variables, parameters, private items and imports of the project's modules
+/// (not dependencies). Names starting with `_` and `pub` items are never reported. Uses
+/// anywhere, including tests, count.
+pub fn unused(ix: &crate::check::index::Index, sm: &crate::diag::SourceMap) -> Vec<Unused> {
+    use crate::check::index::DeclKind;
+    let facts: HashMap<u32, &crate::check::index::ModFacts> =
+        ix.modules.iter().map(|m| (m.file, m)).collect();
+    let mut used: HashSet<Span> = HashSet::new();
+    // declaration spans that are also a use of something else (a `lock` alias)
+    let mut shadowing: HashSet<Span> = HashSet::new();
+    for r in &ix.refs {
+        if let Some(def) = r.def
+            && r.span != def
+        {
+            used.insert(def);
+            shadowing.insert(r.span);
+        }
+    }
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for d in &ix.decls {
+        let Some(f) = facts.get(&d.span.file) else {
+            continue;
+        };
+        if !f.project
+            || d.name.is_empty()
+            || d.name.starts_with('_')
+            || matches!(d.kind, DeclKind::Field | DeclKind::Variant)
+            || used.contains(&d.span)
+            || shadowing.contains(&d.span)
+            || !seen.insert(d.span)
+            || (d.scope.is_none() && d.extern_alias.is_none() && f.public.contains(&d.name))
+        {
+            continue;
+        }
+        let text = &sm.file(d.span.file).text;
+        let (kind, what) = match d.kind {
+            DeclKind::Variable if d.param => (UnusedKind::Parameter, "parameter"),
+            // a function declared inside another one (its span is just the name)
+            DeclKind::Variable
+                if text.get(d.span.start as usize..d.span.end as usize)
+                    == Some(d.name.as_str())
+                    && d.detail.starts_with("(fn") =>
+            {
+                (UnusedKind::Function, "function")
+            }
+            DeclKind::Variable => (UnusedKind::Variable, "variable"),
+            DeclKind::Function if d.extern_alias.is_some() => {
+                (UnusedKind::Function, "extern function")
+            }
+            DeclKind::Function => (UnusedKind::Function, "function"),
+            DeclKind::Struct => (UnusedKind::Type, "struct"),
+            DeclKind::Enum => (UnusedKind::Type, "enum"),
+            DeclKind::Type => (UnusedKind::Type, "type"),
+            DeclKind::Field | DeclKind::Variant => continue,
+        };
+        let first = !matches!(d.kind, DeclKind::Variable);
+        let Some(at) = name_in(text, d.span, &d.name, first) else {
+            continue;
+        };
+        out.push(Unused {
+            diag: Diag::new(
+                at,
+                format!(
+                    "unused {what} `{}`; prefix the name with `_` if this is intended",
+                    d.name
+                ),
+            ),
+            kind,
+        });
+    }
+    for f in ix.modules.iter().filter(|f| f.project) {
+        let text = &sm.file(f.file).text;
+        for (alias, span, is_used) in &f.imports {
+            if *is_used || alias.starts_with('_') {
+                continue;
+            }
+            let at = name_in(text, *span, alias, false).unwrap_or(*span);
+            out.push(Unused {
+                diag: Diag::new(at, format!("unused import `{alias}`")),
+                kind: UnusedKind::Import,
+            });
+        }
+    }
+    out.sort_by_key(|u| (u.diag.span.file, u.diag.span.start));
+    out
+}

@@ -158,6 +158,7 @@ fn check_inner(graph: ModuleGraph) -> (Program, index::Index, Vec<Diag>) {
         _p: std::marker::PhantomData,
     };
     let p = c.run();
+    c.record_module_facts();
     let mut errors = std::mem::take(&mut c.errors);
     errors.retain(|d| !d.msg.is_empty());
     errors.sort_by_key(|d| (d.span.file, d.span.start));
@@ -166,6 +167,61 @@ fn check_inner(graph: ModuleGraph) -> (Program, index::Index, Vec<Diag>) {
 }
 
 impl<'a> Checker<'a> {
+    /// Public names, imports (and whether they are used) and project membership of each
+    /// module, for the unused-code lint.
+    fn record_module_facts(&mut self) {
+        let used = self.ix.used_aliases.borrow().clone();
+        let mut facts = Vec::new();
+        for (m, info) in self.mods.iter().enumerate() {
+            let parts: Vec<String> = info
+                .path
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect();
+            let dependency = parts.windows(2).any(|w| w[0] == ".nc" && w[1] == "deps");
+            let mut f = index::ModFacts {
+                file: info.file,
+                project: !dependency,
+                ..Default::default()
+            };
+            for it in &info.ast.items {
+                match it {
+                    ast::Item::Fn(x) if x.public => {
+                        f.public.insert(x.sig.name.clone());
+                    }
+                    ast::Item::Struct(x) if x.public => {
+                        f.public.insert(x.name.clone());
+                    }
+                    ast::Item::Enum(x) if x.public => {
+                        f.public.insert(x.name.clone());
+                    }
+                    ast::Item::Type(x) if x.public => {
+                        f.public.insert(x.name.clone());
+                    }
+                    ast::Item::Stmt(ast::Stmt {
+                        kind:
+                            ast::StmtKind::VarDecl {
+                                public: true,
+                                targets,
+                                ..
+                            },
+                        ..
+                    }) => {
+                        f.public.extend(targets.iter().map(|t| t.name.clone()));
+                    }
+                    ast::Item::Import(im) => f.imports.push((
+                        im.alias.clone(),
+                        im.span,
+                        used.contains(&(m, im.alias.clone())),
+                    )),
+                    _ => {}
+                }
+            }
+            facts.push(f);
+        }
+        self.ix.index.modules = facts;
+    }
+
     pub fn new_jump(&mut self) -> JumpId {
         self.next_jump += 1;
         self.next_jump
@@ -492,6 +548,34 @@ impl<'a> Checker<'a> {
                                 tparams: HashMap::new(),
                             });
                             let _ = i;
+                        }
+                        // generic declarations are only checked when instantiated; index
+                        // them so that uses link to them (and unused ones are found)
+                        ast::Item::Fn(f) => {
+                            let detail =
+                                format!("fn {}<{}>", f.sig.name, f.sig.type_params.join(", "));
+                            self.idx_decl(
+                                &f.sig.name,
+                                f.sig.span,
+                                index::DeclKind::Function,
+                                detail,
+                                vec![],
+                            );
+                        }
+                        ast::Item::Struct(st) if !st.type_params.is_empty() => {
+                            let detail =
+                                format!("struct {}<{}>", st.name, st.type_params.join(", "));
+                            self.idx_decl(
+                                &st.name,
+                                st.span,
+                                index::DeclKind::Struct,
+                                detail,
+                                vec![],
+                            );
+                        }
+                        ast::Item::Enum(en) if !en.type_params.is_empty() => {
+                            let detail = format!("enum {}<{}>", en.name, en.type_params.join(", "));
+                            self.idx_decl(&en.name, en.span, index::DeclKind::Enum, detail, vec![]);
                         }
                         ast::Item::Extern(e) => {
                             let dir = self.mods[m].path.parent().unwrap().to_path_buf();
@@ -982,6 +1066,10 @@ impl<'a> Checker<'a> {
     ) -> Result<Option<(usize, Sym)>> {
         match module {
             Some(alias) => {
+                self.ix
+                    .used_aliases
+                    .borrow_mut()
+                    .insert((m, alias.to_string()));
                 let Some(&target) = self.mods[m].imports.get(alias) else {
                     return err(span, format!("unknown module `{alias}`"));
                 };

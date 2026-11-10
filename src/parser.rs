@@ -988,17 +988,14 @@ impl Parser {
                 };
             } else if self.at_kw("catch") {
                 self.bump();
-                let name = match self.peek().clone() {
-                    Tok::Ident(s) if s == "_" => {
-                        self.bump();
-                        s
-                    }
-                    _ => self.ident()?.0,
+                let (name, name_span) = match self.peek().clone() {
+                    Tok::Ident(s) if s == "_" => (s, self.bump().span),
+                    _ => self.ident()?,
                 };
                 let b = self.block()?;
                 let sp = e.span.to(self.prev_span());
                 e = Expr {
-                    kind: ExprKind::Catch(Box::new(e), name, b),
+                    kind: ExprKind::Catch(Box::new(e), name, name_span, b),
                     span: sp,
                 };
             } else {

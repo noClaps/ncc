@@ -107,6 +107,8 @@ struct Analysis {
     imports: HashMap<String, PathBuf>,
     /// declaration index by span
     decl_at: HashMap<Span, usize>,
+    /// the program checked without errors (lints run only then, as in the compiler)
+    clean: bool,
 }
 
 impl Analysis {
@@ -592,9 +594,11 @@ impl Server {
         let mut diags: Vec<(Diag, DiagnosticSeverity)> = Vec::new();
         let mut index = None;
         let mut imports = None;
+        let mut clean = false;
         match crate::modules::load_with(&mut sm, entry, &self.docs) {
             Err(errs) => diags.extend(errs.into_iter().map(|d| (d, DiagnosticSeverity::ERROR))),
             Ok((graph, load_errors)) => {
+                let loaded = load_errors.is_empty();
                 diags.extend(
                     load_errors
                         .into_iter()
@@ -606,7 +610,7 @@ impl Server {
                 }
                 imports = Some(im);
                 let (mut p, errs, ix) = crate::check::check_partial(graph);
-                let clean = errs.is_empty();
+                clean = loaded && errs.is_empty();
                 diags.extend(errs.into_iter().map(|d| (d, DiagnosticSeverity::ERROR)));
                 if let Err(errs) = crate::eval::Evaluator::run(&mut p, &sm, false) {
                     diags.extend(errs.into_iter().map(|d| (d, DiagnosticSeverity::ERROR)));
@@ -646,6 +650,7 @@ impl Server {
                 .map(|(i, d)| (d.span, i))
                 .collect();
             let a = Analysis {
+                clean,
                 sm,
                 index,
                 imports,

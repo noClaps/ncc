@@ -33,6 +33,19 @@ Every phase recovers and keeps going, so a single run reports all errors in sour
 - the checker drops failing statements but still declares their variables;
 - the evaluator reports each expression that always panics.
 
+## Unused code
+
+After a program checks without errors, `lint::unused` reports what is never used: local
+variables (including pattern and `for` bindings), parameters, private (non-`pub`) functions,
+structs, enums, type aliases, module-level variables and extern functions, and imports. A
+declaration is used when the checker's index has a reference to it from anywhere else, tests
+included. The checker records which import aliases it resolved, and each module's `pub` names.
+Names starting with `_` and dependency modules (under `.nc/deps`) are skipped. Generic
+declarations are indexed when declared, so an uninstantiated generic is reported too.
+
+Debug builds, `ncc check` and `ncc test` print these as warnings; release builds (`-r`) report
+them as errors and stop. The language server shows the same diagnostics, faded, with quick fixes.
+
 ## Lean output
 
 After generating C, a dead-code pass (`src/cgen/prune.rs`) splits the translation unit
@@ -81,7 +94,7 @@ Features (see [lsp.md](lsp.md) for a comparison with Gleam's language server and
 
 | Area | Features |
 | --- | --- |
-| Diagnostics | parse and type errors, compile-time panics, data-race warnings; unused variables, parameters and imports, unreachable `if` branches (faded) |
+| Diagnostics | parse and type errors, compile-time panics, data-race warnings; unused code (as the compiler reports it), unreachable `if` branches (faded) |
 | Navigation | hover (with `///` doc comments, expression types, builtins, keywords), go to definition, declaration and type definition, references, highlights (including a function's exit points), call hierarchy, selection ranges, document links (imports, externs, `@embed`), document and workspace symbols |
 | Editing | completion (scope- and type-aware, struct literal fields, enum variants, module members, modules that are not imported yet (adding the import), import and `@embed` paths, snippets), signature help, rename (also of import aliases; refused when the new name clashes), import updates when a file is renamed, formatting (whole document or range, as minimal edits), folding |
 | Display | inlay hints (parameter names, bound variable types, `fn name` after long blocks), semantic tokens |

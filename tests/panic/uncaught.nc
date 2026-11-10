@@ -4,4 +4,4 @@ fn f() int! {
   @println("running")
   throw "boom"
 }
-int x = try f()
+int _x = try f()

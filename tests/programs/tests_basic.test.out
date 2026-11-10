@@ -8,7 +8,7 @@ PASS tuple indexing
 PASS partial tuple destructuring
 PASS destructuring optional tuple
 FAIL checking none tuple (should fail): Cannot destructure a none tuple
-FAIL failing test: assertion failed at tests/programs/tests_basic.nc:88
+FAIL failing test: assertion failed at tests/programs/tests_basic.nc:92
 PASS breaking for assignment
 PASS type in type[]
 PASS converting int to float

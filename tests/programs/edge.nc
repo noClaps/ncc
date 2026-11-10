@@ -82,7 +82,7 @@ fn total(str[] words) int! {
   }
   return t
 }
-int t1 = total(["one", "two", "two"]) catch e { break -1 }
+int t1 = total(["one", "two", "two"]) catch _ { break -1 }
 int t2 = total(["one", "six"]) catch e {
   @println(e)
   break -1

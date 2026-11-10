@@ -19,7 +19,6 @@ use crate::check::index::DeclKind;
 use crate::diag::Span;
 use crate::lexer::Tok;
 
-const UNUSED_VARIABLE: &str = "unused-variable";
 const UNUSED_IMPORT: &str = "unused-import";
 const UNREACHABLE_BRANCH: &str = "unreachable-branch";
 
@@ -44,53 +43,6 @@ fn indent_at(text: &str, off: usize) -> &str {
 }
 
 // ------------------------------------------------------------------ warnings
-
-/// Unused local variables of the entry file (with the range of their name).
-fn unused_variables(a: &Analysis, fid: u32) -> Vec<(Span, String)> {
-    let text = &a.sm.file(fid).text;
-    let mut used: HashSet<Span> = HashSet::new();
-    // spans that are also a reference to something else (a `lock` alias shadows its mutex)
-    let mut other: HashSet<Span> = HashSet::new();
-    for r in &a.index.refs {
-        if let Some(def) = r.def {
-            if r.span != def {
-                used.insert(def);
-            } else {
-                continue;
-            }
-            other.insert(r.span);
-        }
-    }
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
-    for d in &a.index.decls {
-        if d.kind != DeclKind::Variable
-            || d.scope.is_none()
-            || d.span.file != fid
-            || d.name.starts_with('_')
-            || used.contains(&d.span)
-            || other.contains(&d.span)
-            || !seen.insert(d.span)
-        {
-            continue;
-        }
-        // the declaration must end with the name (`int x`, `x` in a pattern)
-        let Some(seg) = text.get(d.span.start as usize..d.span.end as usize) else {
-            continue;
-        };
-        if !seg.ends_with(&d.name) {
-            continue;
-        }
-        let ns = Span {
-            file: fid,
-            start: d.span.end - d.name.len() as u32,
-            end: d.span.end,
-        };
-        let what = if d.param { "parameter" } else { "variable" };
-        out.push((ns, format!("unused {what} `{}`", d.name)));
-    }
-    out
-}
 
 /// Imports of a module whose alias is never used: (import span, alias name span, alias).
 fn unused_imports(text: &str) -> Vec<(Span, Span, String)> {
@@ -207,11 +159,13 @@ pub(super) fn warnings(a: &Analysis, entry: &Path) -> Vec<(PathBuf, Diagnostic)>
         )
     };
     let mut out = Vec::new();
-    for (s, msg) in unused_variables(a, fid) {
-        out.push(warn(s, msg, UNUSED_VARIABLE));
-    }
-    for (_, ns, alias) in unused_imports(text) {
-        out.push(warn(ns, format!("unused import `{alias}`"), UNUSED_IMPORT));
+    // unused code, as the compiler reports it (a warning in debug builds, an error in release)
+    if a.clean {
+        for u in crate::lint::unused(&a.index, &a.sm) {
+            if u.diag.span.file == fid {
+                out.push(warn(u.diag.span, u.diag.msg, u.kind.code()));
+            }
+        }
     }
     for arm in unreachable_arms(a, text) {
         out.push(warn(
@@ -491,14 +445,26 @@ impl Server {
                     vec![insert(d.range.start, "_ = ")],
                     true,
                 ));
-            } else if code == UNUSED_VARIABLE {
+            } else if matches!(
+                code,
+                "unused-variable" | "unused-parameter" | "unused-function" | "unused-type"
+            ) {
                 out.push(action(
-                    "Rename to `_`".into(),
+                    "Prefix the name with `_`".into(),
                     CodeActionKind::QUICKFIX,
                     Some(d),
-                    vec![TextEdit::new(d.range, "_".into())],
+                    vec![insert(d.range.start, "_")],
                     true,
                 ));
+                if matches!(code, "unused-variable" | "unused-parameter") {
+                    out.push(action(
+                        "Rename to `_`".into(),
+                        CodeActionKind::QUICKFIX,
+                        Some(d),
+                        vec![TextEdit::new(d.range, "_".into())],
+                        false,
+                    ));
+                }
             } else if code == UNREACHABLE_BRANCH {
                 let (s, e) = (
                     pos_to_offset(&text, d.range.start),

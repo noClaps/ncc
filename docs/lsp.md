@@ -16,7 +16,7 @@ not have.
 | --- | --- |
 | Multiple projects | ✅ every workspace folder; each file finds its own project root |
 | Compiles projects, using unsaved buffers | ✅ every `.nc` file of the workspace at startup; open buffers' text is used |
-| Diagnostics (errors and warnings) | ✅ plus unused variables, parameters and imports |
+| Diagnostics (errors and warnings) | ✅ including unused variables, parameters, private items and imports (warnings in debug, errors in release, as the compiler reports them) |
 | Formatting | ✅ whole document and range, as minimal edits |
 | Hover (docs and types) | ✅ doc comments, types of any expression, builtins, keywords, modules |
 | Go to definition | ✅ including modules (from an alias) |
@@ -57,7 +57,7 @@ not have.
 | Remove unreachable clauses | ✅ branches after a catch-all, or repeating earlier patterns, are faded warnings with a fix |
 | Wrap in block / remove block | n/a: `if` branches are always blocks |
 
-`ncc lsp` also has: make a variable mutable, rename an unused variable to `_`, make a
+`ncc lsp` also has: make a variable mutable, prefix an unused name with `_` (or rename it to `_`), make a
 function throwing, make an item of another module public.
 
 ## rust-analyzer

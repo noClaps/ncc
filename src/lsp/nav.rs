@@ -766,8 +766,9 @@ pub fn expr_spans<'a>(e: &'a ast::Expr, out: &mut dyn FnMut(Node<'a>)) {
                 ast::ElseFallback::Block(b) => block_spans(b, out),
             }
         }
-        E::Catch(x, _, b) => {
+        E::Catch(x, _, sp, b) => {
             expr_spans(x, out);
+            out(Node::Span(*sp));
             block_spans(b, out);
         }
         E::Str(segs) => {

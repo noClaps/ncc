@@ -926,7 +926,7 @@ fn diagnostics_and_code_actions() {
     s.open(src);
 
     // unused variables and imports are faded warnings with a fix
-    let text = src.replace(", util.helper()", "") + "fn f(int unused) {\n  int also = 1\n}\n";
+    let text = src.replace(", util.helper()", "") + "fn f(int unused) {\n  int also = 1\n}\nf(1)\n";
     let diags = s.change(&text);
     let mut msgs: Vec<&str> = diags
         .iter()
@@ -937,8 +937,8 @@ fn diagnostics_and_code_actions() {
         msgs,
         [
             "unused import `util`",
-            "unused parameter `unused`",
-            "unused variable `also`"
+            "unused parameter `unused`; prefix the name with `_` if this is intended",
+            "unused variable `also`; prefix the name with `_` if this is intended"
         ],
         "{diags:?}"
     );
@@ -949,18 +949,27 @@ fn diagnostics_and_code_actions() {
     );
     let d = diags
         .iter()
-        .find(|d| d["message"] == "unused variable `also`")
+        .find(|d| d["code"] == "unused-variable")
         .unwrap()
         .clone();
     let acts = s.actions(
         (d["range"]["start"].clone(), d["range"]["end"].clone()),
         std::slice::from_ref(&d),
     );
-    assert_eq!(titles(&acts)[0], "Rename to `_`", "{acts}");
-    assert_eq!(acts[0]["edit"]["changes"][&s.uri][0]["range"], d["range"]);
+    assert_eq!(
+        titles(&acts)[..2],
+        ["Prefix the name with `_`", "Rename to `_`"],
+        "{acts}"
+    );
+    let e = &acts[0]["edit"]["changes"][&s.uri][0];
+    assert_eq!(
+        (e["newText"].clone(), e["range"]["start"].clone()),
+        (json!("_"), d["range"]["start"].clone())
+    );
+    assert_eq!(acts[1]["edit"]["changes"][&s.uri][0]["range"], d["range"]);
     let d = diags
         .iter()
-        .find(|d| d["message"] == "unused import `util`")
+        .find(|d| d["code"] == "unused-import")
         .unwrap()
         .clone();
     let acts = s.actions(
@@ -1682,7 +1691,7 @@ fn ssr_join_lines_and_pulled_diagnostics() {
 fn extern_completion() {
     let mut s = Session::start("extern");
     std::fs::write(s.dir.join("lib.c"), "").unwrap();
-    let src = "extern \"./lib.c\" as c_lib {\n  fn input() str = \"input\"\n  fn add(int a, int b) int = \"add\"\n}\n\nstr line = c_lib.input()\n";
+    let src = "extern \"./lib.c\" as c_lib {\n  fn input() str = \"input\"\n  fn add(int a, int b) int = \"add\"\n}\n\nstr line = c_lib.input()\n@println(line, c_lib.add(1, 2))\n";
     assert_eq!(s.open(src), Vec::<Value>::new());
 
     // the alias is offered; its functions are not offered unqualified
@@ -1690,7 +1699,7 @@ fn extern_completion() {
     s.change(&text);
     let comp = s.req(
         "textDocument/completion",
-        json!({"position": at(&text, "()\n\n", 0, 3)}),
+        json!({"position": at(&text, "2))\n\n", 0, 5)}),
     );
     let ls = labels(&comp);
     assert!(ls.contains(&"c_lib".into()), "{ls:?}");

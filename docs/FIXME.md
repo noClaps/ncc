@@ -298,3 +298,19 @@ A: The same way as imports: `./` and `../` are relative to the file containing t
 
 **Q: What is the formatter's command line?**
 A: `ncc fmt <file>`, defined in `docs/compiler.md`. It edits the file in place; `--check` exits with code 1 if the file is not formatted; `-o [out]` writes to `out`, or to stdout when `out` is `-` or omitted.
+
+## Unused code
+
+**Request:** Show warnings for unused variables, functions, etc. in debug mode, and make them errors in release mode.
+
+**Q: What is reported as unused?**
+A: Local variables (including pattern and `for` bindings), function parameters, private items (non-`pub` functions, structs, enums, type aliases, module-level variables and extern functions) and imports. `pub` items are never reported.
+
+**Q: How is an intentionally unused name silenced?**
+A: Names starting with `_` (such as `_count`) are never reported. `_` alone still discards a value.
+
+**Q: Does a use inside a `test` block count?**
+A: Yes, everywhere, so helpers only used by tests don't fail release builds.
+
+**Q: Are dependencies (`.nc/deps`) checked?**
+A: No, only the project's own modules.
