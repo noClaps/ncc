@@ -351,6 +351,7 @@ impl<'a> Checker<'a> {
                     ),
                 }
             }
+            E::Slice(base, lo, hi) => self.check_slice(base, lo.as_deref(), hi.as_deref(), span),
             E::Tuple(items) => {
                 let exp =
                     expected
@@ -739,6 +740,71 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+    }
+
+    /// `x[a:b]`. Slicing a fixed-size array with constant bounds (literals, generic constants,
+    /// `$`, omitted bounds) gives a fixed-size array; otherwise the result is a dynamic array,
+    /// or a `str` for strings, and the bounds are checked at run time.
+    fn check_slice(
+        &mut self,
+        base: &ast::Expr,
+        lo: Option<&ast::Expr>,
+        hi: Option<&ast::Expr>,
+        span: Span,
+    ) -> Result<Expr> {
+        let b = self.check_expr(base, None)?;
+        let (result, fixed) = match self.types.kind(self.types.base(b.ty)).clone() {
+            TyKind::Array(_) => (b.ty, None),
+            TyKind::Fixed(el, n) => (self.types.array(el), Some((el, n))),
+            TyKind::Str => (b.ty, None),
+            _ => {
+                return err(
+                    span,
+                    format!(
+                        "cannot slice `{}`; only arrays and strings can be sliced",
+                        self.types.show(b.ty)
+                    ),
+                );
+            }
+        };
+        let lo = match lo {
+            Some(x) => self.seq_index(x, b.ty)?,
+            None => Expr {
+                kind: EK::Lit(Lit::UInt(0)),
+                ty: UINT,
+                span,
+            },
+        };
+        let hi = match hi {
+            Some(x) => Some(Box::new(self.seq_index(x, b.ty)?)),
+            None => None,
+        };
+        let mut ty = result;
+        if let Some((el, n)) = fixed {
+            let dollar = n as i128 - 1;
+            let l = const_index(&lo, dollar);
+            let h = match &hi {
+                Some(h) => const_index(h, dollar),
+                None => Some(n as i128),
+            };
+            if let (Some(l), Some(h)) = (l, h) {
+                if l < 0 || l > h || h > n as i128 {
+                    return err(
+                        span,
+                        format!(
+                            "slice `[{l}:{h}]` is out of bounds for `{}`",
+                            self.types.show(b.ty)
+                        ),
+                    );
+                }
+                ty = self.types.intern(TyKind::Fixed(el, (h - l) as u64));
+            }
+        }
+        Ok(Expr {
+            kind: EK::Slice(Box::new(b), Box::new(lo), hi),
+            ty,
+            span,
+        })
     }
 
     /// Is this identifier a module alias (not shadowed by a variable)?
@@ -1560,5 +1626,29 @@ impl<'a> Checker<'a> {
             ty: value_ty.unwrap_or(VOID),
             span,
         })
+    }
+}
+
+/// The value of a slice bound known at compile time: integer literals (generic constants are
+/// lowered to literals), `$` (`dollar`), and arithmetic on them.
+fn const_index(e: &Expr, dollar: i128) -> Option<i128> {
+    match &e.kind {
+        EK::Lit(Lit::Int(v)) => Some(*v as i128),
+        EK::Lit(Lit::UInt(v)) => Some(*v as i128),
+        EK::Lit(Lit::Byte(v)) => Some(*v as i128),
+        EK::Dollar => Some(dollar),
+        EK::Unary(UnOp::Neg, x) => Some(-const_index(x, dollar)?),
+        EK::Binary(op, a, b) => {
+            let (a, b) = (const_index(a, dollar)?, const_index(b, dollar)?);
+            match op {
+                BinOp::Add => a.checked_add(b),
+                BinOp::Sub => a.checked_sub(b),
+                BinOp::Mul => a.checked_mul(b),
+                BinOp::Div if b != 0 => a.checked_div(b),
+                BinOp::Mod if b != 0 => a.checked_rem(b),
+                _ => None,
+            }
+        }
+        _ => None,
     }
 }

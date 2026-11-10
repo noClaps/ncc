@@ -252,6 +252,7 @@ module.exports = grammar({
         $.generic_expression,
         $.field_expression,
         $.index_expression,
+        $.slice_expression,
         $.function_literal,
         $.if_expression,
         $.else_expression,
@@ -354,6 +355,17 @@ module.exports = grammar({
 
     index_expression: ($) =>
       prec(PREC.postfix, seq(field('value', $._expression), '[', field('index', $._expression), ']')),
+
+    // `x[a:b]`, either bound optional
+    slice_expression: ($) =>
+      prec(PREC.postfix, seq(
+        field('value', $._expression),
+        '[',
+        optional(field('start', $._expression)),
+        ':',
+        optional(field('end', $._expression)),
+        ']',
+      )),
 
     function_literal: ($) =>
       seq(

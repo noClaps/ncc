@@ -75,6 +75,9 @@ pub enum EK {
     TupleIndex(Box<Expr>, usize),
     /// Array / fixed array / str / map index. `$` inside the index refers to this base.
     Index(Box<Expr>, Box<Expr>),
+    /// Array / fixed array / str slice `x[lo:hi]` (`hi` defaults to the length). `$` inside
+    /// the bounds refers to this base.
+    Slice(Box<Expr>, Box<Expr>, Option<Box<Expr>>),
     /// `$` of the innermost enclosing index: len - 1
     Dollar,
     Len(Box<Expr>),

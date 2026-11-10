@@ -236,3 +236,48 @@ str m = """
       (interpolation
         (identifier))
       (string_content))))
+
+================================================================================
+Slices
+================================================================================
+
+a = xs[1:3]
+b = xs[:N]
+c = s[i + 1:]
+d = xs[:]
+e = xs[$ - 1:][0]
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (assignment
+    (identifier)
+    (slice_expression
+      (identifier)
+      (integer)
+      (integer)))
+  (assignment
+    (identifier)
+    (slice_expression
+      (identifier)
+      (identifier)))
+  (assignment
+    (identifier)
+    (slice_expression
+      (identifier)
+      (binary_expression
+        (identifier)
+        (integer))))
+  (assignment
+    (identifier)
+    (slice_expression
+      (identifier)))
+  (assignment
+    (identifier)
+    (index_expression
+      (slice_expression
+        (identifier)
+        (binary_expression
+          (dollar)
+          (integer)))
+      (integer))))

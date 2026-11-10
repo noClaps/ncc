@@ -206,7 +206,9 @@ test "computed sizes" {
 The sizes are computed when the generic is used, and an invalid result is a compile error:
 
 ```nc
-fn drop_one<type T, uint N>(T[N] arr) T[N - 1] { ... }
+fn drop_one<type T, uint N>(T[N] arr) T[N - 1] {
+  return arr[1:] // a slice with constant bounds keeps a fixed size
+}
 
 drop_one<int, 0>([]) // error: array size `N - 1` is -1, which is not a valid size (in instantiation `drop_one<int, 0>`)
 ```

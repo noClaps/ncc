@@ -46,6 +46,8 @@ enum Seg {
     Name(String),
     Call,
     Index,
+    /// `[a:b]`: the same kind of sequence
+    Slice,
 }
 
 /// Parse the receiver chain at the end of `head` (`a.b(x)[0].c`), outermost last.
@@ -79,7 +81,13 @@ fn receiver_chain_at(head: &str) -> Option<(Vec<Seg>, usize)> {
                     }
                 }
             }
-            segs.push(if close == b')' { Seg::Call } else { Seg::Index });
+            segs.push(if close == b')' {
+                Seg::Call
+            } else if is_slice(&b[j + 1..i - 1]) {
+                Seg::Slice
+            } else {
+                Seg::Index
+            });
             i = j;
         }
         let end = i;
@@ -684,6 +692,7 @@ impl Server {
                     .ty
                     .clone(),
                 Seg::Index => a.index.elems.get(&ty)?.clone(),
+                Seg::Slice => ty,
                 Seg::Call => a.index.returns.get(&ty)?.clone(),
             };
         }
@@ -872,6 +881,22 @@ fn path_items(file: &Path, typed: &str, modules: bool) -> Vec<CompletionItem> {
     }
     out.sort_by(|a, b| a.label.cmp(&b.label));
     out
+}
+
+/// Do the contents of `[...]` make a slice (a `:` outside nested brackets and strings)?
+fn is_slice(inner: &[u8]) -> bool {
+    let (mut depth, mut in_str) = (0i32, false);
+    for (k, &c) in inner.iter().enumerate() {
+        match c {
+            b'"' if k == 0 || inner[k - 1] != b'\\' => in_str = !in_str,
+            _ if in_str => {}
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b':' if depth == 0 => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 #[cfg(test)]

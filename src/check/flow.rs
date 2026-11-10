@@ -100,6 +100,13 @@ pub fn visit_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
             visit_expr(a, f);
             visit_expr(b, f);
         }
+        EK::Slice(a, lo, hi) => {
+            visit_expr(a, f);
+            visit_expr(lo, f);
+            if let Some(hi) = hi {
+                visit_expr(hi, f);
+            }
+        }
         EK::Call(c, args) | EK::Async(c, args) => {
             visit_callee(c, f);
             for a in args {

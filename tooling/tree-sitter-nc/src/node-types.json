@@ -100,6 +100,10 @@
         "named": true
       },
       {
+        "type": "slice_expression",
+        "named": true
+      },
+      {
         "type": "string",
         "named": true
       },
@@ -1822,6 +1826,42 @@
           "named": true
         }
       ]
+    }
+  },
+  {
+    "type": "slice_expression",
+    "named": true,
+    "fields": {
+      "end": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "_expression",
+            "named": true
+          }
+        ]
+      },
+      "start": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "_expression",
+            "named": true
+          }
+        ]
+      },
+      "value": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "_expression",
+            "named": true
+          }
+        ]
+      }
     }
   },
   {

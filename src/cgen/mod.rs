@@ -1278,6 +1278,26 @@ impl<'p> CGen<'p> {
                     }
                 }
             }
+            EK::Slice(b, lo, hi) => {
+                let bv = self.expr(b);
+                let bn = self.bind(b.ty, &bv);
+                let is_str = matches!(self.p.types.kind(self.p.types.base(b.ty)), TyKind::Str);
+                let len = if is_str { "clen" } else { "len" };
+                let loc = self.loc(e.span);
+                self.dollar.push(format!("nc_dollar({bn}->{len}, {loc})"));
+                let l = self.index_value(lo);
+                let h = match hi {
+                    Some(h) => self.index_value(h),
+                    None => format!("(uint64_t){bn}->{len}"),
+                };
+                self.dollar.pop();
+                let f = if is_str {
+                    "nc_str_slice"
+                } else {
+                    "nc_arr_slice"
+                };
+                self.temp(ty, &format!("{f}({bn}, {l}, {h}, {loc})"))
+            }
             EK::Dollar => CVal::b(self.dollar.last().cloned().unwrap_or_else(|| "0".into())),
             EK::Len(b) => {
                 let v = self.expr(b);

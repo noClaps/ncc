@@ -1284,12 +1284,34 @@ impl Parser {
                     let saved = self.no_struct;
                     self.no_struct = false;
                     self.skip_nl();
-                    let idx = self.expr()?;
+                    // `x[i]`, or a slice: `x[a:b]` with either bound optional
+                    let lo = if self.at(&Tok::Colon) {
+                        None
+                    } else {
+                        Some(Box::new(self.expr()?))
+                    };
                     self.skip_nl();
+                    let kind = if self.eat(&Tok::Colon) {
+                        self.skip_nl();
+                        let hi = if self.at(&Tok::RBracket) {
+                            None
+                        } else {
+                            Some(Box::new(self.expr()?))
+                        };
+                        self.skip_nl();
+                        ExprKind::Slice(Box::new(e), lo, hi)
+                    } else {
+                        match lo {
+                            Some(i) => ExprKind::Index(Box::new(e), i),
+                            None => {
+                                return err(self.span(), "expected an index or a slice `[a:b]`");
+                            }
+                        }
+                    };
                     self.no_struct = saved;
                     self.expect(&Tok::RBracket)?;
                     e = Expr {
-                        kind: ExprKind::Index(Box::new(e), Box::new(idx)),
+                        kind,
                         span: start.to(self.prev_span()),
                     };
                 }

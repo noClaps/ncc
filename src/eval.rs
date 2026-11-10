@@ -423,7 +423,8 @@ impl<'p> Evaluator<'p> {
             | EK::ToStr(_)
             | EK::Format(_)
             | EK::Len(_)
-            | EK::Index(..) => all_children_lit(e),
+            | EK::Index(..)
+            | EK::Slice(..) => all_children_lit(e),
             EK::Field(..) | EK::TupleIndex(..) => all_children_lit(e),
             EK::Call(Callee::Direct(f), args) => self.pure[*f] && args.iter().all(is_lit_tree),
             _ => false,
@@ -1037,6 +1038,33 @@ impl<'p> Evaluator<'p> {
                     _ => return Err(Stop::Unknown),
                 }
             }
+            EK::Slice(b, lo, hi) => {
+                let base = self.expr(b, env, const_only)?;
+                env.dollar.push(base.clone());
+                let l = self.expr(lo, env, const_only);
+                let h = hi.as_ref().map(|h| self.expr(h, env, const_only));
+                env.dollar.pop();
+                let l = idx_checked(&l?, lo.span)? as usize;
+                let len = match &base {
+                    Val::Arr(a) => a.len(),
+                    Val::Str(s) => s.chars().count(),
+                    _ => return Err(Stop::Unknown),
+                };
+                let h = match h {
+                    Some(h) => idx_checked(&h?, hi.as_ref().unwrap().span)? as usize,
+                    None => len,
+                };
+                if l > h || h > len {
+                    return self.panic("slice out of bounds", span);
+                }
+                match base {
+                    Val::Arr(a) => Val::Arr(Rc::new(a[l..h].to_vec())),
+                    Val::Str(s) => {
+                        Val::Str(s.chars().skip(l).take(h - l).collect::<String>().into())
+                    }
+                    _ => unreachable!(),
+                }
+            }
             EK::Dollar => {
                 let len = match env.dollar.last() {
                     Some(Val::Arr(a)) => a.len(),
@@ -1618,6 +1646,13 @@ fn all_children_lit(e: &Expr) -> bool {
             f(a);
             f(b);
         }
+        EK::Slice(a, lo, hi) => {
+            f(a);
+            f(lo);
+            if let Some(hi) = hi {
+                f(hi);
+            }
+        }
         EK::Format(ps) => ps.iter().for_each(&mut f),
         _ => ok = false,
     }
@@ -1663,6 +1698,13 @@ fn for_children(e: &mut Expr, f: &mut dyn FnMut(&mut Expr)) {
         EK::Binary(_, a, b) | EK::Index(a, b) => {
             f(a);
             f(b);
+        }
+        EK::Slice(a, lo, hi) => {
+            f(a);
+            f(lo);
+            if let Some(hi) = hi {
+                f(hi);
+            }
         }
         EK::Call(c, args) | EK::Async(c, args) => {
             if let Callee::Value(x) = c {

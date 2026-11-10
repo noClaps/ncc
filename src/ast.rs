@@ -230,6 +230,8 @@ pub enum ExprKind {
     Builtin(String, Option<TypeExpr>, Vec<Expr>),
     Field(Box<Expr>, String),
     Index(Box<Expr>, Box<Expr>),
+    /// `x[a:b]`, `x[a:]`, `x[:b]`, `x[:]`
+    Slice(Box<Expr>, Option<Box<Expr>>, Option<Box<Expr>>),
     Tuple(Vec<Expr>),
     Array(Vec<Expr>),
     Map(Vec<(Expr, Expr)>),

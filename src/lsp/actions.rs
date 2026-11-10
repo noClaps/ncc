@@ -376,6 +376,7 @@ fn atomic(e: &ast::Expr) -> bool {
             | E::Builtin(..)
             | E::Field(..)
             | E::Index(..)
+            | E::Slice(..)
             | E::Tuple(_)
             | E::Array(_)
             | E::Map(_)
