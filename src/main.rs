@@ -6,6 +6,7 @@ mod driver;
 mod eval;
 mod lexer;
 mod lint;
+mod lsp;
 mod modules;
 mod parser;
 mod tir;
@@ -13,7 +14,7 @@ mod types;
 
 use std::process::ExitCode;
 
-const HELP: &str = "Usage: ncc [init|build|run|check|test]
+const HELP: &str = "Usage: ncc [init|build|run|check|test|lsp]
 
 Commands:
   init        Initialises a project.
@@ -21,6 +22,14 @@ Commands:
   run         Executes the given file.
   check       Type-checks the given file.
   test        Run tests in the given file.
+  lsp         Starts the language server.
+
+Options:
+  -h, --help  Show this help and exit.";
+
+const HELP_LSP: &str = "Usage: ncc lsp
+
+Starts the language server.
 
 Options:
   -h, --help  Show this help and exit.";
@@ -100,6 +109,16 @@ fn main() -> ExitCode {
         "-h" | "--help" => {
             println!("{HELP}");
             ExitCode::SUCCESS
+        }
+        "lsp" => {
+            match rest.first().map(|s| s.as_str()) {
+                Some("-h" | "--help") => {
+                    println!("{HELP_LSP}");
+                    ExitCode::SUCCESS
+                }
+                Some(a) => usage_error(&format!("unexpected argument `{a}`"), HELP_LSP),
+                None => lsp::run(),
+            }
         }
         "init" => {
             let mut name = None;

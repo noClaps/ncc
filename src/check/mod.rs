@@ -449,6 +449,10 @@ impl<'a> Checker<'a> {
         if let TyKind::Enum(i) = *self.types.kind(ty) {
             self.types.enums[i as usize].variants = variants;
         }
+        let ename = self.types.show(ty);
+        for (vn, _, sp) in &e.variants {
+            self.idx_decl(vn, *sp, index::DeclKind::Variant, format!("{ename}.{vn}"), vec![]);
+        }
         Ok(())
     }
 
