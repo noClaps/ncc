@@ -281,14 +281,60 @@ impl<'a> Lexer<'a> {
         while self.peek().is_ascii_digit() || self.peek() == b'_' {
             self.pos += 1;
         }
+        let mut is_float = false;
         if self.peek() == b'.' && self.peek_at(1).is_ascii_digit() {
+            is_float = true;
             self.pos += 1;
             while self.peek().is_ascii_digit() || self.peek() == b'_' {
                 self.pos += 1;
             }
+        }
+        let mant_end = self.pos;
+        let mut exp: Option<i64> = None;
+        if matches!(self.peek(), b'e' | b'E') {
+            let mut k = 1;
+            if matches!(self.peek_at(1), b'+' | b'-') {
+                k = 2;
+            }
+            if self.peek_at(k).is_ascii_digit() {
+                let es = self.pos + 1;
+                self.pos += k;
+                while self.peek().is_ascii_digit() || self.peek() == b'_' {
+                    self.pos += 1;
+                }
+                let etext = self.src[es..self.pos].replace('_', "");
+                exp = Some(etext.parse().map_err(|_| crate::diag::Diag::new(self.span(start), "exponent too large"))?);
+            }
+        }
+        if is_float || exp.is_some_and(|e| e < 0) {
             let text = self.src[start..self.pos].replace('_', "");
             let v: f64 = text.parse().unwrap();
+            if self.peek().is_ascii_alphanumeric() {
+                return err(self.span(start), "invalid number literal");
+            }
             return Ok(Tok::Float(v));
+        }
+        if let Some(e) = exp {
+            // integer literal with a non-negative exponent: exact integer value
+            let mant: u128 = self.src[start..mant_end]
+                .replace('_', "")
+                .parse()
+                .map_err(|_| crate::diag::Diag::new(self.span(start), "integer literal too large"))?;
+            let mut v = mant;
+            for _ in 0..e {
+                v = v
+                    .checked_mul(10)
+                    .ok_or_else(|| crate::diag::Diag::new(self.span(start), "integer literal too large"))?;
+            }
+            let mut unsigned = false;
+            if self.peek() == b'u' && !self.peek_at(1).is_ascii_alphanumeric() {
+                self.pos += 1;
+                unsigned = true;
+            }
+            if self.peek().is_ascii_alphanumeric() {
+                return err(self.span(start), "invalid number literal");
+            }
+            return Ok(Tok::Int(v, unsigned));
         }
         let text = self.src[start..self.pos].replace('_', "");
         let mut unsigned = false;

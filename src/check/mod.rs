@@ -164,20 +164,19 @@ impl<'a> Checker<'a> {
         for &m in &order {
             self.fns.last_mut().unwrap().module = m;
             self.fns.last_mut().unwrap().scopes = vec![vec![]];
-            let items = std::mem::take(&mut self.mods[m].ast.items);
+            let items = self.mods[m].ast.items.clone();
             let mut init = vec![];
             for it in &items {
                 if let ast::Item::Stmt(s) = it {
                     self.check_stmt(s, &mut init)?;
                 }
             }
-            self.mods[m].ast.items = items;
             self.mods[m].init = init;
         }
         let main_ctx = self.fns.pop().unwrap();
         // tests (entry module only are run, but all are checked)
         for m in 0..self.mods.len() {
-            let items = std::mem::take(&mut self.mods[m].ast.items);
+            let items = self.mods[m].ast.items.clone();
             for it in &items {
                 if let ast::Item::Test(name, body, span) = it {
                     let erru = self.types.erru(VOID);
@@ -193,7 +192,6 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            self.mods[m].ast.items = items;
         }
         // Phase D: function bodies (including generic instances discovered on the way)
         while let Some(p) = self.pending.pop() {
@@ -230,7 +228,7 @@ impl<'a> Checker<'a> {
     }
 
     fn declare_names(&mut self, m: usize) -> Result<()> {
-        let items = std::mem::take(&mut self.mods[m].ast.items);
+        let items = self.mods[m].ast.items.clone();
         let r = (|| {
             for (i, it) in items.iter().enumerate() {
                 match it {
@@ -260,12 +258,11 @@ impl<'a> Checker<'a> {
             }
             Ok(())
         })();
-        self.mods[m].ast.items = items;
         r
     }
 
     fn resolve_decls(&mut self, m: usize) -> Result<()> {
-        let items = std::mem::take(&mut self.mods[m].ast.items);
+        let items = self.mods[m].ast.items.clone();
         let r = (|| {
             let none = HashMap::new();
             for it in items.iter() {
@@ -352,7 +349,6 @@ impl<'a> Checker<'a> {
             }
             Ok(())
         })();
-        self.mods[m].ast.items = items;
         r
     }
 
@@ -764,25 +760,7 @@ impl<'a> Checker<'a> {
 
     /// Types supporting `==`.
     pub fn comparable(&self, t: TyId) -> bool {
-        match self.types.kind(t) {
-            TyKind::Fn(..) | TyKind::Fut(_) | TyKind::Mutex(_) | TyKind::Void | TyKind::Never => false,
-            TyKind::Named(_) => self.comparable(self.types.base(t)),
-            TyKind::Array(e) | TyKind::Fixed(e, _) | TyKind::Opt(e) | TyKind::ErrU(e) => {
-                *e == VOID || self.comparable(*e)
-            }
-            TyKind::Map(k, v) => self.comparable(*k) && self.comparable(*v),
-            TyKind::Tuple(ts) => ts.iter().all(|t| self.comparable(*t)),
-            TyKind::Struct(i) => {
-                let fs: Vec<TyId> = self.types.structs[*i as usize].fields.iter().map(|f| f.1).collect();
-                // recursive structs are comparable when their parts are; guard recursion via a depth-limited walk
-                fs.iter().all(|f| *f == t || self.comparable_guard(*f, &mut vec![t]))
-            }
-            TyKind::Enum(i) => {
-                let vs: Vec<TyId> = self.types.enums[*i as usize].variants.iter().flat_map(|v| v.1.clone()).collect();
-                vs.iter().all(|f| *f == t || self.comparable_guard(*f, &mut vec![t]))
-            }
-            _ => true,
-        }
+        self.comparable_guard(t, &mut vec![])
     }
 
     fn comparable_guard(&self, t: TyId, seen: &mut Vec<TyId>) -> bool {
@@ -808,7 +786,9 @@ impl<'a> Checker<'a> {
             TyKind::Map(k, v) => self.comparable_guard(*k, seen) && self.comparable_guard(*v, seen),
             TyKind::Tuple(ts) => ts.clone().iter().all(|x| self.comparable_guard(*x, seen)),
             TyKind::Named(_) => self.comparable_guard(self.types.base(t), seen),
-            _ => self.comparable(t),
+            TyKind::ErrU(e) => *e == VOID || self.comparable_guard(*e, seen),
+            TyKind::Fn(..) | TyKind::Fut(_) | TyKind::Mutex(_) | TyKind::Void | TyKind::Never => false,
+            _ => true,
         }
     }
 
