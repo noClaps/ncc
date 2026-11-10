@@ -846,9 +846,9 @@ impl Parser {
                 return err(self.span(), "comparison operators cannot be chained; use parentheses");
             }
             let opsp = self.bump().span;
-            self.check_continuation(opsp, op.symbol())?;
+            let at_eol = self.at(&Tok::Newline);
             self.skip_nl();
-            let rhs = self.binary(prec + 1)?;
+            let rhs = self.binary(prec + 1).map_err(|d| self.missing_operand(d, opsp, op.symbol(), at_eol))?;
             last_cmp = prec == 3;
             let sp = lhs.span.to(rhs.span);
             let _ = opsp;
@@ -857,33 +857,31 @@ impl Parser {
         Ok(lhs)
     }
 
-    /// After a binary operator at the end of a line, the operand must be on a continuation
-    /// line indented deeper than the statement; otherwise the operand is missing.
-    fn check_continuation(&self, opsp: Span, sym: &str) -> Result<()> {
-        if !self.at(&Tok::Newline) {
-            return Ok(());
-        }
-        let mut j = self.pos;
+    /// The operand after an operator at the end of a line failed to parse. If the next line
+    /// is indented no deeper than the statement, the operand was most likely left out.
+    fn missing_operand(&self, d: Diag, opsp: Span, sym: &str, at_eol: bool) -> Diag {
+        let mut j = self.toks.iter().position(|t| t.span.start > opsp.start).unwrap_or(self.toks.len() - 1);
         while matches!(self.toks[j].tok, Tok::Newline) && j + 1 < self.toks.len() {
             j += 1;
         }
         let next_col = self.column(j);
         let stmt_col = self.column(self.stmt_start);
-        if matches!(self.toks[j].tok, Tok::Eof | Tok::RBrace)
-            || matches!((next_col, stmt_col), (Some(n), Some(s)) if n <= s)
-        {
-            return err(opsp, format!("expected an expression after `{sym}`"));
+        let new_line = matches!(self.toks[j].tok, Tok::Eof | Tok::RBrace)
+            || matches!((next_col, stmt_col), (Some(n), Some(s)) if n <= s);
+        if at_eol && new_line {
+            Diag::new(opsp, format!("expected an expression after `{sym}`"))
+        } else {
+            d
         }
-        Ok(())
     }
 
     fn pow(&mut self) -> Result<Expr> {
         let base = self.unary()?;
         if self.at(&Tok::StarStar) {
             let opsp = self.bump().span;
-            self.check_continuation(opsp, "**")?;
+            let at_eol = self.at(&Tok::Newline);
             self.skip_nl();
-            let exp = self.pow()?; // right-assoc
+            let exp = self.pow().map_err(|d| self.missing_operand(d, opsp, "**", at_eol))?; // right-assoc
             let sp = base.span.to(exp.span);
             return Ok(Expr { kind: ExprKind::Binary(BinOp::Pow, Box::new(base), Box::new(exp)), span: sp });
         }

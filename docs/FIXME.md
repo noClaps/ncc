@@ -270,7 +270,7 @@ A: Yes. The extension gets a small Rust crate (compiled to wasm) that runs `ncc 
 Implementation:
 - The lexer and parser recover at statement boundaries.
   - When a statement breaks on a later line (for example because of an unclosed bracket) and that line is indented no deeper than the statement, parsing resumes at that line, so it isn't swallowed. The error points at the bracket that was never closed.
-  - An operator at the end of a line followed by such a line reports "expected an expression after `+`".
+  - When an operator ends a line and the next line fails to parse as its operand while being indented no deeper than the statement, the error is "expected an expression after `+`". Unindented continuations that do parse (`1 +` then `2`) remain valid.
 - Missing or broken imports don't stop the remaining modules from being checked.
 - The checker reports each failing statement or declaration and keeps going. A variable whose initialiser fails is still declared, to avoid follow-up "unknown name" errors.
 - Compile-time panics are reported alongside type errors.
