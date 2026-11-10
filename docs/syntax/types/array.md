@@ -46,7 +46,7 @@ The length of the array can be accessed with `<array>.len`.
 
 ## Slicing
 
-You can take a part of an array with `array[start:end]`. Both bounds are inclusive: the slice holds the values from index `start` through index `end`, so it has `end - start + 1` values. Both bounds are required, and `$` works inside them as it does for indexing, so `nums[3:$]` runs to the end of the array. A slice whose `end` is one less than its `start` (such as `nums[2:1]`) is empty.
+You can take a part of an array with `array[start:end]`. Both bounds are inclusive: the slice holds the values from index `start` through index `end`, so it has `end - start + 1` values. Both bounds are required, and `$` works inside them as it does for indexing, so `nums[3:$]` runs to the end of the array. `start` can't be after `end`, so a slice always holds at least one value.
 
 ```nc
 test "slicing" {
@@ -56,11 +56,10 @@ test "slicing" {
   assert nums[3:$] == [4, 5]
   assert nums[$-1:$] == [4, 5]
   assert nums[0:$] == [1, 2, 3, 4, 5]
-  assert nums[2:1] == []
 }
 ```
 
-A slice is a new array: changing the original afterwards doesn't change the slice. If `end` is past the last index, or `start` is more than one past `end`, the program panics with `slice out of bounds`.
+A slice is a new array: changing the original afterwards doesn't change the slice. If `end` is past the last index, or `start` is after `end`, the program panics with `slice out of bounds`.
 
 ## Fixed-size arrays
 
@@ -135,7 +134,7 @@ test "concat fixed-size and dynamic array" {
 }
 ```
 
-Slicing a fixed-size array with bounds known at compile time gives a fixed-size array. The bounds can be integer literals, [generic constants](../generics#constants), `$`, or arithmetic on these, and out-of-range bounds are a compile error. If a bound is only known at run time, the slice is a dynamic array.
+Slicing a fixed-size array with bounds known at compile time gives a fixed-size array. The bounds can be integer literals, [generic constants](../generics#constants), `$`, or arithmetic on these, and out-of-range or reversed bounds are a compile error. If a bound is only known at run time, the slice is a dynamic array.
 
 ```nc
 fn split<type T, uint N, uint M>(T[N + M] arr) (T[N], T[M]) {
@@ -147,6 +146,7 @@ test "fixed-size array slicing" {
   int[3] middle = nums[1:3]
   int[2] first, int[3] rest = split<int, 2, 3>(nums)
   int[3] wrong = nums[3:5] // error: slice `[3:5]` is out of bounds for `int[5]`
+  int[0] empty, int[5] all = split<int, 0, 5>(nums) // error: slice `[0:-1]` starts after it ends (in instantiation `split<int, 0, 5>`)
 
   uint start = 1
   int[] dynamic = nums[start:start + 2]

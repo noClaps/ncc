@@ -775,8 +775,11 @@ impl<'a> Checker<'a> {
             let l = const_index(&lo, dollar);
             let h = const_index(&hi, dollar);
             if let (Some(l), Some(h)) = (l, h) {
-                // inclusive bounds; `[a:a - 1]` is empty
-                if l < 0 || l > h + 1 || h >= n as i128 {
+                // inclusive bounds, so a slice holds at least one value
+                if l > h {
+                    return err(span, format!("slice `[{l}:{h}]` starts after it ends"));
+                }
+                if l < 0 || h >= n as i128 {
                     return err(
                         span,
                         format!(
@@ -786,16 +789,14 @@ impl<'a> Checker<'a> {
                     );
                 }
                 ty = self.types.intern(TyKind::Fixed(el, (h - l + 1) as u64));
-                // the bounds are known: use their values, so that an empty slice's end of -1
-                // (`arr[0:N - 1]` with `N` = 0) is not computed as `uint` arithmetic. The end
-                // wraps to `u64::MAX`; the runtime reads the bounds as `lo` up to `hi + 1`.
+                // the bounds are known: use their values
                 lo = Expr {
                     kind: EK::Lit(Lit::UInt(l as u64)),
                     ty: UINT,
                     span: lo.span,
                 };
                 hi = Expr {
-                    kind: EK::Lit(Lit::UInt(h as i64 as u64)),
+                    kind: EK::Lit(Lit::UInt(h as u64)),
                     ty: UINT,
                     span: hi.span,
                 };

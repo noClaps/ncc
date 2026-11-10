@@ -15,8 +15,7 @@ int[2] front, int[3] back = split<int, 2, 3>(xs)
 int[3] mid = xs[1:3]
 int[2] last_two = xs[$ - 1:$]
 int[1] one = xs[2:2]
-int[0] empty = xs[2:1]
-@println("{rest} {front} {back} {mid} {last_two} {one} {empty}")
+@println("{rest} {front} {back} {mid} {last_two} {one}")
 
 // bounds known only at run time give a dynamic array
 str[] args = @args()
@@ -31,4 +30,4 @@ words[1] = "z"
 
 // strings are sliced by character
 str s = "héllo wörld"
-@println("{s[0:4]}|{s[6:$]}|{s[0:$ - 1]}|{s[3:2]}|")
+@println("{s[0:4]}|{s[6:$]}|{s[0:$ - 1]}|{s[3:3]}|")

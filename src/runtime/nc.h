@@ -484,12 +484,10 @@ static uint32_t nc_str_at(const nc_str *s, uint64_t i, const char *loc) {
   return c;
 }
 
-/* s[lo:hi], bounds inclusive and counted in scalars; `lo == hi + 1` is empty
-   (`hi` == UINT64_MAX stands for -1) */
+/* s[lo:hi], bounds inclusive (`lo <= hi < clen`) and counted in scalars */
 static nc_str *nc_str_slice(const nc_str *s, uint64_t lo, uint64_t hi, const char *loc) {
-  uint64_t end = hi + 1;
-  if (end > (uint64_t)s->clen || lo > end) nc_panic("slice out of bounds", loc);
-  int64_t a = nc_str_offset(s, lo), b = nc_str_offset(s, end);
+  if (lo > hi || hi >= (uint64_t)s->clen) nc_panic("slice out of bounds", loc);
+  int64_t a = nc_str_offset(s, lo), b = nc_str_offset(s, hi + 1);
   return nc_str_new(s->data + a, b - a);
 }
 
@@ -651,11 +649,10 @@ static inline uint64_t nc_dollar(int64_t len, const char *loc) {
   if (len == 0) nc_panic("`$` used on an empty sequence", loc);
   return (uint64_t)(len - 1);
 }
-/* a[lo:hi], bounds inclusive (`lo == hi + 1` is empty): a new array holding copies */
+/* a[lo:hi], bounds inclusive (`lo <= hi < len`): a new array holding copies */
 static nc_arr *nc_arr_slice(const nc_arr *a, uint64_t lo, uint64_t hi, const char *loc) {
-  uint64_t end = hi + 1; /* `hi` == UINT64_MAX stands for -1 */
-  if (end > (uint64_t)a->len || lo > end) nc_panic("slice out of bounds", loc);
-  int64_t n = (int64_t)(end - lo);
+  if (lo > hi || hi >= (uint64_t)a->len) nc_panic("slice out of bounds", loc);
+  int64_t n = (int64_t)(hi + 1 - lo);
   nc_arr *b = nc_arr_new(a->ti, n);
   if (n) memcpy(b->data, (char *)a->data + lo * a->ti->size, (size_t)n * a->ti->size);
   b->len = n;
