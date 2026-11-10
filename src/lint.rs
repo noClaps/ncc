@@ -92,8 +92,8 @@ pub fn race_warnings(p: &Program) -> Vec<Diag> {
                 hits.extend(shared_accesses(p, g));
                 stack.extend(callees(p, g));
             }
-            if let Some((name, _)) = hits.first() {
-                if seen.insert(span) {
+            if let Some((name, _)) = hits.first()
+                && seen.insert(span) {
                     warnings.push(Diag::new(
                         span,
                         format!(
@@ -102,7 +102,6 @@ pub fn race_warnings(p: &Program) -> Vec<Diag> {
                         ),
                     ));
                 }
-            }
         }
     }
     warnings

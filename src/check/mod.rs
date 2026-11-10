@@ -286,7 +286,7 @@ impl<'a> Checker<'a> {
 
     fn declare_names(&mut self, m: usize) -> Result<()> {
         let items = self.mods[m].ast.items.clone();
-        let r = (|| {
+        {
             for (i, it) in items.iter().enumerate() {
                 let item_r: Result<()> = (|| { match it {
                     ast::Item::Fn(f) => {
@@ -319,13 +319,12 @@ impl<'a> Checker<'a> {
                 }
             }
             Ok(())
-        })();
-        r
+        }
     }
 
     fn resolve_decls(&mut self, m: usize) -> Result<()> {
         let items = self.mods[m].ast.items.clone();
-        let r = (|| {
+        {
             let none = HashMap::new();
             for it in items.iter() {
                 let item_r: Result<()> = (|| { match it {
@@ -428,17 +427,14 @@ impl<'a> Checker<'a> {
             }
             // reject infinitely sized structs
             for it in items.iter() {
-                if let ast::Item::Struct(s) = it {
-                    if let Some(SymEntry { sym: Sym::Struct { ty: Some(ty), .. }, .. }) = self.mods[m].syms.get(&s.name) {
-                        if let Err(d) = self.check_finite(*ty, s.span) {
+                if let ast::Item::Struct(s) = it
+                    && let Some(SymEntry { sym: Sym::Struct { ty: Some(ty), .. }, .. }) = self.mods[m].syms.get(&s.name)
+                        && let Err(d) = self.check_finite(*ty, s.span) {
                             self.errors.push(d);
                         }
-                    }
-                }
             }
             Ok(())
-        })();
-        r
+        }
     }
 
     fn check_finite(&self, ty: TyId, span: Span) -> Result<()> {
@@ -537,11 +533,10 @@ impl<'a> Checker<'a> {
         if matches!(self.types.kind(ret), TyKind::Fut(_)) {
             return err(sig.span, "futures cannot be returned from functions");
         }
-        if let TyKind::ErrU(i) = self.types.kind(ret) {
-            if matches!(self.types.kind(*i), TyKind::Fut(_)) {
+        if let TyKind::ErrU(i) = self.types.kind(ret)
+            && matches!(self.types.kind(*i), TyKind::Fut(_)) {
                 return err(sig.span, "futures cannot be returned from functions");
             }
-        }
         Ok((params, ret))
     }
 
@@ -1071,11 +1066,10 @@ impl<'a> Checker<'a> {
 
     /// Pick the global for a name: the latest declaration at or before `pos`, else the first.
     pub fn pick_global(list: &[(GlobalId, u32)], pos: u32, same_file: bool) -> GlobalId {
-        if same_file {
-            if let Some((g, _)) = list.iter().rev().find(|(_, p)| *p <= pos) {
+        if same_file
+            && let Some((g, _)) = list.iter().rev().find(|(_, p)| *p <= pos) {
                 return *g;
             }
-        }
         if same_file { list[0].0 } else { list.last().unwrap().0 }
     }
 
@@ -1117,18 +1111,18 @@ impl<'a> Checker<'a> {
                 work_f.extend(fs);
             }
             let mut changed = false;
-            for m in 0..self.mods.len() {
+            for (m, (module, inc)) in self.mods.iter().zip(included.iter_mut()).enumerate() {
                 if m == entry {
                     continue;
                 }
-                for (i, s) in self.mods[m].init.iter().enumerate() {
-                    if included[m][i] {
+                for (i, s) in module.init.iter().enumerate() {
+                    if inc[i] {
                         continue;
                     }
                     let mut writes = HashSet::new();
                     flow::writes_stmt(s, &mut writes);
                     if writes.iter().any(|g| reach_g.contains(g)) {
-                        included[m][i] = true;
+                        inc[i] = true;
                         changed = true;
                         let mut g = HashSet::new();
                         let mut fs = HashSet::new();

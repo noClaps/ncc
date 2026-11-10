@@ -133,11 +133,10 @@ pub fn visit_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
 
 /// Globals and functions referenced by a statement.
 pub fn refs_stmt(s: &Stmt, globals: &mut HashSet<GlobalId>, funcs: &mut HashSet<FuncId>) {
-    if let SK::Assign(p, _) = &s.kind {
-        if let Some(VarRef::Global(g)) = place_root(p) {
+    if let SK::Assign(p, _) = &s.kind
+        && let Some(VarRef::Global(g)) = place_root(p) {
             globals.insert(g);
         }
-    }
     let mut f = |e: &Expr| match &e.kind {
         EK::Var(VarRef::Global(g)) => {
             globals.insert(*g);
@@ -193,13 +192,11 @@ pub fn writes_stmt(s: &Stmt, out: &mut HashSet<GlobalId>) {
         };
         for b in blocks {
             for s in &b.stmts {
-                if matches!(s.kind, SK::Assign(..)) {
-                    if let SK::Assign(p, _) = &s.kind {
-                        if let Some(VarRef::Global(g)) = place_root(p) {
+                if matches!(s.kind, SK::Assign(..))
+                    && let SK::Assign(p, _) = &s.kind
+                        && let Some(VarRef::Global(g)) = place_root(p) {
                             out.insert(g);
                         }
-                    }
-                }
             }
         }
     };

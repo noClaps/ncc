@@ -44,12 +44,17 @@ pub fn load_with(
     let entry = std::fs::canonicalize(entry)
         .map_err(|e| vec![Diag::new(Span::default(), format!("cannot open `{}`: {e}", entry.display()))])?;
     let entry_dir = entry.parent().unwrap().to_path_buf();
-    let mut graph = ModuleGraph { modules: vec![], order: vec![] };
-    let mut by_path: HashMap<PathBuf, usize> = HashMap::new();
-    let mut root: Option<Option<PathBuf>> = None;
-    let mut errors = Vec::new();
-    load_one(sm, &entry, &entry_dir, &mut graph, &mut by_path, &mut root, None, overlay, &mut errors)
-        .map_err(|d| vec![d])?;
+    let mut loader = Loader {
+        sm,
+        entry_dir,
+        graph: ModuleGraph { modules: vec![], order: vec![] },
+        by_path: HashMap::new(),
+        root: None,
+        overlay,
+        errors: Vec::new(),
+    };
+    loader.load_one(&entry, None).map_err(|d| vec![d])?;
+    let Loader { mut graph, errors, .. } = loader;
     // order: DFS post-order from the entry
     let mut visited = vec![false; graph.modules.len()];
     fn visit(g: &ModuleGraph, i: usize, visited: &mut Vec<bool>, out: &mut Vec<usize>) {
@@ -79,80 +84,84 @@ pub fn load_with(
     Ok((graph, errors))
 }
 
-fn load_one(
-    sm: &mut SourceMap,
-    path: &Path,
-    entry_dir: &Path,
-    graph: &mut ModuleGraph,
-    by_path: &mut HashMap<PathBuf, usize>,
-    root: &mut Option<Option<PathBuf>>,
-    from: Option<Span>,
-    overlay: &HashMap<PathBuf, String>,
-    errors: &mut Vec<Diag>,
-) -> Result<usize> {
-    if let Some(&i) = by_path.get(path) {
-        return Ok(i);
-    }
-    let text = match overlay.get(path) {
-        Some(t) => Ok(t.clone()),
-        None => std::fs::read_to_string(path),
-    }
-    .map_err(|e| {
-        Diag::new(from.unwrap_or_default(), format!("cannot read module `{}`: {e}", path.display()))
-    })?;
-    let file = sm.add(path.to_path_buf(), text.clone());
-    let (ast, parse_errors) = parse_module_recover(&text, file);
-    errors.extend(parse_errors);
-    let idx = graph.modules.len();
-    by_path.insert(path.to_path_buf(), idx);
-    graph.modules.push(LoadedModule { path: path.to_path_buf(), file, ast, imports: HashMap::new() });
-    let imports: Vec<_> = graph.modules[idx]
-        .ast
-        .items
-        .iter()
-        .filter_map(|it| if let Item::Import(im) = it { Some(im.clone()) } else { None })
-        .collect();
-    let dir = path.parent().unwrap().to_path_buf();
-    for im in imports {
-        let from_root = im.path.strip_prefix(".../");
-        let target = if from_root.is_none() && (im.path.starts_with("./") || im.path.starts_with("../")) {
-            dir.join(format!("{}.nc", im.path.strip_prefix("./").unwrap_or(&im.path)))
-        } else {
-            if root.is_none() {
-                *root = Some(find_root(entry_dir));
-            }
-            match root.as_ref().unwrap() {
-                Some(r) => match from_root {
-                    Some(rel) => r.join(format!("{rel}.nc")),
-                    None => r.join(".nc").join("deps").join(format!("{}.nc", im.path)),
-                },
-                None => {
-                    errors.push(Diag::new(
-                        im.span,
-                        format!(
-                            "cannot resolve import `{}`: no `.nc/config.toml` found in `{}` or any parent directory",
-                            im.path,
-                            entry_dir.display()
-                        ),
-                    ));
-                    continue;
+/// State shared while loading the module graph.
+struct Loader<'a> {
+    sm: &'a mut SourceMap,
+    entry_dir: PathBuf,
+    graph: ModuleGraph,
+    by_path: HashMap<PathBuf, usize>,
+    /// project root (directory holding `.nc/config.toml`), looked up on first use
+    root: Option<Option<PathBuf>>,
+    overlay: &'a HashMap<PathBuf, String>,
+    errors: Vec<Diag>,
+}
+
+impl Loader<'_> {
+    fn load_one(&mut self, path: &Path, from: Option<Span>) -> Result<usize> {
+        if let Some(&i) = self.by_path.get(path) {
+            return Ok(i);
+        }
+        let text = match self.overlay.get(path) {
+            Some(t) => Ok(t.clone()),
+            None => std::fs::read_to_string(path),
+        }
+        .map_err(|e| {
+            Diag::new(from.unwrap_or_default(), format!("cannot read module `{}`: {e}", path.display()))
+        })?;
+        let file = self.sm.add(path.to_path_buf(), text.clone());
+        let (ast, parse_errors) = parse_module_recover(&text, file);
+        self.errors.extend(parse_errors);
+        let idx = self.graph.modules.len();
+        self.by_path.insert(path.to_path_buf(), idx);
+        self.graph.modules.push(LoadedModule { path: path.to_path_buf(), file, ast, imports: HashMap::new() });
+        let imports: Vec<_> = self.graph.modules[idx]
+            .ast
+            .items
+            .iter()
+            .filter_map(|it| if let Item::Import(im) = it { Some(im.clone()) } else { None })
+            .collect();
+        let dir = path.parent().unwrap().to_path_buf();
+        for im in imports {
+            let from_root = im.path.strip_prefix(".../");
+            let target = if from_root.is_none() && (im.path.starts_with("./") || im.path.starts_with("../")) {
+                dir.join(format!("{}.nc", im.path.strip_prefix("./").unwrap_or(&im.path)))
+            } else {
+                if self.root.is_none() {
+                    self.root = Some(find_root(&self.entry_dir));
                 }
+                match self.root.as_ref().unwrap() {
+                    Some(r) => match from_root {
+                        Some(rel) => r.join(format!("{rel}.nc")),
+                        None => r.join(".nc").join("deps").join(format!("{}.nc", im.path)),
+                    },
+                    None => {
+                        self.errors.push(Diag::new(
+                            im.span,
+                            format!(
+                                "cannot resolve import `{}`: no `.nc/config.toml` found in `{}` or any parent directory",
+                                im.path,
+                                self.entry_dir.display()
+                            ),
+                        ));
+                        continue;
+                    }
+                }
+            };
+            let Ok(target) = std::fs::canonicalize(&target) else {
+                self.errors.push(Diag::new(im.span, format!("cannot find module `{}` (looked for `{}`)", im.path, target.display())));
+                continue;
+            };
+            if self.graph.modules[idx].imports.contains_key(&im.alias) {
+                self.errors.push(Diag::new(im.span, format!("duplicate import alias `{}`", im.alias)));
+                continue;
             }
-        };
-        let Ok(target) = std::fs::canonicalize(&target) else {
-            errors.push(Diag::new(im.span, format!("cannot find module `{}` (looked for `{}`)", im.path, target.display())));
-            continue;
-        };
-        if graph.modules[idx].imports.contains_key(&im.alias) {
-            errors.push(Diag::new(im.span, format!("duplicate import alias `{}`", im.alias)));
-            continue;
-        }
-        match load_one(sm, &target, entry_dir, graph, by_path, root, Some(im.span), overlay, errors) {
-            Ok(m) => {
-                graph.modules[idx].imports.insert(im.alias.clone(), m);
+            match self.load_one(&target, Some(im.span)) {
+                Ok(m) => {
+                    self.graph.modules[idx].imports.insert(im.alias.clone(), m);
+                }
+                Err(d) => self.errors.push(d),
             }
-            Err(d) => errors.push(d),
         }
+        Ok(idx)
     }
-    Ok(idx)
 }

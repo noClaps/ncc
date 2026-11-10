@@ -24,13 +24,12 @@ impl<'a> Checker<'a> {
         if e.ty == ty || e.ty == NEVER {
             return Ok(e);
         }
-        if let TyKind::Opt(inner) = *self.types.kind(ty) {
-            if e.ty == inner || self.can_coerce(e.ty, inner) {
+        if let TyKind::Opt(inner) = *self.types.kind(ty)
+            && (e.ty == inner || self.can_coerce(e.ty, inner)) {
                 let span = e.span;
                 let inner_e = self.coerce(e, inner)?;
                 return Ok(Expr { kind: EK::Some(Box::new(inner_e)), ty, span });
             }
-        }
         if e.ty == VOID {
             return err(e.span, format!("expected a value of type `{}`, but this expression has no value", self.types.show(ty)));
         }
@@ -41,11 +40,10 @@ impl<'a> Checker<'a> {
         if matches!(self.types.kind(e.ty), TyKind::Opt(_)) {
             msg.push_str("; optionals must be checked for `none` first (use `else`)");
         }
-        if let (TyKind::Fixed(a, _), TyKind::Array(b)) = (self.types.kind(e.ty), self.types.kind(ty)) {
-            if a == b {
+        if let (TyKind::Fixed(a, _), TyKind::Array(b)) = (self.types.kind(e.ty), self.types.kind(ty))
+            && a == b {
                 msg.push_str("; convert with `@as`");
             }
-        }
         err(e.span, msg)
     }
 
@@ -134,13 +132,12 @@ impl<'a> Checker<'a> {
         // named types can be created with the literal syntax of their underlying type
         if let Some(exp) = expected {
             let exp_s = self.strip_opt(exp);
-            if let TyKind::Named(_) = self.types.kind(exp_s) {
-                if matches!(e.kind, E::Array(_) | E::Map(_) | E::Tuple(_) | E::Struct(..) | E::Str(_)) {
+            if let TyKind::Named(_) = self.types.kind(exp_s)
+                && matches!(e.kind, E::Array(_) | E::Map(_) | E::Tuple(_) | E::Struct(..) | E::Str(_)) {
                     let under = self.types.base(exp_s);
                     let x = self.expect_expr(e, under)?;
                     return Ok(Expr { kind: EK::Retype(Box::new(x)), ty: exp_s, span });
                 }
-            }
         }
         match &e.kind {
             E::Int(v, u) => self.int_lit(*v as i128, *u, expected, span),
@@ -177,7 +174,7 @@ impl<'a> Checker<'a> {
                         }
                         ast::StrSeg::Expr(x) => {
                             let v = self.check_expr(x, None)?;
-                            parts.push(self.to_str(v)?);
+                            parts.push(self.stringify(v)?);
                         }
                     }
                 }
@@ -481,7 +478,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    pub fn to_str(&mut self, v: Expr) -> Result<Expr> {
+    pub fn stringify(&mut self, v: Expr) -> Result<Expr> {
         if v.ty == STR || v.ty == ERROR {
             let span = v.span;
             return Ok(Expr { kind: EK::Retype(Box::new(v)), ty: STR, span });
@@ -650,8 +647,8 @@ impl<'a> Checker<'a> {
             let (ps, r) = self.sigs[f].clone();
             return Ok(Target::Call(Callee::Direct(f), ps, r));
         }
-        if let E::Ident(name) = &callee.kind {
-            if self.resolve_var(name, span)?.is_none() {
+        if let E::Ident(name) = &callee.kind
+            && self.resolve_var(name, span)?.is_none() {
                 let m = self.module();
                 if let Some(Sym::Fn { func: Some(f), .. }) = self.mods[m].syms.get(name).map(|e| e.sym.clone()) {
                     self.idx_fn_ref(f, name, span);
@@ -659,7 +656,6 @@ impl<'a> Checker<'a> {
                     return Ok(Target::Call(Callee::Direct(f), ps, r));
                 }
             }
-        }
         let v = self.check_expr(callee, None)?;
         match self.types.kind(v.ty).clone() {
             TyKind::Fn(ps, r) => Ok(Target::Call(Callee::Value(Box::new(v)), ps, r)),
@@ -687,14 +683,13 @@ impl<'a> Checker<'a> {
             }
             xs.push(x);
         }
-        if let Target::Call(Callee::Direct(f), _, r) = &target {
-            if self.never_funcs.contains(f) {
+        if let Target::Call(Callee::Direct(f), _, r) = &target
+            && self.never_funcs.contains(f) {
                 return Ok((Target::Call(Callee::Direct(*f), params, NEVER), xs)).map(|(t, x)| {
                     let _ = r;
                     (t, x)
                 });
             }
-        }
         Ok((target, xs))
     }
 

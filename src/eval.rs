@@ -160,11 +160,10 @@ impl<'p> Evaluator<'p> {
         let f = self.sm.file(span.file);
         let (l, _) = f.line_col(span.start as usize);
         let mut path = f.path.clone();
-        if let Ok(cwd) = std::env::current_dir() {
-            if let Ok(rel) = path.strip_prefix(&cwd) {
+        if let Ok(cwd) = std::env::current_dir()
+            && let Ok(rel) = path.strip_prefix(&cwd) {
                 path = rel.to_path_buf();
             }
-        }
         format!("{}:{l}", path.display())
     }
 
@@ -197,14 +196,13 @@ impl<'p> Evaluator<'p> {
             // constants for immutable globals with constant initialisers (in main, in order)
             let main = &snapshot.funcs[snapshot.main];
             for s in &main.body.stmts {
-                if let SK::Let(Some(VarRef::Global(g)), e) = &s.kind {
-                    if !snapshot.globals[*g].mutable {
+                if let SK::Let(Some(VarRef::Global(g)), e) = &s.kind
+                    && !snapshot.globals[*g].mutable {
                         // panics are reported when the statement itself is folded below
                         if let Ok(Some(v)) = ev.try_const(e) {
                             ev.gconst.insert(*g, v);
                         }
                     }
-                }
             }
             let mut new_funcs = snapshot.funcs.clone();
             for f in new_funcs.iter_mut() {
@@ -264,13 +262,11 @@ impl<'p> Evaluator<'p> {
         match &mut s.kind {
             SK::Let(v, e) => {
                 self.fold_expr(e, locals, consts)?;
-                if let (Some(VarRef::Local(l)), EK::Lit(_)) = (v, &e.kind) {
-                    if !locals[*l].mutable && !locals[*l].boxed && locals[*l].kind == LocalKind::Normal {
-                        if let Some(val) = lit_val(e) {
+                if let (Some(VarRef::Local(l)), EK::Lit(_)) = (v, &e.kind)
+                    && !locals[*l].mutable && !locals[*l].boxed && locals[*l].kind == LocalKind::Normal
+                        && let Some(val) = lit_val(e) {
                             consts.insert(*l, val);
                         }
-                    }
-                }
             }
             SK::Destructure(_, e) | SK::Expr(e) | SK::Throw(e) | SK::Assert(e) => self.fold_expr(e, locals, consts)?,
             SK::Assign(p, e) => {
@@ -309,19 +305,17 @@ impl<'p> Evaluator<'p> {
         // substitute known constants
         match &e.kind {
             EK::Var(VarRef::Local(l)) => {
-                if let Some(v) = consts.get(l) {
-                    if let Some(x) = val_expr(v, e.ty, e.span, &self.p.types) {
+                if let Some(v) = consts.get(l)
+                    && let Some(x) = val_expr(v, e.ty, e.span, &self.p.types) {
                         *e = x;
                     }
-                }
                 return Ok(());
             }
             EK::Var(VarRef::Global(g)) => {
-                if let Some(v) = self.gconst.get(g) {
-                    if let Some(x) = val_expr(v, e.ty, e.span, &self.p.types) {
+                if let Some(v) = self.gconst.get(g)
+                    && let Some(x) = val_expr(v, e.ty, e.span, &self.p.types) {
                         *e = x;
                     }
-                }
                 return Ok(());
             }
             _ => {}
@@ -474,7 +468,7 @@ impl<'p> Evaluator<'p> {
                     Ok(x) => x,
                     Err(f) => return Ok(f),
                 };
-                self.assign(p, x, env, s.span)?;
+                self.assign(p, x, env)?;
                 Ok(Flow::Normal)
             }
             SK::Expr(e) => match self.expr_flow(e, env)? {
@@ -549,13 +543,13 @@ impl<'p> Evaluator<'p> {
         }
     }
 
-    fn assign(&mut self, p: &Place, v: Val, env: &mut Env, span: Span) -> R<()> {
+    fn assign(&mut self, p: &Place, v: Val, env: &mut Env) -> R<()> {
         // compute index values first (immutable borrow of env), then mutate
         let mut path = Vec::new();
         let root = self.place_path(p, env, &mut path)?;
         let VarRef::Local(l) = root else { return Err(Stop::Unknown) };
         let slot = env.locals.get_mut(l).and_then(|x| x.as_mut()).ok_or(Stop::Unknown)?;
-        set_path(slot, &path, v, span)
+        set_path(slot, &path, v)
     }
 
     fn place_path(&mut self, p: &Place, env: &mut Env, path: &mut Vec<PathStep>) -> R<VarRef> {
@@ -735,7 +729,6 @@ impl<'p> Evaluator<'p> {
     /// Evaluate a value expression. With `const_only`, variables are not available.
     fn expr(&mut self, e: &Expr, env: &mut Env, const_only: bool) -> R<Val> {
         self.tick()?;
-        let t = &self.p.types;
         let span = e.span;
         Ok(match &e.kind {
             EK::Lit(l) => lit_to_val(l),
@@ -901,10 +894,6 @@ impl<'p> Evaluator<'p> {
                 }
             }
             EK::Print(..) | EK::Async(..) | EK::Await(_) => return Err(Stop::Unknown),
-        })
-        .map(|v: Val| {
-            let _ = t;
-            v
         })
     }
 
@@ -1249,25 +1238,25 @@ enum PathStep {
     Index(Val, Span),
 }
 
-fn set_path(slot: &mut Val, path: &[PathStep], v: Val, span: Span) -> R<()> {
+fn set_path(slot: &mut Val, path: &[PathStep], v: Val) -> R<()> {
     if path.is_empty() {
         *slot = v;
         return Ok(());
     }
     match (&path[0], slot) {
-        (PathStep::Elem(i), Val::Tuple(xs) | Val::Struct(xs)) => set_path(&mut Rc::make_mut(xs)[*i], &path[1..], v, span),
+        (PathStep::Elem(i), Val::Tuple(xs) | Val::Struct(xs)) => set_path(&mut Rc::make_mut(xs)[*i], &path[1..], v),
         (PathStep::Index(i, isp), Val::Arr(xs)) => {
             let k = idx_checked(i, *isp)? as usize;
             let xs = Rc::make_mut(xs);
             if k >= xs.len() {
                 return Err(Stop::Panic("index out of bounds".into(), *isp));
             }
-            set_path(&mut xs[k], &path[1..], v, span)
+            set_path(&mut xs[k], &path[1..], v)
         }
         (PathStep::Index(k, _), Val::Map(m)) => {
             let m = Rc::make_mut(m);
             if let Some(pos) = m.iter().position(|(kk, _)| val_eq(kk, k)) {
-                set_path(&mut m[pos].1, &path[1..], v, span)
+                set_path(&mut m[pos].1, &path[1..], v)
             } else if path.len() == 1 {
                 m.push((k.clone(), v));
                 Ok(())

@@ -115,13 +115,12 @@ fn uri_to_path(uri: &Uri) -> Option<PathBuf> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(v) = u8::from_str_radix(&rest[i + 1..i + 3], 16) {
+        if bytes[i] == b'%' && i + 2 < bytes.len()
+            && let Ok(v) = u8::from_str_radix(&rest[i + 1..i + 3], 16) {
                 out.push(v);
                 i += 3;
                 continue;
             }
-        }
         out.push(bytes[i]);
         i += 1;
     }
@@ -462,8 +461,8 @@ impl Server {
             let name = &head[name_start..];
             if let Some(a) = analysis {
                 if let Some(mpath) = a.imports.get(name) {
-                    if let Some(mtext) = self.text_of(mpath) {
-                        if let Ok(m) = crate::parser::parse_module(&mtext, 0) {
+                    if let Some(mtext) = self.text_of(mpath)
+                        && let Ok(m) = crate::parser::parse_module(&mtext, 0) {
                             for it in &m.items {
                                 match it {
                                     ast::Item::Fn(f) if f.public => {
@@ -485,7 +484,6 @@ impl Server {
                                 }
                             }
                         }
-                    }
                     return Some(CompletionResponse::Array(items));
                 }
                 // most recent declaration of `name` before the cursor in this file

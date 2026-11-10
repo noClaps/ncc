@@ -58,8 +58,8 @@ impl<'a> Checker<'a> {
                 }
             },
             E::Call(callee, args) => {
-                if let E::Field(base, vname) = &callee.kind {
-                    if let Some(ety) = self.type_path(base)? {
+                if let E::Field(base, vname) = &callee.kind
+                    && let Some(ety) = self.type_path(base)? {
                         let idx = self.variant_of(ety, ty, vname, span)?;
                         let payload = self.types.enum_def(ety).unwrap().variants[idx].1.clone();
                         if payload.len() != args.len() {
@@ -71,7 +71,6 @@ impl<'a> Checker<'a> {
                         }
                         return Ok(Pat::Variant(idx, out));
                     }
-                }
                 let v = self.expect_expr(p, ty)?;
                 self.value_pat(v, ty, span)
             }

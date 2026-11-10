@@ -253,11 +253,10 @@ impl<'p> CGen<'p> {
         let f = self.sm.file(span.file);
         let (l, _) = f.line_col(span.start as usize);
         let mut path = f.path.clone();
-        if let Some(cwd) = &self.cwd {
-            if let Ok(rel) = path.strip_prefix(cwd) {
+        if let Some(cwd) = &self.cwd
+            && let Ok(rel) = path.strip_prefix(cwd) {
                 path = rel.to_path_buf();
             }
-        }
         format!("\"{}:{l}\"", c_escape_str(&path.display().to_string()))
     }
 
@@ -313,12 +312,11 @@ impl<'p> CGen<'p> {
         if !self.managed(ty) {
             return v.code;
         }
-        if v.owned {
-            if let Some(c) = self.cleanup.iter_mut().rev().find(|c| c.var == v.code && c.temp && !c.moved) {
+        if v.owned
+            && let Some(c) = self.cleanup.iter_mut().rev().find(|c| c.var == v.code && c.temp && !c.moved) {
                 c.moved = true;
                 return v.code;
             }
-        }
         format!("rt_{}({})", self.h(ty), v.code)
     }
 

@@ -220,8 +220,8 @@ impl Parser {
         let line_start = (start + 1..=err_tok)
             .rev()
             .find(|&i| self.toks[i - 1].tok == Tok::Newline && self.toks[i].tok != Tok::Newline);
-        if let (Some(i), Some(sc)) = (line_start, self.column(start)) {
-            if self.column(i).is_some_and(|c| c <= sc) {
+        if let (Some(i), Some(sc)) = (line_start, self.column(start))
+            && self.column(i).is_some_and(|c| c <= sc) {
                 // report the bracket that was left open rather than the token after it
                 let d = match open.iter().rev().find(|&&b| b < i) {
                     Some(&b) => {
@@ -238,7 +238,6 @@ impl Parser {
                 self.pos = i;
                 return;
             }
-        }
         self.errors.push(d);
         // skip to the end of the statement, including brackets it already opened
         let mut depth: i32 = open.len() as i32;
@@ -555,11 +554,10 @@ impl Parser {
                     while !self.at(&Tok::RParen) {
                         params.push(self.parse_type()?);
                         // optional parameter name
-                        if let Tok::Ident(s) = self.peek() {
-                            if !is_keyword(s) {
+                        if let Tok::Ident(s) = self.peek()
+                            && !is_keyword(s) {
                                 self.bump();
                             }
-                        }
                         if !self.eat(&Tok::Comma) {
                             break;
                         }
@@ -632,17 +630,14 @@ impl Parser {
     }
 
     fn label(&mut self) -> Option<String> {
-        if let (Tok::Ident(name), Tok::Colon) = (self.peek().clone(), self.peek_n(1).clone()) {
-            if !is_keyword(&name) {
-                if let Tok::Ident(k) = self.peek_n(2) {
-                    if matches!(k.as_str(), "while" | "for" | "if" | "lock") {
+        if let (Tok::Ident(name), Tok::Colon) = (self.peek().clone(), self.peek_n(1).clone())
+            && !is_keyword(&name)
+                && let Tok::Ident(k) = self.peek_n(2)
+                    && matches!(k.as_str(), "while" | "for" | "if" | "lock") {
                         self.bump();
                         self.bump();
                         return Some(name);
                     }
-                }
-            }
-        }
         None
     }
 
@@ -768,8 +763,8 @@ impl Parser {
             _ => {
                 // try a declaration first
                 let save = self.pos;
-                if let Ok(targets) = self.decl_targets() {
-                    if self.at(&Tok::Assign) {
+                if let Ok(targets) = self.decl_targets()
+                    && self.at(&Tok::Assign) {
                         self.bump();
                         let value = self.decl_value();
                         return Ok(Stmt {
@@ -777,7 +772,6 @@ impl Parser {
                             span: start.to(self.prev_span()),
                         });
                     }
-                }
                 self.pos = save;
                 let e = self.expr()?;
                 if self.eat(&Tok::Assign) {
