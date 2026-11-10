@@ -1,0 +1,19 @@
+========================================
+Comments
+========================================
+
+// a comment
+/// a doc comment
+int a = 2 // trailing
+
+----------------------------------------
+
+(source_file
+  (comment)
+  (comment)
+  (variable_declaration
+    (declaration_target
+      (primitive_type)
+      (identifier))
+    (integer))
+  (comment))

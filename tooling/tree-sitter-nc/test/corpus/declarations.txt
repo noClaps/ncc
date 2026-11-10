@@ -1,0 +1,386 @@
+========================================
+Variables and shadowing
+========================================
+
+int a = 1
+mut int b = 2
+str a = "hi"
+_ = hello()
+
+----------------------------------------
+
+(source_file
+  (variable_declaration
+    (declaration_target
+      (primitive_type)
+      (identifier))
+    (integer))
+  (variable_declaration
+    (mutable)
+    (declaration_target
+      (primitive_type)
+      (identifier))
+    (integer))
+  (variable_declaration
+    (declaration_target
+      (primitive_type)
+      (identifier))
+    (string
+      (string_content)))
+  (assignment
+    (discard_pattern)
+    (call_expression
+      (identifier)
+      (arguments))))
+
+========================================
+Tuple destructuring
+========================================
+
+int a, (int, int) b = vals
+
+----------------------------------------
+
+(source_file
+  (variable_declaration
+    (declaration_target
+      (primitive_type)
+      (identifier))
+    (declaration_target
+      (tuple_type
+        (primitive_type)
+        (primitive_type))
+      (identifier))
+    (identifier)))
+
+========================================
+Mutex and future declarations
+========================================
+
+mutex int[] numbers = [1, 2, 3]
+fut int! f = async work(1)
+
+----------------------------------------
+
+(source_file
+  (variable_declaration
+    (mutex)
+    (declaration_target
+      (array_type
+        (primitive_type))
+      (identifier))
+    (array_expression
+      (integer)
+      (integer)
+      (integer)))
+  (variable_declaration
+    (declaration_target
+      (future_type
+        (error_union_type
+          (primitive_type)))
+      (identifier))
+    (async_expression
+      (call_expression
+        (identifier)
+        (arguments
+          (integer))))))
+
+========================================
+Types
+========================================
+
+int[]? a = none
+int?[] b = [none]
+int[5] c = [1, 2, 3, 4, 5]
+[str]float m = ["a": 1.0, "b": 2.0,]
+(fn(int, int) int) op = add
+Matrix<int> mat = Matrix<int>{.rows = 2, .data = [1]}
+math.Point p = math.Point{.x = 1, .y = 2}
+void! v = f()
+
+----------------------------------------
+
+(source_file
+  (variable_declaration
+    (declaration_target
+      (optional_type
+        (array_type
+          (primitive_type)))
+      (identifier))
+    (none))
+  (variable_declaration
+    (declaration_target
+      (array_type
+        (optional_type
+          (primitive_type)))
+      (identifier))
+    (array_expression
+      (none)))
+  (variable_declaration
+    (declaration_target
+      (array_type
+        (primitive_type)
+        (integer))
+      (identifier))
+    (array_expression
+      (integer)
+      (integer)
+      (integer)
+      (integer)
+      (integer)))
+  (variable_declaration
+    (declaration_target
+      (map_type
+        (primitive_type)
+        (primitive_type))
+      (identifier))
+    (map_expression
+      (map_entry
+        (string
+          (string_content))
+        (float))
+      (map_entry
+        (string
+          (string_content))
+        (float))))
+  (variable_declaration
+    (declaration_target
+      (function_type
+        (parameter_list
+          (parameter
+            (primitive_type))
+          (parameter
+            (primitive_type)))
+        (primitive_type))
+      (identifier))
+    (identifier))
+  (variable_declaration
+    (declaration_target
+      (generic_type
+        (type_identifier)
+        (type_arguments
+          (primitive_type)))
+      (identifier))
+    (struct_expression
+      (generic_expression
+        (identifier)
+        (type_arguments
+          (primitive_type)))
+      (field_initializer
+        (field_identifier)
+        (integer))
+      (field_initializer
+        (field_identifier)
+        (array_expression
+          (integer)))))
+  (variable_declaration
+    (declaration_target
+      (qualified_type
+        (identifier)
+        (type_identifier))
+      (identifier))
+    (struct_expression
+      (field_expression
+        (identifier)
+        (field_identifier))
+      (field_initializer
+        (field_identifier)
+        (integer))
+      (field_initializer
+        (field_identifier)
+        (integer))))
+  (variable_declaration
+    (declaration_target
+      (error_union_type
+        (primitive_type))
+      (identifier))
+    (call_expression
+      (identifier)
+      (arguments))))
+
+========================================
+Struct, enum and type declarations
+========================================
+
+pub struct Matrix<type T> {
+  uint rows
+  T[] data
+}
+
+enum Node {
+  Root(Node[])
+  Doctype
+  Text(str)
+}
+
+type CustomStr = str
+
+----------------------------------------
+
+(source_file
+  (struct_declaration
+    (visibility)
+    (type_identifier)
+    (type_parameters
+      (type_identifier))
+    (field_declaration
+      (primitive_type)
+      (field_identifier))
+    (field_declaration
+      (array_type
+        (type_identifier))
+      (field_identifier)))
+  (enum_declaration
+    (type_identifier)
+    (enum_member
+      (identifier)
+      (array_type
+        (type_identifier)))
+    (enum_member
+      (identifier))
+    (enum_member
+      (identifier)
+      (primitive_type)))
+  (type_declaration
+    (type_identifier)
+    (primitive_type)))
+
+========================================
+Functions
+========================================
+
+pub fn map<type T, type U>(T[] arr, (fn(T) U) apply) U[] {
+  return []
+}
+
+fn add_throws(int a, int b) int! {
+  throw "overflow"
+}
+
+fn nothing() ! {
+}
+
+fn add = fn(int a, int b) int {
+  return a + b
+}
+
+----------------------------------------
+
+(source_file
+  (function_declaration
+    (visibility)
+    (identifier)
+    (type_parameters
+      (type_identifier)
+      (type_identifier))
+    (parameter_list
+      (parameter
+        (array_type
+          (type_identifier))
+        (identifier))
+      (parameter
+        (function_type
+          (parameter_list
+            (parameter
+              (type_identifier)))
+          (type_identifier))
+        (identifier)))
+    (array_type
+      (type_identifier))
+    (block
+      (return_statement
+        (array_expression))))
+  (function_declaration
+    (identifier)
+    (parameter_list
+      (parameter
+        (primitive_type)
+        (identifier))
+      (parameter
+        (primitive_type)
+        (identifier)))
+    (error_union_type
+      (primitive_type))
+    (block
+      (throw_statement
+        (string
+          (string_content)))))
+  (function_declaration
+    (identifier)
+    (parameter_list)
+    (error_union_type)
+    (block))
+  (function_variable
+    (identifier)
+    (function_literal
+      (parameter_list
+        (parameter
+          (primitive_type)
+          (identifier))
+        (parameter
+          (primitive_type)
+          (identifier)))
+      (primitive_type)
+      (block
+        (return_statement
+          (binary_expression
+            (identifier)
+            (identifier)))))))
+
+========================================
+Imports, externs and tests
+========================================
+
+import {
+  "./lib/math" as math
+  "std/os" as os
+}
+
+extern "runtime/io.c" as raw_io {
+  fn write(int fd, byte[] data) int! = "__nc_v1_write"
+}
+
+test "passing test" {
+  assert 2 + 2 == 4
+}
+
+----------------------------------------
+
+(source_file
+  (import_declaration
+    (import_spec
+      (string
+        (string_content))
+      (identifier))
+    (import_spec
+      (string
+        (string_content))
+      (identifier)))
+  (extern_declaration
+    (string
+      (string_content))
+    (identifier)
+    (extern_function
+      (identifier)
+      (parameter_list
+        (parameter
+          (primitive_type)
+          (identifier))
+        (parameter
+          (array_type
+            (primitive_type))
+          (identifier)))
+      (error_union_type
+        (primitive_type))
+      (string
+        (string_content))))
+  (test_declaration
+    (string
+      (string_content))
+    (block
+      (assert_statement
+        (binary_expression
+          (binary_expression
+            (integer)
+            (integer))
+          (integer))))))

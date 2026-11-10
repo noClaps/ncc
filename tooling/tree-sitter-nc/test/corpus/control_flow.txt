@@ -1,0 +1,191 @@
+========================================
+Pattern matching
+========================================
+
+char letter = if index {
+  1, 2 -> { break 'A' }
+  Node.Text(t) -> { break t }
+  (0, _) -> { break 'B' }
+  Person{.name = "N", .age = _} -> { break 'C' }
+  [1, a] -> { break 'D' }
+  _ -> { break 'Z' }
+}
+
+----------------------------------------
+
+(source_file
+  (variable_declaration
+    (declaration_target
+      (primitive_type)
+      (identifier))
+    (if_expression
+      (identifier)
+      (if_arm
+        (integer)
+        (integer)
+        (block
+          (break_statement
+            (char))))
+      (if_arm
+        (call_expression
+          (field_expression
+            (identifier)
+            (field_identifier))
+          (arguments
+            (identifier)))
+        (block
+          (break_statement
+            (identifier))))
+      (if_arm
+        (tuple_expression
+          (integer)
+          (discard_pattern))
+        (block
+          (break_statement
+            (char))))
+      (if_arm
+        (struct_expression
+          (identifier)
+          (field_initializer
+            (field_identifier)
+            (string
+              (string_content)))
+          (field_initializer
+            (field_identifier)
+            (discard_pattern)))
+        (block
+          (break_statement
+            (char))))
+      (if_arm
+        (array_expression
+          (integer)
+          (identifier))
+        (block
+          (break_statement
+            (char))))
+      (if_arm
+        (discard_pattern)
+        (block
+          (break_statement
+            (char)))))))
+
+========================================
+Bare if
+========================================
+
+if {
+  n <= 5 -> { @print("small") }
+  _ -> {}
+}
+
+----------------------------------------
+
+(source_file
+  (expression_statement
+    (if_expression
+      (if_arm
+        (binary_expression
+          (identifier)
+          (integer))
+        (block
+          (expression_statement
+            (builtin_call
+              (builtin_identifier)
+              (arguments
+                (string
+                  (string_content)))))))
+      (if_arm
+        (discard_pattern)
+        (block)))))
+
+========================================
+Loops and labels
+========================================
+
+rows: for row in table {
+  for col in table[row] {
+    if col {
+      2 -> { continue }
+      5 -> { continue :rows }
+      10 -> { break :rows }
+      _ -> {}
+    }
+  }
+}
+while j > 0 {
+  j = j - 1
+}
+
+----------------------------------------
+
+(source_file
+  (labeled_statement
+    (label)
+    (for_statement
+      (identifier)
+      (identifier)
+      (block
+        (for_statement
+          (identifier)
+          (index_expression
+            (identifier)
+            (identifier))
+          (block
+            (expression_statement
+              (if_expression
+                (identifier)
+                (if_arm
+                  (integer)
+                  (block
+                    (continue_statement)))
+                (if_arm
+                  (integer)
+                  (block
+                    (continue_statement
+                      (label_reference
+                        (label)))))
+                (if_arm
+                  (integer)
+                  (block
+                    (break_statement
+                      (label_reference
+                        (label)))))
+                (if_arm
+                  (discard_pattern)
+                  (block)))))))))
+  (while_statement
+    (binary_expression
+      (identifier)
+      (integer))
+    (block
+      (assignment
+        (identifier)
+        (binary_expression
+          (identifier)
+          (integer))))))
+
+========================================
+Lock
+========================================
+
+lbl: lock numbers {
+  numbers[0] = 1
+  break :lbl
+}
+
+----------------------------------------
+
+(source_file
+  (labeled_statement
+    (label)
+    (lock_statement
+      (identifier)
+      (block
+        (assignment
+          (index_expression
+            (identifier)
+            (integer))
+          (integer))
+        (break_statement
+          (label_reference
+            (label)))))))

@@ -1,0 +1,32 @@
+{
+  "$schema": "https://tree-sitter.github.io/tree-sitter/assets/schemas/config.schema.json",
+  "grammars": [
+    {
+      "name": "nc",
+      "camelcase": "NC",
+      "title": "NC",
+      "scope": "source.nc",
+      "file-types": ["nc"],
+      "injection-regex": "^nc$",
+      "highlights": ["queries/highlights.scm"],
+      "locals": ["queries/locals.scm"],
+      "tags": ["queries/tags.scm"]
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "NC grammar for tree-sitter",
+    "links": {
+      "repository": "https://github.com/noClaps/ncc"
+    }
+  },
+  "bindings": {
+    "c": false,
+    "go": false,
+    "node": false,
+    "python": false,
+    "rust": false,
+    "swift": false
+  }
+}

@@ -1,0 +1,238 @@
+========================================
+Precedence
+========================================
+
+x = a + b * c ** d ** e
+y = -2 ** 2
+z = a == b and c < d or not e
+w = a <> b | c & d << 1
+
+----------------------------------------
+
+(source_file
+  (assignment
+    (identifier)
+    (binary_expression
+      (identifier)
+      (binary_expression
+        (identifier)
+        (binary_expression
+          (identifier)
+          (binary_expression
+            (identifier)
+            (identifier))))))
+  (assignment
+    (identifier)
+    (binary_expression
+      (unary_expression
+        (integer))
+      (integer)))
+  (assignment
+    (identifier)
+    (binary_expression
+      (binary_expression
+        (binary_expression
+          (identifier)
+          (identifier))
+        (binary_expression
+          (identifier)
+          (identifier)))
+      (unary_expression
+        (identifier))))
+  (assignment
+    (identifier)
+    (binary_expression
+      (identifier)
+      (binary_expression
+        (identifier)
+        (binary_expression
+          (identifier)
+          (binary_expression
+            (identifier)
+            (integer)))))))
+
+========================================
+Else and catch
+========================================
+
+int out = opt else default
+int v = await fut catch err {
+  throw err
+}
+int s = try add_throws(1, 2)
+
+----------------------------------------
+
+(source_file
+  (variable_declaration
+    (declaration_target
+      (primitive_type)
+      (identifier))
+    (else_expression
+      (identifier)
+      (identifier)))
+  (variable_declaration
+    (declaration_target
+      (primitive_type)
+      (identifier))
+    (catch_expression
+      (await_expression
+        (identifier))
+      (identifier)
+      (block
+        (throw_statement
+          (identifier)))))
+  (variable_declaration
+    (declaration_target
+      (primitive_type)
+      (identifier))
+    (try_expression
+      (call_expression
+        (identifier)
+        (arguments
+          (integer)
+          (integer))))))
+
+========================================
+Calls, fields and indexing
+========================================
+
+@println(nums[$], nums[$-1], s.len)
+str[] r = map<int, str>(arr, fn(int n) str { return "{n}" })
+Result<int, str> res = Result<int, str>.Ok(1)
+float f = @as(float, n)
+
+----------------------------------------
+
+(source_file
+  (expression_statement
+    (builtin_call
+      (builtin_identifier)
+      (arguments
+        (index_expression
+          (identifier)
+          (dollar))
+        (index_expression
+          (identifier)
+          (binary_expression
+            (dollar)
+            (integer)))
+        (field_expression
+          (identifier)
+          (field_identifier)))))
+  (variable_declaration
+    (declaration_target
+      (array_type
+        (primitive_type))
+      (identifier))
+    (call_expression
+      (generic_expression
+        (identifier)
+        (type_arguments
+          (primitive_type)
+          (primitive_type)))
+      (arguments
+        (identifier)
+        (function_literal
+          (parameter_list
+            (parameter
+              (primitive_type)
+              (identifier)))
+          (primitive_type)
+          (block
+            (return_statement
+              (string
+                (interpolation
+                  (identifier)))))))))
+  (variable_declaration
+    (declaration_target
+      (generic_type
+        (type_identifier)
+        (type_arguments
+          (primitive_type)
+          (primitive_type)))
+      (identifier))
+    (call_expression
+      (field_expression
+        (generic_expression
+          (identifier)
+          (type_arguments
+            (primitive_type)
+            (primitive_type)))
+        (field_identifier))
+      (arguments
+        (integer))))
+  (variable_declaration
+    (declaration_target
+      (primitive_type)
+      (identifier))
+    (builtin_call
+      (builtin_identifier)
+      (primitive_type)
+      (identifier))))
+
+========================================
+Literals
+========================================
+
+_ = [0xFF, 0o17, 0b1010, 1_000, 5u, 1e5, 1.5, 2.0e-3, 'a', '\n', '\u{1F36A}', true, none]
+
+----------------------------------------
+
+(source_file
+  (assignment
+    (discard_pattern)
+    (array_expression
+      (integer)
+      (integer)
+      (integer)
+      (integer)
+      (integer)
+      (integer)
+      (float)
+      (float)
+      (char)
+      (char
+        (escape_sequence))
+      (char
+        (escape_sequence))
+      (boolean)
+      (none))))
+
+========================================
+Strings
+========================================
+
+@println("value: {5 + 2} and \{escaped} \"quoted\"")
+str m = """
+  Hello {name}
+  """
+
+----------------------------------------
+
+(source_file
+  (expression_statement
+    (builtin_call
+      (builtin_identifier)
+      (arguments
+        (string
+          (string_content)
+          (interpolation
+            (binary_expression
+              (integer)
+              (integer)))
+          (string_content)
+          (escape_sequence)
+          (string_content)
+          (escape_sequence)
+          (string_content)
+          (escape_sequence)))))
+  (variable_declaration
+    (declaration_target
+      (primitive_type)
+      (identifier))
+    (multiline_string
+      (string_content)
+      (interpolation
+        (identifier))
+      (string_content))))
