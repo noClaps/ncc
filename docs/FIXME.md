@@ -224,3 +224,19 @@ A: Yes, both must list every field. Use `.f = _` to ignore a field in a pattern.
 
 **Q: Does `@print` with several arguments put a separator between them?**
 A: No. Arguments are converted to `str` and written back-to-back.
+
+## Tests
+
+**Q: Under `ncc test`, does the entry file's top-level code run before the tests?**
+A: Only global writes run: global initialisers and top-level statements that write globals, the same rule as for imported modules. Side-effect-only statements such as prints don't run.
+
+## `ncc init`
+
+**Q: What does `.nc/config.toml` contain?**
+A: A single line: `name = "<project name>"`.
+
+**Q: What goes in `.gitignore` and `main.nc`?**
+A: `.gitignore` contains `.nc/deps/`, and `main.nc` contains `@println("Hello, world!")`.
+
+**Q: Where is the project created, and what if files already exist?**
+A: In the current directory. It is an error if `.nc/` already exists. An existing `.gitignore` or `main.nc` is never overwritten; it is skipped.
