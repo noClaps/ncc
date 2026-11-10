@@ -110,22 +110,17 @@ nc_arr *nc_arr_new(const nc_ti *ti, int64_t cap);
 void nc_arr_push(nc_arr **a, const void *elem);
 void nc_arr_retain(nc_arr *a);
 void nc_arr_release(nc_arr *a);
-extern const nc_ti nc_ti_byte;
 
 #ifdef NC_RUNTIME_IMPL
 
 /* ------------------------------------------------------------------ panics */
 
-static bool nc_test_mode = false;
-static jmp_buf *nc_test_jmp = NULL;
-static pthread_t nc_main_thread;
-static char nc_test_msg[1024];
+/* Set by the test runner: called before a panic or failed assert aborts the process, so the
+ * runner can record the failure and move on to the next test. */
+static void (*nc_fail_hook)(bool is_assert, const char *msg, const char *loc) = NULL;
 
 _Noreturn void nc_panic(const char *msg, const char *loc) {
-  if (nc_test_mode && nc_test_jmp && pthread_equal(pthread_self(), nc_main_thread)) {
-    snprintf(nc_test_msg, sizeof nc_test_msg, "panic: %s (%s)", msg, loc);
-    longjmp(*nc_test_jmp, 1);
-  }
+  if (nc_fail_hook) nc_fail_hook(false, msg, loc);
   fflush(stdout);
   fprintf(stderr, "panic: %s (%s)\n", msg, loc);
   fflush(stderr);
@@ -133,11 +128,29 @@ _Noreturn void nc_panic(const char *msg, const char *loc) {
 }
 
 static _Noreturn void nc_assert_fail(const char *loc) {
-  if (nc_test_mode && nc_test_jmp && pthread_equal(pthread_self(), nc_main_thread)) {
-    snprintf(nc_test_msg, sizeof nc_test_msg, "assertion failed at %s", loc);
-    longjmp(*nc_test_jmp, 1);
-  }
+  if (nc_fail_hook) nc_fail_hook(true, "assertion failed", loc);
   nc_panic("assertion failed", loc);
+}
+
+/* ------------------------------------------------------------------ test runner */
+
+static jmp_buf *nc_test_jmp = NULL;
+static pthread_t nc_main_thread;
+static char nc_test_msg[1024];
+
+/* Failures on the main thread jump back to the test runner; other threads abort. */
+static void nc_test_fail(bool is_assert, const char *msg, const char *loc) {
+  if (!nc_test_jmp || !pthread_equal(pthread_self(), nc_main_thread)) return;
+  if (is_assert)
+    snprintf(nc_test_msg, sizeof nc_test_msg, "assertion failed at %s", loc);
+  else
+    snprintf(nc_test_msg, sizeof nc_test_msg, "panic: %s (%s)", msg, loc);
+  longjmp(*nc_test_jmp, 1);
+}
+
+static void nc_test_runner_init(void) {
+  nc_main_thread = pthread_self();
+  nc_fail_hook = nc_test_fail;
 }
 
 static void *nc_alloc(size_t n) {
@@ -170,38 +183,81 @@ static inline bool nc_unique(_Atomic int64_t *rc) { return atomic_load_explicit(
 
 /* ------------------------------------------------------------------ checked integer arithmetic */
 
-#define NC_ARITH(T, S)                                                                                       \
-  static inline T nc_add_##S(T a, T b, const char *loc) {                                                     \
-    T r;                                                                                                      \
-    if (ckd_add(&r, a, b)) nc_panic("integer overflow", loc);                                                 \
-    return r;                                                                                                 \
-  }                                                                                                           \
-  static inline T nc_sub_##S(T a, T b, const char *loc) {                                                     \
-    T r;                                                                                                      \
-    if (ckd_sub(&r, a, b)) nc_panic("integer overflow", loc);                                                 \
-    return r;                                                                                                 \
-  }                                                                                                           \
-  static inline T nc_mul_##S(T a, T b, const char *loc) {                                                     \
-    T r;                                                                                                      \
-    if (ckd_mul(&r, a, b)) nc_panic("integer overflow", loc);                                                 \
-    return r;                                                                                                 \
-  }                                                                                                           \
-  static inline T nc_pow_##S(T a, T b, const char *loc) {                                                     \
-    if (b < 0) nc_panic("negative exponent", loc);                                                            \
-    T r = 1;                                                                                                  \
-    while (b > 0) {                                                                                           \
-      if (b & 1) {                                                                                            \
-        if (ckd_mul(&r, r, a)) nc_panic("integer overflow", loc);                                             \
-      }                                                                                                       \
-      b >>= 1;                                                                                                \
-      if (b > 0 && ckd_mul(&a, a, a)) nc_panic("integer overflow", loc);                                      \
-    }                                                                                                         \
-    return r;                                                                                                 \
+static inline int64_t nc_add_i64(int64_t a, int64_t b, const char *loc) {
+  int64_t r;
+  if (ckd_add(&r, a, b)) nc_panic("integer overflow", loc);
+  return r;
+}
+static inline int64_t nc_sub_i64(int64_t a, int64_t b, const char *loc) {
+  int64_t r;
+  if (ckd_sub(&r, a, b)) nc_panic("integer overflow", loc);
+  return r;
+}
+static inline int64_t nc_mul_i64(int64_t a, int64_t b, const char *loc) {
+  int64_t r;
+  if (ckd_mul(&r, a, b)) nc_panic("integer overflow", loc);
+  return r;
+}
+static inline int64_t nc_pow_i64(int64_t a, int64_t b, const char *loc) {
+  if (b < 0) nc_panic("negative exponent", loc);
+  int64_t r = 1;
+  while (b > 0) {
+    if ((b & 1) && ckd_mul(&r, r, a)) nc_panic("integer overflow", loc);
+    b >>= 1;
+    if (b > 0 && ckd_mul(&a, a, a)) nc_panic("integer overflow", loc);
   }
-
-NC_ARITH(int64_t, i64)
-NC_ARITH(uint64_t, u64)
-NC_ARITH(uint8_t, u8)
+  return r;
+}
+static inline uint64_t nc_add_u64(uint64_t a, uint64_t b, const char *loc) {
+  uint64_t r;
+  if (ckd_add(&r, a, b)) nc_panic("integer overflow", loc);
+  return r;
+}
+static inline uint64_t nc_sub_u64(uint64_t a, uint64_t b, const char *loc) {
+  uint64_t r;
+  if (ckd_sub(&r, a, b)) nc_panic("integer overflow", loc);
+  return r;
+}
+static inline uint64_t nc_mul_u64(uint64_t a, uint64_t b, const char *loc) {
+  uint64_t r;
+  if (ckd_mul(&r, a, b)) nc_panic("integer overflow", loc);
+  return r;
+}
+static inline uint64_t nc_pow_u64(uint64_t a, uint64_t b, const char *loc) {
+  if (b < 0) nc_panic("negative exponent", loc);
+  uint64_t r = 1;
+  while (b > 0) {
+    if ((b & 1) && ckd_mul(&r, r, a)) nc_panic("integer overflow", loc);
+    b >>= 1;
+    if (b > 0 && ckd_mul(&a, a, a)) nc_panic("integer overflow", loc);
+  }
+  return r;
+}
+static inline uint8_t nc_add_u8(uint8_t a, uint8_t b, const char *loc) {
+  uint8_t r;
+  if (ckd_add(&r, a, b)) nc_panic("integer overflow", loc);
+  return r;
+}
+static inline uint8_t nc_sub_u8(uint8_t a, uint8_t b, const char *loc) {
+  uint8_t r;
+  if (ckd_sub(&r, a, b)) nc_panic("integer overflow", loc);
+  return r;
+}
+static inline uint8_t nc_mul_u8(uint8_t a, uint8_t b, const char *loc) {
+  uint8_t r;
+  if (ckd_mul(&r, a, b)) nc_panic("integer overflow", loc);
+  return r;
+}
+static inline uint8_t nc_pow_u8(uint8_t a, uint8_t b, const char *loc) {
+  if (b < 0) nc_panic("negative exponent", loc);
+  uint8_t r = 1;
+  while (b > 0) {
+    if ((b & 1) && ckd_mul(&r, r, a)) nc_panic("integer overflow", loc);
+    b >>= 1;
+    if (b > 0 && ckd_mul(&a, a, a)) nc_panic("integer overflow", loc);
+  }
+  return r;
+}
 
 static inline int64_t nc_div_i64(int64_t a, int64_t b, const char *loc) {
   if (b == 0) nc_panic("division by zero", loc);
@@ -532,36 +588,18 @@ static nc_str *nc_sb_finish(nc_sb *sb) {
   return s;
 }
 
-static pthread_mutex_t nc_io_mu = PTHREAD_MUTEX_INITIALIZER;
+/* Write a finished line in one call: stdio locks the stream, so concurrent prints don't mix. */
 static void nc_sb_write(nc_sb *sb, bool err, bool nl) {
   if (nl) nc_sb_put(sb, "\n", 1);
-  pthread_mutex_lock(&nc_io_mu);
-  FILE *f = err ? stderr : stdout;
   if (err) fflush(stdout);
-  if (sb->len) fwrite(sb->buf, 1, (size_t)sb->len, f);
-  if (err) fflush(stderr);
-  pthread_mutex_unlock(&nc_io_mu);
+  if (sb->len) fwrite(sb->buf, 1, (size_t)sb->len, err ? stderr : stdout);
   free(sb->buf);
   sb->buf = NULL;
   sb->len = sb->cap = 0;
 }
 
-/* ------------------------------------------------------------------ primitive type infos */
+/* ------------------------------------------------------------------ float hashing */
 
-#define NC_PRIM_TI(NAME, T, STR)                                                                     \
-  static bool nc_eq_##NAME(const void *a, const void *b) { return *(const T *)a == *(const T *)b; } \
-  static uint64_t nc_hs_##NAME(const void *a) { return nc_hash_u64((uint64_t) * (const T *)a); }     \
-  static void nc_st_##NAME(nc_sb *sb, const void *a) { STR(sb, *(const T *)a); }                     \
-  const nc_ti nc_ti_##NAME = {sizeof(T), NULL, NULL, nc_eq_##NAME, nc_hs_##NAME, nc_st_##NAME};
-
-#define NC_SB_U8(sb, v) nc_sb_u64(sb, (uint64_t)(v))
-NC_PRIM_TI(bool, bool, nc_sb_bool)
-NC_PRIM_TI(byte, uint8_t, NC_SB_U8)
-NC_PRIM_TI(int, int64_t, nc_sb_i64)
-NC_PRIM_TI(uint, uint64_t, nc_sb_u64)
-NC_PRIM_TI(char, uint32_t, nc_sb_char)
-
-static bool nc_eq_float(const void *a, const void *b) { return *(const double *)a == *(const double *)b; }
 static uint64_t nc_hs_float(const void *a) {
   double d = *(const double *)a;
   if (d == 0) d = 0; /* -0.0 == 0.0 */
@@ -569,15 +607,6 @@ static uint64_t nc_hs_float(const void *a) {
   memcpy(&u, &d, sizeof u);
   return nc_hash_u64(u);
 }
-static void nc_st_float(nc_sb *sb, const void *a) { nc_sb_f64(sb, *(const double *)a); }
-const nc_ti nc_ti_float = {sizeof(double), NULL, NULL, nc_eq_float, nc_hs_float, nc_st_float};
-
-static void nc_rt_strp(void *p) { nc_str_retain(*(nc_str **)p); }
-static void nc_rl_strp(void *p) { nc_str_release(*(nc_str **)p); }
-static bool nc_eq_strp(const void *a, const void *b) { return nc_str_eq(*(nc_str *const *)a, *(nc_str *const *)b); }
-static uint64_t nc_hs_strp(const void *a) { return nc_str_hash(*(nc_str *const *)a); }
-static void nc_st_strp(nc_sb *sb, const void *a) { nc_sb_str(sb, *(nc_str *const *)a); }
-const nc_ti nc_ti_str = {sizeof(nc_str *), nc_rt_strp, nc_rl_strp, nc_eq_strp, nc_hs_strp, nc_st_strp};
 
 /* ------------------------------------------------------------------ arrays */
 
@@ -677,11 +706,6 @@ static void nc_arr_str(nc_sb *sb, const nc_arr *a) {
   }
   nc_sb_put(sb, "]", 1);
 }
-static void nc_rt_arrp(void *p) { nc_arr_retain(*(nc_arr **)p); }
-static void nc_rl_arrp(void *p) { nc_arr_release(*(nc_arr **)p); }
-static bool nc_eq_arrp(const void *a, const void *b) { return nc_arr_eq(*(nc_arr *const *)a, *(nc_arr *const *)b); }
-static uint64_t nc_hs_arrp(const void *a) { return nc_arr_hash(*(nc_arr *const *)a); }
-static void nc_st_arrp(nc_sb *sb, const void *a) { nc_arr_str(sb, *(nc_arr *const *)a); }
 
 /* strings <-> arrays */
 static nc_arr *nc_str_to_chars(const nc_str *s, const nc_ti *ti) {
@@ -1055,7 +1079,6 @@ static _Noreturn void nc_uncaught(nc_str *err) {
   exit(1);
 }
 
-static void nc_runtime_init(void) { nc_main_thread = pthread_self(); }
 
 #endif /* NC_RUNTIME_IMPL */
 #endif /* NC_RUNTIME_H */
