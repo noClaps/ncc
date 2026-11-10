@@ -75,7 +75,10 @@ pub fn purity(p: &Program) -> Vec<bool> {
     let mut pure = vec![true; n];
     let mut calls: Vec<Vec<FuncId>> = vec![vec![]; n];
     for (i, f) in p.funcs.iter().enumerate() {
-        if f.locals.iter().any(|l| matches!(l.kind, LocalKind::CapRef(_) | LocalKind::LockAlias)) {
+        if f.locals
+            .iter()
+            .any(|l| matches!(l.kind, LocalKind::CapRef(_) | LocalKind::LockAlias))
+        {
             pure[i] = false;
         }
         let mut ok = true;
@@ -85,7 +88,11 @@ pub fn purity(p: &Program) -> Vec<bool> {
             EK::Call(Callee::Extern(_), _) => ok = false,
             EK::Call(Callee::Direct(g), _) => cs.push(*g),
             EK::Var(VarRef::Global(g)) if p.globals[*g].mutable => ok = false,
-            EK::Var(VarRef::Global(g)) if matches!(p.types.kind(p.globals[*g].ty), TyKind::Mutex(_)) => ok = false,
+            EK::Var(VarRef::Global(g))
+                if matches!(p.types.kind(p.globals[*g].ty), TyKind::Mutex(_)) =>
+            {
+                ok = false
+            }
             _ => {}
         };
         for s in &f.body.stmts {
@@ -126,7 +133,9 @@ fn stmt_pure(s: &Stmt) -> bool {
     match &s.kind {
         SK::Lock { .. } | SK::Assert(_) => false,
         SK::Let(Some(VarRef::Global(_)), _) => false,
-        SK::While { body, .. } | SK::For { body, .. } | SK::Block(body) => body.stmts.iter().all(stmt_pure),
+        SK::While { body, .. } | SK::For { body, .. } | SK::Block(body) => {
+            body.stmts.iter().all(stmt_pure)
+        }
         _ => {
             let mut ok = true;
             let mut check = |e: &Expr| {
@@ -150,7 +159,15 @@ fn stmt_pure(s: &Stmt) -> bool {
 
 impl<'p> Evaluator<'p> {
     pub fn new(p: &'p Program, sm: &'p SourceMap) -> Evaluator<'p> {
-        Evaluator { p, sm, pure: purity(p), fuel: 0, depth: 0, gconst: HashMap::new(), errs: vec![] }
+        Evaluator {
+            p,
+            sm,
+            pure: purity(p),
+            fuel: 0,
+            depth: 0,
+            gconst: HashMap::new(),
+            errs: vec![],
+        }
     }
 
     fn loc(&self, span: Span) -> String {
@@ -161,9 +178,10 @@ impl<'p> Evaluator<'p> {
         let (l, _) = f.line_col(span.start as usize);
         let mut path = f.path.clone();
         if let Ok(cwd) = std::env::current_dir()
-            && let Ok(rel) = path.strip_prefix(&cwd) {
-                path = rel.to_path_buf();
-            }
+            && let Ok(rel) = path.strip_prefix(&cwd)
+        {
+            path = rel.to_path_buf();
+        }
         format!("{}:{l}", path.display())
     }
 
@@ -197,18 +215,20 @@ impl<'p> Evaluator<'p> {
             let main = &snapshot.funcs[snapshot.main];
             for s in &main.body.stmts {
                 if let SK::Let(Some(VarRef::Global(g)), e) = &s.kind
-                    && !snapshot.globals[*g].mutable {
-                        // panics are reported when the statement itself is folded below
-                        if let Ok(Some(v)) = ev.try_const(e) {
-                            ev.gconst.insert(*g, v);
-                        }
+                    && !snapshot.globals[*g].mutable
+                {
+                    // panics are reported when the statement itself is folded below
+                    if let Ok(Some(v)) = ev.try_const(e) {
+                        ev.gconst.insert(*g, v);
                     }
+                }
             }
             let mut new_funcs = snapshot.funcs.clone();
             for f in new_funcs.iter_mut() {
                 let mut consts: HashMap<LocalId, Val> = HashMap::new();
                 let mut body = f.body.clone();
-                ev.fold_block(&mut body, &f.locals, &mut consts).map_err(|d| vec![d])?;
+                ev.fold_block(&mut body, &f.locals, &mut consts)
+                    .map_err(|d| vec![d])?;
                 if fold {
                     f.body = body;
                 }
@@ -231,7 +251,10 @@ impl<'p> Evaluator<'p> {
     /// Evaluate an expression that is fully constant (no variables), if possible.
     fn try_const(&mut self, e: &Expr) -> Result<Option<Val>, Diag> {
         self.fuel = CALL_FUEL;
-        let mut env = Env { locals: vec![], dollar: vec![] };
+        let mut env = Env {
+            locals: vec![],
+            dollar: vec![],
+        };
         match self.expr(e, &mut env, true) {
             Ok(v) => Ok(Some(v)),
             Err(Stop::Unknown) => Ok(None),
@@ -245,11 +268,19 @@ impl<'p> Evaluator<'p> {
             Diag::new(at, format!("this expression always panics: {msg}"))
         } else {
             // the panic happens elsewhere (e.g. inside a called function): say where
-            Diag::new(at, format!("this expression always panics: {msg} ({})", self.loc(inner)))
+            Diag::new(
+                at,
+                format!("this expression always panics: {msg} ({})", self.loc(inner)),
+            )
         }
     }
 
-    fn fold_block(&mut self, b: &mut Block, locals: &[Local], consts: &mut HashMap<LocalId, Val>) -> Result<(), Diag> {
+    fn fold_block(
+        &mut self,
+        b: &mut Block,
+        locals: &[Local],
+        consts: &mut HashMap<LocalId, Val>,
+    ) -> Result<(), Diag> {
         for s in b.stmts.iter_mut() {
             if let Err(d) = self.fold_stmt(s, locals, consts) {
                 self.errs.push(d);
@@ -258,17 +289,27 @@ impl<'p> Evaluator<'p> {
         Ok(())
     }
 
-    fn fold_stmt(&mut self, s: &mut Stmt, locals: &[Local], consts: &mut HashMap<LocalId, Val>) -> Result<(), Diag> {
+    fn fold_stmt(
+        &mut self,
+        s: &mut Stmt,
+        locals: &[Local],
+        consts: &mut HashMap<LocalId, Val>,
+    ) -> Result<(), Diag> {
         match &mut s.kind {
             SK::Let(v, e) => {
                 self.fold_expr(e, locals, consts)?;
                 if let (Some(VarRef::Local(l)), EK::Lit(_)) = (v, &e.kind)
-                    && !locals[*l].mutable && !locals[*l].boxed && locals[*l].kind == LocalKind::Normal
-                        && let Some(val) = lit_val(e) {
-                            consts.insert(*l, val);
-                        }
+                    && !locals[*l].mutable
+                    && !locals[*l].boxed
+                    && locals[*l].kind == LocalKind::Normal
+                    && let Some(val) = lit_val(e)
+                {
+                    consts.insert(*l, val);
+                }
             }
-            SK::Destructure(_, e) | SK::Expr(e) | SK::Throw(e) | SK::Assert(e) => self.fold_expr(e, locals, consts)?,
+            SK::Destructure(_, e) | SK::Expr(e) | SK::Throw(e) | SK::Assert(e) => {
+                self.fold_expr(e, locals, consts)?
+            }
             SK::Assign(p, e) => {
                 self.fold_place(p, locals, consts)?;
                 self.fold_expr(e, locals, consts)?;
@@ -289,7 +330,12 @@ impl<'p> Evaluator<'p> {
         Ok(())
     }
 
-    fn fold_place(&mut self, p: &mut Place, locals: &[Local], consts: &mut HashMap<LocalId, Val>) -> Result<(), Diag> {
+    fn fold_place(
+        &mut self,
+        p: &mut Place,
+        locals: &[Local],
+        consts: &mut HashMap<LocalId, Val>,
+    ) -> Result<(), Diag> {
         match p {
             Place::Var(_) => Ok(()),
             Place::Field(b, _) | Place::TupleIndex(b, _) => self.fold_place(b, locals, consts),
@@ -301,21 +347,28 @@ impl<'p> Evaluator<'p> {
     }
 
     /// Fold children first, then this node when all of its inputs are constant.
-    fn fold_expr(&mut self, e: &mut Expr, locals: &[Local], consts: &mut HashMap<LocalId, Val>) -> Result<(), Diag> {
+    fn fold_expr(
+        &mut self,
+        e: &mut Expr,
+        locals: &[Local],
+        consts: &mut HashMap<LocalId, Val>,
+    ) -> Result<(), Diag> {
         // substitute known constants
         match &e.kind {
             EK::Var(VarRef::Local(l)) => {
                 if let Some(v) = consts.get(l)
-                    && let Some(x) = val_expr(v, e.ty, e.span, &self.p.types) {
-                        *e = x;
-                    }
+                    && let Some(x) = val_expr(v, e.ty, e.span, &self.p.types)
+                {
+                    *e = x;
+                }
                 return Ok(());
             }
             EK::Var(VarRef::Global(g)) => {
                 if let Some(v) = self.gconst.get(g)
-                    && let Some(x) = val_expr(v, e.ty, e.span, &self.p.types) {
-                        *e = x;
-                    }
+                    && let Some(x) = val_expr(v, e.ty, e.span, &self.p.types)
+                {
+                    *e = x;
+                }
                 return Ok(());
             }
             _ => {}
@@ -338,14 +391,20 @@ impl<'p> Evaluator<'p> {
                     self.fold_block(&mut arm.body, locals, consts)?;
                 }
             }
-            EK::Else(_, Fallback::Block(b, _)) | EK::Catch(_, _, b, _) => self.fold_block(b, locals, consts)?,
+            EK::Else(_, Fallback::Block(b, _)) | EK::Catch(_, _, b, _) => {
+                self.fold_block(b, locals, consts)?
+            }
             _ => {}
         }
         // this node
         let foldable = match &e.kind {
-            EK::Unary(..) | EK::Binary(..) | EK::Cast(_) | EK::ToStr(_) | EK::Format(_) | EK::Len(_) | EK::Index(..) => {
-                all_children_lit(e)
-            }
+            EK::Unary(..)
+            | EK::Binary(..)
+            | EK::Cast(_)
+            | EK::ToStr(_)
+            | EK::Format(_)
+            | EK::Len(_)
+            | EK::Index(..) => all_children_lit(e),
             EK::Field(..) | EK::TupleIndex(..) => all_children_lit(e),
             EK::Call(Callee::Direct(f), args) => self.pure[*f] && args.iter().all(is_lit_tree),
             _ => false,
@@ -354,7 +413,10 @@ impl<'p> Evaluator<'p> {
             return Ok(());
         }
         self.fuel = CALL_FUEL;
-        let mut env = Env { locals: vec![], dollar: vec![] };
+        let mut env = Env {
+            locals: vec![],
+            dollar: vec![],
+        };
         match self.expr(e, &mut env, true) {
             Ok(v) => {
                 if let Some(x) = val_expr(&v, e.ty, e.span, &self.p.types) {
@@ -377,7 +439,10 @@ impl<'p> Evaluator<'p> {
             return Err(Stop::Unknown);
         }
         let func = &self.p.funcs[f];
-        let mut env = Env { locals: vec![None; func.locals.len()], dollar: vec![] };
+        let mut env = Env {
+            locals: vec![None; func.locals.len()],
+            dollar: vec![],
+        };
         for (i, a) in func.params.iter().zip(args) {
             env.locals[*i] = Some(a);
         }
@@ -448,7 +513,9 @@ impl<'p> Evaluator<'p> {
                     Ok(x) => x,
                     Err(f) => return Ok(f),
                 };
-                let Val::Tuple(items) = x else { return Err(Stop::Unknown) };
+                let Val::Tuple(items) = x else {
+                    return Err(Stop::Unknown);
+                };
                 for (v, start, count) in ts {
                     let part = if *count == 1 {
                         items[*start].clone()
@@ -515,14 +582,22 @@ impl<'p> Evaluator<'p> {
                     f => return Ok(f),
                 }
             },
-            SK::For { id, var, kind, iter, body } => {
+            SK::For {
+                id,
+                var,
+                kind,
+                iter,
+                body,
+            } => {
                 let it = match self.expr_flow(iter, env)? {
                     Ok(v) => v,
                     Err(f) => return Ok(f),
                 };
                 let keys: Vec<Val> = match (kind, &it) {
                     (ForKind::Index, Val::Arr(a)) => (0..a.len() as u64).map(Val::UInt).collect(),
-                    (ForKind::Index, Val::Str(s)) => (0..s.chars().count() as u64).map(Val::UInt).collect(),
+                    (ForKind::Index, Val::Str(s)) => {
+                        (0..s.chars().count() as u64).map(Val::UInt).collect()
+                    }
                     (ForKind::Keys, Val::Map(m)) => m.iter().map(|(k, _)| k.clone()).collect(),
                     _ => return Err(Stop::Unknown),
                 };
@@ -547,8 +622,14 @@ impl<'p> Evaluator<'p> {
         // compute index values first (immutable borrow of env), then mutate
         let mut path = Vec::new();
         let root = self.place_path(p, env, &mut path)?;
-        let VarRef::Local(l) = root else { return Err(Stop::Unknown) };
-        let slot = env.locals.get_mut(l).and_then(|x| x.as_mut()).ok_or(Stop::Unknown)?;
+        let VarRef::Local(l) = root else {
+            return Err(Stop::Unknown);
+        };
+        let slot = env
+            .locals
+            .get_mut(l)
+            .and_then(|x| x.as_mut())
+            .ok_or(Stop::Unknown)?;
         set_path(slot, &path, v)
     }
 
@@ -574,13 +655,25 @@ impl<'p> Evaluator<'p> {
     }
 
     fn read_path(&self, r: VarRef, path: &[PathStep], env: &Env) -> R<Val> {
-        let VarRef::Local(l) = r else { return Err(Stop::Unknown) };
-        let mut cur = env.locals.get(l).and_then(|x| x.clone()).ok_or(Stop::Unknown)?;
+        let VarRef::Local(l) = r else {
+            return Err(Stop::Unknown);
+        };
+        let mut cur = env
+            .locals
+            .get(l)
+            .and_then(|x| x.clone())
+            .ok_or(Stop::Unknown)?;
         for st in path {
             cur = match (st, &cur) {
                 (PathStep::Elem(i), Val::Tuple(xs) | Val::Struct(xs)) => xs[*i].clone(),
-                (PathStep::Index(k, _), Val::Map(m)) => m.iter().find(|(kk, _)| kk == k).map(|x| x.1.clone()).ok_or(Stop::Unknown)?,
-                (PathStep::Index(i, _), Val::Arr(a)) => a.get(idx_of(i)? as usize).cloned().ok_or(Stop::Unknown)?,
+                (PathStep::Index(k, _), Val::Map(m)) => m
+                    .iter()
+                    .find(|(kk, _)| kk == k)
+                    .map(|x| x.1.clone())
+                    .ok_or(Stop::Unknown)?,
+                (PathStep::Index(i, _), Val::Arr(a)) => {
+                    a.get(idx_of(i)? as usize).cloned().ok_or(Stop::Unknown)?
+                }
                 _ => return Err(Stop::Unknown),
             };
         }
@@ -737,7 +830,10 @@ impl<'p> Evaluator<'p> {
                 if const_only {
                     return Err(Stop::Unknown);
                 }
-                env.locals.get(*l).and_then(|x| x.clone()).ok_or(Stop::Unknown)?
+                env.locals
+                    .get(*l)
+                    .and_then(|x| x.clone())
+                    .ok_or(Stop::Unknown)?
             }
             EK::Var(VarRef::Global(g)) => self.gconst.get(g).cloned().ok_or(Stop::Unknown)?,
             EK::FnRef(f) => Val::Fn(*f, Rc::new(vec![])),
@@ -751,7 +847,12 @@ impl<'p> Evaluator<'p> {
                     if const_only {
                         return Err(Stop::Unknown);
                     }
-                    caps.push(env.locals.get(c.outer).and_then(|x| x.clone()).ok_or(Stop::Unknown)?);
+                    caps.push(
+                        env.locals
+                            .get(c.outer)
+                            .and_then(|x| x.clone())
+                            .ok_or(Stop::Unknown)?,
+                    );
                 }
                 Val::Fn(*f, Rc::new(caps))
             }
@@ -926,17 +1027,30 @@ impl<'p> Evaluator<'p> {
             }
             (In, a, Val::Arr(b)) => Val::Bool(b.iter().any(|x| val_eq(x, &a))),
             (In, a, Val::Map(b)) => Val::Bool(b.iter().any(|(k, _)| val_eq(k, &a))),
-            (In, Val::Char(c), Val::Str(s)) => Val::Bool(char::from_u32(c).is_some_and(|c| s.contains(c))),
+            (In, Val::Char(c), Val::Str(s)) => {
+                Val::Bool(char::from_u32(c).is_some_and(|c| s.contains(c)))
+            }
             (In, Val::Str(a), Val::Str(s)) => Val::Bool(s.contains(&*a)),
             (op, Val::Int(a), Val::Int(b)) => match op {
-                Add => a.checked_add(b).map(Val::Int).map_or_else(|| ovf(self), Ok)?,
-                Sub => a.checked_sub(b).map(Val::Int).map_or_else(|| ovf(self), Ok)?,
-                Mul => a.checked_mul(b).map(Val::Int).map_or_else(|| ovf(self), Ok)?,
+                Add => a
+                    .checked_add(b)
+                    .map(Val::Int)
+                    .map_or_else(|| ovf(self), Ok)?,
+                Sub => a
+                    .checked_sub(b)
+                    .map(Val::Int)
+                    .map_or_else(|| ovf(self), Ok)?,
+                Mul => a
+                    .checked_mul(b)
+                    .map(Val::Int)
+                    .map_or_else(|| ovf(self), Ok)?,
                 Div => {
                     if b == 0 {
                         return self.panic("division by zero", span);
                     }
-                    a.checked_div(b).map(Val::Int).map_or_else(|| ovf(self), Ok)?
+                    a.checked_div(b)
+                        .map(Val::Int)
+                        .map_or_else(|| ovf(self), Ok)?
                 }
                 Mod => {
                     if b == 0 {
@@ -977,7 +1091,9 @@ impl<'p> Evaluator<'p> {
                             _ => return ovf(self),
                         }
                     } else {
-                        a.checked_mul(1i64 << b).map(Val::Int).map_or_else(|| ovf(self), Ok)?
+                        a.checked_mul(1i64 << b)
+                            .map(Val::Int)
+                            .map_or_else(|| ovf(self), Ok)?
                     }
                 }
                 Shr => {
@@ -995,8 +1111,14 @@ impl<'p> Evaluator<'p> {
                 Ge => Val::Bool(a >= b),
                 _ => return Err(Stop::Unknown),
             },
-            (op, Val::UInt(a), Val::UInt(b)) => self.unsigned(op, a as u128, b as u128, u64::MAX as u128, span, |v| Val::UInt(v as u64))?,
-            (op, Val::Byte(a), Val::Byte(b)) => self.unsigned(op, a as u128, b as u128, 255, span, |v| Val::Byte(v as u8))?,
+            (op, Val::UInt(a), Val::UInt(b)) => {
+                self.unsigned(op, a as u128, b as u128, u64::MAX as u128, span, |v| {
+                    Val::UInt(v as u64)
+                })?
+            }
+            (op, Val::Byte(a), Val::Byte(b)) => {
+                self.unsigned(op, a as u128, b as u128, 255, span, |v| Val::Byte(v as u8))?
+            }
             (op, Val::Float(a), Val::Float(b)) => match op {
                 Add => Val::Float(a + b),
                 Sub => Val::Float(a - b),
@@ -1020,7 +1142,15 @@ impl<'p> Evaluator<'p> {
         })
     }
 
-    fn unsigned(&self, op: BinOp, a: u128, b: u128, max: u128, span: Span, mk: impl Fn(u128) -> Val) -> R<Val> {
+    fn unsigned(
+        &self,
+        op: BinOp,
+        a: u128,
+        b: u128,
+        max: u128,
+        span: Span,
+        mk: impl Fn(u128) -> Val,
+    ) -> R<Val> {
         use BinOp::*;
         let bits = if max == 255 { 8 } else { 64 };
         let chk = |v: Option<u128>| -> R<Val> {
@@ -1118,13 +1248,25 @@ impl<'p> Evaluator<'p> {
                 let s = char::from_u32(c).ok_or(Stop::Unknown)?.to_string();
                 Val::Arr(Rc::new(s.bytes().map(Val::Byte).collect()))
             }
-            (Val::Int(i), TyKind::Array(_)) => Val::Arr(Rc::new(i.to_le_bytes().iter().map(|b| Val::Byte(*b)).collect())),
-            (Val::UInt(i), TyKind::Array(_)) => Val::Arr(Rc::new(i.to_le_bytes().iter().map(|b| Val::Byte(*b)).collect())),
-            (Val::Float(f), TyKind::Array(_)) => {
-                Val::Arr(Rc::new(f.to_bits().to_le_bytes().iter().map(|b| Val::Byte(*b)).collect()))
+            (Val::Int(i), TyKind::Array(_)) => Val::Arr(Rc::new(
+                i.to_le_bytes().iter().map(|b| Val::Byte(*b)).collect(),
+            )),
+            (Val::UInt(i), TyKind::Array(_)) => Val::Arr(Rc::new(
+                i.to_le_bytes().iter().map(|b| Val::Byte(*b)).collect(),
+            )),
+            (Val::Float(f), TyKind::Array(_)) => Val::Arr(Rc::new(
+                f.to_bits()
+                    .to_le_bytes()
+                    .iter()
+                    .map(|b| Val::Byte(*b))
+                    .collect(),
+            )),
+            (Val::Str(s), TyKind::Array(e)) if *e == CHAR => {
+                Val::Arr(Rc::new(s.chars().map(|c| Val::Char(c as u32)).collect()))
             }
-            (Val::Str(s), TyKind::Array(e)) if *e == CHAR => Val::Arr(Rc::new(s.chars().map(|c| Val::Char(c as u32)).collect())),
-            (Val::Str(s), TyKind::Array(_)) => Val::Arr(Rc::new(s.bytes().map(Val::Byte).collect())),
+            (Val::Str(s), TyKind::Array(_)) => {
+                Val::Arr(Rc::new(s.bytes().map(Val::Byte).collect()))
+            }
             (v, _) => v,
         })
     }
@@ -1244,7 +1386,9 @@ fn set_path(slot: &mut Val, path: &[PathStep], v: Val) -> R<()> {
         return Ok(());
     }
     match (&path[0], slot) {
-        (PathStep::Elem(i), Val::Tuple(xs) | Val::Struct(xs)) => set_path(&mut Rc::make_mut(xs)[*i], &path[1..], v),
+        (PathStep::Elem(i), Val::Tuple(xs) | Val::Struct(xs)) => {
+            set_path(&mut Rc::make_mut(xs)[*i], &path[1..], v)
+        }
         (PathStep::Index(i, isp), Val::Arr(xs)) => {
             let k = idx_checked(i, *isp)? as usize;
             let xs = Rc::make_mut(xs);
@@ -1266,7 +1410,9 @@ fn set_path(slot: &mut Val, path: &[PathStep], v: Val) -> R<()> {
         }
         (PathStep::Index(i, isp), Val::Str(s)) if path.len() == 1 => {
             let k = idx_checked(i, *isp)? as usize;
-            let Val::Char(c) = v else { return Err(Stop::Unknown) };
+            let Val::Char(c) = v else {
+                return Err(Stop::Unknown);
+            };
             let mut chars: Vec<char> = s.chars().collect();
             if k >= chars.len() {
                 return Err(Stop::Panic("string index out of bounds".into(), *isp));
@@ -1308,12 +1454,18 @@ fn map_set(m: &mut Vec<(Val, Val)>, k: Val, v: Val) {
 fn val_eq(a: &Val, b: &Val) -> bool {
     match (a, b) {
         (Val::Float(x), Val::Float(y)) => x == y,
-        (Val::Arr(x), Val::Arr(y)) | (Val::Tuple(x), Val::Tuple(y)) | (Val::Struct(x), Val::Struct(y)) => {
+        (Val::Arr(x), Val::Arr(y))
+        | (Val::Tuple(x), Val::Tuple(y))
+        | (Val::Struct(x), Val::Struct(y)) => {
             x.len() == y.len() && x.iter().zip(y.iter()).all(|(a, b)| val_eq(a, b))
         }
-        (Val::Variant(i, x), Val::Variant(j, y)) => i == j && x.iter().zip(y.iter()).all(|(a, b)| val_eq(a, b)),
+        (Val::Variant(i, x), Val::Variant(j, y)) => {
+            i == j && x.iter().zip(y.iter()).all(|(a, b)| val_eq(a, b))
+        }
         (Val::Map(x), Val::Map(y)) => {
-            x.len() == y.len() && x.iter().all(|(k, v)| y.iter().any(|(k2, v2)| val_eq(k, k2) && val_eq(v, v2)))
+            x.len() == y.len()
+                && x.iter()
+                    .all(|(k, v)| y.iter().any(|(k2, v2)| val_eq(k, k2) && val_eq(v, v2)))
         }
         (Val::Some(x), Val::Some(y)) | (Val::Ok(x), Val::Ok(y)) => val_eq(x, y),
         (Val::Fn(..), _) => false,
@@ -1345,7 +1497,9 @@ fn lit_val(e: &Expr) -> Option<Val> {
 fn is_lit_tree(e: &Expr) -> bool {
     match &e.kind {
         EK::Lit(_) | EK::None | EK::FnRef(_) => true,
-        EK::Tuple(xs) | EK::Array(xs) | EK::Struct(xs) | EK::Variant(_, xs) => xs.iter().all(is_lit_tree),
+        EK::Tuple(xs) | EK::Array(xs) | EK::Struct(xs) | EK::Variant(_, xs) => {
+            xs.iter().all(is_lit_tree)
+        }
         EK::Map(es) => es.iter().all(|(k, v)| is_lit_tree(k) && is_lit_tree(v)),
         EK::Some(x) | EK::Retype(x) => is_lit_tree(x),
         _ => false,
@@ -1360,7 +1514,12 @@ fn all_children_lit(e: &Expr) -> bool {
         }
     };
     match &e.kind {
-        EK::Unary(_, a) | EK::Cast(a) | EK::ToStr(a) | EK::Len(a) | EK::Field(a, _) | EK::TupleIndex(a, _) => f(a),
+        EK::Unary(_, a)
+        | EK::Cast(a)
+        | EK::ToStr(a)
+        | EK::Len(a)
+        | EK::Field(a, _)
+        | EK::TupleIndex(a, _) => f(a),
         EK::Binary(_, a, b) | EK::Index(a, b) => {
             f(a);
             f(b);
@@ -1374,7 +1533,10 @@ fn all_children_lit(e: &Expr) -> bool {
 fn contains_control(e: &Expr) -> bool {
     let mut found = false;
     flow::visit_expr(e, &mut |x: &Expr| {
-        if matches!(x.kind, EK::If(_) | EK::Catch(..) | EK::Else(..) | EK::Try(_)) {
+        if matches!(
+            x.kind,
+            EK::If(_) | EK::Catch(..) | EK::Else(..) | EK::Try(_)
+        ) {
             found = true;
         }
     });
@@ -1405,9 +1567,12 @@ fn for_children(e: &mut Expr, f: &mut dyn FnMut(&mut Expr)) {
             }
             args.iter_mut().for_each(f);
         }
-        EK::Print(_, _, xs) | EK::Format(xs) | EK::Tuple(xs) | EK::Array(xs) | EK::Struct(xs) | EK::Variant(_, xs) => {
-            xs.iter_mut().for_each(f)
-        }
+        EK::Print(_, _, xs)
+        | EK::Format(xs)
+        | EK::Tuple(xs)
+        | EK::Array(xs)
+        | EK::Struct(xs)
+        | EK::Variant(_, xs) => xs.iter_mut().for_each(f),
         EK::Map(es) => {
             for (k, v) in es.iter_mut() {
                 f(k);
@@ -1431,7 +1596,13 @@ fn for_children(e: &mut Expr, f: &mut dyn FnMut(&mut Expr)) {
 
 /// Convert a value back into an IR expression (literals only).
 fn val_expr(v: &Val, ty: TyId, span: Span, t: &Types) -> Option<Expr> {
-    let lit = |l| Some(Expr { kind: EK::Lit(l), ty, span });
+    let lit = |l| {
+        Some(Expr {
+            kind: EK::Lit(l),
+            ty,
+            span,
+        })
+    };
     let b = t.base(ty);
     match v {
         Val::Bool(x) => lit(Lit::Bool(*x)),
@@ -1441,26 +1612,50 @@ fn val_expr(v: &Val, ty: TyId, span: Span, t: &Types) -> Option<Expr> {
         Val::Float(x) => lit(Lit::Float(*x)),
         Val::Char(x) => lit(Lit::Char(*x)),
         Val::Str(s) if b == STR || b == ERROR => lit(Lit::Str(s.to_string())),
-        Val::None if matches!(t.kind(b), TyKind::Opt(_)) => Some(Expr { kind: EK::None, ty, span }),
+        Val::None if matches!(t.kind(b), TyKind::Opt(_)) => Some(Expr {
+            kind: EK::None,
+            ty,
+            span,
+        }),
         Val::Some(x) => match t.kind(b) {
             TyKind::Opt(i) => {
                 let inner = val_expr(x, *i, span, t)?;
-                Some(Expr { kind: EK::Some(Box::new(inner)), ty, span })
+                Some(Expr {
+                    kind: EK::Some(Box::new(inner)),
+                    ty,
+                    span,
+                })
             }
             _ => None,
         },
         Val::Tuple(xs) => match t.kind(b) {
             TyKind::Tuple(ts) => {
-                let items: Option<Vec<Expr>> = xs.iter().zip(ts).map(|(x, et)| val_expr(x, *et, span, t)).collect();
-                Some(Expr { kind: EK::Tuple(items?), ty, span })
+                let items: Option<Vec<Expr>> = xs
+                    .iter()
+                    .zip(ts)
+                    .map(|(x, et)| val_expr(x, *et, span, t))
+                    .collect();
+                Some(Expr {
+                    kind: EK::Tuple(items?),
+                    ty,
+                    span,
+                })
             }
             _ => None,
         },
         Val::Struct(xs) => match t.kind(b) {
             TyKind::Struct(si) => {
                 let fs = &t.structs[*si as usize].fields;
-                let items: Option<Vec<Expr>> = xs.iter().zip(fs).map(|(x, (_, ft))| val_expr(x, *ft, span, t)).collect();
-                Some(Expr { kind: EK::Struct(items?), ty, span })
+                let items: Option<Vec<Expr>> = xs
+                    .iter()
+                    .zip(fs)
+                    .map(|(x, (_, ft))| val_expr(x, *ft, span, t))
+                    .collect();
+                Some(Expr {
+                    kind: EK::Struct(items?),
+                    ty,
+                    span,
+                })
             }
             _ => None,
         },
@@ -1470,13 +1665,25 @@ fn val_expr(v: &Val, ty: TyId, span: Span, t: &Types) -> Option<Expr> {
                 return None;
             }
             let items: Option<Vec<Expr>> = xs.iter().map(|x| val_expr(x, et, span, t)).collect();
-            Some(Expr { kind: EK::Array(items?), ty, span })
+            Some(Expr {
+                kind: EK::Array(items?),
+                ty,
+                span,
+            })
         }
         Val::Variant(i, xs) => match t.kind(b) {
             TyKind::Enum(ei) => {
                 let ps = &t.enums[*ei as usize].variants[*i].1;
-                let items: Option<Vec<Expr>> = xs.iter().zip(ps).map(|(x, pt)| val_expr(x, *pt, span, t)).collect();
-                Some(Expr { kind: EK::Variant(*i, items?), ty, span })
+                let items: Option<Vec<Expr>> = xs
+                    .iter()
+                    .zip(ps)
+                    .map(|(x, pt)| val_expr(x, *pt, span, t))
+                    .collect();
+                Some(Expr {
+                    kind: EK::Variant(*i, items?),
+                    ty,
+                    span,
+                })
             }
             _ => None,
         },

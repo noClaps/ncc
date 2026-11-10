@@ -25,25 +25,45 @@ impl<'a> Checker<'a> {
             return Ok(e);
         }
         if let TyKind::Opt(inner) = *self.types.kind(ty)
-            && (e.ty == inner || self.can_coerce(e.ty, inner)) {
-                let span = e.span;
-                let inner_e = self.coerce(e, inner)?;
-                return Ok(Expr { kind: EK::Some(Box::new(inner_e)), ty, span });
-            }
+            && (e.ty == inner || self.can_coerce(e.ty, inner))
+        {
+            let span = e.span;
+            let inner_e = self.coerce(e, inner)?;
+            return Ok(Expr {
+                kind: EK::Some(Box::new(inner_e)),
+                ty,
+                span,
+            });
+        }
         if e.ty == VOID {
-            return err(e.span, format!("expected a value of type `{}`, but this expression has no value", self.types.show(ty)));
+            return err(
+                e.span,
+                format!(
+                    "expected a value of type `{}`, but this expression has no value",
+                    self.types.show(ty)
+                ),
+            );
         }
         if self.types.kind(ty) == &TyKind::Void {
-            return err(e.span, format!("unexpected value of type `{}`", self.types.show(e.ty)));
+            return err(
+                e.span,
+                format!("unexpected value of type `{}`", self.types.show(e.ty)),
+            );
         }
-        let mut msg = format!("expected `{}`, found `{}`", self.types.show(ty), self.types.show(e.ty));
+        let mut msg = format!(
+            "expected `{}`, found `{}`",
+            self.types.show(ty),
+            self.types.show(e.ty)
+        );
         if matches!(self.types.kind(e.ty), TyKind::Opt(_)) {
             msg.push_str("; optionals must be checked for `none` first (use `else`)");
         }
-        if let (TyKind::Fixed(a, _), TyKind::Array(b)) = (self.types.kind(e.ty), self.types.kind(ty))
-            && a == b {
-                msg.push_str("; convert with `@as`");
-            }
+        if let (TyKind::Fixed(a, _), TyKind::Array(b)) =
+            (self.types.kind(e.ty), self.types.kind(ty))
+            && a == b
+        {
+            msg.push_str("; convert with `@as`");
+        }
         err(e.span, msg)
     }
 
@@ -80,21 +100,44 @@ impl<'a> Checker<'a> {
         match &e.kind {
             E::Int(_, u) => !u,
             E::Unary(UnOp::Neg | UnOp::BitNot, x) => Self::is_untyped_int(x),
-            E::Binary(op, a, b) if !matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge | BinOp::In | BinOp::And | BinOp::Or | BinOp::Concat) => {
+            E::Binary(op, a, b)
+                if !matches!(
+                    op,
+                    BinOp::Eq
+                        | BinOp::Ne
+                        | BinOp::Lt
+                        | BinOp::Gt
+                        | BinOp::Le
+                        | BinOp::Ge
+                        | BinOp::In
+                        | BinOp::And
+                        | BinOp::Or
+                        | BinOp::Concat
+                ) =>
+            {
                 Self::is_untyped_int(a) && Self::is_untyped_int(b)
             }
             _ => false,
         }
     }
 
-    fn int_lit(&mut self, v: i128, unsigned: bool, expected: Option<TyId>, span: Span) -> Result<Expr> {
+    fn int_lit(
+        &mut self,
+        v: i128,
+        unsigned: bool,
+        expected: Option<TyId>,
+        span: Span,
+    ) -> Result<Expr> {
         let ty = if unsigned {
             UINT
         } else {
             match expected.map(|t| self.strip_opt(t)) {
                 Some(t) if self.types.is_integer(self.types.base(t)) => t,
                 Some(t) if self.types.base(t) == FLOAT => {
-                    return err(span, "integer literals cannot be used as `float`; write a decimal point (e.g. `1.0`)")
+                    return err(
+                        span,
+                        "integer literals cannot be used as `float`; write a decimal point (e.g. `1.0`)",
+                    );
                 }
                 _ => INT,
             }
@@ -103,7 +146,10 @@ impl<'a> Checker<'a> {
         let lit = match base {
             BYTE => {
                 if !(0..=255).contains(&v) {
-                    return err(span, format!("literal `{v}` is out of range for `byte` (0 to 255)"));
+                    return err(
+                        span,
+                        format!("literal `{v}` is out of range for `byte` (0 to 255)"),
+                    );
                 }
                 Lit::Byte(v as u8)
             }
@@ -123,26 +169,45 @@ impl<'a> Checker<'a> {
                 Lit::UInt(v as u64)
             }
         };
-        Ok(Expr { kind: EK::Lit(lit), ty, span })
+        Ok(Expr {
+            kind: EK::Lit(lit),
+            ty,
+            span,
+        })
     }
 
-    pub fn check_expr_opts(&mut self, e: &ast::Expr, expected: Option<TyId>, value_needed: bool) -> Result<Expr> {
+    pub fn check_expr_opts(
+        &mut self,
+        e: &ast::Expr,
+        expected: Option<TyId>,
+        value_needed: bool,
+    ) -> Result<Expr> {
         let span = e.span;
         let mk = |kind, ty| Ok(Expr { kind, ty, span });
         // named types can be created with the literal syntax of their underlying type
         if let Some(exp) = expected {
             let exp_s = self.strip_opt(exp);
             if let TyKind::Named(_) = self.types.kind(exp_s)
-                && matches!(e.kind, E::Array(_) | E::Map(_) | E::Tuple(_) | E::Struct(..) | E::Str(_)) {
-                    let under = self.types.base(exp_s);
-                    let x = self.expect_expr(e, under)?;
-                    return Ok(Expr { kind: EK::Retype(Box::new(x)), ty: exp_s, span });
-                }
+                && matches!(
+                    e.kind,
+                    E::Array(_) | E::Map(_) | E::Tuple(_) | E::Struct(..) | E::Str(_)
+                )
+            {
+                let under = self.types.base(exp_s);
+                let x = self.expect_expr(e, under)?;
+                return Ok(Expr {
+                    kind: EK::Retype(Box::new(x)),
+                    ty: exp_s,
+                    span,
+                });
+            }
         }
         match &e.kind {
             E::Int(v, u) => self.int_lit(*v as i128, *u, expected, span),
             E::Unary(UnOp::Neg, inner) if matches!(inner.kind, E::Int(..)) => {
-                let E::Int(v, u) = inner.kind else { unreachable!() };
+                let E::Int(v, u) = inner.kind else {
+                    unreachable!()
+                };
                 if u {
                     return err(span, "negative value cannot be a `uint`");
                 }
@@ -150,7 +215,9 @@ impl<'a> Checker<'a> {
             }
             E::Float(f) => mk(EK::Lit(Lit::Float(*f)), self.lit_ty(expected, FLOAT)),
             E::Unary(UnOp::Neg, inner) if matches!(inner.kind, E::Float(_)) => {
-                let E::Float(f) = inner.kind else { unreachable!() };
+                let E::Float(f) = inner.kind else {
+                    unreachable!()
+                };
                 mk(EK::Lit(Lit::Float(-f)), self.lit_ty(expected, FLOAT))
             }
             E::Char(c) => mk(EK::Lit(Lit::Char(*c)), self.lit_ty(expected, CHAR)),
@@ -169,9 +236,11 @@ impl<'a> Checker<'a> {
                 let mut parts = Vec::new();
                 for seg in segs {
                     match seg {
-                        ast::StrSeg::Lit(l) => {
-                            parts.push(Expr { kind: EK::Lit(Lit::Str(l.clone())), ty: STR, span })
-                        }
+                        ast::StrSeg::Lit(l) => parts.push(Expr {
+                            kind: EK::Lit(Lit::Str(l.clone())),
+                            ty: STR,
+                            span,
+                        }),
                         ast::StrSeg::Expr(x) => {
                             let v = self.check_expr(x, None)?;
                             parts.push(self.stringify(v)?);
@@ -184,12 +253,18 @@ impl<'a> Checker<'a> {
                 Some(t) if matches!(self.types.kind(t), TyKind::Opt(_)) => mk(EK::None, t),
                 Some(t) => err(
                     span,
-                    format!("cannot use `none` as `{}`, which is not optional", self.types.show(t)),
+                    format!(
+                        "cannot use `none` as `{}`, which is not optional",
+                        self.types.show(t)
+                    ),
                 ),
                 None => err(span, "cannot infer the optional type of `none` here"),
             },
             E::Ident(name) => self.check_ident(name, span),
-            E::Wildcard => err(span, "`_` can only be used in patterns or as a discard target"),
+            E::Wildcard => err(
+                span,
+                "`_` can only be used in patterns or as a discard target",
+            ),
             E::Dollar => {
                 if self.ctx_ref().dollar.is_empty() {
                     return err(span, "`$` can only be used inside an array or string index");
@@ -209,7 +284,13 @@ impl<'a> Checker<'a> {
                         UnOp::BitNot => "!",
                         UnOp::Not => "not",
                     };
-                    return err(span, format!("operator `{sym}` cannot be applied to `{}`", self.types.show(x.ty)));
+                    return err(
+                        span,
+                        format!(
+                            "operator `{sym}` cannot be applied to `{}`",
+                            self.types.show(x.ty)
+                        ),
+                    );
                 }
                 let ty = x.ty;
                 mk(EK::Unary(*op, Box::new(x)), ty)
@@ -251,22 +332,34 @@ impl<'a> Checker<'a> {
                         let i = self.seq_index(idx, b.ty)?;
                         mk(EK::Index(Box::new(b), Box::new(i)), CHAR)
                     }
-                    _ => err(span, format!("cannot index into `{}`", self.types.show(b.ty))),
+                    _ => err(
+                        span,
+                        format!("cannot index into `{}`", self.types.show(b.ty)),
+                    ),
                 }
             }
             E::Tuple(items) => {
-                let exp = expected.map(|t| self.strip_opt(t)).and_then(|t| match self.types.kind(t) {
-                    TyKind::Tuple(ts) if ts.len() == items.len() => Some(ts.clone()),
-                    _ => None,
-                });
+                let exp =
+                    expected
+                        .map(|t| self.strip_opt(t))
+                        .and_then(|t| match self.types.kind(t) {
+                            TyKind::Tuple(ts) if ts.len() == items.len() => Some(ts.clone()),
+                            _ => None,
+                        });
                 let mut xs = Vec::new();
                 for (i, it) in items.iter().enumerate() {
                     let x = match &exp {
                         Some(ts) => self.expect_expr(it, ts[i])?,
                         None => self.check_expr(it, None)?,
                     };
-                    if matches!(self.types.kind(x.ty), TyKind::Void | TyKind::Never | TyKind::Fut(_)) {
-                        return err(it.span, format!("`{}` cannot be stored in a tuple", self.types.show(x.ty)));
+                    if matches!(
+                        self.types.kind(x.ty),
+                        TyKind::Void | TyKind::Never | TyKind::Fut(_)
+                    ) {
+                        return err(
+                            it.span,
+                            format!("`{}` cannot be stored in a tuple", self.types.show(x.ty)),
+                        );
                     }
                     xs.push(x);
                 }
@@ -303,15 +396,25 @@ impl<'a> Checker<'a> {
                     xs.push(x);
                 }
                 let et = et.unwrap();
-                if matches!(self.types.kind(et), TyKind::Void | TyKind::Never | TyKind::Fut(_) | TyKind::Mutex(_)) {
-                    return err(span, format!("arrays cannot hold `{}`", self.types.show(et)));
+                if matches!(
+                    self.types.kind(et),
+                    TyKind::Void | TyKind::Never | TyKind::Fut(_) | TyKind::Mutex(_)
+                ) {
+                    return err(
+                        span,
+                        format!("arrays cannot hold `{}`", self.types.show(et)),
+                    );
                 }
                 let ty = match fixed {
                     Some(n) => {
                         if n as usize != xs.len() {
                             return err(
                                 span,
-                                format!("expected exactly {n} elements for `{}`, found {}", self.types.show(exp.unwrap()), xs.len()),
+                                format!(
+                                    "expected exactly {n} elements for `{}`, found {}",
+                                    self.types.show(exp.unwrap()),
+                                    xs.len()
+                                ),
                             );
                         }
                         exp.unwrap()
@@ -348,7 +451,10 @@ impl<'a> Checker<'a> {
                 }
                 let (kt, vt) = (kt.unwrap(), vt.unwrap());
                 if !self.comparable(kt) {
-                    return err(span, format!("`{}` cannot be used as a map key", self.types.show(kt)));
+                    return err(
+                        span,
+                        format!("`{}` cannot be used as a map key", self.types.show(kt)),
+                    );
                 }
                 let ty = self.types.intern(TyKind::Map(kt, vt));
                 mk(EK::Map(xs), ty)
@@ -358,7 +464,10 @@ impl<'a> Checker<'a> {
                     return err(path.span, "expected a struct type");
                 };
                 let Some(def) = self.types.struct_def(ty).cloned() else {
-                    return err(path.span, format!("`{}` is not a struct", self.types.show(ty)));
+                    return err(
+                        path.span,
+                        format!("`{}` is not a struct", self.types.show(ty)),
+                    );
                 };
                 let mut vals: Vec<Option<Expr>> = vec![None; def.fields.len()];
                 for (name, v, fsp) in fields {
@@ -374,7 +483,12 @@ impl<'a> Checker<'a> {
                 for (i, v) in vals.into_iter().enumerate() {
                     match v {
                         Some(v) => out.push(v),
-                        None => return err(span, format!("missing field `{}` in `{}`", def.fields[i].0, def.name)),
+                        None => {
+                            return err(
+                                span,
+                                format!("missing field `{}` in `{}`", def.fields[i].0, def.name),
+                            );
+                        }
                     }
                 }
                 mk(EK::Struct(out), ty)
@@ -386,7 +500,10 @@ impl<'a> Checker<'a> {
             E::If(ife) => {
                 if value_needed {
                     let Some(t) = expected else {
-                        return err(span, "cannot infer the type of this `if`; assign it to a variable with a declared type");
+                        return err(
+                            span,
+                            "cannot infer the type of this `if`; assign it to a variable with a declared type",
+                        );
                     };
                     self.check_if(ife, Some(t), span)
                 } else {
@@ -397,13 +514,25 @@ impl<'a> Checker<'a> {
                 let oexp = expected.map(|t| self.types.opt(t));
                 let o = self.check_expr(opt, oexp)?;
                 let TyKind::Opt(inner) = *self.types.kind(o.ty) else {
-                    return err(opt.span, format!("`else` can only be used on optional values, found `{}`", self.types.show(o.ty)));
+                    return err(
+                        opt.span,
+                        format!(
+                            "`else` can only be used on optional values, found `{}`",
+                            self.types.show(o.ty)
+                        ),
+                    );
                 };
                 let fallback = match fb {
-                    ast::ElseFallback::Expr(x) => Fallback::Expr(Box::new(self.expect_expr(x, inner)?)),
+                    ast::ElseFallback::Expr(x) => {
+                        Fallback::Expr(Box::new(self.expect_expr(x, inner)?))
+                    }
                     ast::ElseFallback::Block(b) => {
                         let id = self.new_jump();
-                        self.ctx().jumps.push(JumpCtx { id, kind: JumpKind::Value(inner), label: None });
+                        self.ctx().jumps.push(JumpCtx {
+                            id,
+                            kind: JumpKind::Value(inner),
+                            label: None,
+                        });
                         let blk = self.check_block(b);
                         self.ctx().jumps.pop();
                         let blk = blk?;
@@ -421,13 +550,27 @@ impl<'a> Checker<'a> {
             E::Catch(x, name, b) => {
                 let v = self.check_expr(x, None)?;
                 let TyKind::ErrU(inner) = *self.types.kind(v.ty) else {
-                    return err(x.span, format!("`catch` can only be used on error unions, found `{}`", self.types.show(v.ty)));
+                    return err(
+                        x.span,
+                        format!(
+                            "`catch` can only be used on error unions, found `{}`",
+                            self.types.show(v.ty)
+                        ),
+                    );
                 };
                 let id = self.new_jump();
                 self.push_scope();
-                let local = if name == "_" { None } else { Some(self.declare_local(name, ERROR, false, LocalKind::Normal, span)?) };
+                let local = if name == "_" {
+                    None
+                } else {
+                    Some(self.declare_local(name, ERROR, false, LocalKind::Normal, span)?)
+                };
                 if inner != VOID {
-                    self.ctx().jumps.push(JumpCtx { id, kind: JumpKind::Value(inner), label: None });
+                    self.ctx().jumps.push(JumpCtx {
+                        id,
+                        kind: JumpKind::Value(inner),
+                        label: None,
+                    });
                 }
                 let blk = self.check_block(b);
                 if inner != VOID {
@@ -447,7 +590,13 @@ impl<'a> Checker<'a> {
                 self.require_throwing(span, "`try`")?;
                 let v = self.check_expr(x, None)?;
                 let TyKind::ErrU(inner) = *self.types.kind(v.ty) else {
-                    return err(x.span, format!("`try` can only be used on error unions, found `{}`", self.types.show(v.ty)));
+                    return err(
+                        x.span,
+                        format!(
+                            "`try` can only be used on error unions, found `{}`",
+                            self.types.show(v.ty)
+                        ),
+                    );
                 };
                 mk(EK::Try(Box::new(v)), inner)
             }
@@ -464,14 +613,22 @@ impl<'a> Checker<'a> {
                         let ty = self.types.intern(TyKind::Fut(ret));
                         mk(EK::Async(c, args), ty)
                     }
-                    Target::Variant(..) => err(call.span, "`async` must be followed by a function call"),
+                    Target::Variant(..) => {
+                        err(call.span, "`async` must be followed by a function call")
+                    }
                 }
             }
             E::Error => Err(Diag::new(span, String::new())),
             E::Await(x) => {
                 let v = self.check_expr(x, None)?;
                 let TyKind::Fut(inner) = *self.types.kind(v.ty) else {
-                    return err(x.span, format!("`await` expects a future, found `{}`", self.types.show(v.ty)));
+                    return err(
+                        x.span,
+                        format!(
+                            "`await` expects a future, found `{}`",
+                            self.types.show(v.ty)
+                        ),
+                    );
                 };
                 mk(EK::Await(Box::new(v)), inner)
             }
@@ -481,22 +638,43 @@ impl<'a> Checker<'a> {
     pub fn stringify(&mut self, v: Expr) -> Result<Expr> {
         if v.ty == STR || v.ty == ERROR {
             let span = v.span;
-            return Ok(Expr { kind: EK::Retype(Box::new(v)), ty: STR, span });
+            return Ok(Expr {
+                kind: EK::Retype(Box::new(v)),
+                ty: STR,
+                span,
+            });
         }
         if !self.printable(v.ty) {
-            return err(v.span, format!("`{}` cannot be converted to a string", self.types.show(v.ty)));
+            return err(
+                v.span,
+                format!(
+                    "`{}` cannot be converted to a string",
+                    self.types.show(v.ty)
+                ),
+            );
         }
         let span = v.span;
-        Ok(Expr { kind: EK::ToStr(Box::new(v)), ty: STR, span })
+        Ok(Expr {
+            kind: EK::ToStr(Box::new(v)),
+            ty: STR,
+            span,
+        })
     }
 
     fn check_ident(&mut self, name: &str, span: Span) -> Result<Expr> {
         if let Some((v, ty)) = self.resolve_var(name, span)? {
             self.idx_var_ref(v, span);
             if matches!(self.types.kind(ty), TyKind::Mutex(_)) {
-                return err(span, format!("`{name}` is a mutex; access it inside `lock {name} {{ ... }}`"));
+                return err(
+                    span,
+                    format!("`{name}` is a mutex; access it inside `lock {name} {{ ... }}`"),
+                );
             }
-            return Ok(Expr { kind: EK::Var(v), ty, span });
+            return Ok(Expr {
+                kind: EK::Var(v),
+                ty,
+                span,
+            });
         }
         let m = self.module();
         match self.mods[m].syms.get(name).map(|e| e.sym.clone()) {
@@ -504,15 +682,26 @@ impl<'a> Checker<'a> {
                 self.idx_fn_ref(f, name, span);
                 let (ps, r) = self.sigs[f].clone();
                 let ty = self.types.intern(TyKind::Fn(ps, r));
-                Ok(Expr { kind: EK::FnRef(f), ty, span })
+                Ok(Expr {
+                    kind: EK::FnRef(f),
+                    ty,
+                    span,
+                })
             }
-            Some(Sym::Fn { func: None, .. }) => err(span, format!("generic function `{name}` requires explicit type arguments: `{name}<...>`")),
+            Some(Sym::Fn { func: None, .. }) => err(
+                span,
+                format!(
+                    "generic function `{name}` requires explicit type arguments: `{name}<...>`"
+                ),
+            ),
             Some(Sym::Struct { .. }) | Some(Sym::Enum { .. }) | Some(Sym::Type(_)) => {
                 err(span, format!("`{name}` is a type, not a value"))
             }
             Some(Sym::Globals(_)) => unreachable!(),
             None => {
-                if self.mods[m].imports.contains_key(name) || self.mods[m].externs.contains_key(name) {
+                if self.mods[m].imports.contains_key(name)
+                    || self.mods[m].externs.contains_key(name)
+                {
                     err(span, format!("`{name}` is a module, not a value"))
                 } else {
                     err(span, format!("unknown name `{name}`"))
@@ -569,8 +758,15 @@ impl<'a> Checker<'a> {
             },
         };
         match sym {
-            Some((_, Sym::Struct { .. })) | Some((_, Sym::Enum { .. })) | Some((_, Sym::Type(_))) => {
-                let te = ast::TypeExpr::Named { module, name, args, span };
+            Some((_, Sym::Struct { .. }))
+            | Some((_, Sym::Enum { .. }))
+            | Some((_, Sym::Type(_))) => {
+                let te = ast::TypeExpr::Named {
+                    module,
+                    name,
+                    args,
+                    span,
+                };
                 let tp = self.tparams();
                 Ok(Some(self.resolve_type(&te, m, &tp)?))
             }
@@ -580,7 +776,9 @@ impl<'a> Checker<'a> {
 
     /// `name<T>` referring to a generic function: instantiate it.
     fn generic_fn_ref(&mut self, e: &ast::Expr) -> Result<Option<FuncId>> {
-        let E::Generic(inner, targs) = &e.kind else { return Ok(None) };
+        let E::Generic(inner, targs) = &e.kind else {
+            return Ok(None);
+        };
         let (module, name) = match &inner.kind {
             E::Ident(n) => (None, n.clone()),
             E::Field(base, n) => match self.module_alias(base)? {
@@ -598,7 +796,9 @@ impl<'a> Checker<'a> {
                 }
                 Ok(Some(self.instantiate_fn(dm, decl, args, e.span)?))
             }
-            Some((_, Sym::Fn { func: Some(_), .. })) => err(e.span, format!("`{name}` is not generic")),
+            Some((_, Sym::Fn { func: Some(_), .. })) => {
+                err(e.span, format!("`{name}` is not generic"))
+            }
             _ => Ok(None),
         }
     }
@@ -611,7 +811,10 @@ impl<'a> Checker<'a> {
                 let m = self.module();
                 if let Some(tab) = self.mods[m].externs.get(&alias) {
                     let Some(&id) = tab.get(name) else {
-                        return err(span, format!("extern block `{alias}` has no function `{name}`"));
+                        return err(
+                            span,
+                            format!("extern block `{alias}` has no function `{name}`"),
+                        );
                     };
                     let x = &self.externs[id];
                     let hover = format!("extern fn {}", x.name);
@@ -626,7 +829,12 @@ impl<'a> Checker<'a> {
                         return Ok(Target::Call(Callee::Direct(f), ps, r));
                     }
                     Some((_, Sym::Fn { func: None, .. })) => {
-                        return err(span, format!("generic function `{alias}.{name}` requires explicit type arguments"))
+                        return err(
+                            span,
+                            format!(
+                                "generic function `{alias}.{name}` requires explicit type arguments"
+                            ),
+                        );
                     }
                     _ => {}
                 }
@@ -642,28 +850,43 @@ impl<'a> Checker<'a> {
             }
         }
         if let Some(f) = self.generic_fn_ref(callee)? {
-            let fname = self.funcs.get(f).and_then(|x| x.as_ref()).map(|x| x.name.clone()).unwrap_or_else(|| "fn".into());
+            let fname = self
+                .funcs
+                .get(f)
+                .and_then(|x| x.as_ref())
+                .map(|x| x.name.clone())
+                .unwrap_or_else(|| "fn".into());
             self.idx_fn_ref(f, &fname, callee.span);
             let (ps, r) = self.sigs[f].clone();
             return Ok(Target::Call(Callee::Direct(f), ps, r));
         }
         if let E::Ident(name) = &callee.kind
-            && self.resolve_var(name, span)?.is_none() {
-                let m = self.module();
-                if let Some(Sym::Fn { func: Some(f), .. }) = self.mods[m].syms.get(name).map(|e| e.sym.clone()) {
-                    self.idx_fn_ref(f, name, span);
-                    let (ps, r) = self.sigs[f].clone();
-                    return Ok(Target::Call(Callee::Direct(f), ps, r));
-                }
+            && self.resolve_var(name, span)?.is_none()
+        {
+            let m = self.module();
+            if let Some(Sym::Fn { func: Some(f), .. }) =
+                self.mods[m].syms.get(name).map(|e| e.sym.clone())
+            {
+                self.idx_fn_ref(f, name, span);
+                let (ps, r) = self.sigs[f].clone();
+                return Ok(Target::Call(Callee::Direct(f), ps, r));
             }
+        }
         let v = self.check_expr(callee, None)?;
         match self.types.kind(v.ty).clone() {
             TyKind::Fn(ps, r) => Ok(Target::Call(Callee::Value(Box::new(v)), ps, r)),
-            _ => err(span, format!("`{}` is not a function", self.types.show(v.ty))),
+            _ => err(
+                span,
+                format!("`{}` is not a function", self.types.show(v.ty)),
+            ),
         }
     }
 
-    fn check_call_parts(&mut self, callee: &ast::Expr, args: &[ast::Expr]) -> Result<(Target, Vec<Expr>)> {
+    fn check_call_parts(
+        &mut self,
+        callee: &ast::Expr,
+        args: &[ast::Expr],
+    ) -> Result<(Target, Vec<Expr>)> {
         let target = self.resolve_target(callee)?;
         let params = match &target {
             Target::Call(_, ps, _) => ps.clone(),
@@ -672,7 +895,11 @@ impl<'a> Checker<'a> {
         if params.len() != args.len() {
             return err(
                 callee.span,
-                format!("expected {} argument(s), found {}", params.len(), args.len()),
+                format!(
+                    "expected {} argument(s), found {}",
+                    params.len(),
+                    args.len()
+                ),
             );
         }
         let mut xs = Vec::new();
@@ -684,12 +911,13 @@ impl<'a> Checker<'a> {
             xs.push(x);
         }
         if let Target::Call(Callee::Direct(f), _, r) = &target
-            && self.never_funcs.contains(f) {
-                return Ok((Target::Call(Callee::Direct(*f), params, NEVER), xs)).map(|(t, x)| {
-                    let _ = r;
-                    (t, x)
-                });
-            }
+            && self.never_funcs.contains(f)
+        {
+            return Ok((Target::Call(Callee::Direct(*f), params, NEVER), xs)).map(|(t, x)| {
+                let _ = r;
+                (t, x)
+            });
+        }
         Ok((target, xs))
     }
 
@@ -697,7 +925,10 @@ impl<'a> Checker<'a> {
         if let Some(alias) = self.module_alias(base)? {
             let m = self.module();
             if self.mods[m].externs.contains_key(&alias) {
-                return err(span, format!("extern functions must be called: `{alias}.{name}(...)`"));
+                return err(
+                    span,
+                    format!("extern functions must be called: `{alias}.{name}(...)`"),
+                );
             }
             return match self.lookup_sym(m, Some(&alias), name, span)? {
                 Some((tm, Sym::Globals(list))) => {
@@ -706,34 +937,59 @@ impl<'a> Checker<'a> {
                     let ty = self.globals[g].ty;
                     let _ = tm;
                     if matches!(self.types.kind(ty), TyKind::Mutex(_)) {
-                        return err(span, "mutexes from other modules cannot be accessed directly");
+                        return err(
+                            span,
+                            "mutexes from other modules cannot be accessed directly",
+                        );
                     }
-                    Ok(Expr { kind: EK::Var(VarRef::Global(g)), ty, span })
+                    Ok(Expr {
+                        kind: EK::Var(VarRef::Global(g)),
+                        ty,
+                        span,
+                    })
                 }
                 Some((_, Sym::Fn { func: Some(f), .. })) => {
                     self.idx_fn_ref(f, name, span);
                     let (ps, r) = self.sigs[f].clone();
                     let ty = self.types.intern(TyKind::Fn(ps, r));
-                    Ok(Expr { kind: EK::FnRef(f), ty, span })
+                    Ok(Expr {
+                        kind: EK::FnRef(f),
+                        ty,
+                        span,
+                    })
                 }
-                Some((_, Sym::Fn { func: None, .. })) => {
-                    err(span, format!("generic function `{alias}.{name}` requires explicit type arguments"))
-                }
+                Some((_, Sym::Fn { func: None, .. })) => err(
+                    span,
+                    format!("generic function `{alias}.{name}` requires explicit type arguments"),
+                ),
                 _ => err(span, format!("`{alias}.{name}` is a type, not a value")),
             };
         }
         if let Some(ty) = self.type_path(base)? {
             let Some(def) = self.types.enum_def(ty).cloned() else {
-                return err(span, format!("`{}` is a type, not a value", self.types.show(ty)));
+                return err(
+                    span,
+                    format!("`{}` is a type, not a value", self.types.show(ty)),
+                );
             };
             let Some(idx) = def.variants.iter().position(|(n, _)| n == name) else {
                 return err(span, format!("enum `{}` has no member `{name}`", def.name));
             };
             if !def.variants[idx].1.is_empty() {
-                return err(span, format!("`{}.{name}` holds a value; construct it with `{}.{name}(...)`", def.name, def.name));
+                return err(
+                    span,
+                    format!(
+                        "`{}.{name}` holds a value; construct it with `{}.{name}(...)`",
+                        def.name, def.name
+                    ),
+                );
             }
             self.idx_variant_ref(ty, idx, span);
-            return Ok(Expr { kind: EK::Variant(idx, vec![]), ty, span });
+            return Ok(Expr {
+                kind: EK::Variant(idx, vec![]),
+                ty,
+                span,
+            });
         }
         let b = self.check_expr(base, None)?;
         match self.types.kind(b.ty).clone() {
@@ -744,23 +1000,47 @@ impl<'a> Checker<'a> {
                         let ty = fields[idx].1;
                         let bty = b.ty;
                         self.idx_field_ref(bty, idx, span);
-                        Ok(Expr { kind: EK::Field(Box::new(b), idx), ty, span })
+                        Ok(Expr {
+                            kind: EK::Field(Box::new(b), idx),
+                            ty,
+                            span,
+                        })
                     }
-                    None => err(span, format!("`{}` has no field `{name}`", self.types.show(b.ty))),
+                    None => err(
+                        span,
+                        format!("`{}` has no field `{name}`", self.types.show(b.ty)),
+                    ),
                 }
             }
-            TyKind::Array(_) | TyKind::Fixed(..) | TyKind::Str | TyKind::Map(..) if name == "len" => {
-                Ok(Expr { kind: EK::Len(Box::new(b)), ty: UINT, span })
+            TyKind::Array(_) | TyKind::Fixed(..) | TyKind::Str | TyKind::Map(..)
+                if name == "len" =>
+            {
+                Ok(Expr {
+                    kind: EK::Len(Box::new(b)),
+                    ty: UINT,
+                    span,
+                })
             }
             TyKind::Named(_) => err(
                 span,
-                format!("`{}` is a named type; convert it with `@as` to access `.{name}`", self.types.show(b.ty)),
+                format!(
+                    "`{}` is a named type; convert it with `@as` to access `.{name}`",
+                    self.types.show(b.ty)
+                ),
             ),
-            _ => err(span, format!("`{}` has no member `{name}`", self.types.show(b.ty))),
+            _ => err(
+                span,
+                format!("`{}` has no member `{name}`", self.types.show(b.ty)),
+            ),
         }
     }
 
-    fn check_pair(&mut self, l: &ast::Expr, r: &ast::Expr, exp: Option<TyId>) -> Result<(Expr, Expr)> {
+    fn check_pair(
+        &mut self,
+        l: &ast::Expr,
+        r: &ast::Expr,
+        exp: Option<TyId>,
+    ) -> Result<(Expr, Expr)> {
         if Self::is_untyped_int(l) && !Self::is_untyped_int(r) {
             let b = self.check_expr(r, exp)?;
             let a = self.check_expr(l, Some(b.ty))?;
@@ -785,7 +1065,14 @@ impl<'a> Checker<'a> {
         Ok(e)
     }
 
-    fn check_binary(&mut self, op: BinOp, l: &ast::Expr, r: &ast::Expr, expected: Option<TyId>, span: Span) -> Result<Expr> {
+    fn check_binary(
+        &mut self,
+        op: BinOp,
+        l: &ast::Expr,
+        r: &ast::Expr,
+        expected: Option<TyId>,
+        span: Span,
+    ) -> Result<Expr> {
         use BinOp::*;
         let mk = |kind, ty| Ok(Expr { kind, ty, span });
         match op {
@@ -817,12 +1104,15 @@ impl<'a> Checker<'a> {
                             self.types.intern(TyKind::Fixed(*x, n + m))
                         }
                     }
-                    (TyKind::Fixed(x, _), TyKind::Array(y)) | (TyKind::Array(x), TyKind::Fixed(y, _)) if x == y => {
+                    (TyKind::Fixed(x, _), TyKind::Array(y))
+                    | (TyKind::Array(x), TyKind::Fixed(y, _))
+                        if x == y =>
+                    {
                         self.types.array(*x)
                     }
                     (TyKind::Map(..), TyKind::Map(..)) if a.ty == b.ty => a.ty,
                     (TyKind::Map(..), TyKind::Map(..)) => {
-                        return err(span, "cannot concatenate maps of different types")
+                        return err(span, "cannot concatenate maps of different types");
                     }
                     _ => {
                         return err(
@@ -832,7 +1122,7 @@ impl<'a> Checker<'a> {
                                 self.types.show(a.ty),
                                 self.types.show(b.ty)
                             ),
-                        )
+                        );
                     }
                 };
                 mk(EK::Binary(op, Box::new(a), Box::new(b)), ty)
@@ -845,16 +1135,31 @@ impl<'a> Checker<'a> {
                     TyKind::Str => {
                         let a = self.check_expr(l, None)?;
                         if a.ty != CHAR && a.ty != STR {
-                            return err(l.span, format!("expected `char` or `str`, found `{}`", self.types.show(a.ty)));
+                            return err(
+                                l.span,
+                                format!(
+                                    "expected `char` or `str`, found `{}`",
+                                    self.types.show(a.ty)
+                                ),
+                            );
                         }
                         a
                     }
                     _ => {
-                        return err(r.span, format!("`in` expects an array, map or string, found `{}`", self.types.show(b.ty)))
+                        return err(
+                            r.span,
+                            format!(
+                                "`in` expects an array, map or string, found `{}`",
+                                self.types.show(b.ty)
+                            ),
+                        );
                     }
                 };
                 if !self.comparable(a.ty) {
-                    return err(l.span, format!("`{}` values cannot be compared", self.types.show(a.ty)));
+                    return err(
+                        l.span,
+                        format!("`{}` values cannot be compared", self.types.show(a.ty)),
+                    );
                 }
                 mk(EK::Binary(op, Box::new(a), Box::new(b)), BOOL)
             }
@@ -863,7 +1168,11 @@ impl<'a> Checker<'a> {
                 if a.ty != b.ty {
                     return err(
                         span,
-                        format!("cannot compare `{}` with `{}`", self.types.show(a.ty), self.types.show(b.ty)),
+                        format!(
+                            "cannot compare `{}` with `{}`",
+                            self.types.show(a.ty),
+                            self.types.show(b.ty)
+                        ),
                     );
                 }
                 let ok = if matches!(op, Eq | Ne) {
@@ -872,7 +1181,14 @@ impl<'a> Checker<'a> {
                     self.types.is_numeric(a.ty) || a.ty == CHAR
                 };
                 if !ok {
-                    return err(span, format!("operator `{}` cannot be applied to `{}`", op.symbol(), self.types.show(a.ty)));
+                    return err(
+                        span,
+                        format!(
+                            "operator `{}` cannot be applied to `{}`",
+                            op.symbol(),
+                            self.types.show(a.ty)
+                        ),
+                    );
                 }
                 mk(EK::Binary(op, Box::new(a), Box::new(b)), BOOL)
             }
@@ -902,29 +1218,55 @@ impl<'a> Checker<'a> {
                     _ => unreachable!(),
                 };
                 if !ok {
-                    return err(span, format!("operator `{}` cannot be applied to `{}`", op.symbol(), self.types.show(t)));
+                    return err(
+                        span,
+                        format!(
+                            "operator `{}` cannot be applied to `{}`",
+                            op.symbol(),
+                            self.types.show(t)
+                        ),
+                    );
                 }
                 mk(EK::Binary(op, Box::new(a), Box::new(b)), t)
             }
         }
     }
 
-    fn check_builtin(&mut self, name: &str, ty: Option<&ast::TypeExpr>, args: &[ast::Expr], span: Span) -> Result<Expr> {
+    fn check_builtin(
+        &mut self,
+        name: &str,
+        ty: Option<&ast::TypeExpr>,
+        args: &[ast::Expr],
+        span: Span,
+    ) -> Result<Expr> {
         match name {
             "print" | "println" | "eprint" | "eprintln" => {
                 let mut xs = Vec::new();
                 for a in args {
                     let x = self.check_expr(a, None)?;
                     if !self.printable(x.ty) {
-                        return err(a.span, format!("`{}` cannot be printed", self.types.show(x.ty)));
+                        return err(
+                            a.span,
+                            format!("`{}` cannot be printed", self.types.show(x.ty)),
+                        );
                     }
                     xs.push(x);
                 }
-                let to = if name.starts_with('e') { PrintTo::Stderr } else { PrintTo::Stdout };
-                Ok(Expr { kind: EK::Print(to, name.ends_with("ln"), xs), ty: VOID, span })
+                let to = if name.starts_with('e') {
+                    PrintTo::Stderr
+                } else {
+                    PrintTo::Stdout
+                };
+                Ok(Expr {
+                    kind: EK::Print(to, name.ends_with("ln"), xs),
+                    ty: VOID,
+                    span,
+                })
             }
             "as" => {
-                let Some(te) = ty else { return err(span, "`@as` expects a type and a value") };
+                let Some(te) = ty else {
+                    return err(span, "`@as` expects a type and a value");
+                };
                 if args.len() != 1 {
                     return err(span, "`@as` expects a type and a value: `@as(T, value)`");
                 }
@@ -937,7 +1279,13 @@ impl<'a> Checker<'a> {
     }
 
     fn check_cast(&mut self, x: Expr, t: TyId, span: Span) -> Result<Expr> {
-        let retype = |x: Expr| Ok(Expr { kind: EK::Retype(Box::new(x)), ty: t, span });
+        let retype = |x: Expr| {
+            Ok(Expr {
+                kind: EK::Retype(Box::new(x)),
+                ty: t,
+                span,
+            })
+        };
         if x.ty == t {
             return Ok(x);
         }
@@ -957,14 +1305,17 @@ impl<'a> Checker<'a> {
         let ok = match (&from, &to) {
             (TyKind::Fixed(e, _), TyKind::Array(f)) if e == f => return retype(x),
             (TyKind::Array(_), TyKind::Fixed(..)) => {
-                return err(span, "cannot convert a dynamic array to a fixed-size array")
+                return err(span, "cannot convert a dynamic array to a fixed-size array");
             }
             (TyKind::Fixed(..), TyKind::Str) => true,
             (TyKind::Bool, TyKind::Int | TyKind::UInt | TyKind::Str) => true,
             (TyKind::Byte, TyKind::Char | TyKind::Int | TyKind::UInt | TyKind::Str) => true,
             (TyKind::Char, TyKind::Str) => true,
             (TyKind::Char, _) if t == bytes => true,
-            (TyKind::Enum(_) | TyKind::Map(..) | TyKind::Struct(_) | TyKind::Tuple(_), TyKind::Str) => true,
+            (
+                TyKind::Enum(_) | TyKind::Map(..) | TyKind::Struct(_) | TyKind::Tuple(_),
+                TyKind::Str,
+            ) => true,
             (TyKind::Int, TyKind::UInt | TyKind::Float | TyKind::Str) => true,
             (TyKind::UInt, TyKind::Int | TyKind::Float | TyKind::Str) => true,
             (TyKind::Float, TyKind::Int | TyKind::UInt | TyKind::Str) => true,
@@ -973,12 +1324,29 @@ impl<'a> Checker<'a> {
             _ => false,
         };
         if !ok {
-            return err(span, format!("cannot convert `{}` to `{}`", self.types.show(x.ty), self.types.show(t)));
+            return err(
+                span,
+                format!(
+                    "cannot convert `{}` to `{}`",
+                    self.types.show(x.ty),
+                    self.types.show(t)
+                ),
+            );
         }
         if to == TyKind::Str && !self.printable(x.ty) {
-            return err(span, format!("`{}` cannot be converted to a string", self.types.show(x.ty)));
+            return err(
+                span,
+                format!(
+                    "`{}` cannot be converted to a string",
+                    self.types.show(x.ty)
+                ),
+            );
         }
-        Ok(Expr { kind: EK::Cast(Box::new(x)), ty: t, span })
+        Ok(Expr {
+            kind: EK::Cast(Box::new(x)),
+            ty: t,
+            span,
+        })
     }
 
     fn check_if(&mut self, ife: &ast::IfExpr, value_ty: Option<TyId>, span: Span) -> Result<Expr> {
@@ -988,10 +1356,16 @@ impl<'a> Checker<'a> {
                 let x = self.check_expr(s, None)?;
                 match self.types.kind(x.ty) {
                     TyKind::Map(..) => {
-                        return err(s.span, "maps cannot be matched directly; use a bare `if { ... }` with conditions")
+                        return err(
+                            s.span,
+                            "maps cannot be matched directly; use a bare `if { ... }` with conditions",
+                        );
                     }
                     TyKind::Fn(..) | TyKind::Fut(_) | TyKind::Void => {
-                        return err(s.span, format!("`{}` values cannot be matched", self.types.show(x.ty)))
+                        return err(
+                            s.span,
+                            format!("`{}` values cannot be matched", self.types.show(x.ty)),
+                        );
                     }
                     _ => {}
                 }
@@ -1003,7 +1377,11 @@ impl<'a> Checker<'a> {
             Some(t) => JumpKind::Value(t),
             None => JumpKind::If,
         };
-        self.ctx().jumps.push(JumpCtx { id, kind, label: ife.label.clone() });
+        self.ctx().jumps.push(JumpCtx {
+            id,
+            kind,
+            label: ife.label.clone(),
+        });
         let r = (|| {
             let mut arms = Vec::new();
             for arm in &ife.arms {
@@ -1025,9 +1403,15 @@ impl<'a> Checker<'a> {
                     }
                     let body = self.check_block(&arm.body)?;
                     if value_ty.is_some() && self.block_completes(&body) {
-                        return err(arm.body.span, "this branch must produce a value with `break <value>`");
+                        return err(
+                            arm.body.span,
+                            "this branch must produce a value with `break <value>`",
+                        );
                     }
-                    Ok(Arm { patterns: pats, body })
+                    Ok(Arm {
+                        patterns: pats,
+                        body,
+                    })
                 })();
                 self.pop_scope();
                 arms.push(res?);
@@ -1047,10 +1431,18 @@ impl<'a> Checker<'a> {
             }),
         };
         if !exhaustive {
-            return err(span, "`if` branches are not exhaustive; add a fallback `_ -> { ... }` branch");
+            return err(
+                span,
+                "`if` branches are not exhaustive; add a fallback `_ -> { ... }` branch",
+            );
         }
         Ok(Expr {
-            kind: EK::If(Box::new(If { id, is_value: value_ty.is_some(), scrutinee: scrut, arms })),
+            kind: EK::If(Box::new(If {
+                id,
+                is_value: value_ty.is_some(),
+                scrutinee: scrut,
+                arms,
+            })),
             ty: value_ty.unwrap_or(VOID),
             span,
         })

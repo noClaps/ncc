@@ -10,10 +10,12 @@ use std::process::ExitCode;
 
 use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
 use lsp_types::notification::{
-    DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument, Notification as _,
-    PublishDiagnostics,
+    DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument,
+    Notification as _, PublishDiagnostics,
 };
-use lsp_types::request::{Completion, DocumentSymbolRequest, GotoDefinition, HoverRequest, Request as _};
+use lsp_types::request::{
+    Completion, DocumentSymbolRequest, GotoDefinition, HoverRequest, Request as _,
+};
 use lsp_types::*;
 
 use crate::ast;
@@ -21,11 +23,13 @@ use crate::check::index::{DeclKind, Index};
 use crate::diag::{Diag, SourceMap, Span};
 
 const KEYWORDS: &[&str] = &[
-    "fn", "return", "if", "else", "while", "for", "in", "break", "continue", "mut", "mutex", "lock", "struct",
-    "enum", "type", "import", "as", "extern", "pub", "test", "assert", "true", "false", "none", "and", "or", "not",
-    "try", "catch", "throw", "async", "await", "fut",
+    "fn", "return", "if", "else", "while", "for", "in", "break", "continue", "mut", "mutex",
+    "lock", "struct", "enum", "type", "import", "as", "extern", "pub", "test", "assert", "true",
+    "false", "none", "and", "or", "not", "try", "catch", "throw", "async", "await", "fut",
 ];
-const TYPES: &[&str] = &["int", "uint", "byte", "float", "bool", "char", "str", "void", "error", "never"];
+const TYPES: &[&str] = &[
+    "int", "uint", "byte", "float", "bool", "char", "str", "void", "error", "never",
+];
 const BUILTINS: &[(&str, &str)] = &[
     ("print", "fn @print(...)"),
     ("println", "fn @println(...)"),
@@ -53,12 +57,14 @@ struct Server {
 pub fn run() -> ExitCode {
     let (connection, io_threads) = Connection::stdio();
     let caps = ServerCapabilities {
-        text_document_sync: Some(TextDocumentSyncCapability::Options(TextDocumentSyncOptions {
-            open_close: Some(true),
-            change: Some(TextDocumentSyncKind::FULL),
-            save: Some(TextDocumentSyncSaveOptions::Supported(true)),
-            ..Default::default()
-        })),
+        text_document_sync: Some(TextDocumentSyncCapability::Options(
+            TextDocumentSyncOptions {
+                open_close: Some(true),
+                change: Some(TextDocumentSyncKind::FULL),
+                save: Some(TextDocumentSyncSaveOptions::Supported(true)),
+                ..Default::default()
+            },
+        )),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         definition_provider: Some(OneOf::Left(true)),
         document_symbol_provider: Some(OneOf::Left(true)),
@@ -115,12 +121,14 @@ fn uri_to_path(uri: &Uri) -> Option<PathBuf> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len()
-            && let Ok(v) = u8::from_str_radix(&rest[i + 1..i + 3], 16) {
-                out.push(v);
-                i += 3;
-                continue;
-            }
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Ok(v) = u8::from_str_radix(&rest[i + 1..i + 3], 16)
+        {
+            out.push(v);
+            i += 3;
+            continue;
+        }
         out.push(bytes[i]);
         i += 1;
     }
@@ -132,7 +140,9 @@ fn path_to_uri(p: &Path) -> Uri {
     let mut s = String::from("file://");
     for b in p.to_string_lossy().bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' => s.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' => {
+                s.push(b as char)
+            }
             _ => s.push_str(&format!("%{b:02X}")),
         }
     }
@@ -169,12 +179,18 @@ fn pos_to_offset(text: &str, pos: Position) -> usize {
 }
 
 fn span_range(text: &str, span: Span) -> Range {
-    Range::new(offset_to_pos(text, span.start as usize), offset_to_pos(text, span.end as usize))
+    Range::new(
+        offset_to_pos(text, span.start as usize),
+        offset_to_pos(text, span.end as usize),
+    )
 }
 
 impl Server {
     fn text_of(&self, path: &Path) -> Option<String> {
-        self.docs.get(path).cloned().or_else(|| std::fs::read_to_string(path).ok())
+        self.docs
+            .get(path)
+            .cloned()
+            .or_else(|| std::fs::read_to_string(path).ok())
     }
 
     // ------------------------------------------------------------------ notifications
@@ -182,27 +198,43 @@ impl Server {
     fn notification(&mut self, n: Notification) -> Vec<Notification> {
         let path = match n.method.as_str() {
             DidOpenTextDocument::METHOD => {
-                let Ok(p) = serde_json::from_value::<DidOpenTextDocumentParams>(n.params) else { return vec![] };
-                let Some(path) = uri_to_path(&p.text_document.uri) else { return vec![] };
+                let Ok(p) = serde_json::from_value::<DidOpenTextDocumentParams>(n.params) else {
+                    return vec![];
+                };
+                let Some(path) = uri_to_path(&p.text_document.uri) else {
+                    return vec![];
+                };
                 self.docs.insert(path.clone(), p.text_document.text);
                 path
             }
             DidChangeTextDocument::METHOD => {
-                let Ok(p) = serde_json::from_value::<DidChangeTextDocumentParams>(n.params) else { return vec![] };
-                let Some(path) = uri_to_path(&p.text_document.uri) else { return vec![] };
+                let Ok(p) = serde_json::from_value::<DidChangeTextDocumentParams>(n.params) else {
+                    return vec![];
+                };
+                let Some(path) = uri_to_path(&p.text_document.uri) else {
+                    return vec![];
+                };
                 if let Some(change) = p.content_changes.into_iter().last() {
                     self.docs.insert(path.clone(), change.text);
                 }
                 path
             }
             DidSaveTextDocument::METHOD => {
-                let Ok(p) = serde_json::from_value::<DidSaveTextDocumentParams>(n.params) else { return vec![] };
-                let Some(path) = uri_to_path(&p.text_document.uri) else { return vec![] };
+                let Ok(p) = serde_json::from_value::<DidSaveTextDocumentParams>(n.params) else {
+                    return vec![];
+                };
+                let Some(path) = uri_to_path(&p.text_document.uri) else {
+                    return vec![];
+                };
                 path
             }
             DidCloseTextDocument::METHOD => {
-                let Ok(p) = serde_json::from_value::<DidCloseTextDocumentParams>(n.params) else { return vec![] };
-                let Some(path) = uri_to_path(&p.text_document.uri) else { return vec![] };
+                let Ok(p) = serde_json::from_value::<DidCloseTextDocumentParams>(n.params) else {
+                    return vec![];
+                };
+                let Some(path) = uri_to_path(&p.text_document.uri) else {
+                    return vec![];
+                };
                 self.docs.remove(&path);
                 self.analyses.remove(&path);
                 // clear diagnostics owned by this entry
@@ -228,7 +260,10 @@ impl Server {
                 by_file.entry(file).or_default().push(d);
             }
             files.insert(entry.clone());
-            let old = self.published.insert(entry, files.clone()).unwrap_or_default();
+            let old = self
+                .published
+                .insert(entry, files.clone())
+                .unwrap_or_default();
             for f in old.difference(&files) {
                 by_file.entry(f.clone()).or_default();
             }
@@ -252,7 +287,11 @@ impl Server {
         match crate::modules::load_with(&mut sm, entry, &self.docs) {
             Err(errs) => diags.extend(errs.into_iter().map(|d| (d, DiagnosticSeverity::ERROR))),
             Ok((graph, load_errors)) => {
-                diags.extend(load_errors.into_iter().map(|d| (d, DiagnosticSeverity::ERROR)));
+                diags.extend(
+                    load_errors
+                        .into_iter()
+                        .map(|d| (d, DiagnosticSeverity::ERROR)),
+                );
                 let mut im = HashMap::new();
                 for (alias, &m) in &graph.modules[0].imports {
                     im.insert(alias.clone(), graph.modules[m].path.clone());
@@ -293,7 +332,8 @@ impl Server {
         match (index, self.analyses.get_mut(entry)) {
             (Some(index), _) => {
                 let imports = imports.unwrap_or_default();
-                self.analyses.insert(entry.to_path_buf(), Analysis { sm, index, imports });
+                self.analyses
+                    .insert(entry.to_path_buf(), Analysis { sm, index, imports });
             }
             (None, Some(a)) => {
                 // refresh the text used for position mapping of the current file
@@ -315,9 +355,11 @@ impl Server {
             GotoDefinition::METHOD => serde_json::from_value::<GotoDefinitionParams>(req.params)
                 .ok()
                 .map(|p| serde_json::to_value(self.definition(p)).unwrap()),
-            DocumentSymbolRequest::METHOD => serde_json::from_value::<DocumentSymbolParams>(req.params)
-                .ok()
-                .map(|p| serde_json::to_value(self.symbols(p)).unwrap()),
+            DocumentSymbolRequest::METHOD => {
+                serde_json::from_value::<DocumentSymbolParams>(req.params)
+                    .ok()
+                    .map(|p| serde_json::to_value(self.symbols(p)).unwrap())
+            }
             Completion::METHOD => serde_json::from_value::<CompletionParams>(req.params)
                 .ok()
                 .map(|p| serde_json::to_value(self.completion(p)).unwrap()),
@@ -325,12 +367,20 @@ impl Server {
         };
         match result {
             Some(v) => Response::new_ok(id, v),
-            None => Response::new_err(id, lsp_server::ErrorCode::InvalidParams as i32, "invalid parameters".into()),
+            None => Response::new_err(
+                id,
+                lsp_server::ErrorCode::InvalidParams as i32,
+                "invalid parameters".into(),
+            ),
         }
     }
 
     /// Find the innermost indexed reference at a position.
-    fn lookup(&self, uri: &Uri, pos: Position) -> Option<(&Analysis, &crate::check::index::SymRef)> {
+    fn lookup(
+        &self,
+        uri: &Uri,
+        pos: Position,
+    ) -> Option<(&Analysis, &crate::check::index::SymRef)> {
         let path = uri_to_path(uri)?;
         let a = self.analyses.get(&path)?;
         let fid = a.sm.files.iter().position(|f| f.path == path)? as u32;
@@ -339,7 +389,12 @@ impl Server {
         a.index
             .refs
             .iter()
-            .filter(|r| r.span.file == fid && r.span.start <= off && off <= r.span.end && r.span.end > r.span.start)
+            .filter(|r| {
+                r.span.file == fid
+                    && r.span.start <= off
+                    && off <= r.span.end
+                    && r.span.end > r.span.start
+            })
             .min_by_key(|r| r.span.end - r.span.start)
             .map(|r| (a, r))
     }
@@ -362,7 +417,10 @@ impl Server {
         let (a, r) = self.lookup(&pp.text_document.uri, pp.position)?;
         let def = r.def?;
         let f = a.sm.file(def.file);
-        Some(GotoDefinitionResponse::Scalar(Location::new(path_to_uri(&f.path), span_range(&f.text, def))))
+        Some(GotoDefinitionResponse::Scalar(Location::new(
+            path_to_uri(&f.path),
+            span_range(&f.text, def),
+        )))
     }
 
     #[allow(deprecated)]
@@ -370,10 +428,18 @@ impl Server {
         let path = uri_to_path(&p.text_document.uri)?;
         let text = self.text_of(&path)?;
         let (module, _) = crate::parser::parse_module_recover(&text, 0);
-        let sym = |name: &str, kind: SymbolKind, span: Span, detail: Option<String>, children: Option<Vec<DocumentSymbol>>| {
+        let sym = |name: &str,
+                   kind: SymbolKind,
+                   span: Span,
+                   detail: Option<String>,
+                   children: Option<Vec<DocumentSymbol>>| {
             let range = span_range(&text, span);
             DocumentSymbol {
-                name: if name.is_empty() { "_".into() } else { name.to_string() },
+                name: if name.is_empty() {
+                    "_".into()
+                } else {
+                    name.to_string()
+                },
                 detail,
                 kind,
                 tags: None,
@@ -386,26 +452,79 @@ impl Server {
         let mut out = Vec::new();
         for it in &module.items {
             match it {
-                ast::Item::Fn(f) => out.push(sym(&f.sig.name, SymbolKind::FUNCTION, f.sig.span.to(f.body.span), None, None)),
+                ast::Item::Fn(f) => out.push(sym(
+                    &f.sig.name,
+                    SymbolKind::FUNCTION,
+                    f.sig.span.to(f.body.span),
+                    None,
+                    None,
+                )),
                 ast::Item::Struct(s) => {
-                    let fields = s.fields.iter().map(|(_, n, sp)| sym(n, SymbolKind::FIELD, *sp, None, None)).collect();
+                    let fields = s
+                        .fields
+                        .iter()
+                        .map(|(_, n, sp)| sym(n, SymbolKind::FIELD, *sp, None, None))
+                        .collect();
                     out.push(sym(&s.name, SymbolKind::STRUCT, s.span, None, Some(fields)));
                 }
                 ast::Item::Enum(e) => {
-                    let vs = e.variants.iter().map(|(n, _, sp)| sym(n, SymbolKind::ENUM_MEMBER, *sp, None, None)).collect();
+                    let vs = e
+                        .variants
+                        .iter()
+                        .map(|(n, _, sp)| sym(n, SymbolKind::ENUM_MEMBER, *sp, None, None))
+                        .collect();
                     out.push(sym(&e.name, SymbolKind::ENUM, e.span, None, Some(vs)));
                 }
-                ast::Item::Type(t) => out.push(sym(&t.name, SymbolKind::TYPE_PARAMETER, t.span, None, None)),
-                ast::Item::Test(name, _, span) => out.push(sym(name, SymbolKind::METHOD, *span, Some("test".into()), None)),
-                ast::Item::Extern(e) => {
-                    let fs = e.fns.iter().map(|f| sym(&f.sig.name, SymbolKind::FUNCTION, f.sig.span, Some(f.symbol.clone()), None)).collect();
-                    out.push(sym(&e.alias, SymbolKind::MODULE, e.span, Some(e.path.clone()), Some(fs)));
+                ast::Item::Type(t) => {
+                    out.push(sym(&t.name, SymbolKind::TYPE_PARAMETER, t.span, None, None))
                 }
-                ast::Item::Import(im) => out.push(sym(&im.alias, SymbolKind::MODULE, im.span, Some(im.path.clone()), None)),
+                ast::Item::Test(name, _, span) => out.push(sym(
+                    name,
+                    SymbolKind::METHOD,
+                    *span,
+                    Some("test".into()),
+                    None,
+                )),
+                ast::Item::Extern(e) => {
+                    let fs = e
+                        .fns
+                        .iter()
+                        .map(|f| {
+                            sym(
+                                &f.sig.name,
+                                SymbolKind::FUNCTION,
+                                f.sig.span,
+                                Some(f.symbol.clone()),
+                                None,
+                            )
+                        })
+                        .collect();
+                    out.push(sym(
+                        &e.alias,
+                        SymbolKind::MODULE,
+                        e.span,
+                        Some(e.path.clone()),
+                        Some(fs),
+                    ));
+                }
+                ast::Item::Import(im) => out.push(sym(
+                    &im.alias,
+                    SymbolKind::MODULE,
+                    im.span,
+                    Some(im.path.clone()),
+                    None,
+                )),
                 ast::Item::Stmt(s) => {
-                    if let ast::StmtKind::VarDecl { targets, mutable, .. } = &s.kind {
+                    if let ast::StmtKind::VarDecl {
+                        targets, mutable, ..
+                    } = &s.kind
+                    {
                         for t in targets {
-                            let kind = if *mutable { SymbolKind::VARIABLE } else { SymbolKind::CONSTANT };
+                            let kind = if *mutable {
+                                SymbolKind::VARIABLE
+                            } else {
+                                SymbolKind::CONSTANT
+                            };
                             out.push(sym(&t.name, kind, t.span, None, None));
                         }
                     } else if let ast::StmtKind::FnVar { name, .. } = &s.kind {
@@ -432,7 +551,9 @@ impl Server {
         };
         let mut items = Vec::new();
         let analysis = self.analyses.get(&path);
-        let fid = analysis.and_then(|a| a.sm.files.iter().position(|f| f.path == path)).map(|i| i as u32);
+        let fid = analysis
+            .and_then(|a| a.sm.files.iter().position(|f| f.path == path))
+            .map(|i| i as u32);
 
         // `@builtin`
         let word_start = before
@@ -462,28 +583,47 @@ impl Server {
             if let Some(a) = analysis {
                 if let Some(mpath) = a.imports.get(name) {
                     if let Some(mtext) = self.text_of(mpath)
-                        && let Ok(m) = crate::parser::parse_module(&mtext, 0) {
-                            for it in &m.items {
-                                match it {
-                                    ast::Item::Fn(f) if f.public => {
-                                        items.push(item(&f.sig.name, CompletionItemKind::FUNCTION, None))
-                                    }
-                                    ast::Item::Struct(s) if s.public => {
-                                        items.push(item(&s.name, CompletionItemKind::STRUCT, None))
-                                    }
-                                    ast::Item::Enum(e) if e.public => items.push(item(&e.name, CompletionItemKind::ENUM, None)),
-                                    ast::Item::Type(t) if t.public => {
-                                        items.push(item(&t.name, CompletionItemKind::TYPE_PARAMETER, None))
-                                    }
-                                    ast::Item::Stmt(ast::Stmt { kind: ast::StmtKind::VarDecl { public: true, targets, .. }, .. }) => {
-                                        for t in targets {
-                                            items.push(item(&t.name, CompletionItemKind::VARIABLE, None));
-                                        }
-                                    }
-                                    _ => {}
+                        && let Ok(m) = crate::parser::parse_module(&mtext, 0)
+                    {
+                        for it in &m.items {
+                            match it {
+                                ast::Item::Fn(f) if f.public => items.push(item(
+                                    &f.sig.name,
+                                    CompletionItemKind::FUNCTION,
+                                    None,
+                                )),
+                                ast::Item::Struct(s) if s.public => {
+                                    items.push(item(&s.name, CompletionItemKind::STRUCT, None))
                                 }
+                                ast::Item::Enum(e) if e.public => {
+                                    items.push(item(&e.name, CompletionItemKind::ENUM, None))
+                                }
+                                ast::Item::Type(t) if t.public => items.push(item(
+                                    &t.name,
+                                    CompletionItemKind::TYPE_PARAMETER,
+                                    None,
+                                )),
+                                ast::Item::Stmt(ast::Stmt {
+                                    kind:
+                                        ast::StmtKind::VarDecl {
+                                            public: true,
+                                            targets,
+                                            ..
+                                        },
+                                    ..
+                                }) => {
+                                    for t in targets {
+                                        items.push(item(
+                                            &t.name,
+                                            CompletionItemKind::VARIABLE,
+                                            None,
+                                        ));
+                                    }
+                                }
+                                _ => {}
                             }
                         }
+                    }
                     return Some(CompletionResponse::Array(items));
                 }
                 // most recent declaration of `name` before the cursor in this file
@@ -492,11 +632,18 @@ impl Server {
                     .decls
                     .iter()
                     .filter(|d| d.name == name && Some(d.span.file) == fid)
-                    .filter(|d| (d.span.start as usize) <= off || matches!(d.kind, DeclKind::Enum | DeclKind::Struct))
+                    .filter(|d| {
+                        (d.span.start as usize) <= off
+                            || matches!(d.kind, DeclKind::Enum | DeclKind::Struct)
+                    })
                     .max_by_key(|d| d.span.start);
                 if let Some(d) = decl {
                     for (m, detail) in &d.members {
-                        let kind = if d.kind == DeclKind::Enum { CompletionItemKind::ENUM_MEMBER } else { CompletionItemKind::FIELD };
+                        let kind = if d.kind == DeclKind::Enum {
+                            CompletionItemKind::ENUM_MEMBER
+                        } else {
+                            CompletionItemKind::FIELD
+                        };
                         items.push(item(m, kind, Some(detail.clone())));
                     }
                 }
@@ -509,16 +656,23 @@ impl Server {
             items.push(item(k, CompletionItemKind::KEYWORD, None));
         }
         for t in TYPES {
-            items.push(item(t, CompletionItemKind::KEYWORD, Some("builtin type".into())));
+            items.push(item(
+                t,
+                CompletionItemKind::KEYWORD,
+                Some("builtin type".into()),
+            ));
         }
         if let Some(a) = analysis {
             let mut seen = HashSet::new();
             for d in a.index.decls.iter().rev() {
-                if Some(d.span.file) != fid || matches!(d.kind, DeclKind::Field | DeclKind::Variant) {
+                if Some(d.span.file) != fid || matches!(d.kind, DeclKind::Field | DeclKind::Variant)
+                {
                     continue;
                 }
-                let visible = matches!(d.kind, DeclKind::Function | DeclKind::Struct | DeclKind::Enum | DeclKind::Type)
-                    || (d.span.start as usize) <= off;
+                let visible = matches!(
+                    d.kind,
+                    DeclKind::Function | DeclKind::Struct | DeclKind::Enum | DeclKind::Type
+                ) || (d.span.start as usize) <= off;
                 if !visible || !seen.insert(d.name.clone()) {
                     continue;
                 }
@@ -542,10 +696,18 @@ impl Server {
 fn publish(path: &Path, diagnostics: Vec<Diagnostic>) -> Notification {
     Notification::new(
         PublishDiagnostics::METHOD.to_string(),
-        PublishDiagnosticsParams { uri: path_to_uri(path), diagnostics, version: None },
+        PublishDiagnosticsParams {
+            uri: path_to_uri(path),
+            diagnostics,
+            version: None,
+        },
     )
 }
 
 fn method_not_found(id: RequestId, method: &str) -> Response {
-    Response::new_err(id, lsp_server::ErrorCode::MethodNotFound as i32, format!("unsupported request `{method}`"))
+    Response::new_err(
+        id,
+        lsp_server::ErrorCode::MethodNotFound as i32,
+        format!("unsupported request `{method}`"),
+    )
 }

@@ -14,9 +14,9 @@ impl zed::Extension for NcExtension {
         _language_server_id: &LanguageServerId,
         worktree: &zed::Worktree,
     ) -> Result<zed::Command> {
-        let path = worktree
-            .which("ncc")
-            .ok_or_else(|| "`ncc` was not found on PATH; install it to enable the NC language server".to_string())?;
+        let path = worktree.which("ncc").ok_or_else(|| {
+            "`ncc` was not found on PATH; install it to enable the NC language server".to_string()
+        })?;
         Ok(zed::Command {
             command: path,
             args: vec!["lsp".into()],

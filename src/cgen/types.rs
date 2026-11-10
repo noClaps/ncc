@@ -170,7 +170,12 @@ impl<'t> TypeGen<'t> {
         }
         // components
         let comps: Vec<TyId> = match &kind {
-            TyKind::Array(e) | TyKind::Fixed(e, _) | TyKind::Opt(e) | TyKind::ErrU(e) | TyKind::Fut(e) | TyKind::Mutex(e) => vec![*e],
+            TyKind::Array(e)
+            | TyKind::Fixed(e, _)
+            | TyKind::Opt(e)
+            | TyKind::ErrU(e)
+            | TyKind::Fut(e)
+            | TyKind::Mutex(e) => vec![*e],
             TyKind::Map(k, v) => vec![*k, *v],
             TyKind::Tuple(ts) => ts.clone(),
             TyKind::Fn(ps, r) => {
@@ -178,8 +183,16 @@ impl<'t> TypeGen<'t> {
                 v.push(*r);
                 v
             }
-            TyKind::Struct(i) => self.t.structs[*i as usize].fields.iter().map(|f| f.1).collect(),
-            TyKind::Enum(i) => self.t.enums[*i as usize].variants.iter().flat_map(|v| v.1.clone()).collect(),
+            TyKind::Struct(i) => self.t.structs[*i as usize]
+                .fields
+                .iter()
+                .map(|f| f.1)
+                .collect(),
+            TyKind::Enum(i) => self.t.enums[*i as usize]
+                .variants
+                .iter()
+                .flat_map(|v| v.1.clone())
+                .collect(),
             _ => vec![],
         };
         for c in &comps {
@@ -190,11 +203,19 @@ impl<'t> TypeGen<'t> {
         match &kind {
             TyKind::Opt(i) if !self.t.opt_boxed(t) => {
                 let ic = self.ct(*i);
-                writeln!(self.decls, "struct nc_{name} {{\n  bool has;\n  {ic} val;\n}};").unwrap();
+                writeln!(
+                    self.decls,
+                    "struct nc_{name} {{\n  bool has;\n  {ic} val;\n}};"
+                )
+                .unwrap();
             }
             TyKind::ErrU(i) => {
                 let ic = self.ct(*i);
-                writeln!(self.decls, "struct nc_{name} {{\n  nc_str *err; /* NULL on success */\n  {ic} val;\n}};").unwrap();
+                writeln!(
+                    self.decls,
+                    "struct nc_{name} {{\n  nc_str *err; /* NULL on success */\n  {ic} val;\n}};"
+                )
+                .unwrap();
             }
             TyKind::Tuple(ts) => {
                 let mut s = format!("struct nc_{name} {{\n");
@@ -220,7 +241,9 @@ impl<'t> TypeGen<'t> {
             }
             TyKind::Enum(ei) if self.t.enum_has_payload(t) => {
                 let vars = self.t.enums[*ei as usize].variants.clone();
-                let mut s = format!("struct nc_{name} {{\n  _Atomic int64_t rc;\n  uint32_t tag;\n  union {{\n");
+                let mut s = format!(
+                    "struct nc_{name} {{\n  _Atomic int64_t rc;\n  uint32_t tag;\n  union {{\n"
+                );
                 for (vi, (vname, ps)) in vars.iter().enumerate() {
                     if ps.is_empty() {
                         continue;
@@ -262,30 +285,92 @@ impl<'t> TypeGen<'t> {
         writeln!(b, "/* {} */", self.t.show(t).replace("*/", "* /")).unwrap();
         writeln!(b, "static {ct} rt_{h}({ct} x) {{ {rt} return x; }}").unwrap();
         writeln!(b, "static void rl_{h}({ct} x) {{ (void)x; {rl} }}").unwrap();
-        writeln!(b, "static bool eq_{h}({ct} a, {ct} b) {{ (void)a; (void)b; {eq} }}").unwrap();
+        writeln!(
+            b,
+            "static bool eq_{h}({ct} a, {ct} b) {{ (void)a; (void)b; {eq} }}"
+        )
+        .unwrap();
         writeln!(b, "static uint64_t hs_{h}({ct} x) {{ (void)x; {hs} }}").unwrap();
-        writeln!(b, "static void st_{h}(nc_sb *sb, {ct} x) {{ (void)sb; (void)x; {st} }}").unwrap();
+        writeln!(
+            b,
+            "static void st_{h}(nc_sb *sb, {ct} x) {{ (void)sb; (void)x; {st} }}"
+        )
+        .unwrap();
         if managed {
-            writeln!(b, "static void vrt_{h}(void *p) {{ *({ct} *)p = rt_{h}(*({ct} *)p); }}").unwrap();
+            writeln!(
+                b,
+                "static void vrt_{h}(void *p) {{ *({ct} *)p = rt_{h}(*({ct} *)p); }}"
+            )
+            .unwrap();
             writeln!(b, "static void vrl_{h}(void *p) {{ rl_{h}(*({ct} *)p); }}").unwrap();
         }
         writeln!(b, "static bool veq_{h}(const void *a, const void *b) {{ return eq_{h}(*({ct} const *)a, *({ct} const *)b); }}").unwrap();
-        writeln!(b, "static uint64_t vhs_{h}(const void *a) {{ return hs_{h}(*({ct} const *)a); }}").unwrap();
-        writeln!(b, "static void vst_{h}(nc_sb *sb, const void *a) {{ st_{h}(sb, *({ct} const *)a); }}").unwrap();
-        let (r, l) = if managed { (format!("vrt_{h}"), format!("vrl_{h}")) } else { ("NULL".into(), "NULL".into()) };
-        writeln!(b, "static const nc_ti ti_{h} = {{sizeof({ct}), {r}, {l}, veq_{h}, vhs_{h}, vst_{h}}};\n").unwrap();
+        writeln!(
+            b,
+            "static uint64_t vhs_{h}(const void *a) {{ return hs_{h}(*({ct} const *)a); }}"
+        )
+        .unwrap();
+        writeln!(
+            b,
+            "static void vst_{h}(nc_sb *sb, const void *a) {{ st_{h}(sb, *({ct} const *)a); }}"
+        )
+        .unwrap();
+        let (r, l) = if managed {
+            (format!("vrt_{h}"), format!("vrl_{h}"))
+        } else {
+            ("NULL".into(), "NULL".into())
+        };
+        writeln!(
+            b,
+            "static const nc_ti ti_{h} = {{sizeof({ct}), {r}, {l}, veq_{h}, vhs_{h}, vst_{h}}};\n"
+        )
+        .unwrap();
     }
 
     /// (retain stmts, release stmts, eq body, hash body, str body)
-    fn helper_bodies(&mut self, t: TyId, kind: &TyKind) -> (String, String, String, String, String) {
+    fn helper_bodies(
+        &mut self,
+        t: TyId,
+        kind: &TyKind,
+    ) -> (String, String, String, String, String) {
         let s = |x: &str| x.to_string();
         match kind {
             TyKind::Void => (s(""), s(""), s("return true;"), s("return 0;"), s("")),
-            TyKind::Bool => (s(""), s(""), s("return a == b;"), s("return nc_hash_u64(x);"), s("nc_sb_bool(sb, x);")),
-            TyKind::Byte => (s(""), s(""), s("return a == b;"), s("return nc_hash_u64(x);"), s("nc_sb_u64(sb, x);")),
-            TyKind::Int => (s(""), s(""), s("return a == b;"), s("return nc_hash_u64((uint64_t)x);"), s("nc_sb_i64(sb, x);")),
-            TyKind::UInt => (s(""), s(""), s("return a == b;"), s("return nc_hash_u64(x);"), s("nc_sb_u64(sb, x);")),
-            TyKind::Char => (s(""), s(""), s("return a == b;"), s("return nc_hash_u64(x);"), s("nc_sb_char(sb, x);")),
+            TyKind::Bool => (
+                s(""),
+                s(""),
+                s("return a == b;"),
+                s("return nc_hash_u64(x);"),
+                s("nc_sb_bool(sb, x);"),
+            ),
+            TyKind::Byte => (
+                s(""),
+                s(""),
+                s("return a == b;"),
+                s("return nc_hash_u64(x);"),
+                s("nc_sb_u64(sb, x);"),
+            ),
+            TyKind::Int => (
+                s(""),
+                s(""),
+                s("return a == b;"),
+                s("return nc_hash_u64((uint64_t)x);"),
+                s("nc_sb_i64(sb, x);"),
+            ),
+            TyKind::UInt => (
+                s(""),
+                s(""),
+                s("return a == b;"),
+                s("return nc_hash_u64(x);"),
+                s("nc_sb_u64(sb, x);"),
+            ),
+            TyKind::Char => (
+                s(""),
+                s(""),
+                s("return a == b;"),
+                s("return nc_hash_u64(x);"),
+                s("nc_sb_char(sb, x);"),
+            ),
             TyKind::Float => (
                 s(""),
                 s(""),
@@ -321,15 +406,21 @@ impl<'t> TypeGen<'t> {
                     (
                         s("nc_cell_retain(x);"),
                         s("nc_cell_release(x);"),
-                        format!("if (!a || !b) return a == b; return eq_{i}(*({ic} *)a->val, *({ic} *)b->val);"),
+                        format!(
+                            "if (!a || !b) return a == b; return eq_{i}(*({ic} *)a->val, *({ic} *)b->val);"
+                        ),
                         format!("return x ? nc_hash_mix(1, hs_{i}(*({ic} *)x->val)) : 0;"),
-                        format!("if (x) st_{i}(sb, *({ic} *)x->val); else nc_sb_cstr(sb, \"none\");"),
+                        format!(
+                            "if (x) st_{i}(sb, *({ic} *)x->val); else nc_sb_cstr(sb, \"none\");"
+                        ),
                     )
                 } else {
                     (
                         format!("if (x.has) x.val = rt_{i}(x.val);"),
                         format!("if (x.has) rl_{i}(x.val);"),
-                        format!("if (a.has != b.has) return false; return !a.has || eq_{i}(a.val, b.val);"),
+                        format!(
+                            "if (a.has != b.has) return false; return !a.has || eq_{i}(a.val, b.val);"
+                        ),
                         format!("return x.has ? nc_hash_mix(1, hs_{i}(x.val)) : 0;"),
                         format!("if (x.has) st_{i}(sb, x.val); else nc_sb_cstr(sb, \"none\");"),
                     )
@@ -340,18 +431,30 @@ impl<'t> TypeGen<'t> {
                 (
                     format!("nc_str_retain(x.err); if (!x.err) x.val = rt_{i}(x.val);"),
                     format!("nc_str_release(x.err); if (!x.err) rl_{i}(x.val);"),
-                    format!("if (!a.err != !b.err) return false; return a.err ? nc_str_eq(a.err, b.err) : eq_{i}(a.val, b.val);"),
+                    format!(
+                        "if (!a.err != !b.err) return false; return a.err ? nc_str_eq(a.err, b.err) : eq_{i}(a.val, b.val);"
+                    ),
                     format!("return x.err ? nc_str_hash(x.err) : hs_{i}(x.val);"),
-                    format!("if (x.err) {{ nc_sb_cstr(sb, \"error: \"); nc_sb_str(sb, x.err); }} else st_{i}(sb, x.val);"),
+                    format!(
+                        "if (x.err) {{ nc_sb_cstr(sb, \"error: \"); nc_sb_str(sb, x.err); }} else st_{i}(sb, x.val);"
+                    ),
                 )
             }
             TyKind::Tuple(ts) => {
-                let fields: Vec<(String, TyId)> = ts.iter().enumerate().map(|(i, t)| (format!("f{i}"), *t)).collect();
+                let fields: Vec<(String, TyId)> = ts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| (format!("f{i}"), *t))
+                    .collect();
                 self.product_bodies(&fields, "(", ")", None)
             }
             TyKind::Struct(si) => {
                 let def = self.t.structs[*si as usize].clone();
-                let fields: Vec<(String, TyId)> = def.fields.iter().map(|(n, t)| (field_name(n), *t)).collect();
+                let fields: Vec<(String, TyId)> = def
+                    .fields
+                    .iter()
+                    .map(|(n, t)| (field_name(n), *t))
+                    .collect();
                 let names: Vec<String> = def.fields.iter().map(|(n, _)| n.clone()).collect();
                 self.product_bodies(&fields, &format!("{}{{", def.name), "}", Some(names))
             }
@@ -360,20 +463,38 @@ impl<'t> TypeGen<'t> {
                 if !self.t.enum_has_payload(t) {
                     let mut st = s("switch (x) {");
                     for (vi, (vn, _)) in def.variants.iter().enumerate() {
-                        write!(st, " case {vi}: nc_sb_cstr(sb, \"{}.{vn}\"); break;", c_escape_str(&def.name)).unwrap();
+                        write!(
+                            st,
+                            " case {vi}: nc_sb_cstr(sb, \"{}.{vn}\"); break;",
+                            c_escape_str(&def.name)
+                        )
+                        .unwrap();
                     }
                     st.push_str(" }");
-                    return (s(""), s(""), s("return a == b;"), s("return nc_hash_u64(x);"), st);
+                    return (
+                        s(""),
+                        s(""),
+                        s("return a == b;"),
+                        s("return nc_hash_u64(x);"),
+                        st,
+                    );
                 }
                 let mut rl = s("if (x && nc_dec(&x->rc)) { switch (x->tag) {");
-                let mut eq = s("if (a == b) return true; if (a->tag != b->tag) return false; switch (a->tag) {");
+                let mut eq = s(
+                    "if (a == b) return true; if (a->tag != b->tag) return false; switch (a->tag) {",
+                );
                 let mut hs = s("uint64_t h = nc_hash_u64(x->tag); switch (x->tag) {");
                 let mut st = s("switch (x->tag) {");
                 for (vi, (vn, ps)) in def.variants.iter().enumerate() {
                     write!(rl, " case {vi}:").unwrap();
                     write!(eq, " case {vi}: return true").unwrap();
                     write!(hs, " case {vi}:").unwrap();
-                    write!(st, " case {vi}: nc_sb_cstr(sb, \"{}.{vn}\");", c_escape_str(&def.name)).unwrap();
+                    write!(
+                        st,
+                        " case {vi}: nc_sb_cstr(sb, \"{}.{vn}\");",
+                        c_escape_str(&def.name)
+                    )
+                    .unwrap();
                     if !ps.is_empty() {
                         st.push_str(" nc_sb_cstr(sb, \"(\");");
                     }
@@ -403,9 +524,27 @@ impl<'t> TypeGen<'t> {
                 st.push_str(" }");
                 (s("if (x) nc_inc(&x->rc);"), rl, eq, hs, st)
             }
-            TyKind::Fn(..) => (s("nc_env_rt(x.env);"), s("nc_env_release(x.env);"), s("return false;"), s("return 0;"), s("")),
-            TyKind::Fut(_) => (s("nc_fut_rt(x);"), s("nc_fut_release(x);"), s("return a == b;"), s("return 0;"), s("")),
-            TyKind::Mutex(_) => (s("nc_mutex_rt(x);"), s("nc_mutex_release(x);"), s("return a == b;"), s("return 0;"), s("")),
+            TyKind::Fn(..) => (
+                s("nc_env_rt(x.env);"),
+                s("nc_env_release(x.env);"),
+                s("return false;"),
+                s("return 0;"),
+                s(""),
+            ),
+            TyKind::Fut(_) => (
+                s("nc_fut_rt(x);"),
+                s("nc_fut_release(x);"),
+                s("return a == b;"),
+                s("return 0;"),
+                s(""),
+            ),
+            TyKind::Mutex(_) => (
+                s("nc_mutex_rt(x);"),
+                s("nc_mutex_release(x);"),
+                s("return a == b;"),
+                s("return 0;"),
+                s(""),
+            ),
             TyKind::Never | TyKind::Named(_) => unreachable!(),
         }
     }

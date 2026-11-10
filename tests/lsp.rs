@@ -3,7 +3,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 struct Client {
     child: Child,
@@ -22,7 +22,12 @@ impl Client {
             .expect("failed to start ncc lsp");
         let stdin = child.stdin.take().unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap());
-        Client { child, stdin, stdout, next_id: 1 }
+        Client {
+            child,
+            stdin,
+            stdout,
+            next_id: 1,
+        }
     }
 
     fn send(&mut self, v: Value) {
@@ -92,7 +97,10 @@ fn language_server() {
     let src = "struct Point {\n  int x\n  int y\n}\n\nfn add(int a, int b) int {\n  return a + b\n}\n\nPoint p = Point{.x = 1, .y = 2}\nint total = add(p.x, p.y)\n@println(total)\n";
 
     let mut c = Client::start();
-    let init = c.request("initialize", json!({"processId": null, "rootUri": null, "capabilities": {}}));
+    let init = c.request(
+        "initialize",
+        json!({"processId": null, "rootUri": null, "capabilities": {}}),
+    );
     assert!(init["capabilities"]["hoverProvider"].as_bool().unwrap());
     c.notify("initialized", json!({}));
 
@@ -103,24 +111,56 @@ fn language_server() {
     assert!(c.diagnostics(&uri).is_empty(), "expected no diagnostics");
 
     // hover on `total` in `@println(total)`
-    let h = c.request("textDocument/hover", json!({"textDocument": {"uri": uri}, "position": pos(11, 10)}));
-    assert!(h["contents"]["value"].as_str().unwrap().contains("int total"), "{h}");
+    let h = c.request(
+        "textDocument/hover",
+        json!({"textDocument": {"uri": uri}, "position": pos(11, 10)}),
+    );
+    assert!(
+        h["contents"]["value"]
+            .as_str()
+            .unwrap()
+            .contains("int total"),
+        "{h}"
+    );
 
     // hover on the call `add`
-    let h = c.request("textDocument/hover", json!({"textDocument": {"uri": uri}, "position": pos(10, 13)}));
-    assert!(h["contents"]["value"].as_str().unwrap().contains("fn add(int, int) int"), "{h}");
+    let h = c.request(
+        "textDocument/hover",
+        json!({"textDocument": {"uri": uri}, "position": pos(10, 13)}),
+    );
+    assert!(
+        h["contents"]["value"]
+            .as_str()
+            .unwrap()
+            .contains("fn add(int, int) int"),
+        "{h}"
+    );
 
     // go to definition of `add`
-    let d = c.request("textDocument/definition", json!({"textDocument": {"uri": uri}, "position": pos(10, 13)}));
+    let d = c.request(
+        "textDocument/definition",
+        json!({"textDocument": {"uri": uri}, "position": pos(10, 13)}),
+    );
     assert_eq!(d["range"]["start"]["line"], 5, "{d}");
 
     // go to definition of field `x` in `p.x`
-    let d = c.request("textDocument/definition", json!({"textDocument": {"uri": uri}, "position": pos(10, 18)}));
+    let d = c.request(
+        "textDocument/definition",
+        json!({"textDocument": {"uri": uri}, "position": pos(10, 18)}),
+    );
     assert_eq!(d["range"]["start"]["line"], 1, "{d}");
 
     // document symbols
-    let s = c.request("textDocument/documentSymbol", json!({"textDocument": {"uri": uri}}));
-    let names: Vec<&str> = s.as_array().unwrap().iter().map(|x| x["name"].as_str().unwrap()).collect();
+    let s = c.request(
+        "textDocument/documentSymbol",
+        json!({"textDocument": {"uri": uri}}),
+    );
+    let names: Vec<&str> = s
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["name"].as_str().unwrap())
+        .collect();
     assert_eq!(names, ["Point", "add", "p", "total"]);
 
     // member completion after `p.`
@@ -131,14 +171,33 @@ fn language_server() {
     );
     let diags = c.diagnostics(&uri);
     assert_eq!(diags.len(), 1, "expected a parse error: {diags:?}");
-    let comp = c.request("textDocument/completion", json!({"textDocument": {"uri": uri}, "position": pos(12, 10)}));
-    let labels: Vec<&str> = comp.as_array().unwrap().iter().map(|x| x["label"].as_str().unwrap()).collect();
+    let comp = c.request(
+        "textDocument/completion",
+        json!({"textDocument": {"uri": uri}, "position": pos(12, 10)}),
+    );
+    let labels: Vec<&str> = comp
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["label"].as_str().unwrap())
+        .collect();
     assert_eq!(labels, ["x", "y"], "{comp}");
 
     // general completion includes keywords and declarations
-    let comp = c.request("textDocument/completion", json!({"textDocument": {"uri": uri}, "position": pos(12, 0)}));
-    let labels: Vec<&str> = comp.as_array().unwrap().iter().map(|x| x["label"].as_str().unwrap()).collect();
-    assert!(labels.contains(&"while") && labels.contains(&"add") && labels.contains(&"total"), "{labels:?}");
+    let comp = c.request(
+        "textDocument/completion",
+        json!({"textDocument": {"uri": uri}, "position": pos(12, 0)}),
+    );
+    let labels: Vec<&str> = comp
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["label"].as_str().unwrap())
+        .collect();
+    assert!(
+        labels.contains(&"while") && labels.contains(&"add") && labels.contains(&"total"),
+        "{labels:?}"
+    );
 
     // type error diagnostic with position
     let bad = "int a = \"oops\"\n";
@@ -148,7 +207,12 @@ fn language_server() {
     );
     let diags = c.diagnostics(&uri);
     assert_eq!(diags.len(), 1);
-    assert!(diags[0]["message"].as_str().unwrap().contains("expected `int`, found `str`"));
+    assert!(
+        diags[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("expected `int`, found `str`")
+    );
     assert_eq!(diags[0]["range"]["start"], pos(0, 8));
 
     // warnings for data races

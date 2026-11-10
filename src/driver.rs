@@ -56,7 +56,10 @@ fn frontend(file: &Path, sm: &mut SourceMap, release: bool) -> Option<Program> {
 
 /// The C compiler command from `$CC`, falling back to `cc`.
 fn cc_command() -> (String, Vec<String>) {
-    let cc = std::env::var("CC").ok().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "cc".into());
+    let cc = std::env::var("CC")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "cc".into());
     let mut parts = cc.split_whitespace().map(|s| s.to_string());
     let prog = parts.next().unwrap();
     (prog, parts.collect())
@@ -86,7 +89,14 @@ impl Drop for TempDir {
 }
 
 /// Compile a program to the given format at `out`. Returns false on failure (already reported).
-fn compile(p: &Program, sm: &SourceMap, mode: Mode, release: bool, format: Format, out: &Path) -> bool {
+fn compile(
+    p: &Program,
+    sm: &SourceMap,
+    mode: Mode,
+    release: bool,
+    format: Format,
+    out: &Path,
+) -> bool {
     let (c_src, header) = cgen::generate(p, sm, mode);
     if format == Format::C {
         if let Err(e) = std::fs::write(out, c_src) {
@@ -178,7 +188,12 @@ fn format_from_ext(p: &Path) -> Format {
 
 pub fn build(o: &Options) -> ExitCode {
     let file = o.file.as_ref().unwrap();
-    let format = o.format.unwrap_or_else(|| o.output.as_deref().map(format_from_ext).unwrap_or(Format::Exe));
+    let format = o.format.unwrap_or_else(|| {
+        o.output
+            .as_deref()
+            .map(format_from_ext)
+            .unwrap_or(Format::Exe)
+    });
     let out = o.output.clone().unwrap_or_else(|| {
         let stem = file.with_extension("");
         match format {
@@ -188,8 +203,14 @@ pub fn build(o: &Options) -> ExitCode {
         }
     });
     let mut sm = SourceMap::default();
-    let Some(p) = frontend(file, &mut sm, o.release) else { return ExitCode::FAILURE };
-    if compile(&p, &sm, Mode::Run, o.release, format, &out) { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+    let Some(p) = frontend(file, &mut sm, o.release) else {
+        return ExitCode::FAILURE;
+    };
+    if compile(&p, &sm, Mode::Run, o.release, format, &out) {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }
 
 fn run_exe(exe: &Path) -> ExitCode {
@@ -211,7 +232,9 @@ fn run_exe(exe: &Path) -> ExitCode {
 fn build_and_run(o: &Options, mode: Mode) -> ExitCode {
     let file = o.file.as_ref().unwrap();
     let mut sm = SourceMap::default();
-    let Some(p) = frontend(file, &mut sm, o.release) else { return ExitCode::FAILURE };
+    let Some(p) = frontend(file, &mut sm, o.release) else {
+        return ExitCode::FAILURE;
+    };
     let tmp = match TempDir::new() {
         Ok(t) => t,
         Err(e) => {
@@ -242,10 +265,17 @@ pub fn init(name: Option<String>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let name = name.unwrap_or_else(|| cwd.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default());
+    let name = name.unwrap_or_else(|| {
+        cwd.file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    });
     let nc = cwd.join(".nc");
     if nc.exists() {
-        eprintln!("error: `{}` already exists; this directory is already a project", nc.display());
+        eprintln!(
+            "error: `{}` already exists; this directory is already a project",
+            nc.display()
+        );
         return ExitCode::FAILURE;
     }
     let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");

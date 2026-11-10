@@ -6,7 +6,12 @@ use crate::diag::Span;
 #[allow(dead_code)]
 pub enum TypeExpr {
     /// `int`, `Foo`, `Matrix<int>`, `mod.Foo<T>`
-    Named { module: Option<String>, name: String, args: Vec<TypeExpr>, span: Span },
+    Named {
+        module: Option<String>,
+        name: String,
+        args: Vec<TypeExpr>,
+        span: Span,
+    },
     /// `T[]` (None) or `T[N]`
     Array(Box<TypeExpr>, Option<u64>, Span),
     /// `[K]V`
@@ -209,19 +214,49 @@ pub struct DeclTarget {
 #[derive(Clone, Debug)]
 pub enum StmtKind {
     /// `[pub] [mut|mutex] T a [, U b] = value`
-    VarDecl { public: bool, mutable: bool, mutex: bool, targets: Vec<DeclTarget>, value: Expr },
+    VarDecl {
+        public: bool,
+        mutable: bool,
+        mutex: bool,
+        targets: Vec<DeclTarget>,
+        value: Expr,
+    },
     /// `fn f = fn(...) R { ... }`
-    FnVar { name: String, value: Expr },
-    Assign { target: Expr, value: Expr },
+    FnVar {
+        name: String,
+        value: Expr,
+    },
+    Assign {
+        target: Expr,
+        value: Expr,
+    },
     Discard(Expr),
     Expr(Expr),
     Return(Option<Expr>),
     Throw(Expr),
-    Break { label: Option<String>, value: Option<Expr> },
+    Break {
+        label: Option<String>,
+        value: Option<Expr>,
+    },
     Continue(Option<String>),
-    While { label: Option<String>, cond: Expr, body: Block },
-    For { label: Option<String>, var: String, var_span: Span, iter: Expr, body: Block },
-    Lock { label: Option<String>, name: String, name_span: Span, body: Block },
+    While {
+        label: Option<String>,
+        cond: Expr,
+        body: Block,
+    },
+    For {
+        label: Option<String>,
+        var: String,
+        var_span: Span,
+        iter: Expr,
+        body: Block,
+    },
+    Lock {
+        label: Option<String>,
+        name: String,
+        name_span: Span,
+        body: Block,
+    },
     Block(Block),
     Fn(FnDecl),
     Assert(Expr),

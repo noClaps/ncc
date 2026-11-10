@@ -34,7 +34,12 @@ impl<'a> Checker<'a> {
         if !self.in_throwing_ctx() {
             let name = self.funcs.len();
             let _ = name;
-            return err(span, format!("{what} requires the enclosing function to be throwing (add `!` to its return type)"));
+            return err(
+                span,
+                format!(
+                    "{what} requires the enclosing function to be throwing (add `!` to its return type)"
+                ),
+            );
         }
         Ok(())
     }
@@ -44,7 +49,14 @@ impl<'a> Checker<'a> {
     }
 
     /// Declare a variable either as a global (module top level) or a local.
-    fn declare_var(&mut self, name: &str, ty: TyId, mutable: bool, public: bool, span: Span) -> Result<Option<VarRef>> {
+    fn declare_var(
+        &mut self,
+        name: &str,
+        ty: TyId,
+        mutable: bool,
+        public: bool,
+        span: Span,
+    ) -> Result<Option<VarRef>> {
         if name == "_" {
             return Ok(None);
         }
@@ -59,7 +71,13 @@ impl<'a> Checker<'a> {
             if public {
                 return err(span, "only module-level declarations can be `pub`");
             }
-            Ok(Some(VarRef::Local(self.declare_local(name, ty, mutable, LocalKind::Normal, span)?)))
+            Ok(Some(VarRef::Local(self.declare_local(
+                name,
+                ty,
+                mutable,
+                LocalKind::Normal,
+                span,
+            )?)))
         }
     }
 
@@ -68,7 +86,13 @@ impl<'a> Checker<'a> {
         let span = s.span;
         let push = |out: &mut Vec<Stmt>, kind| out.push(Stmt { kind, span });
         match &s.kind {
-            S::VarDecl { public, mutable, mutex, targets, value } => {
+            S::VarDecl {
+                public,
+                mutable,
+                mutex,
+                targets,
+                value,
+            } => {
                 if targets.len() == 1 {
                     let t = &targets[0];
                     let ty = self.resolve_type_here(&t.ty)?;
@@ -77,14 +101,21 @@ impl<'a> Checker<'a> {
                             return err(span, "futures cannot be mutable");
                         }
                         if !matches!(value.kind, ast::ExprKind::Async(_)) {
-                            return err(value.span, "a future can only be declared for an `async` function call");
+                            return err(
+                                value.span,
+                                "a future can only be declared for an `async` function call",
+                            );
                         }
                     }
                     if *mutex && matches!(self.types.kind(ty), TyKind::Fut(_)) {
                         return err(span, "futures cannot be placed in a mutex");
                     }
                     let v = self.expect_expr(value, ty);
-                    let vty = if *mutex { self.types.intern(TyKind::Mutex(ty)) } else { ty };
+                    let vty = if *mutex {
+                        self.types.intern(TyKind::Mutex(ty))
+                    } else {
+                        ty
+                    };
                     // declare the variable even if its value is invalid, to avoid follow-up errors
                     let var = self.declare_var(&t.name, vty, *mutable, *public, t.span)?;
                     push(out, SK::Let(var, v?));
@@ -117,9 +148,17 @@ impl<'a> Checker<'a> {
                     let elems = match self.types.kind(v.ty) {
                         TyKind::Tuple(ts) => ts.clone(),
                         TyKind::Opt(_) => {
-                            return err(value.span, "cannot destructure an optional tuple without first checking for `none`")
+                            return err(
+                                value.span,
+                                "cannot destructure an optional tuple without first checking for `none`",
+                            );
                         }
-                        _ => return err(value.span, format!("cannot destructure `{}`", self.types.show(v.ty))),
+                        _ => {
+                            return err(
+                                value.span,
+                                format!("cannot destructure `{}`", self.types.show(v.ty)),
+                            );
+                        }
                     };
                     let mut parts = Vec::new();
                     let mut i = 0;
@@ -139,7 +178,14 @@ impl<'a> Checker<'a> {
                         i += count;
                     }
                     if i != elems.len() {
-                        return err(span, format!("tuple has {} elements but only {} are destructured", elems.len(), i));
+                        return err(
+                            span,
+                            format!(
+                                "tuple has {} elements but only {} are destructured",
+                                elems.len(),
+                                i
+                            ),
+                        );
                     }
                     let mut tgts = Vec::new();
                     for (t, ty, start, count) in parts {
@@ -155,7 +201,17 @@ impl<'a> Checker<'a> {
                 };
                 let (fid, fty) = self.check_nested_fn(sig, body, None)?;
                 let var = self.declare_var(name, fty, false, false, span)?;
-                push(out, SK::Let(var, Expr { kind: EK::Closure(fid), ty: fty, span: value.span }));
+                push(
+                    out,
+                    SK::Let(
+                        var,
+                        Expr {
+                            kind: EK::Closure(fid),
+                            ty: fty,
+                            span: value.span,
+                        },
+                    ),
+                );
             }
             S::Assign { target, value } => {
                 let (place, ty) = self.check_place(target)?;
@@ -173,8 +229,10 @@ impl<'a> Checker<'a> {
                 let x = self.check_expr_opts(e, None, false)?;
                 let ok = x.ty == VOID
                     || x.ty == NEVER
-                    || matches!(x.kind, EK::Else(_, Fallback::Block(..)) | EK::Catch(..) | EK::If(_))
-                        && !matches!(self.types.kind(x.ty), TyKind::ErrU(_));
+                    || matches!(
+                        x.kind,
+                        EK::Else(_, Fallback::Block(..)) | EK::Catch(..) | EK::If(_)
+                    ) && !matches!(self.types.kind(x.ty), TyKind::ErrU(_));
                 if !ok {
                     let msg = match self.types.kind(x.ty) {
                         TyKind::ErrU(_) => format!(
@@ -207,7 +265,13 @@ impl<'a> Checker<'a> {
                 match v {
                     None => {
                         if target != VOID {
-                            return err(span, format!("expected a return value of type `{}`", self.types.show(target)));
+                            return err(
+                                span,
+                                format!(
+                                    "expected a return value of type `{}`",
+                                    self.types.show(target)
+                                ),
+                            );
                         }
                         push(out, SK::Return(None));
                     }
@@ -224,17 +288,29 @@ impl<'a> Checker<'a> {
                 self.require_throwing(span, "`throw`")?;
                 let x = self.check_expr(e, Some(STR))?;
                 if x.ty != STR && x.ty != ERROR {
-                    return err(e.span, format!("can only throw `str` or `error` values, found `{}`", self.types.show(x.ty)));
+                    return err(
+                        e.span,
+                        format!(
+                            "can only throw `str` or `error` values, found `{}`",
+                            self.types.show(x.ty)
+                        ),
+                    );
                 }
                 push(out, SK::Throw(x));
             }
             S::Break { label, value } => {
                 let jumps = self.ctx_ref().jumps.clone();
                 if let Some(v) = value {
-                    let Some(j) = jumps.iter().rev().find(|j| matches!(j.kind, JumpKind::Value(_))) else {
+                    let Some(j) = jumps
+                        .iter()
+                        .rev()
+                        .find(|j| matches!(j.kind, JumpKind::Value(_)))
+                    else {
                         return err(span, "`break` with a value outside of a value assignment");
                     };
-                    let JumpKind::Value(ty) = j.kind else { unreachable!() };
+                    let JumpKind::Value(ty) = j.kind else {
+                        unreachable!()
+                    };
                     let x = self.expect_expr(v, ty)?;
                     self.broken.insert(j.id);
                     push(out, SK::Break(j.id, Some(x)));
@@ -248,7 +324,11 @@ impl<'a> Checker<'a> {
                     self.broken.insert(j.id);
                     push(out, SK::Break(j.id, None));
                 } else {
-                    let Some(j) = jumps.iter().rev().find(|j| matches!(j.kind, JumpKind::Loop | JumpKind::Lock)) else {
+                    let Some(j) = jumps
+                        .iter()
+                        .rev()
+                        .find(|j| matches!(j.kind, JumpKind::Loop | JumpKind::Lock))
+                    else {
                         return err(span, "`break` outside of a loop");
                     };
                     self.broken.insert(j.id);
@@ -273,12 +353,29 @@ impl<'a> Checker<'a> {
             S::While { label, cond, body } => {
                 let c = self.expect_expr(cond, BOOL)?;
                 let id = self.new_jump();
-                self.ctx().jumps.push(JumpCtx { id, kind: JumpKind::Loop, label: label.clone() });
+                self.ctx().jumps.push(JumpCtx {
+                    id,
+                    kind: JumpKind::Loop,
+                    label: label.clone(),
+                });
                 let b = self.check_block(body);
                 self.ctx().jumps.pop();
-                push(out, SK::While { id, cond: c, body: b? });
+                push(
+                    out,
+                    SK::While {
+                        id,
+                        cond: c,
+                        body: b?,
+                    },
+                );
             }
-            S::For { label, var, var_span, iter, body } => {
+            S::For {
+                label,
+                var,
+                var_span,
+                iter,
+                body,
+            } => {
                 let it = self.check_expr(iter, None)?;
                 let (kind, vty) = match self.types.kind(it.ty) {
                     TyKind::Array(_) | TyKind::Fixed(..) | TyKind::Str => (ForKind::Index, UINT),
@@ -286,20 +383,41 @@ impl<'a> Checker<'a> {
                     _ => {
                         return err(
                             iter.span,
-                            format!("cannot loop over `{}`; expected an array, string or map", self.types.show(it.ty)),
-                        )
+                            format!(
+                                "cannot loop over `{}`; expected an array, string or map",
+                                self.types.show(it.ty)
+                            ),
+                        );
                     }
                 };
                 let id = self.new_jump();
                 self.push_scope();
                 let v = self.declare_local(var, vty, false, LocalKind::Normal, *var_span)?;
-                self.ctx().jumps.push(JumpCtx { id, kind: JumpKind::Loop, label: label.clone() });
+                self.ctx().jumps.push(JumpCtx {
+                    id,
+                    kind: JumpKind::Loop,
+                    label: label.clone(),
+                });
                 let b = self.check_block(body);
                 self.ctx().jumps.pop();
                 self.pop_scope();
-                push(out, SK::For { id, var: v, kind, iter: it, body: b? });
+                push(
+                    out,
+                    SK::For {
+                        id,
+                        var: v,
+                        kind,
+                        iter: it,
+                        body: b?,
+                    },
+                );
             }
-            S::Lock { label, name, name_span, body } => {
+            S::Lock {
+                label,
+                name,
+                name_span,
+                body,
+            } => {
                 let (vr, ty) = match self.resolve_var(name, *name_span)? {
                     Some(x) => x,
                     None => return err(*name_span, format!("unknown variable `{name}`")),
@@ -308,15 +426,32 @@ impl<'a> Checker<'a> {
                 let TyKind::Mutex(inner) = *self.types.kind(ty) else {
                     return err(*name_span, format!("`{name}` is not a mutex"));
                 };
-                let mutex = Expr { kind: EK::Var(vr), ty, span: *name_span };
+                let mutex = Expr {
+                    kind: EK::Var(vr),
+                    ty,
+                    span: *name_span,
+                };
                 let id = self.new_jump();
                 self.push_scope();
-                let alias = self.declare_local(name, inner, true, LocalKind::LockAlias, *name_span)?;
-                self.ctx().jumps.push(JumpCtx { id, kind: JumpKind::Lock, label: label.clone() });
+                let alias =
+                    self.declare_local(name, inner, true, LocalKind::LockAlias, *name_span)?;
+                self.ctx().jumps.push(JumpCtx {
+                    id,
+                    kind: JumpKind::Lock,
+                    label: label.clone(),
+                });
                 let b = self.check_block(body);
                 self.ctx().jumps.pop();
                 self.pop_scope();
-                push(out, SK::Lock { id, mutex, alias, body: b? });
+                push(
+                    out,
+                    SK::Lock {
+                        id,
+                        mutex,
+                        alias,
+                        body: b?,
+                    },
+                );
             }
             S::Block(b) => {
                 let b = self.check_block(b)?;
@@ -328,7 +463,17 @@ impl<'a> Checker<'a> {
                 }
                 let (fid, fty) = self.check_nested_fn(&f.sig, &f.body, Some(&f.sig.name))?;
                 let var = self.declare_var(&f.sig.name, fty, false, false, f.sig.span)?;
-                push(out, SK::Let(var, Expr { kind: EK::Closure(fid), ty: fty, span: f.sig.span }));
+                push(
+                    out,
+                    SK::Let(
+                        var,
+                        Expr {
+                            kind: EK::Closure(fid),
+                            ty: fty,
+                            span: f.sig.span,
+                        },
+                    ),
+                );
             }
             S::Assert(e) => {
                 if !self.in_test() {
@@ -353,15 +498,25 @@ impl<'a> Checker<'a> {
     }
 
     /// Check a nested function or function literal; returns its id and function type.
-    pub fn check_nested_fn(&mut self, sig: &ast::FnSig, body: &ast::Block, name: Option<&str>) -> Result<(FuncId, TyId)> {
+    pub fn check_nested_fn(
+        &mut self,
+        sig: &ast::FnSig,
+        body: &ast::Block,
+        name: Option<&str>,
+    ) -> Result<(FuncId, TyId)> {
         if !sig.type_params.is_empty() {
-            return err(sig.span, "generic functions must be declared at module level");
+            return err(
+                sig.span,
+                "generic functions must be declared at module level",
+            );
         }
         let m = self.module();
         let tp = self.tparams();
         let (params, ret) = self.resolve_sig(sig, m, &tp)?;
         let fty = self.types.intern(TyKind::Fn(params.clone(), ret));
-        let display = name.map(|s| s.to_string()).unwrap_or_else(|| "fn literal".to_string());
+        let display = name
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "fn literal".to_string());
         let fid = self.reserve_fn(display.clone(), params.clone(), ret);
         self.ix.fn_spans.insert(fid, sig.span);
         if ret == NEVER {
@@ -378,7 +533,13 @@ impl<'a> Checker<'a> {
             }
             let mut pids = Vec::new();
             for (i, p) in sig.params.iter().enumerate() {
-                pids.push(self.declare_local(&p.name, params[i], false, LocalKind::Param, p.span)?);
+                pids.push(self.declare_local(
+                    &p.name,
+                    params[i],
+                    false,
+                    LocalKind::Param,
+                    p.span,
+                )?);
             }
             let before = self.errors.len();
             let b = self.check_block(body)?;
@@ -400,7 +561,11 @@ impl<'a> Checker<'a> {
             return Ok(Some((VarRef::Local(l), ty)));
         }
         let m = self.module();
-        if let Some(SymEntry { sym: Sym::Globals(list), .. }) = self.mods[m].syms.get(name) {
+        if let Some(SymEntry {
+            sym: Sym::Globals(list),
+            ..
+        }) = self.mods[m].syms.get(name)
+        {
             let in_main = self.fns.len() == 1 && self.ctx_ref().is_main;
             let g = Self::pick_global(list, span.start, span.file == self.mods[m].file || in_main);
             return Ok(Some((VarRef::Global(g), self.globals[g].ty)));
@@ -427,14 +592,22 @@ impl<'a> Checker<'a> {
                 };
                 self.idx_var_ref(v, e.span);
                 if matches!(self.types.kind(ty), TyKind::Mutex(_)) {
-                    return err(e.span, format!("`{name}` is a mutex; access it inside `lock {name} {{ ... }}`"));
+                    return err(
+                        e.span,
+                        format!("`{name}` is a mutex; access it inside `lock {name} {{ ... }}`"),
+                    );
                 }
                 if !self.var_mutable(v) {
                     let what = match v {
-                        VarRef::Local(l) if self.ctx_ref().locals[l].kind == LocalKind::Param => "function argument",
+                        VarRef::Local(l) if self.ctx_ref().locals[l].kind == LocalKind::Param => {
+                            "function argument"
+                        }
                         _ => "immutable variable",
                     };
-                    return err(e.span, format!("cannot assign to {what} `{name}`; declare it with `mut`"));
+                    return err(
+                        e.span,
+                        format!("cannot assign to {what} `{name}`; declare it with `mut`"),
+                    );
                 }
                 Ok((Place::Var(v), ty))
             }
@@ -445,11 +618,17 @@ impl<'a> Checker<'a> {
                         let fields = &self.types.structs[i as usize].fields;
                         match fields.iter().position(|(n, _)| n == name) {
                             Some(idx) => Ok((Place::Field(Box::new(p), idx), fields[idx].1)),
-                            None => err(e.span, format!("`{}` has no field `{name}`", self.types.show(ty))),
+                            None => err(
+                                e.span,
+                                format!("`{}` has no field `{name}`", self.types.show(ty)),
+                            ),
                         }
                     }
                     _ if name == "len" => err(e.span, "`.len` cannot be assigned"),
-                    _ => err(e.span, format!("`{}` has no field `{name}`", self.types.show(ty))),
+                    _ => err(
+                        e.span,
+                        format!("`{}` has no field `{name}`", self.types.show(ty)),
+                    ),
                 }
             }
             E::Index(base, idx) => {
@@ -471,7 +650,10 @@ impl<'a> Checker<'a> {
                         let i = self.seq_index(idx, ty)?;
                         Ok((Place::Index(Box::new(p), Box::new(i)), CHAR))
                     }
-                    _ => err(e.span, format!("cannot index into `{}`", self.types.show(ty))),
+                    _ => err(
+                        e.span,
+                        format!("cannot index into `{}`", self.types.show(ty)),
+                    ),
                 }
             }
             _ => err(e.span, "invalid assignment target"),
@@ -481,7 +663,10 @@ impl<'a> Checker<'a> {
     pub fn tuple_index(&mut self, idx: &ast::Expr, len: usize) -> Result<usize> {
         match idx.kind {
             ast::ExprKind::Int(v, _) if (v as usize) < len => Ok(v as usize),
-            ast::ExprKind::Int(v, _) => err(idx.span, format!("tuple index {v} out of range for a tuple of {len} elements")),
+            ast::ExprKind::Int(v, _) => err(
+                idx.span,
+                format!("tuple index {v} out of range for a tuple of {len} elements"),
+            ),
             _ => err(idx.span, "tuple indexes must be integer literals"),
         }
     }
@@ -493,7 +678,13 @@ impl<'a> Checker<'a> {
         self.ctx().dollar.pop();
         let i = r?;
         if i.ty != INT && i.ty != UINT {
-            return err(idx.span, format!("indexes must be `int` or `uint`, found `{}`", self.types.show(i.ty)));
+            return err(
+                idx.span,
+                format!(
+                    "indexes must be `int` or `uint`, found `{}`",
+                    self.types.show(i.ty)
+                ),
+            );
         }
         Ok(i)
     }

@@ -110,16 +110,14 @@ fn main() -> ExitCode {
             println!("{HELP}");
             ExitCode::SUCCESS
         }
-        "lsp" => {
-            match rest.first().map(|s| s.as_str()) {
-                Some("-h" | "--help") => {
-                    println!("{HELP_LSP}");
-                    ExitCode::SUCCESS
-                }
-                Some(a) => usage_error(&format!("unexpected argument `{a}`"), HELP_LSP),
-                None => lsp::run(),
+        "lsp" => match rest.first().map(|s| s.as_str()) {
+            Some("-h" | "--help") => {
+                println!("{HELP_LSP}");
+                ExitCode::SUCCESS
             }
-        }
+            Some(a) => usage_error(&format!("unexpected argument `{a}`"), HELP_LSP),
+            None => lsp::run(),
+        },
         "init" => {
             let mut name = None;
             let mut i = 0;
@@ -168,7 +166,12 @@ fn main() -> ExitCode {
                             "c" => driver::Format::C,
                             "asm" => driver::Format::Asm,
                             "exe" => driver::Format::Exe,
-                            _ => return usage_error(&format!("unknown format `{f}`; expected c, asm or exe"), help),
+                            _ => {
+                                return usage_error(
+                                    &format!("unknown format `{f}`; expected c, asm or exe"),
+                                    help,
+                                );
+                            }
                         });
                     }
                     "-o" | "--output" if cmd == "build" => {
@@ -179,7 +182,7 @@ fn main() -> ExitCode {
                         opts.output = Some(o.into());
                     }
                     _ if a.starts_with('-') && a.len() > 1 => {
-                        return usage_error(&format!("unknown option `{a}`"), help)
+                        return usage_error(&format!("unknown option `{a}`"), help);
                     }
                     _ => {
                         if opts.file.is_some() {

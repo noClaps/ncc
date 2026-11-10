@@ -174,10 +174,25 @@ pub enum SK {
     Throw(Expr),
     Break(JumpId, Option<Expr>),
     Continue(JumpId),
-    While { id: JumpId, cond: Expr, body: Block },
-    For { id: JumpId, var: LocalId, kind: ForKind, iter: Expr, body: Block },
+    While {
+        id: JumpId,
+        cond: Expr,
+        body: Block,
+    },
+    For {
+        id: JumpId,
+        var: LocalId,
+        kind: ForKind,
+        iter: Expr,
+        body: Block,
+    },
     /// `lock`: the mutex variable and the local alias bound inside the body
-    Lock { id: JumpId, mutex: Expr, alias: LocalId, body: Block },
+    Lock {
+        id: JumpId,
+        mutex: Expr,
+        alias: LocalId,
+        body: Block,
+    },
     Block(Block),
     Assert(Expr),
 }

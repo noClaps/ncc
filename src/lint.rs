@@ -13,7 +13,9 @@ fn shared_accesses(p: &Program, f: FuncId) -> Vec<(String, Span)> {
     let mut visit = |e: &Expr| {
         if let EK::Var(v) = &e.kind {
             match v {
-                VarRef::Global(g) if p.globals[*g].mutable => out.push((p.globals[*g].name.clone(), e.span)),
+                VarRef::Global(g) if p.globals[*g].mutable => {
+                    out.push((p.globals[*g].name.clone(), e.span))
+                }
                 VarRef::Local(l) if matches!(func.locals[*l].kind, LocalKind::CapRef(_)) => {
                     out.push((func.locals[*l].name.clone(), e.span))
                 }
@@ -29,23 +31,30 @@ fn shared_accesses(p: &Program, f: FuncId) -> Vec<(String, Span)> {
         for s in &b.stmts {
             if let SK::Assign(pl, _) = &s.kind {
                 match flow::place_root(pl) {
-                    Some(VarRef::Global(g)) if p.globals[g].mutable => out.push((p.globals[g].name.clone(), s.span)),
-                    Some(VarRef::Local(l)) if matches!(func.locals[l].kind, LocalKind::CapRef(_)) => {
+                    Some(VarRef::Global(g)) if p.globals[g].mutable => {
+                        out.push((p.globals[g].name.clone(), s.span))
+                    }
+                    Some(VarRef::Local(l))
+                        if matches!(func.locals[l].kind, LocalKind::CapRef(_)) =>
+                    {
                         out.push((func.locals[l].name.clone(), s.span))
                     }
                     _ => {}
                 }
             }
             match &s.kind {
-                SK::While { body, .. } | SK::For { body, .. } | SK::Lock { body, .. } | SK::Block(body) => {
-                    places(body, func, p, out)
-                }
+                SK::While { body, .. }
+                | SK::For { body, .. }
+                | SK::Lock { body, .. }
+                | SK::Block(body) => places(body, func, p, out),
                 _ => {}
             }
             let mut nested: Vec<Block> = Vec::new();
             flow::visit_stmt(s, &mut |e: &Expr| match &e.kind {
                 EK::If(i) => nested.extend(i.arms.iter().map(|a| a.body.clone())),
-                EK::Catch(_, _, b, _) | EK::Else(_, Fallback::Block(b, _)) => nested.push(b.clone()),
+                EK::Catch(_, _, b, _) | EK::Else(_, Fallback::Block(b, _)) => {
+                    nested.push(b.clone())
+                }
                 _ => {}
             });
             for b in &nested {
@@ -93,22 +102,34 @@ pub fn race_warnings(p: &Program) -> Vec<Diag> {
                 stack.extend(callees(p, g));
             }
             if let Some((name, _)) = hits.first()
-                && seen.insert(span) {
-                    warnings.push(Diag::new(
+                && seen.insert(span)
+            {
+                warnings.push(Diag::new(
                         span,
                         format!(
                             "possible data race: `{}` runs asynchronously and accesses the mutable variable `{name}` without a mutex",
                             p.funcs[target].name
                         ),
                     ));
-                }
+            }
         }
     }
     warnings
 }
 
-fn collect(s: &Stmt, closures: &mut HashMap<LocalId, FuncId>, asyncs: &mut Vec<(Option<FuncId>, Span)>) {
-    if let SK::Let(Some(VarRef::Local(l)), Expr { kind: EK::Closure(f), .. }) = &s.kind {
+fn collect(
+    s: &Stmt,
+    closures: &mut HashMap<LocalId, FuncId>,
+    asyncs: &mut Vec<(Option<FuncId>, Span)>,
+) {
+    if let SK::Let(
+        Some(VarRef::Local(l)),
+        Expr {
+            kind: EK::Closure(f),
+            ..
+        },
+    ) = &s.kind
+    {
         closures.insert(*l, *f);
     }
     let mut found = Vec::new();

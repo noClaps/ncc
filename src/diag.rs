@@ -12,10 +12,18 @@ pub struct Span {
 
 impl Span {
     pub fn new(file: u32, start: usize, end: usize) -> Span {
-        Span { file, start: start as u32, end: end as u32 }
+        Span {
+            file,
+            start: start as u32,
+            end: end as u32,
+        }
     }
     pub fn to(self, other: Span) -> Span {
-        Span { file: self.file, start: self.start.min(other.start), end: self.end.max(other.end) }
+        Span {
+            file: self.file,
+            start: self.start.min(other.start),
+            end: self.end.max(other.end),
+        }
     }
 }
 
@@ -33,7 +41,11 @@ impl SourceFile {
                 line_starts.push(i + 1);
             }
         }
-        SourceFile { path, text, line_starts }
+        SourceFile {
+            path,
+            text,
+            line_starts,
+        }
     }
 
     /// 1-based line and column of a byte offset.
@@ -42,13 +54,19 @@ impl SourceFile {
             Ok(i) => i,
             Err(i) => i - 1,
         };
-        let col = self.text[self.line_starts[line]..offset.min(self.text.len())].chars().count();
+        let col = self.text[self.line_starts[line]..offset.min(self.text.len())]
+            .chars()
+            .count();
         (line + 1, col + 1)
     }
 
     pub fn line_text(&self, line: usize) -> &str {
         let start = self.line_starts[line - 1];
-        let end = self.line_starts.get(line).map(|e| e - 1).unwrap_or(self.text.len());
+        let end = self
+            .line_starts
+            .get(line)
+            .map(|e| e - 1)
+            .unwrap_or(self.text.len());
         &self.text[start..end.max(start)]
     }
 }
@@ -76,7 +94,10 @@ pub struct Diag {
 
 impl Diag {
     pub fn new(span: Span, msg: impl Into<String>) -> Diag {
-        Diag { span, msg: msg.into() }
+        Diag {
+            span,
+            msg: msg.into(),
+        }
     }
     pub fn render(&self, sm: &SourceMap) -> String {
         self.render_as("error", sm)

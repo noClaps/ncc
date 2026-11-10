@@ -9,7 +9,9 @@ use crate::types::NEVER;
 /// Visit every expression (pre-order) in a statement, including nested blocks.
 pub fn visit_stmt(s: &Stmt, f: &mut dyn FnMut(&Expr)) {
     match &s.kind {
-        SK::Let(_, e) | SK::Destructure(_, e) | SK::Expr(e) | SK::Throw(e) | SK::Assert(e) => visit_expr(e, f),
+        SK::Let(_, e) | SK::Destructure(_, e) | SK::Expr(e) | SK::Throw(e) | SK::Assert(e) => {
+            visit_expr(e, f)
+        }
         SK::Assign(p, e) => {
             visit_place(p, f);
             visit_expr(e, f);
@@ -95,7 +97,12 @@ pub fn visit_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
                 visit_expr(a, f)
             }
         }
-        EK::Print(_, _, args) | EK::Format(args) | EK::Tuple(args) | EK::Array(args) | EK::Struct(args) | EK::Variant(_, args) => {
+        EK::Print(_, _, args)
+        | EK::Format(args)
+        | EK::Tuple(args)
+        | EK::Array(args)
+        | EK::Struct(args)
+        | EK::Variant(_, args) => {
             for a in args {
                 visit_expr(a, f)
             }
@@ -134,14 +141,18 @@ pub fn visit_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
 /// Globals and functions referenced by a statement.
 pub fn refs_stmt(s: &Stmt, globals: &mut HashSet<GlobalId>, funcs: &mut HashSet<FuncId>) {
     if let SK::Assign(p, _) = &s.kind
-        && let Some(VarRef::Global(g)) = place_root(p) {
-            globals.insert(g);
-        }
+        && let Some(VarRef::Global(g)) = place_root(p)
+    {
+        globals.insert(g);
+    }
     let mut f = |e: &Expr| match &e.kind {
         EK::Var(VarRef::Global(g)) => {
             globals.insert(*g);
         }
-        EK::FnRef(id) | EK::Closure(id) | EK::Call(Callee::Direct(id), _) | EK::Async(Callee::Direct(id), _) => {
+        EK::FnRef(id)
+        | EK::Closure(id)
+        | EK::Call(Callee::Direct(id), _)
+        | EK::Async(Callee::Direct(id), _) => {
             funcs.insert(*id);
         }
         _ => {}
@@ -194,13 +205,17 @@ pub fn writes_stmt(s: &Stmt, out: &mut HashSet<GlobalId>) {
             for s in &b.stmts {
                 if matches!(s.kind, SK::Assign(..))
                     && let SK::Assign(p, _) = &s.kind
-                        && let Some(VarRef::Global(g)) = place_root(p) {
-                            out.insert(g);
-                        }
+                    && let Some(VarRef::Global(g)) = place_root(p)
+                {
+                    out.insert(g);
+                }
             }
         }
     };
-    if !matches!(s.kind, SK::While { .. } | SK::For { .. } | SK::Lock { .. } | SK::Block(_)) {
+    if !matches!(
+        s.kind,
+        SK::While { .. } | SK::For { .. } | SK::Lock { .. } | SK::Block(_)
+    ) {
         visit_stmt(s, &mut nested);
     }
 }

@@ -10,16 +10,25 @@ mod stmt;
 use std::collections::{HashMap, HashSet};
 
 use crate::ast;
-use crate::diag::{err, Diag, Result, Span};
+use crate::diag::{Diag, Result, Span, err};
 use crate::modules::ModuleGraph;
 use crate::tir::*;
 use crate::types::*;
 
 #[derive(Clone, Debug)]
 pub enum Sym {
-    Fn { decl: usize, func: Option<FuncId> },
-    Struct { decl: usize, ty: Option<TyId> },
-    Enum { decl: usize, ty: Option<TyId> },
+    Fn {
+        decl: usize,
+        func: Option<FuncId>,
+    },
+    Struct {
+        decl: usize,
+        ty: Option<TyId>,
+    },
+    Enum {
+        decl: usize,
+        ty: Option<TyId>,
+    },
     Type(TyId),
     /// globals with that name, with declaration position (shadowing at top level)
     Globals(Vec<(GlobalId, u32)>),
@@ -224,7 +233,10 @@ impl<'a> Checker<'a> {
                     };
                     self.finish_fn(ctx, format!("test {name}"), vec![], body, *span, None);
                     if m == 0 {
-                        self.tests.push(Test { name: name.clone(), func: f });
+                        self.tests.push(Test {
+                            name: name.clone(),
+                            func: f,
+                        });
                     }
                 }
             }
@@ -237,7 +249,14 @@ impl<'a> Checker<'a> {
 
         // assemble main
         let main_body = self.assemble_main();
-        self.finish_fn(main_ctx, "main".into(), vec![], main_body, Span::default(), None);
+        self.finish_fn(
+            main_ctx,
+            "main".into(),
+            vec![],
+            main_body,
+            Span::default(),
+            None,
+        );
         // functions whose checking failed early get empty bodies
         let sigs = self.sigs.clone();
         let funcs = std::mem::take(&mut self.funcs)
@@ -271,8 +290,23 @@ impl<'a> Checker<'a> {
     // ------------------------------------------------------------ declarations
 
     fn add_sym(&mut self, m: usize, name: &str, sym: Sym, public: bool, span: Span) -> Result<()> {
-        if matches!(name, "int" | "uint" | "byte" | "float" | "bool" | "char" | "str" | "void" | "error" | "never") {
-            return err(span, format!("`{name}` is a builtin type and cannot be redefined"));
+        if matches!(
+            name,
+            "int"
+                | "uint"
+                | "byte"
+                | "float"
+                | "bool"
+                | "char"
+                | "str"
+                | "void"
+                | "error"
+                | "never"
+        ) {
+            return err(
+                span,
+                format!("`{name}` is a builtin type and cannot be redefined"),
+            );
         }
         if self.mods[m].imports.contains_key(name) {
             return err(span, format!("`{name}` is already used as an import alias"));
@@ -280,7 +314,9 @@ impl<'a> Checker<'a> {
         if self.mods[m].syms.contains_key(name) {
             return err(span, format!("`{name}` is already defined in this module"));
         }
-        self.mods[m].syms.insert(name.to_string(), SymEntry { sym, public });
+        self.mods[m]
+            .syms
+            .insert(name.to_string(), SymEntry { sym, public });
         Ok(())
     }
 
@@ -288,31 +324,49 @@ impl<'a> Checker<'a> {
         let items = self.mods[m].ast.items.clone();
         {
             for (i, it) in items.iter().enumerate() {
-                let item_r: Result<()> = (|| { match it {
-                    ast::Item::Fn(f) => {
-                        self.add_sym(m, &f.sig.name, Sym::Fn { decl: i, func: None }, f.public, f.sig.span)?
-                    }
-                    ast::Item::Struct(s) => {
-                        let ty = if s.type_params.is_empty() { Some(self.types.new_struct(s.name.clone())) } else { None };
-                        self.add_sym(m, &s.name, Sym::Struct { decl: i, ty }, s.public, s.span)?
-                    }
-                    ast::Item::Enum(e) => {
-                        let ty = if e.type_params.is_empty() { Some(self.types.new_enum(e.name.clone())) } else { None };
-                        self.add_sym(m, &e.name, Sym::Enum { decl: i, ty }, e.public, e.span)?
-                    }
-                    ast::Item::Type(t) => {
-                        let ty = self.types.new_named(t.name.clone(), VOID);
-                        self.add_sym(m, &t.name, Sym::Type(ty), t.public, t.span)?
-                    }
-                    ast::Item::Extern(e) => {
-                        if self.mods[m].externs.contains_key(&e.alias) || self.mods[m].imports.contains_key(&e.alias) {
-                            return err(e.span, format!("duplicate alias `{}`", e.alias));
+                let item_r: Result<()> = (|| {
+                    match it {
+                        ast::Item::Fn(f) => self.add_sym(
+                            m,
+                            &f.sig.name,
+                            Sym::Fn {
+                                decl: i,
+                                func: None,
+                            },
+                            f.public,
+                            f.sig.span,
+                        )?,
+                        ast::Item::Struct(s) => {
+                            let ty = if s.type_params.is_empty() {
+                                Some(self.types.new_struct(s.name.clone()))
+                            } else {
+                                None
+                            };
+                            self.add_sym(m, &s.name, Sym::Struct { decl: i, ty }, s.public, s.span)?
                         }
-                        self.mods[m].externs.insert(e.alias.clone(), HashMap::new());
+                        ast::Item::Enum(e) => {
+                            let ty = if e.type_params.is_empty() {
+                                Some(self.types.new_enum(e.name.clone()))
+                            } else {
+                                None
+                            };
+                            self.add_sym(m, &e.name, Sym::Enum { decl: i, ty }, e.public, e.span)?
+                        }
+                        ast::Item::Type(t) => {
+                            let ty = self.types.new_named(t.name.clone(), VOID);
+                            self.add_sym(m, &t.name, Sym::Type(ty), t.public, t.span)?
+                        }
+                        ast::Item::Extern(e) => {
+                            if self.mods[m].externs.contains_key(&e.alias)
+                                || self.mods[m].imports.contains_key(&e.alias)
+                            {
+                                return err(e.span, format!("duplicate alias `{}`", e.alias));
+                            }
+                            self.mods[m].externs.insert(e.alias.clone(), HashMap::new());
+                        }
+                        _ => {}
                     }
-                    _ => {}
-                }
-                Ok(())
+                    Ok(())
                 })();
                 if let Err(d) = item_r {
                     self.errors.push(d);
@@ -327,99 +381,143 @@ impl<'a> Checker<'a> {
         {
             let none = HashMap::new();
             for it in items.iter() {
-                let item_r: Result<()> = (|| { match it {
-                    ast::Item::Type(t) => {
-                        let ty = match self.mods[m].syms[&t.name].sym {
-                            Sym::Type(ty) => ty,
-                            _ => unreachable!(),
-                        };
-                        let under = self.resolve_type(&t.ty, m, &none)?;
-                        if let TyKind::Named(n) = self.types.kind(ty).clone() {
-                            self.types.named[n as usize].underlying = under;
-                        }
-                        self.ix.type_spans.insert(ty, t.span);
-                        let detail = self.type_detail(ty);
-                        let members = self.members_of(ty);
-                        self.idx_decl(&t.name, t.span, index::DeclKind::Type, detail, members);
-                        // reject cycles
-                        let mut seen = vec![ty];
-                        let mut cur = under;
-                        while let TyKind::Named(n) = self.types.kind(cur).clone() {
-                            if seen.contains(&cur) {
-                                return err(t.span, format!("type `{}` is defined in terms of itself", t.name));
+                let item_r: Result<()> = (|| {
+                    match it {
+                        ast::Item::Type(t) => {
+                            let ty = match self.mods[m].syms[&t.name].sym {
+                                Sym::Type(ty) => ty,
+                                _ => unreachable!(),
+                            };
+                            let under = self.resolve_type(&t.ty, m, &none)?;
+                            if let TyKind::Named(n) = self.types.kind(ty).clone() {
+                                self.types.named[n as usize].underlying = under;
                             }
-                            seen.push(cur);
-                            cur = self.types.named[n as usize].underlying;
+                            self.ix.type_spans.insert(ty, t.span);
+                            let detail = self.type_detail(ty);
+                            let members = self.members_of(ty);
+                            self.idx_decl(&t.name, t.span, index::DeclKind::Type, detail, members);
+                            // reject cycles
+                            let mut seen = vec![ty];
+                            let mut cur = under;
+                            while let TyKind::Named(n) = self.types.kind(cur).clone() {
+                                if seen.contains(&cur) {
+                                    return err(
+                                        t.span,
+                                        format!("type `{}` is defined in terms of itself", t.name),
+                                    );
+                                }
+                                seen.push(cur);
+                                cur = self.types.named[n as usize].underlying;
+                            }
                         }
+                        ast::Item::Struct(s) if s.type_params.is_empty() => {
+                            let ty = match self.mods[m].syms[&s.name].sym {
+                                Sym::Struct { ty, .. } => ty.unwrap(),
+                                _ => unreachable!(),
+                            };
+                            self.fill_struct(ty, s, m, &none)?;
+                            let detail = self.type_detail(ty);
+                            self.idx_decl(&s.name, s.span, index::DeclKind::Struct, detail, vec![]);
+                        }
+                        ast::Item::Enum(e) if e.type_params.is_empty() => {
+                            let ty = match self.mods[m].syms[&e.name].sym {
+                                Sym::Enum { ty, .. } => ty.unwrap(),
+                                _ => unreachable!(),
+                            };
+                            self.fill_enum(ty, e, m, &none)?;
+                            let detail = self.type_detail(ty);
+                            let members: Vec<(String, String)> = e
+                                .variants
+                                .iter()
+                                .map(|v| (v.0.clone(), format!("{}.{}", e.name, v.0)))
+                                .collect();
+                            self.idx_decl(&e.name, e.span, index::DeclKind::Enum, detail, members);
+                        }
+                        _ => {}
                     }
-                    ast::Item::Struct(s) if s.type_params.is_empty() => {
-                        let ty = match self.mods[m].syms[&s.name].sym {
-                            Sym::Struct { ty, .. } => ty.unwrap(),
-                            _ => unreachable!(),
-                        };
-                        self.fill_struct(ty, s, m, &none)?;
-                        let detail = self.type_detail(ty);
-                        self.idx_decl(&s.name, s.span, index::DeclKind::Struct, detail, vec![]);
-                    }
-                    ast::Item::Enum(e) if e.type_params.is_empty() => {
-                        let ty = match self.mods[m].syms[&e.name].sym {
-                            Sym::Enum { ty, .. } => ty.unwrap(),
-                            _ => unreachable!(),
-                        };
-                        self.fill_enum(ty, e, m, &none)?;
-                        let detail = self.type_detail(ty);
-                        let members: Vec<(String, String)> = e.variants.iter().map(|v| (v.0.clone(), format!("{}.{}", e.name, v.0))).collect();
-                        self.idx_decl(&e.name, e.span, index::DeclKind::Enum, detail, members);
-                    }
-                    _ => {}
-                }
-                Ok(())
+                    Ok(())
                 })();
                 if let Err(d) = item_r {
                     self.errors.push(d);
                 }
             }
             for (i, it) in items.iter().enumerate() {
-                let item_r: Result<()> = (|| { match it {
-                    ast::Item::Fn(f) if f.sig.type_params.is_empty() => {
-                        let (params, ret) = self.resolve_sig(&f.sig, m, &none)?;
-                        let id = self.reserve_fn(f.sig.name.clone(), params, ret);
-                        if is_never_ret(&f.sig) {
-                            self.never_funcs.insert(id);
-                        }
-                        self.ix.fn_spans.insert(id, f.sig.span);
-                        let detail = self.fn_detail(&f.sig.name, id);
-                        self.idx_decl(&f.sig.name, f.sig.span, index::DeclKind::Function, detail, vec![]);
-                        if let Some(SymEntry { sym: Sym::Fn { func, .. }, .. }) = self.mods[m].syms.get_mut(&f.sig.name) {
-                            *func = Some(id);
-                        }
-                        self.pending.push(PendingFn { func: id, module: m, decl: f.clone(), tparams: HashMap::new() });
-                        let _ = i;
-                    }
-                    ast::Item::Extern(e) => {
-                        let dir = self.mods[m].path.parent().unwrap().to_path_buf();
-                        for f in &e.fns {
+                let item_r: Result<()> = (|| {
+                    match it {
+                        ast::Item::Fn(f) if f.sig.type_params.is_empty() => {
                             let (params, ret) = self.resolve_sig(&f.sig, m, &none)?;
-                            let id = self.externs.len();
-                            let ps: Vec<String> = params.iter().map(|p| self.types.show(*p)).collect();
-                            let detail = format!("fn {}.{}({}) {}", e.alias, f.sig.name, ps.join(", "), if ret == VOID { String::new() } else { self.types.show(ret) });
-                            self.idx_decl(&f.sig.name, f.sig.span, index::DeclKind::Function, detail.trim_end().to_string(), vec![]);
-                            self.externs.push(Extern {
-                                name: format!("{}.{}", e.alias, f.sig.name),
-                                symbol: f.symbol.clone(),
-                                params,
-                                ret,
-                                file: dir.join(&e.path),
+                            let id = self.reserve_fn(f.sig.name.clone(), params, ret);
+                            if is_never_ret(&f.sig) {
+                                self.never_funcs.insert(id);
+                            }
+                            self.ix.fn_spans.insert(id, f.sig.span);
+                            let detail = self.fn_detail(&f.sig.name, id);
+                            self.idx_decl(
+                                &f.sig.name,
+                                f.sig.span,
+                                index::DeclKind::Function,
+                                detail,
+                                vec![],
+                            );
+                            if let Some(SymEntry {
+                                sym: Sym::Fn { func, .. },
+                                ..
+                            }) = self.mods[m].syms.get_mut(&f.sig.name)
+                            {
+                                *func = Some(id);
+                            }
+                            self.pending.push(PendingFn {
+                                func: id,
+                                module: m,
+                                decl: f.clone(),
+                                tparams: HashMap::new(),
                             });
-                            let tab = self.mods[m].externs.get_mut(&e.alias).unwrap();
-                            if tab.insert(f.sig.name.clone(), id).is_some() {
-                                return err(f.sig.span, format!("duplicate extern function `{}`", f.sig.name));
+                            let _ = i;
+                        }
+                        ast::Item::Extern(e) => {
+                            let dir = self.mods[m].path.parent().unwrap().to_path_buf();
+                            for f in &e.fns {
+                                let (params, ret) = self.resolve_sig(&f.sig, m, &none)?;
+                                let id = self.externs.len();
+                                let ps: Vec<String> =
+                                    params.iter().map(|p| self.types.show(*p)).collect();
+                                let detail = format!(
+                                    "fn {}.{}({}) {}",
+                                    e.alias,
+                                    f.sig.name,
+                                    ps.join(", "),
+                                    if ret == VOID {
+                                        String::new()
+                                    } else {
+                                        self.types.show(ret)
+                                    }
+                                );
+                                self.idx_decl(
+                                    &f.sig.name,
+                                    f.sig.span,
+                                    index::DeclKind::Function,
+                                    detail.trim_end().to_string(),
+                                    vec![],
+                                );
+                                self.externs.push(Extern {
+                                    name: format!("{}.{}", e.alias, f.sig.name),
+                                    symbol: f.symbol.clone(),
+                                    params,
+                                    ret,
+                                    file: dir.join(&e.path),
+                                });
+                                let tab = self.mods[m].externs.get_mut(&e.alias).unwrap();
+                                if tab.insert(f.sig.name.clone(), id).is_some() {
+                                    return err(
+                                        f.sig.span,
+                                        format!("duplicate extern function `{}`", f.sig.name),
+                                    );
+                                }
                             }
                         }
+                        _ => {}
                     }
-                    _ => {}
-                }
-                Ok(())
+                    Ok(())
                 })();
                 if let Err(d) = item_r {
                     self.errors.push(d);
@@ -428,10 +526,14 @@ impl<'a> Checker<'a> {
             // reject infinitely sized structs
             for it in items.iter() {
                 if let ast::Item::Struct(s) = it
-                    && let Some(SymEntry { sym: Sym::Struct { ty: Some(ty), .. }, .. }) = self.mods[m].syms.get(&s.name)
-                        && let Err(d) = self.check_finite(*ty, s.span) {
-                            self.errors.push(d);
-                        }
+                    && let Some(SymEntry {
+                        sym: Sym::Struct { ty: Some(ty), .. },
+                        ..
+                    }) = self.mods[m].syms.get(&s.name)
+                    && let Err(d) = self.check_finite(*ty, s.span)
+                {
+                    self.errors.push(d);
+                }
             }
             Ok(())
         }
@@ -450,7 +552,10 @@ impl<'a> Checker<'a> {
                 TyKind::Named(_) => walk(t, t.base(cur), target, false, seen),
                 TyKind::Tuple(ts) => ts.iter().any(|x| walk(t, *x, target, false, seen)),
                 TyKind::ErrU(i) => walk(t, *i, target, false, seen),
-                TyKind::Struct(i) => t.structs[*i as usize].fields.iter().any(|(_, x)| walk(t, *x, target, false, seen)),
+                TyKind::Struct(i) => t.structs[*i as usize]
+                    .fields
+                    .iter()
+                    .any(|(_, x)| walk(t, *x, target, false, seen)),
                 // optionals that contain themselves are boxed; arrays, maps and enums are on the heap
                 _ => false,
             };
@@ -458,24 +563,44 @@ impl<'a> Checker<'a> {
             r
         }
         if walk(&self.types, ty, ty, true, &mut vec![]) {
-            return err(span, format!("struct `{}` contains itself and would have infinite size", self.types.show(ty)));
+            return err(
+                span,
+                format!(
+                    "struct `{}` contains itself and would have infinite size",
+                    self.types.show(ty)
+                ),
+            );
         }
         Ok(())
     }
 
-    fn fill_struct(&mut self, ty: TyId, s: &ast::StructDecl, m: usize, tp: &HashMap<String, TyId>) -> Result<()> {
+    fn fill_struct(
+        &mut self,
+        ty: TyId,
+        s: &ast::StructDecl,
+        m: usize,
+        tp: &HashMap<String, TyId>,
+    ) -> Result<()> {
         let mut fields = Vec::new();
         for (fty, name, sp) in &s.fields {
             if fields.iter().any(|(n, _): &(String, TyId)| n == name) {
                 return err(*sp, format!("duplicate field `{name}`"));
             }
             let t = self.resolve_type(fty, m, tp)?;
-            if matches!(self.types.kind(t), TyKind::Void | TyKind::Never | TyKind::Mutex(_) | TyKind::Fut(_)) {
-                return err(*sp, format!("struct fields cannot have type `{}`", self.types.show(t)));
+            if matches!(
+                self.types.kind(t),
+                TyKind::Void | TyKind::Never | TyKind::Mutex(_) | TyKind::Fut(_)
+            ) {
+                return err(
+                    *sp,
+                    format!("struct fields cannot have type `{}`", self.types.show(t)),
+                );
             }
             fields.push((name.clone(), t));
         }
-        self.ix.field_spans.insert(ty, s.fields.iter().map(|f| f.2).collect());
+        self.ix
+            .field_spans
+            .insert(ty, s.fields.iter().map(|f| f.2).collect());
         self.ix.type_spans.insert(ty, s.span);
         if let TyKind::Struct(i) = *self.types.kind(ty) {
             self.types.structs[i as usize].fields = fields;
@@ -493,10 +618,19 @@ impl<'a> Checker<'a> {
         Ok(())
     }
 
-    fn fill_enum(&mut self, ty: TyId, e: &ast::EnumDecl, m: usize, tp: &HashMap<String, TyId>) -> Result<()> {
+    fn fill_enum(
+        &mut self,
+        ty: TyId,
+        e: &ast::EnumDecl,
+        m: usize,
+        tp: &HashMap<String, TyId>,
+    ) -> Result<()> {
         let mut variants = Vec::new();
         for (name, tys, sp) in &e.variants {
-            if variants.iter().any(|(n, _): &(String, Vec<TyId>)| n == name) {
+            if variants
+                .iter()
+                .any(|(n, _): &(String, Vec<TyId>)| n == name)
+            {
                 return err(*sp, format!("duplicate enum member `{name}`"));
             }
             let mut ts = Vec::new();
@@ -505,24 +639,43 @@ impl<'a> Checker<'a> {
             }
             variants.push((name.clone(), ts));
         }
-        self.ix.variant_spans.insert(ty, e.variants.iter().map(|v| v.2).collect());
+        self.ix
+            .variant_spans
+            .insert(ty, e.variants.iter().map(|v| v.2).collect());
         self.ix.type_spans.insert(ty, e.span);
         if let TyKind::Enum(i) = *self.types.kind(ty) {
             self.types.enums[i as usize].variants = variants;
         }
         let ename = self.types.show(ty);
         for (vn, _, sp) in &e.variants {
-            self.idx_decl(vn, *sp, index::DeclKind::Variant, format!("{ename}.{vn}"), vec![]);
+            self.idx_decl(
+                vn,
+                *sp,
+                index::DeclKind::Variant,
+                format!("{ename}.{vn}"),
+                vec![],
+            );
         }
         Ok(())
     }
 
-    pub fn resolve_sig(&mut self, sig: &ast::FnSig, m: usize, tp: &HashMap<String, TyId>) -> Result<(Vec<TyId>, TyId)> {
+    pub fn resolve_sig(
+        &mut self,
+        sig: &ast::FnSig,
+        m: usize,
+        tp: &HashMap<String, TyId>,
+    ) -> Result<(Vec<TyId>, TyId)> {
         let mut params = Vec::new();
         for p in &sig.params {
             let t = self.resolve_type(&p.ty, m, tp)?;
-            if matches!(self.types.kind(t), TyKind::Void | TyKind::Never | TyKind::Fut(_)) {
-                return err(p.span, format!("parameters cannot have type `{}`", self.types.show(t)));
+            if matches!(
+                self.types.kind(t),
+                TyKind::Void | TyKind::Never | TyKind::Fut(_)
+            ) {
+                return err(
+                    p.span,
+                    format!("parameters cannot have type `{}`", self.types.show(t)),
+                );
             }
             params.push(t);
         }
@@ -534,9 +687,10 @@ impl<'a> Checker<'a> {
             return err(sig.span, "futures cannot be returned from functions");
         }
         if let TyKind::ErrU(i) = self.types.kind(ret)
-            && matches!(self.types.kind(*i), TyKind::Fut(_)) {
-                return err(sig.span, "futures cannot be returned from functions");
-            }
+            && matches!(self.types.kind(*i), TyKind::Fut(_))
+        {
+            return err(sig.span, "futures cannot be returned from functions");
+        }
         Ok((params, ret))
     }
 
@@ -546,7 +700,13 @@ impl<'a> Checker<'a> {
         self.funcs.len() - 1
     }
 
-    pub fn new_ctx(&mut self, func: FuncId, module: usize, ret: TyId, tparams: HashMap<String, TyId>) -> FnCtx {
+    pub fn new_ctx(
+        &mut self,
+        func: FuncId,
+        module: usize,
+        ret: TyId,
+        tparams: HashMap<String, TyId>,
+    ) -> FnCtx {
         FnCtx {
             func,
             locals: vec![],
@@ -620,7 +780,10 @@ impl<'a> Checker<'a> {
         let completes = self.block_completes(body);
         if completes {
             if ret == NEVER {
-                return err(span, format!("function `{name}` is declared `never` but can return"));
+                return err(
+                    span,
+                    format!("function `{name}` is declared `never` but can return"),
+                );
             }
             let needs = match self.types.kind(ret) {
                 TyKind::Void => false,
@@ -628,7 +791,10 @@ impl<'a> Checker<'a> {
                 _ => true,
             };
             if needs {
-                return err(span, format!("function `{name}` does not return a value on every path"));
+                return err(
+                    span,
+                    format!("function `{name}` does not return a value on every path"),
+                );
             }
         }
         Ok(())
@@ -636,7 +802,13 @@ impl<'a> Checker<'a> {
 
     // ------------------------------------------------------------ generics
 
-    pub fn instantiate_fn(&mut self, m: usize, decl: usize, args: Vec<TyId>, span: Span) -> Result<FuncId> {
+    pub fn instantiate_fn(
+        &mut self,
+        m: usize,
+        decl: usize,
+        args: Vec<TyId>,
+        span: Span,
+    ) -> Result<FuncId> {
         let key = (m, decl, args.clone());
         if let Some(&f) = self.fn_insts.get(&key) {
             return Ok(f);
@@ -656,9 +828,22 @@ impl<'a> Checker<'a> {
                 ),
             );
         }
-        let tp: HashMap<String, TyId> = f.sig.type_params.iter().cloned().zip(args.iter().cloned()).collect();
+        let tp: HashMap<String, TyId> = f
+            .sig
+            .type_params
+            .iter()
+            .cloned()
+            .zip(args.iter().cloned())
+            .collect();
         let (params, ret) = self.resolve_sig(&f.sig, m, &tp)?;
-        let name = format!("{}<{}>", f.sig.name, args.iter().map(|a| self.types.show(*a)).collect::<Vec<_>>().join(", "));
+        let name = format!(
+            "{}<{}>",
+            f.sig.name,
+            args.iter()
+                .map(|a| self.types.show(*a))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
         let id = self.reserve_fn(name, params, ret);
         if is_never_ret(&f.sig) {
             self.never_funcs.insert(id);
@@ -671,7 +856,12 @@ impl<'a> Checker<'a> {
         let mut decl2 = f.clone();
         decl2.sig.name = self.types_name(&f.sig.name, &args);
         let before = self.errors.len();
-        let r = self.check_fn_body(PendingFn { func: id, module: m, decl: decl2, tparams: tp });
+        let r = self.check_fn_body(PendingFn {
+            func: id,
+            module: m,
+            decl: decl2,
+            tparams: tp,
+        });
         self.fns = saved;
         self.report(r);
         let inst = self.types_name(&f.sig.name, &args);
@@ -682,10 +872,23 @@ impl<'a> Checker<'a> {
     }
 
     fn types_name(&self, base: &str, args: &[TyId]) -> String {
-        format!("{}<{}>", base, args.iter().map(|a| self.types.show(*a)).collect::<Vec<_>>().join(", "))
+        format!(
+            "{}<{}>",
+            base,
+            args.iter()
+                .map(|a| self.types.show(*a))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
     }
 
-    fn instantiate_type(&mut self, m: usize, decl: usize, args: Vec<TyId>, span: Span) -> Result<TyId> {
+    fn instantiate_type(
+        &mut self,
+        m: usize,
+        decl: usize,
+        args: Vec<TyId>,
+        span: Span,
+    ) -> Result<TyId> {
         let key = (m, decl, args.clone());
         if let Some(&t) = self.type_insts.get(&key) {
             return Ok(t);
@@ -697,7 +900,14 @@ impl<'a> Checker<'a> {
             _ => unreachable!(),
         };
         if tparams.len() != args.len() {
-            return err(span, format!("`{name}` expects {} type argument(s), found {}", tparams.len(), args.len()));
+            return err(
+                span,
+                format!(
+                    "`{name}` expects {} type argument(s), found {}",
+                    tparams.len(),
+                    args.len()
+                ),
+            );
         }
         let display = self.types_name(&name, &args);
         let tp: HashMap<String, TyId> = tparams.into_iter().zip(args.iter().cloned()).collect();
@@ -723,7 +933,13 @@ impl<'a> Checker<'a> {
     // ------------------------------------------------------------ types
 
     /// Look up a symbol in module `m`, or in an imported module when `module` is given.
-    pub fn lookup_sym(&self, m: usize, module: Option<&str>, name: &str, span: Span) -> Result<Option<(usize, Sym)>> {
+    pub fn lookup_sym(
+        &self,
+        m: usize,
+        module: Option<&str>,
+        name: &str,
+        span: Span,
+    ) -> Result<Option<(usize, Sym)>> {
         match module {
             Some(alias) => {
                 let Some(&target) = self.mods[m].imports.get(alias) else {
@@ -739,10 +955,20 @@ impl<'a> Checker<'a> {
         }
     }
 
-    pub fn resolve_type(&mut self, te: &ast::TypeExpr, m: usize, tp: &HashMap<String, TyId>) -> Result<TyId> {
+    pub fn resolve_type(
+        &mut self,
+        te: &ast::TypeExpr,
+        m: usize,
+        tp: &HashMap<String, TyId>,
+    ) -> Result<TyId> {
         use ast::TypeExpr as T;
         Ok(match te {
-            T::Named { module, name, args, span } => {
+            T::Named {
+                module,
+                name,
+                args,
+                span,
+            } => {
                 if module.is_none() {
                     if let Some(t) = tp.get(name) {
                         if !args.is_empty() {
@@ -775,20 +1001,28 @@ impl<'a> Checker<'a> {
                     targs.push(self.resolve_type(a, m, tp)?);
                 }
                 let resolved = match self.lookup_sym(m, module.as_deref(), name, *span)? {
-                    Some((dm, Sym::Struct { decl, ty })) | Some((dm, Sym::Enum { decl, ty })) => match ty {
-                        Some(t) => {
-                            if !targs.is_empty() {
-                                return err(*span, format!("`{name}` does not take type arguments"));
+                    Some((dm, Sym::Struct { decl, ty })) | Some((dm, Sym::Enum { decl, ty })) => {
+                        match ty {
+                            Some(t) => {
+                                if !targs.is_empty() {
+                                    return err(
+                                        *span,
+                                        format!("`{name}` does not take type arguments"),
+                                    );
+                                }
+                                t
                             }
-                            t
-                        }
-                        None => {
-                            if targs.is_empty() {
-                                return err(*span, format!("generic type `{name}` requires type arguments"));
+                            None => {
+                                if targs.is_empty() {
+                                    return err(
+                                        *span,
+                                        format!("generic type `{name}` requires type arguments"),
+                                    );
+                                }
+                                self.instantiate_type(dm, decl, targs, *span)?
                             }
-                            self.instantiate_type(dm, decl, targs, *span)?
                         }
-                    },
+                    }
                     Some((_, Sym::Type(t))) => {
                         if !targs.is_empty() {
                             return err(*span, format!("`{name}` does not take type arguments"));
@@ -814,21 +1048,33 @@ impl<'a> Checker<'a> {
                 let vt = self.resolve_type(v, m, tp)?;
                 self.check_elem_type(vt, *sp)?;
                 if !self.comparable(kt) {
-                    return err(*sp, format!("`{}` cannot be used as a map key", self.types.show(kt)));
+                    return err(
+                        *sp,
+                        format!("`{}` cannot be used as a map key", self.types.show(kt)),
+                    );
                 }
                 self.types.intern(TyKind::Map(kt, vt))
             }
             T::Optional(i, sp) => {
                 let it = self.resolve_type(i, m, tp)?;
-                if matches!(self.types.kind(it), TyKind::Void | TyKind::Never | TyKind::ErrU(_) | TyKind::Mutex(_)) {
+                if matches!(
+                    self.types.kind(it),
+                    TyKind::Void | TyKind::Never | TyKind::ErrU(_) | TyKind::Mutex(_)
+                ) {
                     return err(*sp, format!("`{}` cannot be optional", self.types.show(it)));
                 }
                 self.types.opt(it)
             }
             T::ErrorUnion(i, sp) => {
                 let it = self.resolve_type(i, m, tp)?;
-                if matches!(self.types.kind(it), TyKind::Never | TyKind::ErrU(_) | TyKind::Mutex(_)) {
-                    return err(*sp, format!("`{}` cannot be an error union", self.types.show(it)));
+                if matches!(
+                    self.types.kind(it),
+                    TyKind::Never | TyKind::ErrU(_) | TyKind::Mutex(_)
+                ) {
+                    return err(
+                        *sp,
+                        format!("`{}` cannot be an error union", self.types.show(it)),
+                    );
                 }
                 self.types.erru(it)
             }
@@ -854,8 +1100,14 @@ impl<'a> Checker<'a> {
             }
             T::Fut(i, sp) => {
                 let it = self.resolve_type(i, m, tp)?;
-                if matches!(self.types.kind(it), TyKind::Fut(_) | TyKind::Never | TyKind::Mutex(_)) {
-                    return err(*sp, format!("invalid future type `fut {}`", self.types.show(it)));
+                if matches!(
+                    self.types.kind(it),
+                    TyKind::Fut(_) | TyKind::Never | TyKind::Mutex(_)
+                ) {
+                    return err(
+                        *sp,
+                        format!("invalid future type `fut {}`", self.types.show(it)),
+                    );
                 }
                 self.types.intern(TyKind::Fut(it))
             }
@@ -863,8 +1115,14 @@ impl<'a> Checker<'a> {
     }
 
     fn check_elem_type(&self, t: TyId, sp: Span) -> Result<()> {
-        if matches!(self.types.kind(t), TyKind::Void | TyKind::Never | TyKind::Mutex(_) | TyKind::Fut(_)) {
-            return err(sp, format!("`{}` cannot be stored in a container", self.types.show(t)));
+        if matches!(
+            self.types.kind(t),
+            TyKind::Void | TyKind::Never | TyKind::Mutex(_) | TyKind::Fut(_)
+        ) {
+            return err(
+                sp,
+                format!("`{}` cannot be stored in a container", self.types.show(t)),
+            );
         }
         Ok(())
     }
@@ -881,24 +1139,36 @@ impl<'a> Checker<'a> {
         match self.types.kind(t) {
             TyKind::Struct(i) => {
                 seen.push(t);
-                let fs: Vec<TyId> = self.types.structs[*i as usize].fields.iter().map(|f| f.1).collect();
+                let fs: Vec<TyId> = self.types.structs[*i as usize]
+                    .fields
+                    .iter()
+                    .map(|f| f.1)
+                    .collect();
                 let r = fs.iter().all(|f| self.comparable_guard(*f, seen));
                 seen.pop();
                 r
             }
             TyKind::Enum(i) => {
                 seen.push(t);
-                let vs: Vec<TyId> = self.types.enums[*i as usize].variants.iter().flat_map(|v| v.1.clone()).collect();
+                let vs: Vec<TyId> = self.types.enums[*i as usize]
+                    .variants
+                    .iter()
+                    .flat_map(|v| v.1.clone())
+                    .collect();
                 let r = vs.iter().all(|f| self.comparable_guard(*f, seen));
                 seen.pop();
                 r
             }
-            TyKind::Array(e) | TyKind::Fixed(e, _) | TyKind::Opt(e) => self.comparable_guard(*e, seen),
+            TyKind::Array(e) | TyKind::Fixed(e, _) | TyKind::Opt(e) => {
+                self.comparable_guard(*e, seen)
+            }
             TyKind::Map(k, v) => self.comparable_guard(*k, seen) && self.comparable_guard(*v, seen),
             TyKind::Tuple(ts) => ts.clone().iter().all(|x| self.comparable_guard(*x, seen)),
             TyKind::Named(_) => self.comparable_guard(self.types.base(t), seen),
             TyKind::ErrU(e) => *e == VOID || self.comparable_guard(*e, seen),
-            TyKind::Fn(..) | TyKind::Fut(_) | TyKind::Mutex(_) | TyKind::Void | TyKind::Never => false,
+            TyKind::Fn(..) | TyKind::Fut(_) | TyKind::Mutex(_) | TyKind::Void | TyKind::Never => {
+                false
+            }
             _ => true,
         }
     }
@@ -912,22 +1182,34 @@ impl<'a> Checker<'a> {
             return true;
         }
         match self.types.kind(t) {
-            TyKind::Fn(..) | TyKind::Fut(_) | TyKind::Mutex(_) | TyKind::Void | TyKind::Never => false,
+            TyKind::Fn(..) | TyKind::Fut(_) | TyKind::Mutex(_) | TyKind::Void | TyKind::Never => {
+                false
+            }
             TyKind::ErrU(e) => *e == VOID || self.printable_guard(*e, seen),
             TyKind::Named(_) => self.printable_guard(self.types.base(t), seen),
-            TyKind::Array(e) | TyKind::Fixed(e, _) | TyKind::Opt(e) => self.printable_guard(*e, seen),
+            TyKind::Array(e) | TyKind::Fixed(e, _) | TyKind::Opt(e) => {
+                self.printable_guard(*e, seen)
+            }
             TyKind::Map(k, v) => self.printable_guard(*k, seen) && self.printable_guard(*v, seen),
             TyKind::Tuple(ts) => ts.clone().iter().all(|x| self.printable_guard(*x, seen)),
             TyKind::Struct(i) => {
                 seen.push(t);
-                let fs: Vec<TyId> = self.types.structs[*i as usize].fields.iter().map(|f| f.1).collect();
+                let fs: Vec<TyId> = self.types.structs[*i as usize]
+                    .fields
+                    .iter()
+                    .map(|f| f.1)
+                    .collect();
                 let r = fs.iter().all(|f| self.printable_guard(*f, seen));
                 seen.pop();
                 r
             }
             TyKind::Enum(i) => {
                 seen.push(t);
-                let vs: Vec<TyId> = self.types.enums[*i as usize].variants.iter().flat_map(|v| v.1.clone()).collect();
+                let vs: Vec<TyId> = self.types.enums[*i as usize]
+                    .variants
+                    .iter()
+                    .flat_map(|v| v.1.clone())
+                    .collect();
                 let r = vs.iter().all(|f| self.printable_guard(*f, seen));
                 seen.pop();
                 r
@@ -955,10 +1237,23 @@ impl<'a> Checker<'a> {
         self.ctx().scopes.pop();
     }
 
-    pub fn declare_local(&mut self, name: &str, ty: TyId, mutable: bool, kind: LocalKind, span: Span) -> Result<LocalId> {
+    pub fn declare_local(
+        &mut self,
+        name: &str,
+        ty: TyId,
+        mutable: bool,
+        kind: LocalKind,
+        span: Span,
+    ) -> Result<LocalId> {
         let ctx = self.ctx();
         let id = ctx.locals.len();
-        ctx.locals.push(Local { name: name.to_string(), ty, mutable, kind, boxed: false });
+        ctx.locals.push(Local {
+            name: name.to_string(),
+            ty,
+            mutable,
+            kind,
+            boxed: false,
+        });
         if name != "_" {
             ctx.scopes.last_mut().unwrap().push((name.to_string(), id));
         }
@@ -976,10 +1271,21 @@ impl<'a> Checker<'a> {
         self.fns.len() == 1 && c.is_main && c.scopes.len() == 1
     }
 
-    pub fn declare_global(&mut self, name: &str, ty: TyId, mutable: bool, span: Span) -> Result<GlobalId> {
+    pub fn declare_global(
+        &mut self,
+        name: &str,
+        ty: TyId,
+        mutable: bool,
+        span: Span,
+    ) -> Result<GlobalId> {
         let m = self.module();
         let id = self.globals.len();
-        self.globals.push(Global { name: name.to_string(), ty, mutable, module: m });
+        self.globals.push(Global {
+            name: name.to_string(),
+            ty,
+            mutable,
+            module: m,
+        });
         self.ix.global_spans.insert(id, span);
         let detail = self.var_detail(name, ty, mutable);
         let members = self.members_of(ty);
@@ -988,15 +1294,24 @@ impl<'a> Checker<'a> {
             return Ok(id);
         }
         match self.mods[m].syms.get_mut(name) {
-            Some(SymEntry { sym: Sym::Globals(list), .. }) => list.push((id, span.start)),
+            Some(SymEntry {
+                sym: Sym::Globals(list),
+                ..
+            }) => list.push((id, span.start)),
             Some(_) => return err(span, format!("`{name}` is already defined in this module")),
             None => {
-                if self.mods[m].imports.contains_key(name) || self.mods[m].externs.contains_key(name) {
+                if self.mods[m].imports.contains_key(name)
+                    || self.mods[m].externs.contains_key(name)
+                {
                     return err(span, format!("`{name}` is already used as a module alias"));
                 }
-                self.mods[m]
-                    .syms
-                    .insert(name.to_string(), SymEntry { sym: Sym::Globals(vec![(id, span.start)]), public: false });
+                self.mods[m].syms.insert(
+                    name.to_string(),
+                    SymEntry {
+                        sym: Sym::Globals(vec![(id, span.start)]),
+                        public: false,
+                    },
+                );
             }
         }
         Ok(id)
@@ -1015,7 +1330,13 @@ impl<'a> Checker<'a> {
         let mut found = None;
         for d in (0..=top).rev() {
             let ctx = &self.fns[d];
-            if let Some(&(_, id)) = ctx.scopes.iter().rev().flat_map(|s| s.iter().rev()).find(|(n, _)| n == name) {
+            if let Some(&(_, id)) = ctx
+                .scopes
+                .iter()
+                .rev()
+                .flat_map(|s| s.iter().rev())
+                .find(|(n, _)| n == name)
+            {
                 found = Some((d, id));
                 break;
             }
@@ -1023,7 +1344,9 @@ impl<'a> Checker<'a> {
                 // main's locals are visible to nested functions declared in main
             }
         }
-        let Some((d, mut id)) = found else { return Ok(None) };
+        let Some((d, mut id)) = found else {
+            return Ok(None);
+        };
         if d == top {
             return Ok(Some(id));
         }
@@ -1031,7 +1354,10 @@ impl<'a> Checker<'a> {
         for k in d + 1..=top {
             let outer = &self.fns[k - 1].locals[id];
             if outer.kind == LocalKind::LockAlias {
-                return err(span, format!("`{name}` is locked in an enclosing scope and cannot be captured"));
+                return err(
+                    span,
+                    format!("`{name}` is locked in an enclosing scope and cannot be captured"),
+                );
             }
             let by_ref = outer.mutable;
             let oty = outer.ty;
@@ -1051,7 +1377,11 @@ impl<'a> Checker<'a> {
                 name: name.to_string(),
                 ty: oty,
                 mutable: omut,
-                kind: if by_ref { LocalKind::CapRef(ci) } else { LocalKind::CapVal(ci) },
+                kind: if by_ref {
+                    LocalKind::CapRef(ci)
+                } else {
+                    LocalKind::CapVal(ci)
+                },
                 boxed: false,
             });
             inner.cap_map.insert(id, lid);
@@ -1066,11 +1396,14 @@ impl<'a> Checker<'a> {
 
     /// Pick the global for a name: the latest declaration at or before `pos`, else the first.
     pub fn pick_global(list: &[(GlobalId, u32)], pos: u32, same_file: bool) -> GlobalId {
-        if same_file
-            && let Some((g, _)) = list.iter().rev().find(|(_, p)| *p <= pos) {
-                return *g;
-            }
-        if same_file { list[0].0 } else { list.last().unwrap().0 }
+        if same_file && let Some((g, _)) = list.iter().rev().find(|(_, p)| *p <= pos) {
+            return *g;
+        }
+        if same_file {
+            list[0].0
+        } else {
+            list.last().unwrap().0
+        }
     }
 
     // ------------------------------------------------------------ main assembly
@@ -1095,7 +1428,11 @@ impl<'a> Checker<'a> {
         for t in &self.tests {
             work_f.push(t.func);
         }
-        let mut included: Vec<Vec<bool>> = self.mods.iter().map(|m| vec![false; m.init.len()]).collect();
+        let mut included: Vec<Vec<bool>> = self
+            .mods
+            .iter()
+            .map(|m| vec![false; m.init.len()])
+            .collect();
         loop {
             while let Some(f) = work_f.pop() {
                 if !reach_f.insert(f) {

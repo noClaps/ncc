@@ -12,7 +12,11 @@ fn root() -> PathBuf {
 }
 
 fn run(args: &[&str], file: &Path) -> (String, String, i32) {
-    let out = Command::new(ncc()).args(args).arg(file).output().expect("failed to run ncc");
+    let out = Command::new(ncc())
+        .args(args)
+        .arg(file)
+        .output()
+        .expect("failed to run ncc");
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
@@ -46,8 +50,11 @@ fn programs() {
                 None => (name.strip_suffix(".out").unwrap().to_string(), "run"),
             };
             let src = dir.join(format!("{stem}.nc"));
-            let variants: Vec<Vec<&str>> =
-                if mode == "test" { vec![vec!["test"]] } else { vec![vec!["run"], vec!["run", "-r"]] };
+            let variants: Vec<Vec<&str>> = if mode == "test" {
+                vec![vec!["test"]]
+            } else {
+                vec![vec!["run"], vec!["run", "-r"]]
+            };
             for args in variants {
                 let (stdout, stderr, _) = run(&args, &src);
                 if stdout != expected {
@@ -69,10 +76,19 @@ fn compile_failures() {
     let mut failures = Vec::new();
     for src in sorted_files(&root().join("fail"), ".nc") {
         let text = std::fs::read_to_string(&src).unwrap();
-        let expect = text.lines().next().unwrap().strip_prefix("// expect: ").expect("missing expect line").to_string();
+        let expect = text
+            .lines()
+            .next()
+            .unwrap()
+            .strip_prefix("// expect: ")
+            .expect("missing expect line")
+            .to_string();
         let (_, stderr, code) = run(&["check"], &src);
         if code == 0 || !stderr.contains(&expect) {
-            failures.push(format!("{}: expected `{expect}`, got (exit {code}):\n{stderr}", src.display()));
+            failures.push(format!(
+                "{}: expected `{expect}`, got (exit {code}):\n{stderr}",
+                src.display()
+            ));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
@@ -85,12 +101,27 @@ fn runtime_failures() {
     for src in sorted_files(&root().join("panic"), ".nc") {
         let text = std::fs::read_to_string(&src).unwrap();
         let mut lines = text.lines();
-        let code: i32 = lines.next().unwrap().strip_prefix("// expect-exit: ").unwrap().parse().unwrap();
-        let err = lines.next().unwrap().strip_prefix("// expect-stderr: ").unwrap().to_string();
+        let code: i32 = lines
+            .next()
+            .unwrap()
+            .strip_prefix("// expect-exit: ")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let err = lines
+            .next()
+            .unwrap()
+            .strip_prefix("// expect-stderr: ")
+            .unwrap()
+            .to_string();
         for args in [vec!["run"], vec!["run", "-r"]] {
             let (_, stderr, got) = run(&args, &src);
             if got != code || !stderr.contains(&err) {
-                failures.push(format!("{} ({}): expected exit {code} with `{err}`, got exit {got}:\n{stderr}", src.display(), args.join(" ")));
+                failures.push(format!(
+                    "{} ({}): expected exit {code} with `{err}`, got exit {got}:\n{stderr}",
+                    src.display(),
+                    args.join(" ")
+                ));
             }
         }
     }
@@ -104,13 +135,23 @@ fn build_formats() {
     let src = root().join("programs/fib.nc");
     for (fmt, file) in [("c", "fib.c"), ("asm", "fib.s"), ("exe", "fib")] {
         let out = dir.join(file);
-        let status = Command::new(ncc()).args(["build", "-r", "-f", fmt, "-o"]).arg(&out).arg(&src).status().unwrap();
+        let status = Command::new(ncc())
+            .args(["build", "-r", "-f", fmt, "-o"])
+            .arg(&out)
+            .arg(&src)
+            .status()
+            .unwrap();
         assert!(status.success(), "build -f {fmt} failed");
         assert!(out.is_file(), "{} missing", out.display());
     }
     // format inferred from the output extension
     let out = dir.join("inferred.c");
-    let status = Command::new(ncc()).args(["build", "-o"]).arg(&out).arg(&src).status().unwrap();
+    let status = Command::new(ncc())
+        .args(["build", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .status()
+        .unwrap();
     assert!(status.success());
     assert!(std::fs::read_to_string(&out).unwrap().contains("int main("));
     let exe = Command::new(dir.join("fib")).output().unwrap();
@@ -122,15 +163,33 @@ fn build_formats() {
 fn init_creates_project() {
     let dir = std::env::temp_dir().join(format!("ncc-init-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let status = Command::new(ncc()).args(["init", "--name", "demo"]).current_dir(&dir).status().unwrap();
+    let status = Command::new(ncc())
+        .args(["init", "--name", "demo"])
+        .current_dir(&dir)
+        .status()
+        .unwrap();
     assert!(status.success());
-    assert_eq!(std::fs::read_to_string(dir.join(".nc/config.toml")).unwrap(), "name = \"demo\"\n");
+    assert_eq!(
+        std::fs::read_to_string(dir.join(".nc/config.toml")).unwrap(),
+        "name = \"demo\"\n"
+    );
     assert!(dir.join(".nc/deps").is_dir());
-    assert_eq!(std::fs::read_to_string(dir.join(".gitignore")).unwrap(), ".nc/deps/\n");
-    let out = Command::new(ncc()).args(["run", "main.nc"]).current_dir(&dir).output().unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.join(".gitignore")).unwrap(),
+        ".nc/deps/\n"
+    );
+    let out = Command::new(ncc())
+        .args(["run", "main.nc"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
     assert_eq!(String::from_utf8_lossy(&out.stdout), "Hello, world!\n");
     // a second init refuses
-    let status = Command::new(ncc()).args(["init"]).current_dir(&dir).status().unwrap();
+    let status = Command::new(ncc())
+        .args(["init"])
+        .current_dir(&dir)
+        .status()
+        .unwrap();
     assert!(!status.success());
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -147,12 +206,18 @@ fn all_errors_reported() {
         for msg in expected.lines() {
             match rest.find(msg) {
                 Some(i) => rest = &rest[i + msg.len()..],
-                None => failures.push(format!("{}: missing or out of order `{msg}`:\n{stderr}", src.display())),
+                None => failures.push(format!(
+                    "{}: missing or out of order `{msg}`:\n{stderr}",
+                    src.display()
+                )),
             }
         }
         let n = expected.lines().count();
         if code == 0 || (n > 1 && !stderr.contains(&format!("found {n} errors"))) {
-            failures.push(format!("{}: expected {n} errors (exit {code}):\n{stderr}", src.display()));
+            failures.push(format!(
+                "{}: expected {n} errors (exit {code}):\n{stderr}",
+                src.display()
+            ));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));

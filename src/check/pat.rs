@@ -15,7 +15,10 @@ impl<'a> Checker<'a> {
                     return self.value_pat(v, ty, span);
                 }
                 if multi {
-                    return err(span, "patterns with several alternatives cannot bind variables");
+                    return err(
+                        span,
+                        "patterns with several alternatives cannot bind variables",
+                    );
                 }
                 let l = self.declare_local(name, ty, false, LocalKind::Normal, span)?;
                 Ok(Pat::Bind(l))
@@ -23,7 +26,14 @@ impl<'a> Checker<'a> {
             E::Tuple(items) => {
                 if let TyKind::Tuple(ts) = self.types.kind(ty).clone() {
                     if ts.len() != items.len() {
-                        return err(span, format!("expected a tuple of {} elements, found {}", ts.len(), items.len()));
+                        return err(
+                            span,
+                            format!(
+                                "expected a tuple of {} elements, found {}",
+                                ts.len(),
+                                items.len()
+                            ),
+                        );
                     }
                     let mut out = Vec::new();
                     for (it, t) in items.iter().zip(ts) {
@@ -44,7 +54,14 @@ impl<'a> Checker<'a> {
                 }
                 TyKind::Fixed(e, n) => {
                     if n as usize != items.len() {
-                        return err(span, format!("expected {n} elements to match `{}`, found {}", self.types.show(ty), items.len()));
+                        return err(
+                            span,
+                            format!(
+                                "expected {n} elements to match `{}`, found {}",
+                                self.types.show(ty),
+                                items.len()
+                            ),
+                        );
                     }
                     let mut out = Vec::new();
                     for it in items {
@@ -59,18 +76,26 @@ impl<'a> Checker<'a> {
             },
             E::Call(callee, args) => {
                 if let E::Field(base, vname) = &callee.kind
-                    && let Some(ety) = self.type_path(base)? {
-                        let idx = self.variant_of(ety, ty, vname, span)?;
-                        let payload = self.types.enum_def(ety).unwrap().variants[idx].1.clone();
-                        if payload.len() != args.len() {
-                            return err(span, format!("`{vname}` holds {} value(s), found {}", payload.len(), args.len()));
-                        }
-                        let mut out = Vec::new();
-                        for (a, t) in args.iter().zip(payload) {
-                            out.push(self.check_pattern(a, t, multi)?);
-                        }
-                        return Ok(Pat::Variant(idx, out));
+                    && let Some(ety) = self.type_path(base)?
+                {
+                    let idx = self.variant_of(ety, ty, vname, span)?;
+                    let payload = self.types.enum_def(ety).unwrap().variants[idx].1.clone();
+                    if payload.len() != args.len() {
+                        return err(
+                            span,
+                            format!(
+                                "`{vname}` holds {} value(s), found {}",
+                                payload.len(),
+                                args.len()
+                            ),
+                        );
                     }
+                    let mut out = Vec::new();
+                    for (a, t) in args.iter().zip(payload) {
+                        out.push(self.check_pattern(a, t, multi)?);
+                    }
+                    return Ok(Pat::Variant(idx, out));
+                }
                 let v = self.expect_expr(p, ty)?;
                 self.value_pat(v, ty, span)
             }
@@ -79,7 +104,10 @@ impl<'a> Checker<'a> {
                     let idx = self.variant_of(ety, ty, vname, span)?;
                     let payload = &self.types.enum_def(ety).unwrap().variants[idx].1;
                     if !payload.is_empty() {
-                        return err(span, format!("`{vname}` holds a value; match it with `{vname}(...)`"));
+                        return err(
+                            span,
+                            format!("`{vname}` holds a value; match it with `{vname}(...)`"),
+                        );
                     }
                     return Ok(Pat::Variant(idx, vec![]));
                 }
@@ -91,7 +119,14 @@ impl<'a> Checker<'a> {
                     return err(path.span, "expected a struct type");
                 };
                 if sty != ty {
-                    return err(span, format!("expected `{}`, found `{}`", self.types.show(ty), self.types.show(sty)));
+                    return err(
+                        span,
+                        format!(
+                            "expected `{}`, found `{}`",
+                            self.types.show(ty),
+                            self.types.show(sty)
+                        ),
+                    );
                 }
                 let def = self.types.struct_def(sty).cloned().unwrap();
                 let mut pats: Vec<Option<Pat>> = vec![None; def.fields.len()];
@@ -111,8 +146,11 @@ impl<'a> Checker<'a> {
                         None => {
                             return err(
                                 span,
-                                format!("missing field `{}` in pattern; use `.{} = _` to ignore it", def.fields[i].0, def.fields[i].0),
-                            )
+                                format!(
+                                    "missing field `{}` in pattern; use `.{} = _` to ignore it",
+                                    def.fields[i].0, def.fields[i].0
+                                ),
+                            );
                         }
                     }
                 }
@@ -127,12 +165,22 @@ impl<'a> Checker<'a> {
 
     fn is_value_symbol(&self, name: &str) -> bool {
         let m = self.module();
-        matches!(self.mods[m].syms.get(name).map(|e| &e.sym), Some(Sym::Fn { .. }))
+        matches!(
+            self.mods[m].syms.get(name).map(|e| &e.sym),
+            Some(Sym::Fn { .. })
+        )
     }
 
     fn variant_of(&self, ety: TyId, ty: TyId, vname: &str, span: Span) -> Result<usize> {
         if ety != ty {
-            return err(span, format!("expected `{}`, found `{}`", self.types.show(ty), self.types.show(ety)));
+            return err(
+                span,
+                format!(
+                    "expected `{}`, found `{}`",
+                    self.types.show(ty),
+                    self.types.show(ety)
+                ),
+            );
         }
         let Some(def) = self.types.enum_def(ety) else {
             return err(span, format!("`{}` is not an enum", self.types.show(ety)));
@@ -145,7 +193,10 @@ impl<'a> Checker<'a> {
 
     fn value_pat(&mut self, v: Expr, ty: TyId, span: Span) -> Result<Pat> {
         if !self.comparable(ty) {
-            return err(span, format!("`{}` values cannot be compared", self.types.show(ty)));
+            return err(
+                span,
+                format!("`{}` values cannot be compared", self.types.show(ty)),
+            );
         }
         Ok(Pat::Value(v))
     }
@@ -153,7 +204,10 @@ impl<'a> Checker<'a> {
     // ------------------------------------------------------------ exhaustiveness
 
     pub fn exhaustive(&self, arms: &[Arm], ty: TyId) -> bool {
-        let rows: Vec<Vec<Pat>> = arms.iter().flat_map(|a| a.patterns.iter().map(|p| vec![p.clone()])).collect();
+        let rows: Vec<Vec<Pat>> = arms
+            .iter()
+            .flat_map(|a| a.patterns.iter().map(|p| vec![p.clone()]))
+            .collect();
         self.matrix_exhaustive(&rows, &[ty])
     }
 
@@ -171,7 +225,11 @@ impl<'a> Checker<'a> {
         let t = tys[0];
         let rest = &tys[1..];
         // rows with a wildcard first column
-        let default: Vec<Vec<Pat>> = rows.iter().filter(|r| Self::is_wild(&r[0])).map(|r| r[1..].to_vec()).collect();
+        let default: Vec<Vec<Pat>> = rows
+            .iter()
+            .filter(|r| Self::is_wild(&r[0]))
+            .map(|r| r[1..].to_vec())
+            .collect();
         if default.len() == rows.len() {
             // no constructor in this column: it is irrelevant
             return self.matrix_exhaustive(&default, rest);
@@ -258,7 +316,13 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn expand_product(&self, rows: &[Vec<Pat>], ts: &[TyId], rest: &[TyId], get: impl Fn(&Pat) -> Option<Vec<Pat>>) -> bool {
+    fn expand_product(
+        &self,
+        rows: &[Vec<Pat>],
+        ts: &[TyId],
+        rest: &[TyId],
+        get: impl Fn(&Pat) -> Option<Vec<Pat>>,
+    ) -> bool {
         let sub: Vec<Vec<Pat>> = rows
             .iter()
             .filter_map(|r| {

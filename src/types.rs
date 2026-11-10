@@ -120,11 +120,17 @@ impl Types {
     }
 
     pub fn new_struct(&mut self, name: String) -> TyId {
-        self.structs.push(StructDef { name, fields: vec![] });
+        self.structs.push(StructDef {
+            name,
+            fields: vec![],
+        });
         self.intern(TyKind::Struct(self.structs.len() as u32 - 1))
     }
     pub fn new_enum(&mut self, name: String) -> TyId {
-        self.enums.push(EnumDef { name, variants: vec![] });
+        self.enums.push(EnumDef {
+            name,
+            variants: vec![],
+        });
         self.intern(TyKind::Enum(self.enums.len() as u32 - 1))
     }
     pub fn new_named(&mut self, name: String, underlying: TyId) -> TyId {
@@ -184,7 +190,10 @@ impl Types {
             TyKind::Opt(i) => self.opt_boxed(t) || self.is_managed(*i),
             TyKind::ErrU(_) => true,
             TyKind::Tuple(ts) => ts.iter().any(|t| self.is_managed(*t)),
-            TyKind::Struct(i) => self.structs[*i as usize].fields.iter().any(|(_, t)| self.is_managed(*t)),
+            TyKind::Struct(i) => self.structs[*i as usize]
+                .fields
+                .iter()
+                .any(|(_, t)| self.is_managed(*t)),
             TyKind::Enum(_) => self.enum_has_payload(t),
             _ => true,
         }
@@ -192,7 +201,10 @@ impl Types {
 
     pub fn enum_has_payload(&self, t: TyId) -> bool {
         match self.kind(t) {
-            TyKind::Enum(i) => self.enums[*i as usize].variants.iter().any(|(_, p)| !p.is_empty()),
+            TyKind::Enum(i) => self.enums[*i as usize]
+                .variants
+                .iter()
+                .any(|(_, p)| !p.is_empty()),
             _ => false,
         }
     }
@@ -216,9 +228,16 @@ impl Types {
         seen.push(t);
         let r = match self.kind(t) {
             TyKind::Named(_) => self.contains_by_value(self.base(t), target, seen),
-            TyKind::Tuple(ts) => ts.clone().iter().any(|x| self.contains_by_value(*x, target, seen)),
+            TyKind::Tuple(ts) => ts
+                .clone()
+                .iter()
+                .any(|x| self.contains_by_value(*x, target, seen)),
             TyKind::Struct(i) => {
-                let fs: Vec<TyId> = self.structs[*i as usize].fields.iter().map(|f| f.1).collect();
+                let fs: Vec<TyId> = self.structs[*i as usize]
+                    .fields
+                    .iter()
+                    .map(|f| f.1)
+                    .collect();
                 fs.iter().any(|x| self.contains_by_value(*x, target, seen))
             }
             TyKind::Opt(i) => {
@@ -256,9 +275,19 @@ impl Types {
                     format!("{}!", self.show(*i))
                 }
             }
-            TyKind::Tuple(ts) => format!("({})", ts.iter().map(|t| self.show(*t)).collect::<Vec<_>>().join(", ")),
+            TyKind::Tuple(ts) => format!(
+                "({})",
+                ts.iter()
+                    .map(|t| self.show(*t))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             TyKind::Fn(ps, r) => {
-                let ps = ps.iter().map(|t| self.show(*t)).collect::<Vec<_>>().join(", ");
+                let ps = ps
+                    .iter()
+                    .map(|t| self.show(*t))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 if *r == VOID {
                     format!("(fn({ps}))")
                 } else {

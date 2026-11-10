@@ -1,6 +1,6 @@
 //! Tokenizer for NC source text.
 
-use crate::diag::{err, Result, Span};
+use crate::diag::{Result, Span, err};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum StrPart {
@@ -126,12 +126,22 @@ pub struct Lexer<'a> {
 
 pub fn lex(src: &str, file: u32, base: usize) -> Result<Vec<Token>> {
     let (toks, mut errors) = lex_all(src, file, base);
-    if errors.is_empty() { Ok(toks) } else { Err(errors.remove(0)) }
+    if errors.is_empty() {
+        Ok(toks)
+    } else {
+        Err(errors.remove(0))
+    }
 }
 
 /// Tokenize everything, recovering from errors by skipping the offending character.
 pub fn lex_all(src: &str, file: u32, base: usize) -> (Vec<Token>, Vec<crate::diag::Diag>) {
-    let mut lx = Lexer { src, bytes: src.as_bytes(), pos: 0, base, file };
+    let mut lx = Lexer {
+        src,
+        bytes: src.as_bytes(),
+        pos: 0,
+        base,
+        file,
+    };
     let mut out = Vec::new();
     let mut errors = Vec::new();
     loop {
@@ -148,7 +158,11 @@ pub fn lex_all(src: &str, file: u32, base: usize) -> (Vec<Token>, Vec<crate::dia
                 errors.push(d);
                 if lx.pos <= start {
                     // skip one character to make progress
-                    let ch = src[start..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+                    let ch = src[start..]
+                        .chars()
+                        .next()
+                        .map(|c| c.len_utf8())
+                        .unwrap_or(1);
                     lx.pos = start + ch;
                 }
             }
@@ -185,7 +199,10 @@ impl<'a> Lexer<'a> {
         }
         let start = self.pos;
         if self.pos >= self.bytes.len() {
-            return Ok(Token { tok: Tok::Eof, span: self.span(start) });
+            return Ok(Token {
+                tok: Tok::Eof,
+                span: self.span(start),
+            });
         }
         let c = self.peek();
         let tok = match c {
@@ -253,7 +270,10 @@ impl<'a> Lexer<'a> {
                             _ => {
                                 let ch = self.src[self.pos..].chars().next().unwrap();
                                 self.pos += ch.len_utf8();
-                                return err(self.span(start), format!("unexpected character `{ch}`"));
+                                return err(
+                                    self.span(start),
+                                    format!("unexpected character `{ch}`"),
+                                );
                             }
                         };
                         (t, 1)
@@ -263,7 +283,10 @@ impl<'a> Lexer<'a> {
                 t
             }
         };
-        Ok(Token { tok, span: self.span(start) })
+        Ok(Token {
+            tok,
+            span: self.span(start),
+        })
     }
 
     fn number(&mut self, start: usize) -> Result<Tok> {
@@ -322,7 +345,10 @@ impl<'a> Lexer<'a> {
                     self.pos += 1;
                 }
                 let etext = self.src[es..self.pos].replace('_', "");
-                exp = Some(etext.parse().map_err(|_| crate::diag::Diag::new(self.span(start), "exponent too large"))?);
+                exp =
+                    Some(etext.parse().map_err(|_| {
+                        crate::diag::Diag::new(self.span(start), "exponent too large")
+                    })?);
             }
         }
         if is_float || exp.is_some_and(|e| e < 0) {
@@ -338,12 +364,14 @@ impl<'a> Lexer<'a> {
             let mant: u128 = self.src[start..mant_end]
                 .replace('_', "")
                 .parse()
-                .map_err(|_| crate::diag::Diag::new(self.span(start), "integer literal too large"))?;
+                .map_err(|_| {
+                    crate::diag::Diag::new(self.span(start), "integer literal too large")
+                })?;
             let mut v = mant;
             for _ in 0..e {
-                v = v
-                    .checked_mul(10)
-                    .ok_or_else(|| crate::diag::Diag::new(self.span(start), "integer literal too large"))?;
+                v = v.checked_mul(10).ok_or_else(|| {
+                    crate::diag::Diag::new(self.span(start), "integer literal too large")
+                })?;
             }
             let mut unsigned = false;
             if self.peek() == b'u' && !self.peek_at(1).is_ascii_alphanumeric() {
@@ -394,12 +422,18 @@ impl<'a> Lexer<'a> {
                 }
                 let digits = &self.src[s..self.pos];
                 if self.peek() != b'}' || digits.is_empty() || digits.len() > 6 {
-                    return err(self.span(start), "invalid unicode escape, expected `\\u{XXXXXX}`");
+                    return err(
+                        self.span(start),
+                        "invalid unicode escape, expected `\\u{XXXXXX}`",
+                    );
                 }
                 self.pos += 1;
                 let v = u32::from_str_radix(digits, 16).unwrap();
                 char::from_u32(v).ok_or_else(|| {
-                    crate::diag::Diag::new(self.span(start), format!("`{digits}` is not a valid unicode character"))
+                    crate::diag::Diag::new(
+                        self.span(start),
+                        format!("`{digits}` is not a valid unicode character"),
+                    )
                 })?
             }
             _ => {
@@ -415,7 +449,9 @@ impl<'a> Lexer<'a> {
                 self.pos += 1;
                 self.escape(start, true)?
             }
-            b'\'' | b'\n' | 0 => return err(self.span(start), "empty or unterminated char literal"),
+            b'\'' | b'\n' | 0 => {
+                return err(self.span(start), "empty or unterminated char literal");
+            }
             _ => {
                 let ch = self.src[self.pos..].chars().next().unwrap();
                 self.pos += ch.len_utf8();
@@ -423,7 +459,10 @@ impl<'a> Lexer<'a> {
             }
         };
         if self.peek() != b'\'' {
-            return err(self.span(start), "char literal must contain exactly one character");
+            return err(
+                self.span(start),
+                "char literal must contain exactly one character",
+            );
         }
         self.pos += 1;
         Ok(Tok::Char(c as u32))
@@ -514,7 +553,10 @@ impl<'a> Lexer<'a> {
         let text = self.src[s..self.pos].to_string();
         self.pos += 1;
         if text.trim().is_empty() {
-            return err(self.span(start), "empty interpolation `{}` in string; use `\\{` for a literal brace");
+            return err(
+                self.span(start),
+                "empty interpolation `{}` in string; use `\\{` for a literal brace",
+            );
         }
         Ok((text, s))
     }
@@ -554,11 +596,21 @@ impl<'a> Lexer<'a> {
             if i > 0 {
                 cur.push('\n');
             }
-            let strip = line.bytes().take(indent).take_while(|b| *b == b' ' || *b == b'\t').count();
+            let strip = line
+                .bytes()
+                .take(indent)
+                .take_while(|b| *b == b' ' || *b == b'\t')
+                .count();
             let content_off = body_start + loff + strip;
             let content = &line[strip..];
             // scan content for escapes and interpolations
-            let mut sub = Lexer { src: self.src, bytes: self.bytes, pos: content_off, base: self.base, file: self.file };
+            let mut sub = Lexer {
+                src: self.src,
+                bytes: self.bytes,
+                pos: content_off,
+                base: self.base,
+                file: self.file,
+            };
             let end = content_off + content.len();
             while sub.pos < end {
                 match sub.peek() {
