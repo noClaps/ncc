@@ -1,0 +1,8 @@
+this `(` is never closed
+expected an expression after `+`
+this `(` is never closed
+this `[` is never closed
+this `(` is never closed
+expected expression, found `,`
+expected expression, found `)`
+operator `+` requires both operands to have the same type, found `str` and `int`

@@ -22,6 +22,10 @@ pub struct Parser {
     no_struct: bool,
     /// errors recovered from so far
     errors: Vec<Diag>,
+    /// source text (for indentation-aware error recovery); empty for sub-parsers
+    src: String,
+    /// token index where the current statement started
+    stmt_start: usize,
 }
 
 /// Parse a module, failing with the first error.
@@ -34,7 +38,7 @@ pub fn parse_module(src: &str, file: u32) -> Result<Module> {
 /// parsed and every error found.
 pub fn parse_module_recover(src: &str, file: u32) -> (Module, Vec<Diag>) {
     let (toks, lex_errors) = crate::lexer::lex_all(src, file, 0);
-    let mut p = Parser { toks, pos: 0, file, no_struct: false, errors: lex_errors };
+    let mut p = Parser { toks, pos: 0, file, no_struct: false, errors: lex_errors, src: src.to_string(), stmt_start: 0 };
     let m = p.module();
     let mut errors = p.errors;
     errors.dedup_by(|a, b| a.span == b.span && a.msg == b.msg);
@@ -160,10 +164,62 @@ impl Parser {
         Module { items }
     }
 
+    /// Column (in bytes) of a token, or None when the source is unavailable.
+    fn column(&self, tok: usize) -> Option<usize> {
+        if self.src.is_empty() {
+            return None;
+        }
+        let off = (self.toks[tok].span.start as usize).min(self.src.len());
+        Some(off - self.src[..off].rfind('\n').map(|i| i + 1).unwrap_or(0))
+    }
+
+    /// Brackets opened between `from` and `to` (token indices) that are still unclosed.
+    fn open_brackets(&self, from: usize, to: usize) -> Vec<usize> {
+        let mut open = Vec::new();
+        for i in from..to {
+            match self.toks[i].tok {
+                Tok::LParen | Tok::LBracket | Tok::LBrace => open.push(i),
+                Tok::RParen | Tok::RBracket | Tok::RBrace => {
+                    open.pop();
+                }
+                _ => {}
+            }
+        }
+        open
+    }
+
     /// Record an error and skip to the start of the next statement.
     fn recover(&mut self, d: Diag, start: usize) {
+        let err_tok = self.pos.min(self.toks.len() - 1);
+        let open = self.open_brackets(start, err_tok);
+        // If the statement broke on a later line (e.g. an unclosed bracket swallowed the
+        // newline) and that line is indented no deeper than the statement itself, the line is
+        // most likely a new statement: resume there instead of skipping it.
+        let line_start = (start + 1..=err_tok)
+            .rev()
+            .find(|&i| self.toks[i - 1].tok == Tok::Newline && self.toks[i].tok != Tok::Newline);
+        if let (Some(i), Some(sc)) = (line_start, self.column(start)) {
+            if self.column(i).is_some_and(|c| c <= sc) {
+                // report the bracket that was left open rather than the token after it
+                let d = match open.iter().rev().find(|&&b| b < i) {
+                    Some(&b) => {
+                        let what = match self.toks[b].tok {
+                            Tok::LParen => "(",
+                            Tok::LBracket => "[",
+                            _ => "{",
+                        };
+                        Diag::new(self.toks[b].span, format!("this `{what}` is never closed"))
+                    }
+                    None => d,
+                };
+                self.errors.push(d);
+                self.pos = i;
+                return;
+            }
+        }
         self.errors.push(d);
-        let mut depth: i32 = 0;
+        // skip to the end of the statement, including brackets it already opened
+        let mut depth: i32 = open.len() as i32;
         loop {
             match self.peek() {
                 Tok::Eof => break,
@@ -185,6 +241,7 @@ impl Parser {
     }
 
     fn item(&mut self, items: &mut Vec<Item>) -> Result<()> {
+        self.stmt_start = self.pos;
         let start = self.span();
         let public = self.eat_kw("pub");
         if self.at_kw("import") {
@@ -561,6 +618,14 @@ impl Parser {
     }
 
     fn stmt(&mut self, public: bool) -> Result<Stmt> {
+        let saved_start = self.stmt_start;
+        self.stmt_start = self.pos;
+        let r = self.stmt_inner(public);
+        self.stmt_start = saved_start;
+        r
+    }
+
+    fn stmt_inner(&mut self, public: bool) -> Result<Stmt> {
         let start = self.span();
         let label = self.label();
         if let Some(label) = label {
@@ -781,6 +846,7 @@ impl Parser {
                 return err(self.span(), "comparison operators cannot be chained; use parentheses");
             }
             let opsp = self.bump().span;
+            self.check_continuation(opsp, op.symbol())?;
             self.skip_nl();
             let rhs = self.binary(prec + 1)?;
             last_cmp = prec == 3;
@@ -791,10 +857,31 @@ impl Parser {
         Ok(lhs)
     }
 
+    /// After a binary operator at the end of a line, the operand must be on a continuation
+    /// line indented deeper than the statement; otherwise the operand is missing.
+    fn check_continuation(&self, opsp: Span, sym: &str) -> Result<()> {
+        if !self.at(&Tok::Newline) {
+            return Ok(());
+        }
+        let mut j = self.pos;
+        while matches!(self.toks[j].tok, Tok::Newline) && j + 1 < self.toks.len() {
+            j += 1;
+        }
+        let next_col = self.column(j);
+        let stmt_col = self.column(self.stmt_start);
+        if matches!(self.toks[j].tok, Tok::Eof | Tok::RBrace)
+            || matches!((next_col, stmt_col), (Some(n), Some(s)) if n <= s)
+        {
+            return err(opsp, format!("expected an expression after `{sym}`"));
+        }
+        Ok(())
+    }
+
     fn pow(&mut self) -> Result<Expr> {
         let base = self.unary()?;
         if self.at(&Tok::StarStar) {
-            self.bump();
+            let opsp = self.bump().span;
+            self.check_continuation(opsp, "**")?;
             self.skip_nl();
             let exp = self.pow()?; // right-assoc
             let sp = base.span.to(exp.span);
@@ -981,7 +1068,7 @@ impl Parser {
                         StrPart::Lit(s) => segs.push(StrSeg::Lit(s)),
                         StrPart::Expr(text, off) => {
                             let toks = lex(&text, self.file, off)?;
-                            let mut sub = Parser { toks, pos: 0, file: self.file, no_struct: false, errors: vec![] };
+                            let mut sub = Parser { toks, pos: 0, file: self.file, no_struct: false, errors: vec![], src: String::new(), stmt_start: 0 };
                             sub.skip_nl();
                             let e = sub.expr()?;
                             sub.skip_nl();

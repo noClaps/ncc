@@ -1,2 +1,3 @@
-expected `)`, found `int`
+this `(` is never closed
+expected an expression after `+`
 expected expression, found `)`
