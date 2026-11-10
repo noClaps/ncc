@@ -115,8 +115,6 @@ pub enum Fallback {
 #[derive(Clone, Debug)]
 pub struct If {
     pub id: JumpId,
-    /// Whether the if produces a value (via `break value`)
-    pub is_value: bool,
     pub scrutinee: Option<Expr>,
     pub arms: Vec<Arm>,
 }

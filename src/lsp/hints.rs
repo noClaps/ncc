@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use lsp_types::*;
 
-use super::{KEYWORDS, Server, TYPES, offset_to_pos, pos_to_offset};
+use super::{KEYWORDS, Server, offset_to_pos, pos_to_offset};
 use crate::ast;
 use crate::check::index::{DeclKind, HintKind};
 use crate::lexer::{StrPart, Tok};
@@ -286,7 +286,7 @@ fn classify(
                     out.push((s, e, ENUM_MEMBER, M_DEFAULT_LIBRARY));
                 } else if KEYWORDS.contains(&name.as_str()) {
                     out.push((s, e, KEYWORD, 0));
-                } else if TYPES.contains(&name.as_str()) {
+                } else if crate::types::builtin_type(name).is_some() {
                     out.push((s, e, TYPE, M_DEFAULT_LIBRARY));
                 } else if aliases.contains(name.as_str()) {
                     let decl = i > 0 && matches!(&lexed[i - 1].tok, Tok::Ident(k) if k == "as");

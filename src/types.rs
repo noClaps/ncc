@@ -80,6 +80,27 @@ pub const CHAR: TyId = 7;
 pub const STR: TyId = 8;
 pub const ERROR: TyId = 9;
 
+/// The builtin types by name.
+pub const BUILTIN_TYPES: &[(&str, TyId)] = &[
+    ("int", INT),
+    ("uint", UINT),
+    ("byte", BYTE),
+    ("float", FLOAT),
+    ("bool", BOOL),
+    ("char", CHAR),
+    ("str", STR),
+    ("void", VOID),
+    ("error", ERROR),
+    ("never", NEVER),
+];
+
+pub fn builtin_type(name: &str) -> Option<TyId> {
+    BUILTIN_TYPES
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, t)| *t)
+}
+
 impl Types {
     pub fn new() -> Types {
         let mut t = Types::default();

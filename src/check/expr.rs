@@ -350,13 +350,10 @@ impl Checker {
                         let i = self.expect_expr(idx, k)?;
                         mk(EK::Index(Box::new(b), Box::new(i)), v)
                     }
-                    TyKind::Array(el) | TyKind::Fixed(el, _) => {
+                    TyKind::Array(_) | TyKind::Fixed(..) | TyKind::Str => {
+                        let el = self.types.elem(b.ty).unwrap();
                         let i = self.seq_index(idx, b.ty)?;
                         mk(EK::Index(Box::new(b), Box::new(i)), el)
-                    }
-                    TyKind::Str => {
-                        let i = self.seq_index(idx, b.ty)?;
-                        mk(EK::Index(Box::new(b), Box::new(i)), CHAR)
                     }
                     _ => err(
                         span,
@@ -413,14 +410,7 @@ impl Checker {
                 let mut xs = Vec::new();
                 let mut et = elem;
                 for it in items {
-                    let x = if let Some(t) = et {
-                        self.expect_expr(it, t)?
-                    } else {
-                        let x = self.check_expr(it, None)?;
-                        et = Some(x.ty);
-                        x
-                    };
-                    xs.push(x);
+                    xs.push(self.check_as(it, &mut et)?);
                 }
                 let et = et.unwrap();
                 if matches!(
@@ -458,24 +448,10 @@ impl Checker {
                 };
                 let mut xs = Vec::new();
                 for (k, v) in entries {
-                    let kx = if let Some(t) = kt {
-                        self.expect_expr(k, t)?
-                    } else {
-                        let x = self.check_expr(k, None)?;
-                        kt = Some(x.ty);
-                        x
-                    };
-                    let vx = if let Some(t) = vt {
-                        self.expect_expr(v, t)?
-                    } else {
-                        let x = self.check_expr(v, None)?;
-                        vt = Some(x.ty);
-                        x
-                    };
-                    xs.push((kx, vx));
+                    xs.push((self.check_as(k, &mut kt)?, self.check_as(v, &mut vt)?));
                 }
                 let (kt, vt) = (kt.unwrap(), vt.unwrap());
-                if !self.comparable(kt) {
+                if !self.plain(kt) {
                     return err(
                         span,
                         format!("`{}` cannot be used as a map key", self.types.show(kt)),
@@ -510,18 +486,13 @@ impl Checker {
                     }
                     vals[i] = Some(self.expect_expr(v, def.fields[i].1)?);
                 }
-                let mut out = Vec::new();
-                for (i, v) in vals.into_iter().enumerate() {
-                    match v {
-                        Some(v) => out.push(v),
-                        None => {
-                            return err(
-                                span,
-                                format!("missing field `{}` in `{}`", def.fields[i].0, def.name),
-                            );
-                        }
-                    }
-                }
+                let out = (vals.into_iter().zip(&def.fields))
+                    .map(|(v, (name, _))| {
+                        v.ok_or_else(|| {
+                            Diag::new(span, format!("missing field `{name}` in `{}`", def.name))
+                        })
+                    })
+                    .collect::<Result<_>>()?;
                 mk(EK::Struct(out), ty)
             }
             E::FnLit(sig, body) => {
@@ -529,17 +500,13 @@ impl Checker {
                 mk(EK::Closure(fid), fty)
             }
             E::If(ife) => {
-                if value_needed {
-                    let Some(t) = expected else {
-                        return err(
-                            span,
-                            "cannot infer the type of this `if`; assign it to a variable with a declared type",
-                        );
-                    };
-                    self.check_if(ife, Some(t), span)
-                } else {
-                    self.check_if(ife, None, span)
+                if value_needed && expected.is_none() {
+                    return err(
+                        span,
+                        "cannot infer the type of this `if`; assign it to a variable with a declared type",
+                    );
                 }
+                self.check_if(ife, expected.filter(|_| value_needed), span)
             }
             E::Else(opt, fb) => {
                 let oexp = expected.map(|t| self.types.opt(t));
@@ -559,13 +526,7 @@ impl Checker {
                     }
                     ast::ElseFallback::Block(b) => {
                         let id = self.new_jump();
-                        self.ctx().jumps.push(JumpCtx {
-                            id,
-                            kind: JumpKind::Value(inner),
-                            label: None,
-                        });
-                        let blk = self.check_block(b);
-                        self.ctx().jumps.pop();
+                        let blk = self.check_jump_block(b, id, JumpKind::Value(inner), None);
                         if value_needed && self.block_completes(&blk) {
                             return err(
                                 b.span,
@@ -598,17 +559,11 @@ impl Checker {
                     self.ix.scopes.pop();
                     Some(l)
                 };
-                if inner != VOID {
-                    self.ctx().jumps.push(JumpCtx {
-                        id,
-                        kind: JumpKind::Value(inner),
-                        label: None,
-                    });
-                }
-                let blk = self.check_block(b);
-                if inner != VOID {
-                    self.ctx().jumps.pop();
-                }
+                let blk = if inner == VOID {
+                    self.check_block(b)
+                } else {
+                    self.check_jump_block(b, id, JumpKind::Value(inner), None)
+                };
                 self.pop_scope();
                 if value_needed && inner != VOID && self.block_completes(&blk) {
                     return err(
@@ -668,29 +623,37 @@ impl Checker {
     }
 
     pub fn stringify(&mut self, v: Expr) -> Result<Expr> {
-        if v.ty == STR || v.ty == ERROR {
-            let span = v.span;
-            return Ok(Expr {
-                kind: EK::Retype(Box::new(v)),
-                ty: STR,
-                span,
-            });
-        }
-        if !self.printable(v.ty) {
+        let span = v.span;
+        let kind = if v.ty == STR || v.ty == ERROR {
+            EK::Retype(Box::new(v))
+        } else if self.plain(v.ty) {
+            EK::ToStr(Box::new(v))
+        } else {
             return err(
-                v.span,
+                span,
                 format!(
                     "`{}` cannot be converted to a string",
                     self.types.show(v.ty)
                 ),
             );
-        }
-        let span = v.span;
+        };
         Ok(Expr {
-            kind: EK::ToStr(Box::new(v)),
+            kind,
             ty: STR,
             span,
         })
+    }
+
+    /// Check `e` as the type in `ty`, or, when it is not known yet, infer it from `e`.
+    fn check_as(&mut self, e: &ast::Expr, ty: &mut Option<TyId>) -> Result<Expr> {
+        match *ty {
+            Some(t) => self.expect_expr(e, t),
+            None => {
+                let x = self.check_expr(e, None)?;
+                *ty = Some(x.ty);
+                Ok(x)
+            }
+        }
     }
 
     fn check_ident(&mut self, name: &str, span: Span) -> Result<Expr> {
@@ -822,28 +785,25 @@ impl Checker {
         Ok(None)
     }
 
+    /// `name` or `alias.name` (with `alias` a module): the module alias and the name.
+    fn qualified_name(&mut self, e: &ast::Expr) -> Result<Option<(Option<String>, String)>> {
+        Ok(match &e.kind {
+            E::Ident(n) => Some((None, n.clone())),
+            E::Field(base, n) => self.module_alias(base)?.map(|a| (Some(a), n.clone())),
+            _ => None,
+        })
+    }
+
     /// Resolve an expression that names a type (`Foo`, `Foo<int>`, `mod.Foo`).
     pub fn type_path(&mut self, e: &ast::Expr) -> Result<Option<TyId>> {
-        let (module, name, args, span) = match &e.kind {
-            E::Ident(n) => {
-                if self.resolve_var(n, e.span)?.is_some() {
-                    return Ok(None);
-                }
-                (None, n.clone(), vec![], e.span)
-            }
-            E::Field(base, n) => match self.module_alias(base)? {
-                Some(alias) => (Some(alias), n.clone(), vec![], e.span),
-                None => return Ok(None),
-            },
-            E::Generic(inner, args) => match &inner.kind {
-                E::Ident(n) => (None, n.clone(), args.clone(), e.span),
-                E::Field(base, n) => match self.module_alias(base)? {
-                    Some(alias) => (Some(alias), n.clone(), args.clone(), e.span),
-                    None => return Ok(None),
-                },
-                _ => return Ok(None),
-            },
-            _ => return Ok(None),
+        let span = e.span;
+        let (path, args) = match &e.kind {
+            E::Generic(inner, args) => (inner.as_ref(), args.clone()),
+            E::Ident(n) if self.resolve_var(n, span)?.is_some() => return Ok(None),
+            _ => (e, vec![]),
+        };
+        let Some((module, name)) = self.qualified_name(path)? else {
+            return Ok(None);
         };
         let m = self.module();
         if module.is_none()
@@ -880,22 +840,17 @@ impl Checker {
         let E::Generic(inner, targs) = &e.kind else {
             return Ok(None);
         };
-        let (module, name) = match &inner.kind {
-            E::Ident(n) => (None, n.clone()),
-            E::Field(base, n) => match self.module_alias(base)? {
-                Some(a) => (Some(a), n.clone()),
-                None => return Ok(None),
-            },
-            _ => return Ok(None),
+        let Some((module, name)) = self.qualified_name(inner)? else {
+            return Ok(None);
         };
         let m = self.module();
         match self.lookup_sym(m, module.as_deref(), &name, e.span)? {
             Some((dm, Sym::Fn { decl, func: None })) => {
-                let mut args = Vec::new();
                 let tp = self.tparams();
-                for t in targs {
-                    args.push(self.resolve_targ(t, m, &tp)?);
-                }
+                let args = targs
+                    .iter()
+                    .map(|t| self.resolve_targ(t, m, &tp))
+                    .collect::<Result<_>>()?;
                 Ok(Some(self.instantiate_fn(dm, decl, args, e.span)?))
             }
             Some((_, Sym::Fn { func: Some(_), .. })) => {
@@ -930,9 +885,7 @@ impl Checker {
                 }
                 match self.lookup_sym(m, Some(&alias), name, span)? {
                     Some((_, Sym::Fn { func: Some(f), .. })) => {
-                        self.idx_fn_ref(f, name, span);
-                        let (ps, r) = self.sigs[f].clone();
-                        return Ok(Target::Call(Callee::Direct(f), ps, r));
+                        return Ok(self.direct_target(f, name, span));
                     }
                     Some((_, Sym::Fn { func: None, .. })) => {
                         return err(
@@ -961,9 +914,7 @@ impl Checker {
                 .get(f)
                 .and_then(|x| x.as_ref())
                 .map_or_else(|| "fn".into(), |x| x.name.clone());
-            self.idx_fn_ref(f, &fname, callee.span);
-            let (ps, r) = self.sigs[f].clone();
-            return Ok(Target::Call(Callee::Direct(f), ps, r));
+            return Ok(self.direct_target(f, &fname, callee.span));
         }
         if let E::Ident(name) = &callee.kind
             && self.resolve_var(name, span)?.is_none()
@@ -972,9 +923,7 @@ impl Checker {
             if let Some(Sym::Fn { func: Some(f), .. }) =
                 self.mods[m].syms.get(name).map(|e| e.sym.clone())
             {
-                self.idx_fn_ref(f, name, span);
-                let (ps, r) = self.sigs[f].clone();
-                return Ok(Target::Call(Callee::Direct(f), ps, r));
+                return Ok(self.direct_target(f, name, span));
             }
         }
         let v = self.check_expr(callee, None)?;
@@ -1017,15 +966,19 @@ impl Checker {
             }
             xs.push(x);
         }
-        if let Target::Call(Callee::Direct(f), _, r) = &target
-            && self.never_funcs.contains(f)
+        if let Target::Call(Callee::Direct(f), ..) = target
+            && self.never_funcs.contains(&f)
         {
-            return Ok((Target::Call(Callee::Direct(*f), params, NEVER), xs)).map(|(t, x)| {
-                let _ = r;
-                (t, x)
-            });
+            return Ok((Target::Call(Callee::Direct(f), params, NEVER), xs));
         }
         Ok((target, xs))
+    }
+
+    /// A call of the function `f`, named `name` at `span`.
+    fn direct_target(&mut self, f: FuncId, name: &str, span: Span) -> Target {
+        self.idx_fn_ref(f, name, span);
+        let (ps, r) = self.sigs[f].clone();
+        Target::Call(Callee::Direct(f), ps, r)
     }
 
     fn check_field(&mut self, base: &ast::Expr, name: &str, span: Span) -> Result<Expr> {
@@ -1038,11 +991,10 @@ impl Checker {
                 );
             }
             return match self.lookup_sym(m, Some(&alias), name, span)? {
-                Some((tm, Sym::Globals(list))) => {
+                Some((_, Sym::Globals(list))) => {
                     let g = list.last().unwrap().0;
                     self.idx_global_ref(g, span);
                     let ty = self.globals[g].ty;
-                    let _ = tm;
                     if matches!(self.types.kind(ty), TyKind::Mutex(_)) {
                         return err(
                             span,
@@ -1157,7 +1109,7 @@ impl Checker {
     }
 
     fn coerce_pair(&mut self, e: Expr, ty: TyId) -> Result<Expr> {
-        if e.ty == ty || self.can_coerce(e.ty, ty) {
+        if self.can_coerce(e.ty, ty) {
             return self.coerce(e, ty);
         }
         Ok(e)
@@ -1252,7 +1204,7 @@ impl Checker {
                         );
                     }
                 };
-                if !self.comparable(a.ty) {
+                if !self.plain(a.ty) {
                     return err(
                         l.span,
                         format!("`{}` values cannot be compared", self.types.show(a.ty)),
@@ -1273,7 +1225,7 @@ impl Checker {
                     );
                 }
                 let ok = if matches!(op, Eq | Ne) {
-                    self.comparable(a.ty)
+                    self.plain(a.ty)
                 } else {
                     is_numeric(a.ty) || a.ty == CHAR
                 };
@@ -1341,7 +1293,7 @@ impl Checker {
                 let mut xs = Vec::new();
                 for a in args {
                     let x = self.check_expr(a, None)?;
-                    if !self.printable(x.ty) {
+                    if !self.plain(x.ty) {
                         return err(
                             a.span,
                             format!("`{}` cannot be printed", self.types.show(x.ty)),
@@ -1469,20 +1421,29 @@ impl Checker {
             (TyKind::Array(_), TyKind::Fixed(..)) => {
                 return err(span, "cannot convert a dynamic array to a fixed-size array");
             }
-            (TyKind::Fixed(..), TyKind::Str) => true,
-            (TyKind::Bool, TyKind::Int | TyKind::UInt | TyKind::Str) => true,
-            (TyKind::Byte, TyKind::Char | TyKind::Int | TyKind::UInt | TyKind::Str) => true,
-            (TyKind::Char, TyKind::Str) => true,
-            (TyKind::Char, _) if t == bytes => true,
+            // to a string (the value must be printable, checked below)
             (
-                TyKind::Enum(_) | TyKind::Map(..) | TyKind::Struct(_) | TyKind::Tuple(_),
+                TyKind::Fixed(..)
+                | TyKind::Bool
+                | TyKind::Byte
+                | TyKind::Char
+                | TyKind::Int
+                | TyKind::UInt
+                | TyKind::Float
+                | TyKind::Enum(_)
+                | TyKind::Map(..)
+                | TyKind::Struct(_)
+                | TyKind::Tuple(_),
                 TyKind::Str,
             ) => true,
-            (TyKind::Int, TyKind::UInt | TyKind::Float | TyKind::Str) => true,
-            (TyKind::UInt, TyKind::Int | TyKind::Float | TyKind::Str) => true,
-            (TyKind::Float, TyKind::Int | TyKind::UInt | TyKind::Str) => true,
-            (TyKind::Int | TyKind::UInt | TyKind::Float, _) if t == bytes => true,
-            (TyKind::Str, _) if t == bytes || t == chars => true,
+            (TyKind::Bool, TyKind::Int | TyKind::UInt)
+            | (TyKind::Byte, TyKind::Char | TyKind::Int | TyKind::UInt)
+            | (TyKind::Int, TyKind::UInt | TyKind::Float)
+            | (TyKind::UInt, TyKind::Int | TyKind::Float)
+            | (TyKind::Float, TyKind::Int | TyKind::UInt) => true,
+            // to bytes (and a string to chars)
+            (TyKind::Char | TyKind::Int | TyKind::UInt | TyKind::Float, _) => t == bytes,
+            (TyKind::Str, _) => t == bytes || t == chars,
             _ => false,
         };
         if !ok {
@@ -1495,7 +1456,7 @@ impl Checker {
                 ),
             );
         }
-        if to == TyKind::Str && !self.printable(x.ty) {
+        if to == TyKind::Str && !self.plain(x.ty) {
             return err(
                 span,
                 format!(
@@ -1603,7 +1564,6 @@ impl Checker {
         Ok(Expr {
             kind: EK::If(Box::new(If {
                 id,
-                is_value: value_ty.is_some(),
                 scrutinee: scrut,
                 arms,
             })),

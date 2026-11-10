@@ -45,9 +45,6 @@ use crate::diag::{Diag, SourceMap, Span};
 use crate::lexer::Tok;
 
 use crate::parser::KEYWORDS;
-const TYPES: &[&str] = &[
-    "int", "uint", "byte", "float", "bool", "char", "str", "void", "error", "never",
-];
 /// Builtin functions: name, signature and documentation.
 const BUILTINS: &[(&str, &str, &str)] = &[
     (
@@ -692,7 +689,7 @@ impl Server {
                     im.insert(alias.clone(), graph.modules[m].path.clone());
                 }
                 imports = Some(im);
-                let (mut p, errs, ix) = crate::check::check_for_editor(graph);
+                let (mut p, errs, ix) = crate::check::check(graph, true);
                 clean = loaded && errs.is_empty();
                 diags.extend(errs.into_iter().map(|d| (d, DiagnosticSeverity::ERROR)));
                 if let Err(errs) = crate::eval::Evaluator::run(&mut p, &sm, false) {

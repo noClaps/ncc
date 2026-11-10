@@ -29,7 +29,7 @@ pub struct Options {
 /// compilation target is then needed for `@target`.
 fn frontend(file: &Path, sm: &mut SourceMap, release: bool, codegen: bool) -> Option<Program> {
     let r = crate::modules::load_with(sm, file, &Default::default()).map(|(graph, load_errors)| {
-        let (mut p, mut errors, index) = crate::check::check_partial(graph);
+        let (mut p, mut errors, index) = crate::check::check(graph, false);
         errors.extend(load_errors);
         if codegen && errors.is_empty() && uses_target(&p) {
             match detect_target() {

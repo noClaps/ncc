@@ -62,8 +62,6 @@ impl Checker {
 
     pub fn require_throwing(&self, span: Span, what: &str) -> Result<()> {
         if !self.in_throwing_ctx() {
-            let name = self.funcs.len();
-            let _ = name;
             return err(
                 span,
                 format!(
@@ -153,10 +151,10 @@ impl Checker {
                     if *mutex {
                         return err(span, "a mutex cannot be destructured");
                     }
-                    let mut tys = Vec::new();
-                    for t in targets {
-                        tys.push(self.resolve_type_here(&t.ty)?);
-                    }
+                    let tys = targets
+                        .iter()
+                        .map(|t| self.resolve_type_here(&t.ty))
+                        .collect::<Result<Vec<_>>>()?;
                     // expected type when the value is a literal tuple with one entry per target
                     let v = match &value.kind {
                         ast::ExprKind::Tuple(items) if items.len() == targets.len() => {
@@ -231,17 +229,7 @@ impl Checker {
                 };
                 let (fid, fty) = self.check_nested_fn(sig, body, None)?;
                 let var = self.declare_var(name, fty, false, false, span)?;
-                push(
-                    out,
-                    SK::Let(
-                        var,
-                        Expr {
-                            kind: EK::Closure(fid),
-                            ty: fty,
-                            span: value.span,
-                        },
-                    ),
-                );
+                push(out, SK::Let(var, closure(fid, fty, value.span)));
             }
             S::Assign { target, value } => {
                 let (place, ty) = self.check_place(target)?;
@@ -330,20 +318,19 @@ impl Checker {
             }
             S::Break { label, value } => {
                 let jumps = self.ctx_ref().jumps.clone();
-                if let Some(v) = value {
-                    let Some(j) = jumps
+                let (id, value) = if let Some(v) = value {
+                    let Some(&JumpCtx {
+                        id,
+                        kind: JumpKind::Value(ty),
+                        ..
+                    }) = jumps
                         .iter()
                         .rev()
                         .find(|j| matches!(j.kind, JumpKind::Value(_)))
                     else {
                         return err(span, "`break` with a value outside of a value assignment");
                     };
-                    let JumpKind::Value(ty) = j.kind else {
-                        unreachable!()
-                    };
-                    let x = self.expect_expr(v, ty)?;
-                    self.broken.insert(j.id);
-                    push(out, SK::Break(j.id, Some(x)));
+                    (id, Some(self.expect_expr(v, ty)?))
                 } else if let Some(l) = label {
                     let Some(j) = jumps.iter().rev().find(|j| j.label.as_deref() == Some(l)) else {
                         return err(span, format!("unknown label `{l}`"));
@@ -351,8 +338,7 @@ impl Checker {
                     if matches!(j.kind, JumpKind::Value(_)) {
                         return err(span, format!("breaking out of `{l}` requires a value"));
                     }
-                    self.broken.insert(j.id);
-                    push(out, SK::Break(j.id, None));
+                    (j.id, None)
                 } else {
                     let Some(j) = jumps
                         .iter()
@@ -361,9 +347,10 @@ impl Checker {
                     else {
                         return err(span, "`break` outside of a loop");
                     };
-                    self.broken.insert(j.id);
-                    push(out, SK::Break(j.id, None));
-                }
+                    (j.id, None)
+                };
+                self.broken.insert(id);
+                push(out, SK::Break(id, value));
             }
             S::Continue(label) => {
                 let jumps = &self.ctx_ref().jumps;
@@ -383,13 +370,7 @@ impl Checker {
             S::While { label, cond, body } => {
                 let c = self.expect_expr(cond, BOOL)?;
                 let id = self.new_jump();
-                self.ctx().jumps.push(JumpCtx {
-                    id,
-                    kind: JumpKind::Loop,
-                    label: label.clone(),
-                });
-                let b = self.check_block(body);
-                self.ctx().jumps.pop();
+                let b = self.check_jump_block(body, id, JumpKind::Loop, label.clone());
                 push(
                     out,
                     SK::While {
@@ -428,13 +409,7 @@ impl Checker {
                 let file = var_span.file;
                 let hint = format!("{} ", self.types.show(vty));
                 self.idx_hint(var_span.start, file, hint, index::HintKind::Type);
-                self.ctx().jumps.push(JumpCtx {
-                    id,
-                    kind: JumpKind::Loop,
-                    label: label.clone(),
-                });
-                let b = self.check_block(body);
-                self.ctx().jumps.pop();
+                let b = self.check_jump_block(body, id, JumpKind::Loop, label.clone());
                 self.pop_scope();
                 push(
                     out,
@@ -469,13 +444,7 @@ impl Checker {
                 let id = self.new_jump();
                 self.push_scope();
                 let alias = self.declare_local(name, inner, true, LocalKind::LockAlias, *name_span);
-                self.ctx().jumps.push(JumpCtx {
-                    id,
-                    kind: JumpKind::Lock,
-                    label: label.clone(),
-                });
-                let b = self.check_block(body);
-                self.ctx().jumps.pop();
+                let b = self.check_jump_block(body, id, JumpKind::Lock, label.clone());
                 self.pop_scope();
                 push(
                     out,
@@ -497,17 +466,7 @@ impl Checker {
                 }
                 let (fid, fty) = self.check_nested_fn(&f.sig, &f.body, Some(&f.sig.name))?;
                 let var = self.declare_var(&f.sig.name, fty, false, false, f.sig.span)?;
-                push(
-                    out,
-                    SK::Let(
-                        var,
-                        Expr {
-                            kind: EK::Closure(fid),
-                            ty: fty,
-                            span: f.sig.span,
-                        },
-                    ),
-                );
+                push(out, SK::Let(var, closure(fid, fty, f.sig.span)));
             }
             S::Assert(e) => {
                 if !self.in_test() {
@@ -518,6 +477,20 @@ impl Checker {
             }
         }
         Ok(())
+    }
+
+    /// Check a block that jump `id` (a `break`, or `continue` for loops) can leave.
+    pub fn check_jump_block(
+        &mut self,
+        b: &ast::Block,
+        id: JumpId,
+        kind: JumpKind,
+        label: Option<String>,
+    ) -> Block {
+        self.ctx().jumps.push(JumpCtx { id, kind, label });
+        let blk = self.check_block(b);
+        self.ctx().jumps.pop();
+        blk
     }
 
     fn destructure_msg(&self, ty: TyId, elems: &[TyId], i: usize) -> String {
@@ -549,14 +522,7 @@ impl Checker {
         let (params, ret) = self.resolve_sig(sig, m, &tp)?;
         let fty = self.types.intern(TyKind::Fn(params.clone(), ret));
         let display = name.unwrap_or("fn literal").to_string();
-        let fid = self.reserve_fn(params.clone(), ret);
-        self.ix.fn_spans.insert(fid, sig.span);
-        self.ix
-            .fn_params
-            .insert(fid, sig.params.iter().map(|p| p.name.clone()).collect());
-        if ret == NEVER {
-            self.never_funcs.insert(fid);
-        }
+        let fid = self.reserve_decl(sig, params.clone(), ret);
         let parent = self.ctx_ref().func;
         let tspans = self.ctx_ref().tspans.clone();
         let mut ctx = FnCtx::new(fid, m, ret, tp);
@@ -607,10 +573,7 @@ impl Checker {
 
     pub fn var_mutable(&self, v: VarRef) -> bool {
         match v {
-            VarRef::Local(l) => {
-                let loc = &self.ctx_ref().locals[l];
-                loc.mutable
-            }
+            VarRef::Local(l) => self.ctx_ref().locals[l].mutable,
             VarRef::Global(g) => self.globals[g].mutable,
         }
     }
@@ -674,13 +637,10 @@ impl Checker {
                         let i = self.expect_expr(idx, k)?;
                         Ok((Place::Index(Box::new(p), Box::new(i)), v))
                     }
-                    TyKind::Array(el) | TyKind::Fixed(el, _) => {
+                    TyKind::Array(_) | TyKind::Fixed(..) | TyKind::Str => {
+                        let el = self.types.elem(ty).unwrap();
                         let i = self.seq_index(idx, ty)?;
                         Ok((Place::Index(Box::new(p), Box::new(i)), el))
-                    }
-                    TyKind::Str => {
-                        let i = self.seq_index(idx, ty)?;
-                        Ok((Place::Index(Box::new(p), Box::new(i)), CHAR))
                     }
                     _ => err(
                         e.span,
@@ -708,6 +668,14 @@ impl Checker {
             );
         }
         Ok(i)
+    }
+}
+
+fn closure(fid: FuncId, ty: TyId, span: Span) -> Expr {
+    Expr {
+        kind: EK::Closure(fid),
+        ty,
+        span,
     }
 }
 

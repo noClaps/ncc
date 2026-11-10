@@ -6,7 +6,7 @@ use std::path::Path;
 
 use lsp_types::*;
 
-use super::{Analysis, BUILTINS, KEYWORDS, Server, TYPES, docs, pos_to_offset, uri_to_path};
+use super::{Analysis, BUILTINS, KEYWORDS, Server, docs, pos_to_offset, uri_to_path};
 use crate::ast;
 use crate::check::index::{DeclKind, SymDecl};
 use crate::diag::Span;
@@ -451,7 +451,7 @@ impl Server {
             it.sort_text = Some(format!("3{k}"));
             items.push(it);
         }
-        for t in TYPES {
+        for (t, _) in crate::types::BUILTIN_TYPES {
             let mut it = item(t, CompletionItemKind::KEYWORD, Some("builtin type".into()));
             it.sort_text = Some(format!("2{t}"));
             items.push(it);

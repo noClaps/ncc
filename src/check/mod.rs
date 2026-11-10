@@ -144,20 +144,11 @@ pub struct Checker {
 
 /// Check a program, returning the (possibly partial) program, every error found and the
 /// symbol index. Statements that failed to check are left out of the program.
-pub fn check_partial(graph: ModuleGraph) -> (Program, Vec<Diag>, index::Index) {
-    let (r, ix, errors) = check_inner(graph, false);
-    (r, errors, ix)
-}
-
-/// Like [`check_partial`], for the language server: generic functions that are never
-/// instantiated are also checked with placeholder types, so their bodies are indexed. The
-/// returned program must not be compiled.
-pub fn check_for_editor(graph: ModuleGraph) -> (Program, Vec<Diag>, index::Index) {
-    let (r, ix, errors) = check_inner(graph, true);
-    (r, errors, ix)
-}
-
-fn check_inner(graph: ModuleGraph, editor: bool) -> (Program, index::Index, Vec<Diag>) {
+///
+/// For the language server (`editor`), generic functions that are never instantiated are also
+/// checked with placeholder types, so their bodies are indexed; the program must then not be
+/// compiled.
+pub fn check(graph: ModuleGraph, editor: bool) -> (Program, Vec<Diag>, index::Index) {
     let mut c = Checker {
         mods: graph
             .modules
@@ -196,7 +187,7 @@ fn check_inner(graph: ModuleGraph, editor: bool) -> (Program, index::Index, Vec<
     errors.retain(|d| !d.msg.is_empty());
     errors.sort_by_key(|d| (d.span.file, d.span.start));
     errors.dedup_by(|a, b| a.span == b.span && a.msg == b.msg);
-    (p, std::mem::take(&mut c.ix.index), errors)
+    (p, errors, std::mem::take(&mut c.ix.index))
 }
 
 impl Checker {
@@ -364,19 +355,7 @@ impl Checker {
     // ------------------------------------------------------------ declarations
 
     fn add_sym(&mut self, m: usize, name: &str, sym: Sym, public: bool, span: Span) -> Result<()> {
-        if matches!(
-            name,
-            "int"
-                | "uint"
-                | "byte"
-                | "float"
-                | "bool"
-                | "char"
-                | "str"
-                | "void"
-                | "error"
-                | "never"
-        ) {
+        if builtin_type(name).is_some() {
             return err(
                 span,
                 format!("`{name}` is a builtin type and cannot be redefined"),
@@ -441,9 +420,7 @@ impl Checker {
                 }
                 Ok(())
             })();
-            if let Err(d) = item_r {
-                self.errors.push(d);
-            }
+            self.report(item_r);
         }
     }
 
@@ -520,23 +497,15 @@ impl Checker {
                 }
                 Ok(())
             })();
-            if let Err(d) = item_r {
-                self.errors.push(d);
-            }
+            self.report(item_r);
         }
         for it in &items {
             let item_r: Result<()> = (|| {
                 match it {
                     ast::Item::Fn(f) if f.sig.type_params.is_empty() => {
                         let (params, ret) = self.resolve_sig(&f.sig, m, &none)?;
-                        let id = self.reserve_fn(params, ret);
-                        if is_never_ret(&f.sig) {
-                            self.never_funcs.insert(id);
-                        }
-                        self.ix.fn_spans.insert(id, f.sig.span);
-                        let names: Vec<String> =
-                            f.sig.params.iter().map(|p| p.name.clone()).collect();
-                        self.ix.fn_params.insert(id, names.clone());
+                        let id = self.reserve_decl(&f.sig, params, ret);
+                        let names = self.ix.fn_params[&id].clone();
                         let detail = self.fn_detail_named(&f.sig.name, id, &names);
                         self.idx_decl(
                             &f.sig.name,
@@ -673,9 +642,7 @@ impl Checker {
                 }
                 Ok(())
             })();
-            if let Err(d) = item_r {
-                self.errors.push(d);
-            }
+            self.report(item_r);
         }
         // reject infinitely sized structs
         for it in &items {
@@ -757,8 +724,7 @@ impl Checker {
         if let TyKind::Struct(i) = *self.types.kind(ty) {
             self.types.structs[i as usize].fields = fields;
         }
-        for (fty, name, sp) in &s.fields {
-            let _ = fty;
+        for (_, name, sp) in &s.fields {
             let fdetail = self
                 .types
                 .struct_def(ty)
@@ -785,10 +751,10 @@ impl Checker {
             {
                 return err(*sp, format!("duplicate enum member `{name}`"));
             }
-            let mut ts = Vec::new();
-            for t in tys {
-                ts.push(self.resolve_type(t, m, tp)?);
-            }
+            let ts = tys
+                .iter()
+                .map(|t| self.resolve_type(t, m, tp))
+                .collect::<Result<_>>()?;
             variants.push((name.clone(), ts));
         }
         self.ix
@@ -835,12 +801,11 @@ impl Checker {
             Some(t) => self.resolve_type(t, m, tp)?,
             None => VOID,
         };
-        if matches!(self.types.kind(ret), TyKind::Fut(_)) {
-            return err(sig.span, "futures cannot be returned from functions");
-        }
-        if let TyKind::ErrU(i) = self.types.kind(ret)
-            && matches!(self.types.kind(*i), TyKind::Fut(_))
-        {
+        let value = match self.types.kind(ret) {
+            TyKind::ErrU(i) => *i,
+            _ => ret,
+        };
+        if matches!(self.types.kind(value), TyKind::Fut(_)) {
             return err(sig.span, "futures cannot be returned from functions");
         }
         Ok((params, ret))
@@ -850,6 +815,26 @@ impl Checker {
         self.funcs.push(None);
         self.sigs.push((params, ret));
         self.funcs.len() - 1
+    }
+
+    /// Reserve a declared function, recording what the index needs of its signature.
+    pub fn reserve_decl(&mut self, sig: &ast::FnSig, params: Vec<TyId>, ret: TyId) -> FuncId {
+        let id = self.reserve_fn(params, ret);
+        if is_never_ret(sig) {
+            self.never_funcs.insert(id);
+        }
+        self.ix.fn_spans.insert(id, sig.span);
+        self.ix
+            .fn_params
+            .insert(id, sig.params.iter().map(|p| p.name.clone()).collect());
+        id
+    }
+
+    /// Check a function body from inside another one (a generic instance).
+    fn check_nested_body(&mut self, p: PendingFn) {
+        let saved = std::mem::take(&mut self.fns);
+        self.check_fn_body(p);
+        self.fns = saved;
     }
 
     pub fn finish_fn(
@@ -942,29 +927,20 @@ impl Checker {
         let (params, ret) = self
             .resolve_sig(&f.sig, m, &tp)
             .map_err(|d| self.in_instance(d, &f.sig.name, &args))?;
-        let id = self.reserve_fn(params, ret);
-        if is_never_ret(&f.sig) {
-            self.never_funcs.insert(id);
-        }
-        self.ix.fn_spans.insert(id, f.sig.span);
-        self.ix
-            .fn_params
-            .insert(id, f.sig.params.iter().map(|p| p.name.clone()).collect());
+        let id = self.reserve_decl(&f.sig, params, ret);
         self.fn_insts.insert(key, id);
         // generic bodies are type-checked at instantiation; check right away so that errors
         // point at the instantiation that caused them.
-        let saved = std::mem::take(&mut self.fns);
         let inst = self.types_name(&f.sig.name, &args);
         let mut decl = f;
         decl.sig.name = inst.clone();
         let before = self.errors.len();
-        self.check_fn_body(PendingFn {
+        self.check_nested_body(PendingFn {
             func: id,
             module: m,
             decl,
             tparams: tp,
         });
-        self.fns = saved;
         for d in &mut self.errors[before..] {
             d.msg = format!("{} (in instantiation `{inst}`)", d.msg);
         }
@@ -1005,10 +981,11 @@ impl Checker {
                 }
                 (None, _) => a,
                 (Some(k), TyKind::Const(_, v)) => {
-                    let (ty, lo, hi) = match k.as_str() {
-                        "byte" => (BYTE, 0, 255),
-                        "int" => (INT, i64::MIN as i128, i64::MAX as i128),
-                        _ => (UINT, 0, u64::MAX as i128),
+                    let ty = builtin_type(k).unwrap_or(UINT);
+                    let (lo, hi) = match ty {
+                        BYTE => (0, 255),
+                        INT => (i64::MIN as i128, i64::MAX as i128),
+                        _ => (0, u64::MAX as i128),
                     };
                     if v < lo || v > hi {
                         return err(
@@ -1135,11 +1112,7 @@ impl Checker {
                     let t = match p.konst.as_deref() {
                         None => self.types.new_struct(p.name.clone()),
                         Some(k) => {
-                            let ty = match k {
-                                "byte" => BYTE,
-                                "int" => INT,
-                                _ => UINT,
-                            };
+                            let ty = builtin_type(k).unwrap_or(UINT);
                             let v = match sym_const(consts.len()) {
                                 Some(v) if ty != BYTE => v,
                                 _ => 64,
@@ -1153,19 +1126,13 @@ impl Checker {
                 self.types.sym_consts = consts;
                 let before = self.errors.len();
                 if let Ok((params, ret)) = self.resolve_sig(&f.sig, m, &tp) {
-                    let id = self.reserve_fn(params, ret);
-                    self.ix.fn_spans.insert(id, f.sig.span);
-                    self.ix
-                        .fn_params
-                        .insert(id, f.sig.params.iter().map(|p| p.name.clone()).collect());
-                    let saved = std::mem::take(&mut self.fns);
-                    self.check_fn_body(PendingFn {
+                    let id = self.reserve_decl(&f.sig, params, ret);
+                    self.check_nested_body(PendingFn {
                         func: id,
                         module: m,
                         decl: f.clone(),
                         tparams: tp,
                     });
-                    self.fns = saved;
                 }
                 self.errors.truncate(before);
                 self.types.sym_consts.clear();
@@ -1278,30 +1245,17 @@ impl Checker {
                         }
                         return Ok(*t);
                     }
-                    let b = match name.as_str() {
-                        "void" => Some(VOID),
-                        "never" => Some(NEVER),
-                        "bool" => Some(BOOL),
-                        "byte" => Some(BYTE),
-                        "int" => Some(INT),
-                        "uint" => Some(UINT),
-                        "float" => Some(FLOAT),
-                        "char" => Some(CHAR),
-                        "str" => Some(STR),
-                        "error" => Some(ERROR),
-                        _ => None,
-                    };
-                    if let Some(b) = b {
+                    if let Some(b) = builtin_type(name) {
                         if !args.is_empty() {
                             return err(*span, format!("`{name}` does not take type arguments"));
                         }
                         return Ok(b);
                     }
                 }
-                let mut targs = Vec::new();
-                for a in args {
-                    targs.push(self.resolve_targ(a, m, tp)?);
-                }
+                let targs = args
+                    .iter()
+                    .map(|a| self.resolve_targ(a, m, tp))
+                    .collect::<Result<Vec<_>>>()?;
                 let resolved = match self.lookup_sym(m, module.as_deref(), name, *span)? {
                     Some((dm, Sym::Struct { decl, ty } | Sym::Enum { decl, ty })) => {
                         if let Some(t) = ty {
@@ -1358,7 +1312,7 @@ impl Checker {
                 let kt = self.resolve_type(k, m, tp)?;
                 let vt = self.resolve_type(v, m, tp)?;
                 self.check_elem_type(vt, *sp)?;
-                if !self.comparable(kt) {
+                if !self.plain(kt) {
                     return err(
                         *sp,
                         format!("`{}` cannot be used as a map key", self.types.show(kt)),
@@ -1399,10 +1353,10 @@ impl Checker {
                 self.types.tuple(out)
             }
             T::Fn(ps, r, _) => {
-                let mut out = Vec::new();
-                for p in ps {
-                    out.push(self.resolve_type(p, m, tp)?);
-                }
+                let out = ps
+                    .iter()
+                    .map(|p| self.resolve_type(p, m, tp))
+                    .collect::<Result<_>>()?;
                 let r = match r {
                     Some(r) => self.resolve_type(r, m, tp)?,
                     None => VOID,
@@ -1444,19 +1398,13 @@ impl Checker {
         Ok(())
     }
 
-    /// Types supporting `==`.
-    pub fn comparable(&self, t: TyId) -> bool {
-        self.plain(t, &mut vec![])
+    /// Types supporting `==` and conversion to `str` (printing, format strings): those with no
+    /// functions, futures, mutexes, `void` or `never` (except as the value of `!void`).
+    pub fn plain(&self, t: TyId) -> bool {
+        self.plain_in(t, &mut vec![])
     }
 
-    /// Types that can be converted to `str` (printing, format strings).
-    pub fn printable(&self, t: TyId) -> bool {
-        self.plain(t, &mut vec![])
-    }
-
-    /// Whether `t` contains no functions, futures, mutexes, `void` or `never` (except as the
-    /// value of `!void`).
-    fn plain(&self, t: TyId, seen: &mut Vec<TyId>) -> bool {
+    fn plain_in(&self, t: TyId, seen: &mut Vec<TyId>) -> bool {
         if seen.contains(&t) {
             return true;
         }
@@ -1465,21 +1413,21 @@ impl Checker {
             TyKind::Fn(..) | TyKind::Fut(_) | TyKind::Mutex(_) | TyKind::Void | TyKind::Never => {
                 false
             }
-            TyKind::ErrU(e) => *e == VOID || self.plain(*e, seen),
-            TyKind::Named(_) => self.plain(ty.base(t), seen),
-            TyKind::Array(e) | TyKind::Fixed(e, _) | TyKind::Opt(e) => self.plain(*e, seen),
-            TyKind::Map(k, v) => self.plain(*k, seen) && self.plain(*v, seen),
-            TyKind::Tuple(ts) => ts.iter().all(|x| self.plain(*x, seen)),
+            TyKind::ErrU(e) => *e == VOID || self.plain_in(*e, seen),
+            TyKind::Named(_) => self.plain_in(ty.base(t), seen),
+            TyKind::Array(e) | TyKind::Fixed(e, _) | TyKind::Opt(e) => self.plain_in(*e, seen),
+            TyKind::Map(k, v) => self.plain_in(*k, seen) && self.plain_in(*v, seen),
+            TyKind::Tuple(ts) => ts.iter().all(|x| self.plain_in(*x, seen)),
             TyKind::Struct(i) => {
                 seen.push(t);
-                let r = (ty.structs[*i as usize].fields.iter()).all(|f| self.plain(f.1, seen));
+                let r = (ty.structs[*i as usize].fields.iter()).all(|f| self.plain_in(f.1, seen));
                 seen.pop();
                 r
             }
             TyKind::Enum(i) => {
                 seen.push(t);
                 let r = (ty.enums[*i as usize].variants.iter())
-                    .all(|v| v.1.iter().all(|f| self.plain(*f, seen)));
+                    .all(|v| v.1.iter().all(|f| self.plain_in(*f, seen)));
                 seen.pop();
                 r
             }
@@ -1606,9 +1554,6 @@ impl Checker {
                 found = Some((d, id));
                 break;
             }
-            if ctx.is_main && d == 0 && !ctx.scopes.is_empty() {
-                // main's locals are visible to nested functions declared in main
-            }
         }
         let Some((d, mut id)) = found else {
             return Ok(None);
@@ -1625,9 +1570,8 @@ impl Checker {
                     format!("`{name}` is locked in an enclosing scope and cannot be captured"),
                 );
             }
-            let by_ref = outer.mutable;
-            let oty = outer.ty;
-            let omut = outer.mutable;
+            // mutable variables are captured by reference
+            let (by_ref, oty) = (outer.mutable, outer.ty);
             if by_ref {
                 self.fns[k - 1].locals[id].boxed = true;
             }
@@ -1642,7 +1586,7 @@ impl Checker {
             inner.locals.push(Local {
                 name: name.to_string(),
                 ty: oty,
-                mutable: omut,
+                mutable: by_ref,
                 kind: if by_ref {
                     LocalKind::CapRef(ci)
                 } else {
@@ -1662,11 +1606,12 @@ impl Checker {
 
     /// Pick the global for a name: the latest declaration at or before `pos`, else the first.
     pub fn pick_global(list: &[(GlobalId, u32)], pos: u32, same_file: bool) -> GlobalId {
-        if same_file && let Some((g, _)) = list.iter().rev().find(|(_, p)| *p <= pos) {
-            return *g;
-        }
         if same_file {
-            list[0].0
+            list.iter()
+                .rev()
+                .find(|(_, p)| *p <= pos)
+                .unwrap_or(&list[0])
+                .0
         } else {
             list.last().unwrap().0
         }
@@ -1680,17 +1625,15 @@ impl Checker {
         let mut reach_g: HashSet<GlobalId> = HashSet::new();
         let mut reach_f: HashSet<FuncId> = HashSet::new();
         let mut work_f: Vec<FuncId> = Vec::new();
-        let collect = |stmts: &[Stmt], rg: &mut HashSet<GlobalId>, wf: &mut Vec<FuncId>| {
-            let mut g = HashSet::new();
-            let mut f = HashSet::new();
+        // globals and functions referenced by statements
+        let refs = |stmts: &[Stmt], rg: &mut HashSet<GlobalId>, wf: &mut Vec<FuncId>| {
+            let mut fs = HashSet::new();
             for s in stmts {
-                flow::refs_stmt(s, &mut g, &mut f);
+                flow::refs_stmt(s, rg, &mut fs);
             }
-            rg.extend(g);
-            wf.extend(f);
+            wf.extend(fs);
         };
-        let entry_init = self.mods[entry].init.clone();
-        collect(&entry_init, &mut reach_g, &mut work_f);
+        refs(&self.mods[entry].init, &mut reach_g, &mut work_f);
         for t in &self.tests {
             work_f.push(t.func);
         }
@@ -1705,13 +1648,7 @@ impl Checker {
                     continue;
                 }
                 let func = self.funcs[f].as_ref().unwrap();
-                let mut g = HashSet::new();
-                let mut fs = HashSet::new();
-                for s in &func.body.stmts {
-                    flow::refs_stmt(s, &mut g, &mut fs);
-                }
-                reach_g.extend(g);
-                work_f.extend(fs);
+                refs(&func.body.stmts, &mut reach_g, &mut work_f);
             }
             let mut changed = false;
             for (m, (module, inc)) in self.mods.iter().zip(included.iter_mut()).enumerate() {
@@ -1727,11 +1664,7 @@ impl Checker {
                     if writes.iter().any(|g| reach_g.contains(g)) {
                         inc[i] = true;
                         changed = true;
-                        let mut g = HashSet::new();
-                        let mut fs = HashSet::new();
-                        flow::refs_stmt(s, &mut g, &mut fs);
-                        reach_g.extend(g);
-                        work_f.extend(fs);
+                        refs(std::slice::from_ref(s), &mut reach_g, &mut work_f);
                     }
                 }
             }

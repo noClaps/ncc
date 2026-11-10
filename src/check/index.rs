@@ -154,23 +154,19 @@ impl Checker {
         }
     }
 
+    /// `fn add(int, int) int`
     pub fn fn_detail(&self, name: &str, f: FuncId) -> String {
-        let (ps, r) = &self.sigs[f];
-        let ps: Vec<String> = ps.iter().map(|p| self.types.show(*p)).collect();
-        if *r == VOID {
-            format!("fn {name}({})", ps.join(", "))
-        } else {
-            format!("fn {name}({}) {}", ps.join(", "), self.types.show(*r))
-        }
+        self.fn_detail_named(name, f, &[])
     }
 
-    /// Like `fn_detail`, with parameter names (`fn add(int a, int b) int`).
+    /// Like `fn_detail`, with the parameter names that are known (`fn add(int a, int b) int`).
     pub fn fn_detail_named(&self, name: &str, f: FuncId, params: &[String]) -> String {
         let (ps, r) = &self.sigs[f];
-        let ps: Vec<String> = ps
-            .iter()
-            .zip(params)
-            .map(|(p, n)| format!("{} {n}", self.types.show(*p)))
+        let ps: Vec<String> = (ps.iter().enumerate())
+            .map(|(i, p)| match params.get(i) {
+                Some(n) => format!("{} {n}", self.types.show(*p)),
+                None => self.types.show(*p),
+            })
             .collect();
         if *r == VOID {
             format!("fn {name}({})", ps.join(", "))

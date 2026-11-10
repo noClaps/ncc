@@ -37,25 +37,16 @@ impl Checker {
                             ),
                         );
                     }
-                    let mut out = Vec::new();
-                    for (it, t) in items.iter().zip(ts) {
-                        out.push(self.check_pattern(it, t, multi)?);
-                    }
-                    return Ok(Pat::Tuple(out));
+                    return Ok(Pat::Tuple(self.check_patterns(items, ts, multi)?));
                 }
                 let v = self.expect_expr(p, ty)?;
                 self.value_pat(v, ty, span)
             }
             E::Array(items) => match self.types.kind(ty).clone() {
-                TyKind::Array(e) => {
-                    let mut out = Vec::new();
-                    for it in items {
-                        out.push(self.check_pattern(it, e, multi)?);
-                    }
-                    Ok(Pat::Array(out))
-                }
-                TyKind::Fixed(e, n) => {
-                    if n as usize != items.len() {
+                TyKind::Array(e) | TyKind::Fixed(e, _) => {
+                    if let TyKind::Fixed(_, n) = *self.types.kind(ty)
+                        && n as usize != items.len()
+                    {
                         return err(
                             span,
                             format!(
@@ -65,11 +56,8 @@ impl Checker {
                             ),
                         );
                     }
-                    let mut out = Vec::new();
-                    for it in items {
-                        out.push(self.check_pattern(it, e, multi)?);
-                    }
-                    Ok(Pat::Array(out))
+                    let ts = vec![e; items.len()];
+                    Ok(Pat::Array(self.check_patterns(items, ts, multi)?))
                 }
                 _ => {
                     let v = self.expect_expr(p, ty)?;
@@ -92,11 +80,10 @@ impl Checker {
                             ),
                         );
                     }
-                    let mut out = Vec::new();
-                    for (a, t) in args.iter().zip(payload) {
-                        out.push(self.check_pattern(a, t, multi)?);
-                    }
-                    return Ok(Pat::Variant(idx, out));
+                    return Ok(Pat::Variant(
+                        idx,
+                        self.check_patterns(args, payload, multi)?,
+                    ));
                 }
                 let v = self.expect_expr(p, ty)?;
                 self.value_pat(v, ty, span)
@@ -147,21 +134,16 @@ impl Checker {
                     }
                     pats[i] = Some(self.check_pattern(v, def.fields[i].1, multi)?);
                 }
-                let mut out = Vec::new();
-                for (i, p) in pats.into_iter().enumerate() {
-                    match p {
-                        Some(p) => out.push(p),
-                        None => {
-                            return err(
+                let out = (pats.into_iter().zip(&def.fields))
+                    .map(|(p, (name, _))| {
+                        p.ok_or_else(|| {
+                            Diag::new(
                                 span,
-                                format!(
-                                    "missing field `{}` in pattern; use `.{} = _` to ignore it",
-                                    def.fields[i].0, def.fields[i].0
-                                ),
-                            );
-                        }
-                    }
-                }
+                                format!("missing field `{name}` in pattern; use `.{name} = _` to ignore it"),
+                            )
+                        })
+                    })
+                    .collect::<Result<_>>()?;
                 Ok(Pat::Struct(out))
             }
             _ => {
@@ -169,6 +151,18 @@ impl Checker {
                 self.value_pat(v, ty, span)
             }
         }
+    }
+
+    /// Patterns for `items`, matching values of the types `tys` in order.
+    fn check_patterns(
+        &mut self,
+        items: &[ast::Expr],
+        tys: Vec<TyId>,
+        multi: bool,
+    ) -> Result<Vec<Pat>> {
+        (items.iter().zip(tys))
+            .map(|(it, t)| self.check_pattern(it, t, multi))
+            .collect()
     }
 
     fn is_value_symbol(&self, name: &str) -> bool {
@@ -200,7 +194,7 @@ impl Checker {
     }
 
     fn value_pat(&mut self, v: Expr, ty: TyId, span: Span) -> Result<Pat> {
-        if !self.comparable(ty) {
+        if !self.plain(ty) {
             return err(
                 span,
                 format!("`{}` values cannot be compared", self.types.show(ty)),
@@ -242,38 +236,33 @@ impl Checker {
             // no constructor in this column: it is irrelevant
             return self.matrix_exhaustive(&default, rest);
         }
-        match self.types.kind(t).clone() {
-            TyKind::Bool => {
-                [true, false].iter().all(|b| {
-                    let sub: Vec<Vec<Pat>> = rows
-                        .iter()
-                        .filter(|r| {
-                            Self::is_wild(&r[0]) || matches!(&r[0], Pat::Value(Expr { kind: EK::Lit(Lit::Bool(x)), .. }) if x == b)
-                        })
-                        .map(|r| r[1..].to_vec())
-                        .collect();
-                    self.matrix_exhaustive(&sub, rest)
+        // the rows matching the literal `lit` (or anything) in the first column
+        let lit_rows = |lit: Lit| -> Vec<Vec<Pat>> {
+            rows.iter()
+                .filter(|r| {
+                    Self::is_wild(&r[0])
+                        || matches!(&r[0], Pat::Value(Expr { kind: EK::Lit(x), .. }) if *x == lit)
                 })
-            }
+                .map(|r| r[1..].to_vec())
+                .collect()
+        };
+        match self.types.kind(t).clone() {
+            TyKind::Bool => [true, false]
+                .into_iter()
+                .all(|b| self.matrix_exhaustive(&lit_rows(Lit::Bool(b)), rest)),
             TyKind::Byte => {
                 let mut covered = [false; 256];
                 for r in rows {
-                    if let Pat::Value(Expr { kind: EK::Lit(Lit::Byte(b)), .. }) = &r[0] {
+                    if let Pat::Value(Expr {
+                        kind: EK::Lit(Lit::Byte(b)),
+                        ..
+                    }) = &r[0]
+                    {
                         covered[*b as usize] = true;
                     }
                 }
                 if covered.iter().all(|c| *c) {
-                    (0..=255u8).all(|b| {
-                        let sub: Vec<Vec<Pat>> = rows
-                            .iter()
-                            .filter(|r| {
-                                Self::is_wild(&r[0])
-                                    || matches!(&r[0], Pat::Value(Expr { kind: EK::Lit(Lit::Byte(x)), .. }) if *x == b)
-                            })
-                            .map(|r| r[1..].to_vec())
-                            .collect();
-                        self.matrix_exhaustive(&sub, rest)
-                    })
+                    (0..=255u8).all(|b| self.matrix_exhaustive(&lit_rows(Lit::Byte(b)), rest))
                 } else {
                     self.matrix_exhaustive(&default, rest)
                 }
@@ -281,25 +270,10 @@ impl Checker {
             TyKind::Enum(i) => {
                 let variants = self.types.enums[i as usize].variants.clone();
                 variants.iter().enumerate().all(|(vi, (_, payload))| {
-                    let sub: Vec<Vec<Pat>> = rows
-                        .iter()
-                        .filter_map(|r| match &r[0] {
-                            p if Self::is_wild(p) => {
-                                let mut row = vec![Pat::Wild; payload.len()];
-                                row.extend(r[1..].iter().cloned());
-                                Some(row)
-                            }
-                            Pat::Variant(x, ps) if *x == vi => {
-                                let mut row = ps.clone();
-                                row.extend(r[1..].iter().cloned());
-                                Some(row)
-                            }
-                            _ => None,
-                        })
-                        .collect();
-                    let mut tys2 = payload.clone();
-                    tys2.extend_from_slice(rest);
-                    self.matrix_exhaustive(&sub, &tys2)
+                    self.expand_product(rows, payload, rest, |p| match p {
+                        Pat::Variant(x, ps) if *x == vi => Some(ps.clone()),
+                        _ => None,
+                    })
                 })
             }
             TyKind::Tuple(ts) => self.expand_product(rows, &ts, rest, |p| match p {
@@ -307,7 +281,11 @@ impl Checker {
                 _ => None,
             }),
             TyKind::Struct(i) => {
-                let ts: Vec<TyId> = self.types.structs[i as usize].fields.iter().map(|f| f.1).collect();
+                let ts: Vec<TyId> = self.types.structs[i as usize]
+                    .fields
+                    .iter()
+                    .map(|f| f.1)
+                    .collect();
                 self.expand_product(rows, &ts, rest, |p| match p {
                     Pat::Struct(ps) => Some(ps.clone()),
                     _ => None,

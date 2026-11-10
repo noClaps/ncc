@@ -241,12 +241,7 @@ pub fn writes_stmt(s: &Stmt, out: &mut HashSet<GlobalId>) {
 impl Checker {
     /// Whether execution can fall off the end of the block.
     pub fn block_completes(&self, b: &Block) -> bool {
-        for s in &b.stmts {
-            if !self.stmt_completes(s) {
-                return false;
-            }
-        }
-        true
+        b.stmts.iter().all(|s| self.stmt_completes(s))
     }
 
     fn stmt_completes(&self, s: &Stmt) -> bool {
@@ -270,11 +265,8 @@ impl Checker {
             return false;
         }
         match &e.kind {
-            EK::If(i) if !i.is_value => {
-                i.arms.iter().any(|a| self.block_completes(&a.body)) || self.broken.contains(&i.id)
-            }
+            // an `if` completes when an arm does, or one breaks out of it (with its value)
             EK::If(i) => {
-                // a value if completes when some arm breaks with a value
                 self.broken.contains(&i.id) || i.arms.iter().any(|a| self.block_completes(&a.body))
             }
             _ => true,
