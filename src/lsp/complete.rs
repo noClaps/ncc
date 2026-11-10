@@ -50,6 +50,11 @@ enum Seg {
 
 /// Parse the receiver chain at the end of `head` (`a.b(x)[0].c`), outermost last.
 fn receiver_chain(head: &str) -> Option<Vec<Seg>> {
+    receiver_chain_at(head).map(|(s, _)| s)
+}
+
+/// Like `receiver_chain`, with the offset where the receiver starts.
+fn receiver_chain_at(head: &str) -> Option<(Vec<Seg>, usize)> {
     let b = head.as_bytes();
     let mut i = head.trim_end().len();
     let mut segs = Vec::new();
@@ -92,8 +97,19 @@ fn receiver_chain(head: &str) -> Option<Vec<Seg>> {
         }
     }
     segs.reverse();
-    Some(segs)
+    Some((segs, i))
 }
+
+/// Postfix snippets: label, template (`{r}` is the receiver), description.
+const POSTFIX: &[(&str, &str, &str)] = &[
+    ("if", "if {r} {\n\t$0\n}", "match on the value"),
+    ("not", "not {r}", "negate"),
+    ("return", "return {r}", "return the value"),
+    ("try", "try {r}", "propagate the error"),
+    ("await", "await {r}", "wait for the future"),
+    ("println", "@println({r})", "print the value"),
+    ("discard", "_ = {r}", "discard the value"),
+];
 
 /// Declarations visible at `off` in file `fid`, innermost (latest) first, one per name.
 fn visible(a: &Analysis, fid: u32, off: usize) -> Vec<&SymDecl> {
@@ -289,8 +305,29 @@ impl Server {
                 return Some(CompletionResponse::Array(items));
             };
             let fid = fid?;
-            if let Some(items) = self.member_items(a, fid, dot, &chain, call_parens) {
+            // postfix snippets for values (not modules or types)
+            let is_value = match &chain[0] {
+                Seg::Name(n) => {
+                    !a.imports.contains_key(n)
+                        && visible(a, fid, dot).iter().any(|d| {
+                            &d.name == n
+                                && matches!(d.kind, DeclKind::Variable | DeclKind::Function)
+                        })
+                }
+                _ => false,
+            };
+            let postfix = if is_value && self.snippets {
+                let (_, start) = receiver_chain_at(head)?;
+                postfix_items(&text, start, dot, off)
+            } else {
+                vec![]
+            };
+            if let Some(mut items) = self.member_items(a, fid, dot, &chain, call_parens) {
+                items.extend(postfix);
                 return Some(CompletionResponse::Array(items));
+            }
+            if !postfix.is_empty() {
+                return Some(CompletionResponse::Array(postfix));
             }
             // `name.` where `name` is a module that is not imported: its public items, adding
             // the import
@@ -601,6 +638,43 @@ impl Server {
             })
             .collect()
     }
+}
+
+/// Postfix completions replacing `receiver.` with a snippet around the receiver (`x.if`).
+fn postfix_items(text: &str, start: usize, dot: usize, off: usize) -> Vec<CompletionItem> {
+    let receiver = &text[start..dot];
+    if receiver.contains('\n') {
+        return vec![];
+    }
+    let escaped = receiver
+        .replace('\\', "\\\\")
+        .replace('$', "\\$")
+        .replace('}', "\\}");
+    let range = Range::new(
+        super::offset_to_pos(text, start),
+        super::offset_to_pos(text, off),
+    );
+    POSTFIX
+        .iter()
+        .map(|(label, tmpl, desc)| CompletionItem {
+            label: label.to_string(),
+            kind: Some(CompletionItemKind::SNIPPET),
+            detail: Some(
+                tmpl.replace("{r}", receiver)
+                    .replace("\t", "  ")
+                    .replace("$0", ""),
+            ),
+            documentation: Some(Documentation::String(format!("postfix: {desc}"))),
+            filter_text: Some(format!("{receiver}.{label}")),
+            sort_text: Some(format!("9{label}")),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            text_edit: Some(CompletionTextEdit::Edit(TextEdit::new(
+                range,
+                tmpl.replace("{r}", &escaped),
+            ))),
+            ..Default::default()
+        })
+        .collect()
 }
 
 /// Names a module exports.

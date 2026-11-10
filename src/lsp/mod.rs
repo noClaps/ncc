@@ -175,6 +175,10 @@ pub fn run() -> ExitCode {
             work_done_progress_options: Default::default(),
         }),
         document_range_formatting_provider: Some(OneOf::Left(true)),
+        document_on_type_formatting_provider: Some(DocumentOnTypeFormattingOptions {
+            first_trigger_character: "}".into(),
+            more_trigger_character: None,
+        }),
         linked_editing_range_provider: None,
         workspace: Some(WorkspaceServerCapabilities {
             workspace_folders: None,
@@ -749,6 +753,22 @@ impl Server {
             "workspace/willRenameFiles" => serde_json::from_value::<RenameFilesParams>(req.params)
                 .ok()
                 .map(|p| serde_json::to_value(self.will_rename_files(p)).unwrap()),
+            "textDocument/onTypeFormatting" => {
+                serde_json::from_value::<DocumentOnTypeFormattingParams>(req.params)
+                    .ok()
+                    .map(|p| serde_json::to_value(self.on_type_formatting(p)).unwrap())
+            }
+            // the parsed syntax tree, for debugging (like rust-analyzer's "view syntax tree")
+            "ncc/syntaxTree" => serde_json::from_value::<TextDocumentIdentifier>(
+                req.params.get("textDocument").cloned().unwrap_or_default(),
+            )
+            .ok()
+            .and_then(|d| uri_to_path(&d.uri))
+            .and_then(|path| self.text_of(&path))
+            .map(|text| {
+                let (module, _) = crate::parser::parse_module_recover(&text, 0);
+                serde_json::Value::String(format!("{module:#?}"))
+            }),
             "textDocument/rangeFormatting" => {
                 serde_json::from_value::<DocumentRangeFormattingParams>(req.params)
                     .ok()
@@ -1673,6 +1693,47 @@ impl Server {
         let text = self.text_of(&path)?;
         let formatted = crate::fmt::format(&text).ok()?;
         Some(minimal_edits(&text, &formatted, None))
+    }
+
+    /// After a `}` that starts its line, indent it like the line of its `{`.
+    fn on_type_formatting(&self, p: DocumentOnTypeFormattingParams) -> Option<Vec<TextEdit>> {
+        let path = uri_to_path(&p.text_document_position.text_document.uri)?;
+        let text = self.text_of(&path)?;
+        let off = pos_to_offset(&text, p.text_document_position.position);
+        let (toks, _) = crate::lexer::lex_all(&text, 0, 0);
+        let close = toks
+            .iter()
+            .position(|t| t.tok == crate::lexer::Tok::RBrace && t.span.end as usize == off)?;
+        let ls = text[..off - 1].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        if !text[ls..off - 1].trim().is_empty() {
+            return Some(vec![]);
+        }
+        let mut depth = 0;
+        let open = toks[..close].iter().rev().find(|t| match t.tok {
+            crate::lexer::Tok::RBrace => {
+                depth += 1;
+                false
+            }
+            crate::lexer::Tok::LBrace if depth > 0 => {
+                depth -= 1;
+                false
+            }
+            crate::lexer::Tok::LBrace => true,
+            _ => false,
+        })?;
+        let ols = text[..open.span.start as usize]
+            .rfind('\n')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let line = &text[ols..];
+        let indent = &line[..line.len() - line.trim_start_matches([' ', '\t']).len()];
+        if &text[ls..off - 1] == indent {
+            return Some(vec![]);
+        }
+        Some(vec![TextEdit::new(
+            Range::new(offset_to_pos(&text, ls), offset_to_pos(&text, off - 1)),
+            indent.to_string(),
+        )])
     }
 
     /// Formats the whole document, keeping only the changes to the lines in the range.

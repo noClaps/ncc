@@ -374,10 +374,12 @@ fn at(src: &str, needle: &str, nth: usize, delta: usize) -> Value {
     pos(line as u32, col as u32)
 }
 
+/// Completion labels, without snippets.
 fn labels(v: &Value) -> Vec<String> {
     v.as_array()
         .unwrap()
         .iter()
+        .filter(|x| x["kind"] != 15)
         .map(|x| x["label"].as_str().unwrap().to_string())
         .collect()
 }
@@ -1362,6 +1364,60 @@ fn more_code_actions() {
         a["edit"]["changes"][&uri][0]["newText"],
         "if pick() {\n    Shape.Circle(_) -> {}\n    Shape.Square -> {}\n    Shape.Line -> {}\n  }"
     );
+
+    // unreachable branches are faded warnings that can be removed
+    let text = format!(
+        "{src}fn kind(int n) str {{\n  if n {{\n    1 -> {{ return \"one\" }}\n    _ -> {{ return \"many\" }}\n    2 -> {{ return \"two\" }}\n  }}\n}}\nfn same(Shape sh) int {{\n  if sh {{\n    Shape.Square -> {{ return 1 }}\n    Shape.Square -> {{ return 2 }}\n    _ -> {{ return 3 }}\n  }}\n}}\n"
+    );
+    let diags = s.change(&text);
+    let un: Vec<&Value> = diags
+        .iter()
+        .filter(|d| d["code"] == "unreachable-branch")
+        .collect();
+    assert_eq!(un.len(), 2, "{diags:?}");
+    assert_eq!(un[0]["range"]["start"], at(&text, "2 -> {", 0, 0));
+    assert_eq!(
+        un[1]["range"]["start"],
+        at(&text, "Shape.Square -> { return 2", 0, 0)
+    );
+    let acts = fix(&mut s, un[0]);
+    let a = find_action(&acts, "Remove the unreachable branch");
+    let e = &a["edit"]["changes"][&uri][0];
+    assert_eq!(e["range"]["start"]["character"], 0);
+    assert_eq!(
+        e["range"]["end"]["line"],
+        un[0]["range"]["start"]["line"].as_u64().unwrap() + 1
+    );
+
+    // postfix completions wrap the receiver
+    let text = format!("{src}total.\n");
+    s.change(&text);
+    let comp = s.req(
+        "textDocument/completion",
+        json!({"position": at(&text, "total.\n", 0, 6)}),
+    );
+    let post = comp
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["label"] == "println")
+        .unwrap_or_else(|| panic!("{comp}"));
+    assert_eq!(post["textEdit"]["newText"], "@println(total)");
+    assert_eq!(
+        post["textEdit"]["range"]["start"],
+        at(&text, "total.\n", 0, 0)
+    );
+
+    // typing `}` re-indents it to its `{`
+    let text = format!("{src}fn z() {{\n  @println(1)\n  }}\n");
+    s.change(&text);
+    let e = s.req("textDocument/onTypeFormatting", json!({"position": at(&text, "  }\n", 1, 3), "ch": "}", "options": {"tabSize": 2, "insertSpaces": true}}));
+    assert_eq!(e[0]["newText"], "", "{e}");
+    assert_eq!(e[0]["range"]["end"], at(&text, "  }\n", 1, 2), "{e}");
+
+    // the syntax tree, for debugging
+    let tree = s.req("ncc/syntaxTree", json!({}));
+    assert!(tree.as_str().unwrap().contains("FnDecl"), "{tree}");
 
     // exit points of a function
     s.change(src);

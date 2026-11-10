@@ -54,7 +54,7 @@ not have.
 | Collapse nested case, remove redundant tuples, inexhaustive `let` to case | n/a or not applicable to NC's `if` |
 | Qualify / unqualify | n/a: NC always qualifies module members |
 | Generate decoder / to-JSON, remove echo, remove opaque, redundant record update, add missing type parameter | n/a |
-| Remove unreachable clauses | not yet: the checker does not report unreachable branches |
+| Remove unreachable clauses | ✅ branches after a catch-all, or repeating earlier patterns, are faded warnings with a fix |
 | Wrap in block / remove block | n/a: `if` branches are always blocks |
 
 `ncc lsp` also has: make a variable mutable, rename an unused variable to `_`, make a
@@ -71,7 +71,7 @@ function throwing, make an item of another module public.
 | Find all references, highlight related (including exit points) | ✅ `fn`/`return`/`throw`/`try` highlight the function's exits |
 | Rename (with conflict check), file rename updates imports | ✅ |
 | Call hierarchy | ✅ incoming and outgoing |
-| Completion: scope-aware, fields through chains, snippets, auto-import, parentheses for calls | ✅ (no postfix completions) |
+| Completion: scope-aware, fields through chains, snippets, auto-import, parentheses for calls, postfix (`x.if`) | ✅ postfix: `if`, `not`, `return`, `try`, `await`, `println`, `discard` |
 | Signature help | ✅ |
 | Inlay hints: parameter names, types of bindings, closing braces | ✅ (chaining hints n/a: explicit types) |
 | Semantic highlighting with modifiers | ✅ declaration, readonly/mutable, defaultLibrary, documentation |
@@ -84,9 +84,15 @@ function throwing, make an item of another module public.
 | Runnables (run tests from the editor) | ✅ through the Zed extension's runnables and tasks |
 | Incremental document sync | ✅ |
 | Fault tolerance (a panic does not stop the server) | ✅ |
-| Macro expansion, structural search and replace, syntax tree viewer, join lines, on-type formatting, pull diagnostics | not provided |
+| On-type formatting | ✅ a `}` typed at the start of a line takes the indentation of its `{` |
+| View syntax tree | ✅ `ncc/syntaxTree` request (the parsed tree, for debugging) |
+| Macro expansion | n/a: NC has no macros |
+| Structural search and replace, join lines | not provided |
+| Pull diagnostics | not provided: diagnostics are pushed (like Gleam and rust-analyzer), and offering both makes some clients show them twice |
 
 ## Checks
+
+Not yet done: a session in a real editor. The tests below use the protocol directly.
 
 - `tests/lsp.rs` drives `ncc lsp` over stdio for each feature above.
 - `responses_follow_the_protocol` deserializes every kind of response into the `lsp-types`

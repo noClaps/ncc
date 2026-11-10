@@ -21,6 +21,7 @@ use crate::lexer::Tok;
 
 const UNUSED_VARIABLE: &str = "unused-variable";
 const UNUSED_IMPORT: &str = "unused-import";
+const UNREACHABLE_BRANCH: &str = "unreachable-branch";
 
 fn line_start(text: &str, off: usize) -> usize {
     text[..off.min(text.len())]
@@ -131,6 +132,60 @@ fn unused_imports(text: &str) -> Vec<(Span, Span, String)> {
     out
 }
 
+/// `if` branches that can never run, because earlier branches match everything they match:
+/// branches after a catch-all (`_`, a binding, or the condition `true`), and branches whose
+/// patterns all appeared in earlier branches. Returns the spans of the branches.
+fn unreachable_arms(a: &Analysis, text: &str) -> Vec<Span> {
+    let (module, _) = crate::parser::parse_module_recover(text, 0);
+    let mut out = Vec::new();
+    walk(&module, &mut |n| {
+        let Node::Expr(e) = n else { return };
+        let E::If(ife) = &e.kind else { return };
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut caught = false;
+        for arm in &ife.arms {
+            let simple = |p: &ast::Expr| -> Option<String> {
+                let ok = match &p.kind {
+                    E::Int(..) | E::Char(_) | E::Bool(_) | E::None | E::Float(_) => true,
+                    E::Str(segs) => segs.iter().all(|s| matches!(s, ast::StrSeg::Lit(_))),
+                    E::Field(b, _) => matches!(b.kind, E::Ident(_)),
+                    E::Unary(ast::UnOp::Neg, x) => matches!(x.kind, E::Int(..) | E::Float(_)),
+                    _ => false,
+                };
+                ok.then(|| {
+                    text[p.span.start as usize..p.span.end as usize]
+                        .split_whitespace()
+                        .collect()
+                })
+            };
+            if caught
+                || (!arm.patterns.is_empty()
+                    && arm
+                        .patterns
+                        .iter()
+                        .all(|p| simple(p).is_some_and(|k| seen.contains(&k))))
+            {
+                out.push(arm.span);
+                continue;
+            }
+            for p in &arm.patterns {
+                let catch_all = match &p.kind {
+                    E::Wildcard => true,
+                    // a name that declares a variable binds every value
+                    E::Ident(_) if ife.scrutinee.is_some() => a.decl(p.span).is_some(),
+                    E::Bool(true) => ife.scrutinee.is_none(),
+                    _ => false,
+                };
+                caught |= catch_all;
+                if let Some(k) = simple(p) {
+                    seen.insert(k);
+                }
+            }
+        }
+    });
+    out
+}
+
 /// The language server's own warnings for an analysed entry file.
 pub(super) fn warnings(a: &Analysis, entry: &Path) -> Vec<(PathBuf, Diagnostic)> {
     let Some(fid) = a.file_id(entry) else {
@@ -157,6 +212,13 @@ pub(super) fn warnings(a: &Analysis, entry: &Path) -> Vec<(PathBuf, Diagnostic)>
     }
     for (_, ns, alias) in unused_imports(text) {
         out.push(warn(ns, format!("unused import `{alias}`"), UNUSED_IMPORT));
+    }
+    for arm in unreachable_arms(a, text) {
+        out.push(warn(
+            arm,
+            "unreachable branch: earlier branches match every value it matches".into(),
+            UNREACHABLE_BRANCH,
+        ));
     }
     out
 }
@@ -435,6 +497,25 @@ impl Server {
                     CodeActionKind::QUICKFIX,
                     Some(d),
                     vec![TextEdit::new(d.range, "_".into())],
+                    true,
+                ));
+            } else if code == UNREACHABLE_BRANCH {
+                let (s, e) = (
+                    pos_to_offset(&text, d.range.start),
+                    pos_to_offset(&text, d.range.end),
+                );
+                // the whole lines when the branch is alone on them
+                let (ls, le) = (line_start(&text, s), line_end(&text, e));
+                let alone = text[ls..s].trim().is_empty() && text[e..le].trim().is_empty();
+                let (s, e) = if alone { (ls, le) } else { (s, e) };
+                out.push(action(
+                    "Remove the unreachable branch".into(),
+                    CodeActionKind::QUICKFIX,
+                    Some(d),
+                    vec![TextEdit::new(
+                        Range::new(offset_to_pos(&text, s), offset_to_pos(&text, e)),
+                        String::new(),
+                    )],
                     true,
                 ));
             } else if code == UNUSED_IMPORT {
