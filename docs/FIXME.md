@@ -282,3 +282,19 @@ Implementation:
 
 **Q: Do other brackets also allow an expression to continue onto the next line?**
 A: Yes, any bracket: inside `( )`, `[ ]` (array and map literals, indexing) or a struct literal's `{ }`, a newline after an operator is allowed. Outside brackets it is an error.
+
+## Builtins: `@args`, `@env`, `@target`, `@embed`
+
+**Q: Does `@args()` include the program name?**
+A: Yes. Like C's `argv`, the first element is the program path.
+
+**Q: What does `@target()` return, and when is it decided?**
+A: Rust-style names, fixed at compile time from the C compiler's target macros (so release mode can fold it). The OS is `"macos"`, `"linux"`, `"windows"`, `"freebsd"`, ... and the CPU is `"aarch64"`, `"x86_64"`, `"riscv64"`, ...
+
+**Q: How are `@embed` paths resolved?**
+A: The same way as imports: `./` and `../` are relative to the file containing the `@embed`, and `.../` is relative to `$ROOT`.
+
+## Formatter
+
+**Q: What is the formatter's command line?**
+A: `ncc fmt <file>`, defined in `docs/compiler.md`. It edits the file in place; `--check` exits with code 1 if the file is not formatted; `-o [out]` writes to `out`, or to stdout when `out` is `-` or omitted.

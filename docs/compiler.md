@@ -37,7 +37,7 @@ before being compiled.
 ## CLI
 
 ```
-Usage: ncc [init|build|run|check|test|lsp]
+Usage: ncc [init|build|run|check|test|lsp|fmt]
 
 Commands:
   init        Initialises a project.
@@ -46,6 +46,7 @@ Commands:
   check       Type-checks the given file.
   test        Run tests in the given file.
   lsp         Starts the language server.
+  fmt         Formats the given file.
 
 Options:
   -h, --help  Show this help and exit.
@@ -127,6 +128,24 @@ Starts the language server.
 
 Options:
   -h, --help  Show this help and exit.
+```
+
+```
+Usage: ncc fmt <file>
+
+Formats the given file.
+
+The file is edited in place.
+
+Arguments:
+  <file>              The file to act upon.
+
+Options:
+  --check             Checks if the file is formatted. Exits with code 1 if not
+                      formatted.
+  -o, --output [out]  Write the formatted source to the out file. Writes to
+                      stdout if out is - or omitted.
+  -h, --help          Show this help and exit.
 ```
 
 ## Project layout
