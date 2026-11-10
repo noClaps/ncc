@@ -48,6 +48,116 @@ impl Server {
         )))
     }
 
+    /// An import or extern alias at a position: its name and every occurrence in the file
+    /// (the declaration first).
+    pub(super) fn alias_at(&self, uri: &Uri, pos: Position) -> Option<(String, Vec<Range>)> {
+        let path = uri_to_path(uri)?;
+        let text = self.text_of(&path)?;
+        let off = pos_to_offset(&text, pos);
+        let (s, e) = super::word_at(&text, off)?;
+        let name = &text[s..e];
+        let (module, _) = crate::parser::parse_module_recover(&text, 0);
+        let decl = module.items.iter().find_map(|it| match it {
+            ast::Item::Import(im) if im.alias == name => Some(im.span),
+            ast::Item::Extern(x) if x.alias == name => {
+                // `extern "f.c" as name {`: the alias before the brace
+                let head_end = text[x.span.start as usize..]
+                    .find('{')
+                    .map(|i| x.span.start + i as u32)
+                    .unwrap_or(x.span.end);
+                Some(Span::new(
+                    x.span.file,
+                    x.span.start as usize,
+                    head_end as usize,
+                ))
+            }
+            _ => None,
+        })?;
+        let mut out = vec![span_range(&text, name_span(&text, decl, name, false)?)];
+        let (toks, _) = crate::lexer::lex_all(&text, 0, 0);
+        alias_uses(&text, &toks, name, &mut out);
+        // the cursor must be on one of them
+        out.iter()
+            .any(|r| pos_to_offset(&text, r.start) <= off && off <= pos_to_offset(&text, r.end))
+            .then(|| (name.to_string(), out))
+    }
+
+    /// Import paths to update when `.nc` files are renamed.
+    // `WorkspaceEdit::changes` is keyed by `Uri`, as defined by lsp-types
+    #[allow(clippy::mutable_key_type)]
+    pub(super) fn will_rename_files(&self, p: RenameFilesParams) -> Option<WorkspaceEdit> {
+        let mut changes: std::collections::HashMap<Uri, Vec<TextEdit>> = Default::default();
+        for f in &p.files {
+            let (Ok(old), Ok(new)) = (f.old_uri.parse::<Uri>(), f.new_uri.parse::<Uri>()) else {
+                continue;
+            };
+            let Some(old) = uri_to_path(&old) else {
+                continue;
+            };
+            // the new file does not exist yet: canonicalize its directory
+            let Some(new) = uri_to_path(&new) else {
+                continue;
+            };
+            let new = match (
+                new.parent().and_then(|d| std::fs::canonicalize(d).ok()),
+                new.file_name(),
+            ) {
+                (Some(d), Some(n)) => d.join(n),
+                _ => new,
+            };
+            for (importer, a) in &self.analyses {
+                let Some(text) = self.text_of(importer) else {
+                    continue;
+                };
+                let (module, _) = crate::parser::parse_module_recover(&text, 0);
+                for it in &module.items {
+                    let ast::Item::Import(im) = it else { continue };
+                    let Some(target) = a.imports.get(&im.alias) else {
+                        continue;
+                    };
+                    // imports of the renamed file, and the renamed file's own imports when it
+                    // moves to another directory
+                    let moved = importer == &old && old.parent() != new.parent();
+                    if target != &old && !moved {
+                        continue;
+                    }
+                    let target = if target == &old { &new } else { target };
+                    let dir = if importer == &old {
+                        new.parent()
+                    } else {
+                        importer.parent()
+                    };
+                    let Some(dir) = dir else { continue };
+                    let Some(path) = import_path(dir, target, &im.path) else {
+                        continue;
+                    };
+                    if path == im.path {
+                        continue;
+                    }
+                    let quoted = format!("\"{}\"", im.path);
+                    let seg = &text[im.span.start as usize..(im.span.end as usize).min(text.len())];
+                    if let Some(i) = seg.find(&quoted) {
+                        let s = im.span.start as usize + i + 1;
+                        changes
+                            .entry(path_to_uri(importer))
+                            .or_default()
+                            .push(TextEdit::new(
+                                Range::new(
+                                    offset_to_pos(&text, s),
+                                    offset_to_pos(&text, s + im.path.len()),
+                                ),
+                                path,
+                            ));
+                    }
+                }
+            }
+        }
+        (!changes.is_empty()).then(|| WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        })
+    }
+
     // ------------------------------------------------------------------ call hierarchy
 
     /// The function declared at `def` in an analysis, as a call-hierarchy item.
@@ -291,6 +401,58 @@ impl Server {
     }
 }
 
+/// The import path of `target` from a file in `dir`, in the style of the old path: relative
+/// (`./x`, `../x`) or from the project root (`.../x`). Dependency imports are left alone.
+fn import_path(dir: &Path, target: &Path, old: &str) -> Option<String> {
+    let stem = target.with_extension("");
+    if old.starts_with(".../") {
+        let root = crate::modules::find_root(dir)?;
+        let rel = stem.strip_prefix(&root).ok()?;
+        return Some(format!(".../{}", rel.to_string_lossy()));
+    }
+    if !(old.starts_with("./") || old.starts_with("../")) {
+        return None;
+    }
+    let from: Vec<_> = dir.components().collect();
+    let to: Vec<_> = stem.components().collect();
+    let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+    let mut parts: Vec<String> = vec!["..".into(); from.len() - common];
+    parts.extend(
+        to[common..]
+            .iter()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned()),
+    );
+    let rel = parts.join("/");
+    Some(if rel.starts_with("..") {
+        rel
+    } else {
+        format!("./{rel}")
+    })
+}
+
+/// Ranges of `name.` uses in tokens, including string interpolations.
+fn alias_uses(text: &str, toks: &[crate::lexer::Token], name: &str, out: &mut Vec<Range>) {
+    use crate::lexer::{StrPart, Tok};
+    for (i, t) in toks.iter().enumerate() {
+        match &t.tok {
+            Tok::Ident(n)
+                if n == name && matches!(toks.get(i + 1).map(|t| &t.tok), Some(Tok::Dot)) =>
+            {
+                out.push(span_range(text, t.span));
+            }
+            Tok::Str(parts) => {
+                for p in parts {
+                    if let StrPart::Expr(src, off) = p {
+                        let (inner, _) = crate::lexer::lex_all(src, 0, *off);
+                        alias_uses(text, &inner, name, out);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Resolve `./x`, `../x` or `.../x` (from the project root) like `@embed` does.
 pub fn resolve_relative(dir: &Path, path: &str) -> Option<PathBuf> {
     let p = if let Some(rel) = path.strip_prefix(".../") {
@@ -306,6 +468,23 @@ pub fn resolve_relative(dir: &Path, path: &str) -> Option<PathBuf> {
 // ------------------------------------------------------------------ syntax tree walk
 
 /// A node of the syntax tree, visited by `walk`. `Span` is reported for every node.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn import_paths() {
+        let p = |d: &str, t: &str, o: &str| import_path(Path::new(d), Path::new(t), o);
+        assert_eq!(p("/a/b", "/a/b/c.nc", "./x").as_deref(), Some("./c"));
+        assert_eq!(p("/a/b", "/a/lib/c.nc", "./x").as_deref(), Some("../lib/c"));
+        assert_eq!(
+            p("/a/b", "/a/b/sub/c.nc", "../x").as_deref(),
+            Some("./sub/c")
+        );
+        assert_eq!(p("/a/b", "/a/b/c.nc", "std/x"), None);
+    }
+}
+
 #[derive(Clone, Copy)]
 pub enum Node<'a> {
     Span(Span),

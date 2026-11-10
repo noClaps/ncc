@@ -197,6 +197,91 @@ fn remove_import(text: &str, span: Span) -> TextEdit {
     }
 }
 
+/// Import paths of modules named `name` that `file` could import: a sibling (`./name`), other
+/// project files (`.../dir/name`) and dependencies (`std/name`).
+fn find_modules(file: &Path, name: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(dir) = file.parent() else {
+        return out;
+    };
+    let fname = format!("{name}.nc");
+    if dir.join(&fname).is_file() && dir.join(&fname) != file {
+        out.push(format!("./{name}"));
+    }
+    let Some(root) = crate::modules::find_root(dir) else {
+        return out;
+    };
+    let mut files = Vec::new();
+    super::collect_nc_files(&root, &mut files, 0);
+    for f in files {
+        if f.file_name().is_some_and(|n| n.to_string_lossy() == fname)
+            && f.parent() != Some(dir)
+            && let Ok(rel) = f.with_extension("").strip_prefix(&root)
+        {
+            out.push(format!(".../{}", rel.to_string_lossy()));
+        }
+    }
+    let deps = root.join(".nc").join("deps");
+    let mut files = Vec::new();
+    collect_all_nc(&deps, &mut files, 0);
+    for f in files {
+        if f.file_name().is_some_and(|n| n.to_string_lossy() == fname)
+            && let Ok(rel) = f.with_extension("").strip_prefix(&deps)
+        {
+            out.push(rel.to_string_lossy().into_owned());
+        }
+    }
+    out.sort_by_key(|p| (!p.starts_with("./"), p.starts_with(".../"), p.clone()));
+    out
+}
+
+/// `.nc` files under a directory, including hidden ones (dependencies live under `.nc/`).
+fn collect_all_nc(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
+    if depth > 8 {
+        return;
+    }
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        match e.file_type() {
+            Ok(t) if t.is_dir() => collect_all_nc(&p, out, depth + 1),
+            Ok(t) if t.is_file() && p.extension().is_some_and(|x| x == "nc") => out.push(p),
+            _ => {}
+        }
+    }
+}
+
+/// An edit adding `import { "path" as alias }` after the last import (or at the top).
+fn add_import(text: &str, module: &ast::Module, path: &str, alias: &str) -> TextEdit {
+    let last = module
+        .items
+        .iter()
+        .filter_map(|it| match it {
+            ast::Item::Import(im) => Some(im.span.end as usize),
+            _ => None,
+        })
+        .max();
+    let at = match last {
+        // after the `}` closing the block of the last import
+        Some(e) => {
+            let close = text[e..].find('}').map(|i| e + i).unwrap_or(e);
+            line_end(text, close)
+        }
+        None => 0,
+    };
+    let mut ins = format!("import {{ \"{path}\" as {alias} }}\n");
+    if last.is_none() && !text.starts_with("import") && !text.trim().is_empty() {
+        ins.push('\n');
+    }
+    if at == text.len() && !text.is_empty() && !text.ends_with('\n') {
+        ins.insert(0, '\n');
+    }
+    let p = offset_to_pos(text, at);
+    TextEdit::new(Range::new(p, p), ins)
+}
+
 fn levenshtein(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
@@ -359,13 +444,26 @@ impl Server {
                             offset_to_pos(&text, s + i),
                             offset_to_pos(&text, s + i + name.len()),
                         );
+                        // a module used as `name.x` that is not imported yet
+                        let used_as_module = text[s + i + name.len()..].starts_with('.');
+                        if used_as_module {
+                            for m in find_modules(&path, name).into_iter().take(3) {
+                                out.push(action(
+                                    format!("Import `{m}` as `{name}`"),
+                                    CodeActionKind::QUICKFIX,
+                                    Some(d),
+                                    vec![add_import(&text, &module, &m, name)],
+                                    true,
+                                ));
+                            }
+                        }
                         for (k, (_, c)) in cands.into_iter().take(3).enumerate() {
                             out.push(action(
                                 format!("Change to `{c}`"),
                                 CodeActionKind::QUICKFIX,
                                 Some(d),
                                 vec![TextEdit::new(r, c)],
-                                k == 0,
+                                k == 0 && !used_as_module,
                             ));
                         }
                     }
@@ -386,8 +484,11 @@ impl Server {
                     let (at, ins) = match &sig.ret {
                         Some(r) => (r.span().end as usize, "!".to_string()),
                         None => {
-                            // `fn f(...)` -> `fn f(...) void!`
-                            let close = text[..sig.span.end as usize].rfind(')');
+                            // `fn f(...)` -> `fn f(...) void!` (the span covers the name)
+                            let from = sig.span.end as usize;
+                            let brace = text[from..].find('{').map(|i| from + i);
+                            let close =
+                                brace.and_then(|b| text[from..b].rfind(')').map(|i| from + i));
                             match close {
                                 Some(c) => (c + 1, " void!".to_string()),
                                 None => (sig.span.end as usize, String::new()),

@@ -79,6 +79,19 @@ impl Client {
             }
         }
     }
+
+    /// Wait for diagnostics published for a version of an open document.
+    fn diagnostics_at(&mut self, uri: &str, version: i64) -> Vec<Value> {
+        loop {
+            let m = self.recv();
+            if m["method"] == "textDocument/publishDiagnostics"
+                && m["params"]["uri"] == uri
+                && m["params"]["version"] == version
+            {
+                return m["params"]["diagnostics"].as_array().unwrap().clone();
+            }
+        }
+    }
 }
 
 fn pos(line: u32, character: u32) -> Value {
@@ -461,7 +474,20 @@ impl Session {
             "textDocument/didOpen",
             json!({"textDocument": {"uri": self.uri, "languageId": "nc", "version": 1, "text": text}}),
         );
-        self.c.diagnostics(&self.uri.clone())
+        self.diags()
+    }
+
+    /// Diagnostics published for the current version of the document.
+    fn diags(&mut self) -> Vec<Value> {
+        loop {
+            let m = self.c.recv();
+            if m["method"] == "textDocument/publishDiagnostics"
+                && m["params"]["uri"] == self.uri.as_str()
+                && m["params"]["version"] == self.version
+            {
+                return m["params"]["diagnostics"].as_array().unwrap().clone();
+            }
+        }
     }
 
     fn change(&mut self, text: &str) -> Vec<Value> {
@@ -470,7 +496,7 @@ impl Session {
             "textDocument/didChange",
             json!({"textDocument": {"uri": self.uri, "version": self.version}, "contentChanges": [{"text": text}]}),
         );
-        self.c.diagnostics(&self.uri.clone())
+        self.diags()
     }
 
     fn req(&mut self, method: &str, mut params: Value) -> Value {
@@ -974,8 +1000,7 @@ fn diagnostics_and_code_actions() {
             {"range": {"start": at(src, "@println(total", 0, 9), "end": at(src, "@println(total", 0, 14)}, "text": "sum"}
         ]}),
     );
-    let uri = s.uri.clone();
-    assert_eq!(s.c.diagnostics(&uri), Vec::<Value>::new());
+    assert_eq!(s.diags(), Vec::<Value>::new());
     let h = s.req(
         "textDocument/hover",
         json!({"position": at(src, "@println(total", 0, 10)}),
@@ -998,4 +1023,130 @@ fn diagnostics_and_code_actions() {
     assert_eq!(edits[0]["newText"], "int total = add(ps[0].x, 3)\n");
 
     s.finish();
+}
+
+#[test]
+fn workspace_features() {
+    let dir = std::env::temp_dir().join(format!("ncc-lsp-ws-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join(".nc")).unwrap();
+    std::fs::create_dir_all(dir.join("lib")).unwrap();
+    let dir = std::fs::canonicalize(&dir).unwrap();
+    std::fs::write(dir.join(".nc/config.toml"), "").unwrap();
+    std::fs::write(
+        dir.join("lib/shapes.nc"),
+        "pub fn sides() int {\n  return 4\n}\n",
+    )
+    .unwrap();
+    // a file that is never opened, with an error
+    std::fs::write(dir.join("broken.nc"), "int a = \"no\"\n").unwrap();
+    let main =
+        "import { \"./lib/shapes\" as shapes }\n\n@println(shapes.sides(), \"{shapes.sides()}\")\n";
+    std::fs::write(dir.join("main.nc"), main).unwrap();
+    let uri = format!("file://{}", dir.join("main.nc").display());
+    let broken = format!("file://{}", dir.join("broken.nc").display());
+
+    let mut c = Client::start();
+    c.request(
+        "initialize",
+        json!({"processId": null, "rootUri": format!("file://{}", dir.display()), "capabilities": {}}),
+    );
+    c.notify("initialized", json!({}));
+    // diagnostics for the whole workspace, not only open files
+    let d = c.diagnostics(&broken);
+    assert_eq!(d.len(), 1, "{d:?}");
+
+    c.notify(
+        "textDocument/didOpen",
+        json!({"textDocument": {"uri": uri, "languageId": "nc", "version": 1, "text": main}}),
+    );
+    assert_eq!(c.diagnostics_at(&uri, 1), Vec::<Value>::new());
+    let doc = json!({"uri": uri});
+
+    // an import alias: references (also in string interpolations), rename, hover, definition
+    let refs = c.request(
+        "textDocument/references",
+        json!({"textDocument": doc, "position": at(main, "shapes.sides", 0, 2), "context": {"includeDeclaration": true}}),
+    );
+    assert_eq!(refs.as_array().unwrap().len(), 3, "{refs}");
+    let edit = c.request(
+        "textDocument/rename",
+        json!({"textDocument": doc, "position": at(main, "as shapes", 0, 4), "newName": "sh"}),
+    );
+    assert_eq!(edit["changes"][&uri].as_array().unwrap().len(), 3, "{edit}");
+    let h = c.request(
+        "textDocument/hover",
+        json!({"textDocument": doc, "position": at(main, "shapes.sides", 0, 1)}),
+    );
+    assert!(
+        h["contents"]["value"]
+            .as_str()
+            .unwrap()
+            .contains("module ./lib/shapes"),
+        "{h}"
+    );
+    let d = c.request(
+        "textDocument/definition",
+        json!({"textDocument": doc, "position": at(main, "shapes.sides", 0, 1)}),
+    );
+    assert!(
+        d["uri"].as_str().unwrap().ends_with("/lib/shapes.nc"),
+        "{d}"
+    );
+
+    // renaming a module file updates the imports of it
+    let old = format!("file://{}", dir.join("lib/shapes.nc").display());
+    let new = format!("file://{}", dir.join("lib/polygons.nc").display());
+    let edit = c.request(
+        "workspace/willRenameFiles",
+        json!({"files": [{"oldUri": old, "newUri": new}]}),
+    );
+    let e = &edit["changes"][&uri][0];
+    assert_eq!(e["newText"], "./lib/polygons", "{edit}");
+    assert_eq!(e["range"]["start"], pos(0, 10), "{edit}");
+
+    // a module used without an import: offer to import it
+    let text = "@println(shapes.sides())\n";
+    c.notify(
+        "textDocument/didChange",
+        json!({"textDocument": {"uri": uri, "version": 2}, "contentChanges": [{"text": text}]}),
+    );
+    let diags = c.diagnostics_at(&uri, 2);
+    let acts = c.request(
+        "textDocument/codeAction",
+        json!({"textDocument": doc, "range": {"start": pos(0, 9), "end": pos(0, 9)}, "context": {"diagnostics": diags}}),
+    );
+    assert_eq!(
+        titles(&acts)[0],
+        "Import `.../lib/shapes` as `shapes`",
+        "{acts}"
+    );
+    let e = &acts[0]["edit"]["changes"][&uri][0];
+    assert_eq!(
+        e["newText"], "import { \".../lib/shapes\" as shapes }\n\n",
+        "{e}"
+    );
+
+    // document symbols carry details and select the name
+    std::fs::write(
+        dir.join("lib/shapes.nc"),
+        "pub fn sides() int {\n  return 4\n}\n",
+    )
+    .unwrap();
+    let text = "struct P {\n  int x\n}\nfn area(int w, int h) int {\n  fn inner() int {\n    return 1\n  }\n  return w * h\n}\n";
+    c.notify(
+        "textDocument/didChange",
+        json!({"textDocument": {"uri": uri, "version": 3}, "contentChanges": [{"text": text}]}),
+    );
+    c.diagnostics_at(&uri, 3);
+    let syms = c.request("textDocument/documentSymbol", json!({"textDocument": doc}));
+    assert_eq!(syms[1]["detail"], "(int w, int h) int", "{syms}");
+    assert_eq!(syms[1]["selectionRange"]["start"], pos(3, 3), "{syms}");
+    assert_eq!(syms[1]["children"][0]["name"], "inner", "{syms}");
+    assert_eq!(syms[0]["children"][0]["detail"], "int", "{syms}");
+
+    c.request("shutdown", Value::Null);
+    c.notify("exit", Value::Null);
+    assert!(c.child.wait().unwrap().success());
+    let _ = std::fs::remove_dir_all(&dir);
 }

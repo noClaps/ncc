@@ -122,14 +122,19 @@ impl Analysis {
 struct Server {
     docs: HashMap<PathBuf, String>,
     analyses: HashMap<PathBuf, Analysis>,
-    /// files that received diagnostics from each entry, to clear them later
-    published: HashMap<PathBuf, HashSet<PathBuf>>,
+    /// the diagnostics found by analysing each entry, by file; a file shows the union of what
+    /// every entry found in it
+    published: HashMap<PathBuf, Vec<(PathBuf, Diagnostic)>>,
     /// workspace folders, searched for `.nc` files on workspace-wide requests
     roots: Vec<PathBuf>,
     /// whether the workspace's files that are not open have been analysed
     workspace_indexed: bool,
     /// the client accepts snippets in completions
     snippets: bool,
+    /// notifications to send after the current message
+    outbox: Vec<Notification>,
+    /// versions of the open documents
+    versions: HashMap<PathBuf, i32>,
 }
 
 pub fn run() -> ExitCode {
@@ -169,6 +174,22 @@ pub fn run() -> ExitCode {
         }),
         document_range_formatting_provider: Some(OneOf::Left(true)),
         linked_editing_range_provider: None,
+        workspace: Some(WorkspaceServerCapabilities {
+            workspace_folders: None,
+            file_operations: Some(WorkspaceFileOperationsServerCapabilities {
+                will_rename: Some(FileOperationRegistrationOptions {
+                    filters: vec![FileOperationFilter {
+                        scheme: Some("file".into()),
+                        pattern: FileOperationPattern {
+                            glob: "**/*.nc".into(),
+                            matches: Some(FileOperationPatternKind::File),
+                            options: None,
+                        },
+                    }],
+                }),
+                ..Default::default()
+            }),
+        }),
         references_provider: Some(OneOf::Left(true)),
         document_highlight_provider: Some(OneOf::Left(true)),
         rename_provider: Some(OneOf::Right(RenameOptions {
@@ -207,17 +228,45 @@ pub fn run() -> ExitCode {
         if let Ok(p) = serde_json::from_value::<InitializeParams>(params) {
             server.init(p);
         }
+        // (`initialize_finish` has consumed the `initialized` notification)
+        server.index_workspace();
+        for out in std::mem::take(&mut server.outbox) {
+            connection.sender.send(Message::Notification(out))?;
+        }
         for msg in &connection.receiver {
             match msg {
                 Message::Request(req) => {
                     if connection.handle_shutdown(&req)? {
                         break;
                     }
-                    let resp = server.request(req);
+                    let id = req.id.clone();
+                    let method = req.method.clone();
+                    // a bug in one feature answers that request with an error instead of
+                    // stopping the server
+                    let resp = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        server.request(req)
+                    }))
+                    .unwrap_or_else(|_| {
+                        Response::new_err(
+                            id,
+                            lsp_server::ErrorCode::InternalError as i32,
+                            format!("internal error while handling `{method}`"),
+                        )
+                    });
                     connection.sender.send(Message::Response(resp))?;
+                    for out in std::mem::take(&mut server.outbox) {
+                        connection.sender.send(Message::Notification(out))?;
+                    }
                 }
                 Message::Notification(n) => {
-                    for out in server.notification(n) {
+                    let outs = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        server.notification(n)
+                    }))
+                    .unwrap_or_default();
+                    for out in outs {
+                        connection.sender.send(Message::Notification(out))?;
+                    }
+                    for out in std::mem::take(&mut server.outbox) {
                         connection.sender.send(Message::Notification(out))?;
                     }
                 }
@@ -344,12 +393,66 @@ impl Server {
         for root in self.roots.clone() {
             collect_nc_files(&root, &mut files, 0);
         }
-        for f in files.into_iter().take(1000) {
-            let f = std::fs::canonicalize(&f).unwrap_or(f);
-            if !self.analyses.contains_key(&f) {
-                self.analyze(&f);
+        let files: Vec<PathBuf> = files
+            .into_iter()
+            .take(1000)
+            .map(|f| std::fs::canonicalize(&f).unwrap_or(f))
+            .filter(|f| !self.analyses.contains_key(f))
+            .collect();
+        let out = self.refresh(files);
+        self.outbox.extend(out);
+    }
+
+    /// Files whose analysis includes `path` (they import it, directly or not).
+    fn dependents(&self, path: &Path) -> Vec<PathBuf> {
+        self.analyses
+            .iter()
+            .filter(|(e, a)| e.as_path() != path && a.sm.files.iter().any(|f| f.path == path))
+            .map(|(e, _)| e.clone())
+            .collect()
+    }
+
+    /// Analyse entry files and publish the diagnostics of every file they touch.
+    fn refresh(&mut self, entries: Vec<PathBuf>) -> Vec<Notification> {
+        let mut touched: HashSet<PathBuf> = HashSet::new();
+        let mut done = HashSet::new();
+        for entry in entries {
+            if !done.insert(entry.clone()) {
+                continue;
             }
+            let old = self.published.remove(&entry).unwrap_or_default();
+            touched.extend(old.into_iter().map(|(f, _)| f));
+            touched.insert(entry.clone());
+            if !self.docs.contains_key(&entry) && !entry.is_file() {
+                // deleted: forget it
+                self.analyses.remove(&entry);
+                continue;
+            }
+            let diags = self.analyze(&entry);
+            touched.extend(diags.iter().map(|(f, _)| f.clone()));
+            self.published.insert(entry, diags);
         }
+        let mut out = Vec::new();
+        for file in touched {
+            let mut diags: Vec<Diagnostic> = self
+                .published
+                .values()
+                .flatten()
+                .filter(|(f, _)| *f == file)
+                .map(|(_, d)| d.clone())
+                .collect();
+            diags.sort_by(|a, b| {
+                (a.range.start.line, a.range.start.character, &a.message).cmp(&(
+                    b.range.start.line,
+                    b.range.start.character,
+                    &b.message,
+                ))
+            });
+            diags.dedup_by(|a, b| a.range == b.range && a.message == b.message);
+            let version = self.versions.get(&file).copied();
+            out.push(publish(&file, diags, version));
+        }
+        out
     }
 
     fn text_of(&self, path: &Path) -> Option<String> {
@@ -371,6 +474,7 @@ impl Server {
                     return vec![];
                 };
                 self.docs.insert(path.clone(), p.text_document.text);
+                self.versions.insert(path.clone(), p.text_document.version);
                 path
             }
             DidChangeTextDocument::METHOD => {
@@ -392,6 +496,7 @@ impl Server {
                     }
                 }
                 self.docs.insert(path.clone(), text);
+                self.versions.insert(path.clone(), p.text_document.version);
                 path
             }
             DidSaveTextDocument::METHOD => {
@@ -404,11 +509,22 @@ impl Server {
                 path
             }
             "workspace/didChangeWatchedFiles" => {
-                // files changed outside the editor: analyse them again when next needed
-                self.workspace_indexed = false;
-                let open: HashSet<PathBuf> = self.docs.keys().cloned().collect();
-                self.analyses.retain(|p, _| open.contains(p));
-                return vec![];
+                // files changed outside the editor: analyse them and what imports them again
+                let Ok(p) = serde_json::from_value::<DidChangeWatchedFilesParams>(n.params) else {
+                    return vec![];
+                };
+                let mut entries = Vec::new();
+                for c in p.changes {
+                    let Some(path) = uri_to_path(&c.uri) else {
+                        continue;
+                    };
+                    if self.docs.contains_key(&path) {
+                        continue;
+                    }
+                    entries.extend(self.dependents(&path));
+                    entries.push(path);
+                }
+                return self.refresh(entries);
             }
             DidCloseTextDocument::METHOD => {
                 let Ok(p) = serde_json::from_value::<DidCloseTextDocumentParams>(n.params) else {
@@ -418,51 +534,17 @@ impl Server {
                     return vec![];
                 };
                 self.docs.remove(&path);
-                // keep the file's analysis for workspace-wide requests when it is on disk
-                if path.is_file() {
-                    self.analyze(&path);
-                } else {
-                    self.analyses.remove(&path);
-                }
-                // clear diagnostics owned by this entry
-                let mut out = Vec::new();
-                for f in self.published.remove(&path).unwrap_or_default() {
-                    out.push(publish(&f, vec![]));
-                }
-                return out;
+                self.versions.remove(&path);
+                // the file is now analysed as it is on disk (or forgotten when it is not)
+                path
             }
             _ => return vec![],
         };
-        // re-analyse every open document (imports may have changed)
-        let open: Vec<PathBuf> = self.docs.keys().cloned().collect();
-        let mut out = Vec::new();
-        let mut order = vec![path.clone()];
-        order.extend(open.into_iter().filter(|p| *p != path));
-        let mut by_file: HashMap<PathBuf, Vec<Diagnostic>> = HashMap::new();
-        for entry in order {
-            let diags = self.analyze(&entry);
-            let mut files: HashSet<PathBuf> = HashSet::new();
-            for (file, d) in diags {
-                files.insert(file.clone());
-                by_file.entry(file).or_default().push(d);
-            }
-            files.insert(entry.clone());
-            let old = self
-                .published
-                .insert(entry, files.clone())
-                .unwrap_or_default();
-            for f in old.difference(&files) {
-                by_file.entry(f.clone()).or_default();
-            }
-            for f in files {
-                by_file.entry(f).or_default();
-            }
-        }
-        for (file, mut diags) in by_file {
-            diags.dedup_by(|a, b| a.range == b.range && a.message == b.message);
-            out.push(publish(&file, diags));
-        }
-        out
+        // re-analyse the document, what imports it, and every open document
+        let mut entries = vec![path.clone()];
+        entries.extend(self.dependents(&path));
+        entries.extend(self.docs.keys().filter(|p| **p != path).cloned());
+        self.refresh(entries)
     }
 
     /// Analyse an entry file; returns diagnostics per file.
@@ -543,6 +625,7 @@ impl Server {
         if matches!(
             req.method.as_str(),
             "workspace/symbol"
+                | "workspace/willRenameFiles"
                 | "textDocument/references"
                 | "textDocument/rename"
                 | "callHierarchy/incomingCalls"
@@ -661,6 +744,9 @@ impl Server {
             "textDocument/documentLink" => serde_json::from_value::<DocumentLinkParams>(req.params)
                 .ok()
                 .map(|p| serde_json::to_value(self.document_links(p)).unwrap()),
+            "workspace/willRenameFiles" => serde_json::from_value::<RenameFilesParams>(req.params)
+                .ok()
+                .map(|p| serde_json::to_value(self.will_rename_files(p)).unwrap()),
             "textDocument/rangeFormatting" => {
                 serde_json::from_value::<DocumentRangeFormattingParams>(req.params)
                     .ok()
@@ -707,6 +793,15 @@ impl Server {
         if let Some(h) = self.builtin_hover(&pp) {
             return Some(h);
         }
+        if let Some((target, range)) = self.alias_target(&pp) {
+            return Some(Hover {
+                contents: HoverContents::Markup(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: format!("```nc\nmodule {}\n```\n\n`{}`", range.0, target.display()),
+                }),
+                range: Some(range.1),
+            });
+        }
         if let Some((a, r)) = self.lookup(&pp.text_document.uri, pp.position) {
             let text = &a.sm.file(r.span.file).text;
             let mut value = format!("```nc\n{}\n```", r.hover);
@@ -747,6 +842,33 @@ impl Server {
         })
     }
 
+    /// The module file of an import or extern alias under the cursor, with the alias's path text
+    /// and range.
+    fn alias_target(&self, pp: &TextDocumentPositionParams) -> Option<(PathBuf, (String, Range))> {
+        let (name, ranges) = self.alias_at(&pp.text_document.uri, pp.position)?;
+        let path = uri_to_path(&pp.text_document.uri)?;
+        let text = self.text_of(&path)?;
+        let off = pos_to_offset(&text, pp.position);
+        let range = ranges
+            .into_iter()
+            .find(|r| pos_to_offset(&text, r.start) <= off && off <= pos_to_offset(&text, r.end))?;
+        let (module, _) = crate::parser::parse_module_recover(&text, 0);
+        for it in &module.items {
+            match it {
+                ast::Item::Import(im) if im.alias == name => {
+                    let target = self.analyses.get(&path)?.imports.get(&name)?.clone();
+                    return Some((target, (im.path.clone(), range)));
+                }
+                ast::Item::Extern(x) if x.alias == name => {
+                    let target = path.parent()?.join(&x.path);
+                    return Some((target, (x.path.clone(), range)));
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
     /// The analysis of a document, when it was made from the document's current text: its
     /// file id and that text.
     fn fresh(&self, uri: &Uri) -> Option<(&Analysis, u32, &str)> {
@@ -764,6 +886,13 @@ impl Server {
 
     fn definition(&self, p: GotoDefinitionParams) -> Option<GotoDefinitionResponse> {
         let pp = p.text_document_position_params;
+        if let Some((target, _)) = self.alias_target(&pp) {
+            let start = Range::new(Position::new(0, 0), Position::new(0, 0));
+            return Some(GotoDefinitionResponse::Scalar(Location::new(
+                path_to_uri(&target),
+                start,
+            )));
+        }
         let (a, r) = self.lookup(&pp.text_document.uri, pp.position)?;
         let def = r.def?;
         let f = a.sm.file(def.file);
@@ -784,6 +913,17 @@ impl Server {
                    detail: Option<String>,
                    children: Option<Vec<DocumentSymbol>>| {
             let range = span_range(&text, span);
+            // the name comes last in `int x` (fields, variables, imports) and first elsewhere
+            let first = !matches!(
+                kind,
+                SymbolKind::FIELD
+                    | SymbolKind::VARIABLE
+                    | SymbolKind::CONSTANT
+                    | SymbolKind::MODULE
+            );
+            let selection_range = name_span(&text, span, name, first)
+                .map(|s| span_range(&text, s))
+                .unwrap_or(range);
             DocumentSymbol {
                 name: if name.is_empty() {
                     "_".into()
@@ -795,25 +935,60 @@ impl Server {
                 tags: None,
                 deprecated: None,
                 range,
-                selection_range: range,
+                selection_range,
                 children,
             }
+        };
+        let src = |sp: Span| -> String {
+            text.get(sp.start as usize..sp.end as usize)
+                .unwrap_or("")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        // `(int a, int b) int` from a signature (its span covers the name; the parameters
+        // and return type run up to the body or `=`)
+        let sig_detail = |sig: &ast::FnSig| -> Option<String> {
+            let start = sig.span.end as usize;
+            let rest = text.get(start..)?;
+            let end = rest.find(['{', '=', '\n']).unwrap_or(rest.len());
+            let t = src(Span::new(sig.span.file, start, start + end));
+            t.starts_with('(').then_some(t)
+        };
+        let fn_symbol = |f: &ast::FnDecl| -> DocumentSymbol {
+            // functions declared directly in the body
+            let nested: Vec<DocumentSymbol> = f
+                .body
+                .stmts
+                .iter()
+                .filter_map(|st| match &st.kind {
+                    ast::StmtKind::Fn(g) => Some(sym(
+                        &g.sig.name,
+                        SymbolKind::FUNCTION,
+                        g.sig.span.to(g.body.span),
+                        sig_detail(&g.sig),
+                        None,
+                    )),
+                    _ => None,
+                })
+                .collect();
+            sym(
+                &f.sig.name,
+                SymbolKind::FUNCTION,
+                f.sig.span.to(f.body.span),
+                sig_detail(&f.sig),
+                (!nested.is_empty()).then_some(nested),
+            )
         };
         let mut out = Vec::new();
         for it in &module.items {
             match it {
-                ast::Item::Fn(f) => out.push(sym(
-                    &f.sig.name,
-                    SymbolKind::FUNCTION,
-                    f.sig.span.to(f.body.span),
-                    None,
-                    None,
-                )),
+                ast::Item::Fn(f) => out.push(fn_symbol(f)),
                 ast::Item::Struct(s) => {
                     let fields = s
                         .fields
                         .iter()
-                        .map(|(_, n, sp)| sym(n, SymbolKind::FIELD, *sp, None, None))
+                        .map(|(t, n, sp)| sym(n, SymbolKind::FIELD, *sp, Some(src(t.span())), None))
                         .collect();
                     out.push(sym(&s.name, SymbolKind::STRUCT, s.span, None, Some(fields)));
                 }
@@ -821,13 +996,23 @@ impl Server {
                     let vs = e
                         .variants
                         .iter()
-                        .map(|(n, _, sp)| sym(n, SymbolKind::ENUM_MEMBER, *sp, None, None))
+                        .map(|(n, ts, sp)| {
+                            let detail = (!ts.is_empty()).then(|| {
+                                let ts: Vec<String> = ts.iter().map(|t| src(t.span())).collect();
+                                format!("({})", ts.join(", "))
+                            });
+                            sym(n, SymbolKind::ENUM_MEMBER, *sp, detail, None)
+                        })
                         .collect();
                     out.push(sym(&e.name, SymbolKind::ENUM, e.span, None, Some(vs)));
                 }
-                ast::Item::Type(t) => {
-                    out.push(sym(&t.name, SymbolKind::TYPE_PARAMETER, t.span, None, None))
-                }
+                ast::Item::Type(t) => out.push(sym(
+                    &t.name,
+                    SymbolKind::TYPE_PARAMETER,
+                    t.span,
+                    Some(src(t.ty.span())),
+                    None,
+                )),
                 ast::Item::Test(name, _, span) => out.push(sym(
                     name,
                     SymbolKind::METHOD,
@@ -844,7 +1029,7 @@ impl Server {
                                 &f.sig.name,
                                 SymbolKind::FUNCTION,
                                 f.sig.span,
-                                Some(f.symbol.clone()),
+                                sig_detail(&f.sig),
                                 None,
                             )
                         })
@@ -864,23 +1049,25 @@ impl Server {
                     Some(im.path.clone()),
                     None,
                 )),
-                ast::Item::Stmt(s) => {
-                    if let ast::StmtKind::VarDecl {
+                ast::Item::Stmt(s) => match &s.kind {
+                    ast::StmtKind::VarDecl {
                         targets, mutable, ..
-                    } = &s.kind
-                    {
+                    } => {
                         for t in targets {
                             let kind = if *mutable {
                                 SymbolKind::VARIABLE
                             } else {
                                 SymbolKind::CONSTANT
                             };
-                            out.push(sym(&t.name, kind, t.span, None, None));
+                            out.push(sym(&t.name, kind, t.span, Some(src(t.ty.span())), None));
                         }
-                    } else if let ast::StmtKind::FnVar { name, .. } = &s.kind {
-                        out.push(sym(name, SymbolKind::FUNCTION, s.span, None, None));
                     }
-                }
+                    ast::StmtKind::FnVar { name, .. } => {
+                        out.push(sym(name, SymbolKind::FUNCTION, s.span, None, None))
+                    }
+                    ast::StmtKind::Fn(f) => out.push(fn_symbol(f)),
+                    _ => {}
+                },
             }
         }
         Some(DocumentSymbolResponse::Nested(out))
@@ -991,6 +1178,16 @@ impl Server {
 
     fn references(&self, p: ReferenceParams) -> Option<Vec<Location>> {
         let pp = p.text_document_position;
+        if let Some((_, ranges)) = self.alias_at(&pp.text_document.uri, pp.position) {
+            let skip = usize::from(!p.context.include_declaration);
+            return Some(
+                ranges
+                    .into_iter()
+                    .skip(skip)
+                    .map(|r| Location::new(pp.text_document.uri.clone(), r))
+                    .collect(),
+            );
+        }
         let (key, name, first) = self.symbol_at(&pp.text_document.uri, pp.position)?;
         let mut locs: Vec<Location> = self
             .occurrences(&key, &name, first)
@@ -1011,6 +1208,17 @@ impl Server {
 
     fn highlights(&self, p: DocumentHighlightParams) -> Option<Vec<DocumentHighlight>> {
         let pp = p.text_document_position_params;
+        if let Some((_, ranges)) = self.alias_at(&pp.text_document.uri, pp.position) {
+            return Some(
+                ranges
+                    .into_iter()
+                    .map(|range| DocumentHighlight {
+                        range,
+                        kind: Some(DocumentHighlightKind::TEXT),
+                    })
+                    .collect(),
+            );
+        }
         let path = uri_to_path(&pp.text_document.uri)?;
         let (key, name, first) = self.symbol_at(&pp.text_document.uri, pp.position)?;
         Some(
@@ -1026,6 +1234,20 @@ impl Server {
     }
 
     fn prepare_rename(&self, p: TextDocumentPositionParams) -> Option<PrepareRenameResponse> {
+        if let Some((name, ranges)) = self.alias_at(&p.text_document.uri, p.position) {
+            let path = uri_to_path(&p.text_document.uri)?;
+            let text = self.text_of(&path)?;
+            let off = pos_to_offset(&text, p.position);
+            return ranges
+                .into_iter()
+                .find(|r| {
+                    pos_to_offset(&text, r.start) <= off && off <= pos_to_offset(&text, r.end)
+                })
+                .map(|range| PrepareRenameResponse::RangeWithPlaceholder {
+                    range,
+                    placeholder: name,
+                });
+        }
         let path = uri_to_path(&p.text_document.uri)?;
         let (key, name, first) = self.symbol_at(&p.text_document.uri, p.position)?;
         let text = self.text_of(&path)?;
@@ -1055,6 +1277,20 @@ impl Server {
             && new != "_";
         if !valid || crate::parser::is_keyword(new) {
             return Err(format!("`{new}` is not a valid name"));
+        }
+        if let Some((_, ranges)) = self.alias_at(&pp.text_document.uri, pp.position) {
+            let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
+            changes.insert(
+                pp.text_document.uri.clone(),
+                ranges
+                    .into_iter()
+                    .map(|r| TextEdit::new(r, new.to_string()))
+                    .collect(),
+            );
+            return Ok(Some(WorkspaceEdit {
+                changes: Some(changes),
+                ..Default::default()
+            }));
         }
         let Some((key, name, first)) = self.symbol_at(&pp.text_document.uri, pp.position) else {
             return Ok(None);
@@ -1439,13 +1675,13 @@ fn is_type_ref(hover: &str) -> bool {
     hover.starts_with("struct ") || hover.starts_with("enum ") || hover.starts_with("type ")
 }
 
-fn publish(path: &Path, diagnostics: Vec<Diagnostic>) -> Notification {
+fn publish(path: &Path, diagnostics: Vec<Diagnostic>, version: Option<i32>) -> Notification {
     Notification::new(
         PublishDiagnostics::METHOD.to_string(),
         PublishDiagnosticsParams {
             uri: path_to_uri(path),
             diagnostics,
-            version: None,
+            version,
         },
     )
 }
