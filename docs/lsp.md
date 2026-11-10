@@ -80,15 +80,16 @@ function throwing, make an item of another module public.
 | Document links | ✅ imports, externs, `@embed` paths |
 | Formatting | ✅ |
 | Assists: extract/inline variable, fill match arms, add missing fields, generate function, convert int base, change visibility, ... | ✅ (see above) |
-| Code lens (run / references) | not provided: the commands are editor-specific; Zed shows "run" buttons on tests through `runnables.scm` instead |
+| Code lens | ✅ "N references" (with `editor.action.showReferences`, as rust-analyzer); "run" lenses are left to the editor: Zed shows run buttons on tests through `runnables.scm` |
 | Runnables (run tests from the editor) | ✅ through the Zed extension's runnables and tasks |
 | Incremental document sync | ✅ |
 | Fault tolerance (a panic does not stop the server) | ✅ |
 | On-type formatting | ✅ a `}` typed at the start of a line takes the indentation of its `{` |
 | View syntax tree | ✅ `ncc/syntaxTree` request (the parsed tree, for debugging) |
 | Macro expansion | n/a: NC has no macros |
-| Structural search and replace, join lines | not provided |
-| Pull diagnostics | not provided: diagnostics are pushed (like Gleam and rust-analyzer), and offering both makes some clients show them twice |
+| Structural search and replace | ✅ `experimental/ssr`, rust-analyzer's request: `add($a, $b) ==>> $a + $b` over the workspace; placeholders bind whole expressions |
+| Join lines | ✅ `experimental/joinLines`, rust-analyzer's request: drops indentation, trailing commas before a closing bracket and the `//` of joined comments |
+| Pull diagnostics | ✅ `textDocument/diagnostic` for clients that support it; their open documents are then not pushed as well |
 
 ## Checks
 

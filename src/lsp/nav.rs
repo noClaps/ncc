@@ -158,6 +158,56 @@ impl Server {
         })
     }
 
+    /// "N references" above each module-level function, struct, enum and type, using the
+    /// client's `editor.action.showReferences` command (as rust-analyzer does).
+    pub(super) fn code_lenses(&self, p: CodeLensParams) -> Option<Vec<CodeLens>> {
+        let path = uri_to_path(&p.text_document.uri)?;
+        let a = self.analyses.get(&path)?;
+        let fid = a.file_id(&path)?;
+        let text = &a.sm.file(fid).text;
+        let mut out = Vec::new();
+        for d in &a.index.decls {
+            if d.span.file != fid
+                || d.scope.is_some()
+                || !matches!(
+                    d.kind,
+                    DeclKind::Function | DeclKind::Struct | DeclKind::Enum | DeclKind::Type
+                )
+            {
+                continue;
+            }
+            let first = true;
+            let key = (path.clone(), d.span.start);
+            let occ = self.occurrences(&key, &d.name, first);
+            let Some(ns) = name_span(text, d.span, &d.name, first) else {
+                continue;
+            };
+            let decl_range = span_range(text, ns);
+            let locations: Vec<Location> = occ
+                .into_iter()
+                .filter(|(f, r)| !(f == &path && *r == decl_range))
+                .map(|(f, r)| Location::new(path_to_uri(&f), r))
+                .collect();
+            let n = locations.len();
+            out.push(CodeLens {
+                range: decl_range,
+                command: Some(Command::new(
+                    format!("{n} reference{}", if n == 1 { "" } else { "s" }),
+                    "editor.action.showReferences".into(),
+                    Some(vec![
+                        serde_json::to_value(&p.text_document.uri).ok()?,
+                        serde_json::to_value(decl_range.start).ok()?,
+                        serde_json::to_value(&locations).ok()?,
+                    ]),
+                )),
+                data: None,
+            });
+        }
+        out.sort_by_key(|l| (l.range.start.line, l.range.start.character));
+        out.dedup_by_key(|l| l.range);
+        Some(out)
+    }
+
     // ------------------------------------------------------------------ call hierarchy
 
     /// The function declared at `def` in an analysis, as a call-hierarchy item.

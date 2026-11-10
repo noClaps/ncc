@@ -13,6 +13,7 @@
 //! - `nav.rs`: type definition, call hierarchy, selection ranges, document links
 //! - `actions.rs`: code actions and the extra diagnostics they fix (unused variables and imports)
 //! - `refactor.rs`: more code actions, and exit-point highlights
+//! - `ssr.rs`: structural search and replace, join lines and pulled diagnostics
 
 mod actions;
 mod complete;
@@ -20,6 +21,7 @@ mod docs;
 mod hints;
 mod nav;
 mod refactor;
+mod ssr;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -34,6 +36,7 @@ use lsp_types::request::{
     Completion, DocumentSymbolRequest, GotoDefinition, HoverRequest, Request as _,
 };
 use lsp_types::*;
+use ssr::{JoinLinesParams, SsrParams};
 
 use crate::ast;
 use crate::check::index::{DeclKind, Index};
@@ -137,6 +140,8 @@ struct Server {
     outbox: Vec<Notification>,
     /// versions of the open documents
     versions: HashMap<PathBuf, i32>,
+    /// the client pulls the diagnostics of open documents (`textDocument/diagnostic`)
+    pull: bool,
 }
 
 pub fn run() -> ExitCode {
@@ -160,6 +165,9 @@ pub fn run() -> ExitCode {
             ..Default::default()
         }),
         inlay_hint_provider: Some(OneOf::Left(true)),
+        code_lens_provider: Some(CodeLensOptions {
+            resolve_provider: Some(false),
+        }),
         semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
             SemanticTokensOptions {
                 legend: hints::legend(),
@@ -223,17 +231,28 @@ pub fn run() -> ExitCode {
         document_formatting_provider: Some(OneOf::Left(true)),
         ..Default::default()
     };
-    let init = serde_json::json!({
-        "capabilities": caps,
-        "serverInfo": { "name": "ncc", "version": env!("CARGO_PKG_VERSION") },
-    });
+    let mut caps = caps;
     let r = (|| -> Result<(), Box<dyn std::error::Error + Sync + Send>> {
         let (id, params) = connection.initialize_start()?;
-        connection.initialize_finish(id, init)?;
         let mut server = Server::default();
         if let Ok(p) = serde_json::from_value::<InitializeParams>(params) {
             server.init(p);
         }
+        // clients that pull diagnostics get them on request (and not pushed as well)
+        if server.pull {
+            caps.diagnostic_provider =
+                Some(DiagnosticServerCapabilities::Options(DiagnosticOptions {
+                    identifier: Some("ncc".into()),
+                    inter_file_dependencies: true,
+                    workspace_diagnostics: false,
+                    work_done_progress_options: Default::default(),
+                }));
+        }
+        let init = serde_json::json!({
+            "capabilities": caps,
+            "serverInfo": { "name": "ncc", "version": env!("CARGO_PKG_VERSION") },
+        });
+        connection.initialize_finish(id, init)?;
         // (`initialize_finish` has consumed the `initialized` notification)
         server.index_workspace();
         for out in std::mem::take(&mut server.outbox) {
@@ -368,6 +387,11 @@ fn span_range(text: &str, span: Span) -> Range {
 impl Server {
     #[allow(deprecated)]
     fn init(&mut self, p: InitializeParams) {
+        self.pull = p
+            .capabilities
+            .text_document
+            .as_ref()
+            .is_some_and(|t| t.diagnostic.is_some());
         self.snippets = p
             .capabilities
             .text_document
@@ -409,6 +433,26 @@ impl Server {
         self.outbox.extend(out);
     }
 
+    /// The diagnostics of a file: the union of what every analysis found in it.
+    fn diagnostics_of(&self, file: &Path) -> Vec<Diagnostic> {
+        let mut diags: Vec<Diagnostic> = self
+            .published
+            .values()
+            .flatten()
+            .filter(|(f, _)| f == file)
+            .map(|(_, d)| d.clone())
+            .collect();
+        diags.sort_by(|a, b| {
+            (a.range.start.line, a.range.start.character, &a.message).cmp(&(
+                b.range.start.line,
+                b.range.start.character,
+                &b.message,
+            ))
+        });
+        diags.dedup_by(|a, b| a.range == b.range && a.message == b.message);
+        diags
+    }
+
     /// Files whose analysis includes `path` (they import it, directly or not).
     fn dependents(&self, path: &Path) -> Vec<PathBuf> {
         self.analyses
@@ -440,21 +484,10 @@ impl Server {
         }
         let mut out = Vec::new();
         for file in touched {
-            let mut diags: Vec<Diagnostic> = self
-                .published
-                .values()
-                .flatten()
-                .filter(|(f, _)| *f == file)
-                .map(|(_, d)| d.clone())
-                .collect();
-            diags.sort_by(|a, b| {
-                (a.range.start.line, a.range.start.character, &a.message).cmp(&(
-                    b.range.start.line,
-                    b.range.start.character,
-                    &b.message,
-                ))
-            });
-            diags.dedup_by(|a, b| a.range == b.range && a.message == b.message);
+            let diags = self.diagnostics_of(&file);
+            if self.pull && self.docs.contains_key(&file) {
+                continue;
+            }
             let version = self.versions.get(&file).copied();
             out.push(publish(&file, diags, version));
         }
@@ -631,7 +664,9 @@ impl Server {
         if matches!(
             req.method.as_str(),
             "workspace/symbol"
+                | "textDocument/codeLens"
                 | "workspace/willRenameFiles"
+                | "experimental/ssr"
                 | "textDocument/references"
                 | "textDocument/rename"
                 | "callHierarchy/incomingCalls"
@@ -769,6 +804,30 @@ impl Server {
                 let (module, _) = crate::parser::parse_module_recover(&text, 0);
                 serde_json::Value::String(format!("{module:#?}"))
             }),
+            "textDocument/codeLens" => serde_json::from_value::<CodeLensParams>(req.params)
+                .ok()
+                .map(|p| serde_json::to_value(self.code_lenses(p)).unwrap()),
+            "textDocument/diagnostic" => {
+                serde_json::from_value::<DocumentDiagnosticParams>(req.params)
+                    .ok()
+                    .map(|p| serde_json::to_value(self.pull_diagnostics(p)).unwrap())
+            }
+            "experimental/joinLines" => serde_json::from_value::<JoinLinesParams>(req.params)
+                .ok()
+                .map(|p| serde_json::to_value(self.join_lines(p)).unwrap()),
+            "experimental/ssr" => match serde_json::from_value::<SsrParams>(req.params) {
+                Ok(p) => match self.ssr(p) {
+                    Ok(edit) => Some(serde_json::to_value(edit).unwrap()),
+                    Err(msg) => {
+                        return Response::new_err(
+                            id,
+                            lsp_server::ErrorCode::InvalidParams as i32,
+                            msg,
+                        );
+                    }
+                },
+                Err(_) => None,
+            },
             "textDocument/rangeFormatting" => {
                 serde_json::from_value::<DocumentRangeFormattingParams>(req.params)
                     .ok()

@@ -758,6 +758,16 @@ fn hover_hints_and_navigation() {
     );
     assert_eq!(r["changes"][&s.uri].as_array().unwrap().len(), 2, "{r}");
 
+    // reference counts above declarations
+    let lenses = s.req("textDocument/codeLens", json!({}));
+    let add = lenses
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["range"]["start"] == at(src, "add(int", 0, 0))
+        .unwrap_or_else(|| panic!("{lenses}"));
+    assert_eq!(add["command"]["title"], "2 references", "{add}");
+
     // references and rename include files that are not open
     let refs = s.req(
         "textDocument/references",
@@ -1564,4 +1574,106 @@ fn responses_follow_the_protocol() {
         s.c.request("callHierarchy/outgoingCalls", json!({"item": items[0]})),
     );
     s.finish();
+}
+
+#[test]
+fn ssr_join_lines_and_pulled_diagnostics() {
+    let mut s = Session::start("ssr");
+    let src = PROGRAM;
+    s.open(src);
+    let uri = s.uri.clone();
+
+    // structural search and replace across the workspace
+    let edit = s.c.request(
+        "experimental/ssr",
+        json!({"query": "add($a, $b) ==>> $a + $b", "parseOnly": false}),
+    );
+    let edits = edit["changes"][&uri].as_array().unwrap();
+    let texts: Vec<&str> = edits
+        .iter()
+        .map(|e| e["newText"].as_str().unwrap())
+        .collect();
+    assert_eq!(texts, ["n + n", "ps[0].x + 3"], "{edit}");
+    // a bad rule is an error
+    let bad = s.c.request(
+        "experimental/ssr",
+        json!({"query": "add($a) ==>> $b", "parseOnly": true}),
+    );
+    assert!(bad.is_null(), "{bad}");
+
+    // join lines
+    let text = "int[] xs = [\n  1,\n  2,\n]\n// one\n// two\n";
+    s.change(text);
+    let e = s.req(
+        "experimental/joinLines",
+        json!({"ranges": [{"start": pos(0, 0), "end": pos(3, 0)}]}),
+    );
+    let mut joined = text.to_string();
+    let mut es: Vec<(usize, usize, String)> = e
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| {
+            let off = |p: &Value| {
+                let (l, c) = (
+                    p["line"].as_u64().unwrap() as usize,
+                    p["character"].as_u64().unwrap() as usize,
+                );
+                text.split_inclusive('\n')
+                    .take(l)
+                    .map(|x| x.len())
+                    .sum::<usize>()
+                    + c
+            };
+            (
+                off(&x["range"]["start"]),
+                off(&x["range"]["end"]),
+                x["newText"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    es.sort_by_key(|x| std::cmp::Reverse(x.0));
+    for (a, b, t) in es {
+        joined.replace_range(a..b, &t);
+    }
+    assert_eq!(joined, "int[] xs = [1, 2]\n// one\n// two\n");
+    let e = s.req(
+        "experimental/joinLines",
+        json!({"ranges": [{"start": pos(4, 0), "end": pos(4, 0)}]}),
+    );
+    assert_eq!(e[0]["newText"], " ", "{e}");
+    assert_eq!(e[0]["range"]["end"], pos(5, 3), "{e}");
+    s.finish();
+
+    // a client that pulls diagnostics gets them on request instead of pushed
+    let dir = std::env::temp_dir().join(format!("ncc-lsp-pull-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = std::fs::canonicalize(&dir).unwrap();
+    let file = dir.join("main.nc");
+    std::fs::write(&file, "int a = \"x\"\n").unwrap();
+    let furi = format!("file://{}", file.display());
+    let mut c = Client::start();
+    let init = c.request(
+        "initialize",
+        json!({"processId": null, "rootUri": null, "capabilities": {"textDocument": {"diagnostic": {}}}}),
+    );
+    assert_eq!(
+        init["capabilities"]["diagnosticProvider"]["identifier"], "ncc",
+        "{init}"
+    );
+    c.notify("initialized", json!({}));
+    c.notify(
+        "textDocument/didOpen",
+        json!({"textDocument": {"uri": furi, "languageId": "nc", "version": 1, "text": "int a = \"x\"\n"}}),
+    );
+    let r = c.request(
+        "textDocument/diagnostic",
+        json!({"textDocument": {"uri": furi}}),
+    );
+    assert_eq!(r["kind"], "full", "{r}");
+    assert_eq!(r["items"].as_array().unwrap().len(), 1, "{r}");
+    c.request("shutdown", Value::Null);
+    c.notify("exit", Value::Null);
+    assert!(c.child.wait().unwrap().success());
+    let _ = std::fs::remove_dir_all(&dir);
 }
