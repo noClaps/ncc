@@ -25,6 +25,9 @@ pub struct Options {
 /// Parse and type-check a program, printing diagnostics on failure.
 fn frontend(file: &Path, sm: &mut SourceMap, release: bool) -> Option<Program> {
     let r = crate::modules::load(sm, file).and_then(crate::check::check).and_then(|mut p| {
+        for w in crate::lint::race_warnings(&p) {
+            eprintln!("{}", w.render_as("warning", sm));
+        }
         crate::eval::Evaluator::run(&mut p, sm, release)?;
         Ok(p)
     });

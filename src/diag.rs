@@ -85,8 +85,12 @@ impl Diag {
         Diag { span, msg: msg.into() }
     }
     pub fn render(&self, sm: &SourceMap) -> String {
+        self.render_as("error", sm)
+    }
+
+    pub fn render_as(&self, kind: &str, sm: &SourceMap) -> String {
         if sm.files.is_empty() {
-            return format!("error: {}", self.msg);
+            return format!("{kind}: {}", self.msg);
         }
         let f = sm.file(self.span.file);
         let (line, col) = f.line_col(self.span.start as usize);
@@ -94,7 +98,7 @@ impl Diag {
         let width = (self.span.end.saturating_sub(self.span.start) as usize).max(1);
         let width = width.min(text.chars().count().saturating_sub(col - 1).max(1));
         format!(
-            "error: {}\n  --> {}:{}:{}\n   |\n{:>3}| {}\n   | {}{}",
+            "{kind}: {}\n  --> {}:{}:{}\n   |\n{:>3}| {}\n   | {}{}",
             self.msg,
             f.path.display(),
             line,

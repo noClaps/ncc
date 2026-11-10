@@ -5,6 +5,7 @@ mod diag;
 mod driver;
 mod eval;
 mod lexer;
+mod lint;
 mod modules;
 mod parser;
 mod tir;

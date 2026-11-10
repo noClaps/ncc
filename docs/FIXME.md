@@ -250,3 +250,8 @@ A: The command was dropped and removed from `docs/compiler.md`.
 
 **Q: Which exponent literal forms are valid, and what are their types?**
 A: Exponent literals are supported (`e` or `E`, with an optional `+`/`-` sign on the exponent), and they are integers when exact. Implementation: with no decimal point and a non-negative exponent the literal is an integer literal, contextually typed like any other (`1e5` is `100000`, and `1e5u` is a `uint`). With a decimal point (`1.5e3`) or a negative exponent (`1e-5`) it is a `float`.
+
+## Race conditions
+
+**Request:** If the checker can detect a race condition, it should emit a warning but still compile.
+Implementation: a function run with `async` that (directly or through the functions it calls) reads or writes a mutable global or a captured `mut` variable outside a mutex gets a "possible data race" warning at the `async` call. Compilation continues.
