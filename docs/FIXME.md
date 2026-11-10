@@ -179,3 +179,15 @@ A: No. Apart from `==`, printing and construction with the underlying literal sy
 
 **Q: Does compile-time panic detection run the same in all modes?**
 A: Yes. `check`, debug and release reject the same programs. Only release also rewrites the program with folded results.
+
+**Q: Can a `void!` function be called as a bare statement?**
+A: No, that is a compile error. Error unions must be handled with `catch`/`try` or discarded explicitly with `_ =`, which ignores the error.
+
+**Q: Are recursive types allowed?**
+A: Yes. Directly recursive enum payloads and optional struct fields are heap-allocated (refcounted) automatically. Infinite-size types such as `struct A { A a }` are compile errors.
+
+**Q: Can `mut str` elements be assigned, and are nested optionals legal?**
+A: Both are allowed: `s[i] = c` works on a `mut str`, and `T??` is legal.
+
+**Q: Where is `$` valid?**
+A: Anywhere inside the `[]` of an array, string or fixed-array index (not maps or tuples). It is a `uint` equal to `len - 1`, and it panics (underflow) on an empty array.
