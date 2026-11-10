@@ -68,7 +68,7 @@ Options:
   -o, --output <out>        The file to output to. (default: filename)
   -h, --help                Show this help and exit.";
 
-const HELP_RUN: &str = "Usage: ncc run <file>
+const HELP_RUN: &str = "Usage: ncc run <file> [-- <args>...]
 
 Executes the given file.
 
@@ -77,6 +77,7 @@ deleting the executable.
 
 Arguments:
   <file>                    The file to act upon.
+  <args>...                 Arguments passed to the program (see `@args()`).
 
 Options:
   -r, --release             Run the file in release mode.
@@ -92,12 +93,13 @@ Arguments:
 Options:
   -h, --help  Show this help and exit.";
 
-const HELP_TEST: &str = "Usage: ncc test <file>
+const HELP_TEST: &str = "Usage: ncc test <file> [-- <args>...]
 
 Run tests in the given file.
 
 Arguments:
   <file>      The file to act upon.
+  <args>...   Arguments passed to the test program (see `@args()`).
 
 Options:
   -h, --help  Show this help and exit.";
@@ -224,6 +226,11 @@ fn main() -> ExitCode {
                     "-h" | "--help" => {
                         println!("{help}");
                         return ExitCode::SUCCESS;
+                    }
+                    // everything after `--` goes to the program, options included
+                    "--" if cmd == "run" || cmd == "test" => {
+                        opts.args = rest[i + 1..].to_vec();
+                        break;
                     }
                     "-r" | "--release" if cmd == "build" || cmd == "run" => opts.release = true,
                     "-f" | "--format" if cmd == "build" => {

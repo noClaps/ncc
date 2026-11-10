@@ -71,7 +71,7 @@ Options:
 ```
 
 ```
-Usage: ncc run <file>
+Usage: ncc run <file> [-- <args>...]
 
 Executes the given file.
 
@@ -80,6 +80,7 @@ deleting the executable.
 
 Arguments:
   <file>                    The file to act upon.
+  <args>...                 Arguments passed to the program (see `@args()`).
 
 Options:
   -r, --release             Run the file in release mode.
@@ -99,12 +100,13 @@ Options:
 ```
 
 ```
-Usage: ncc test <file>
+Usage: ncc test <file> [-- <args>...]
 
 Run tests in the given file.
 
 Arguments:
   <file>      The file to act upon.
+  <args>...   Arguments passed to the test program (see `@args()`).
 
 Options:
   -h, --help  Show this help and exit.

@@ -119,7 +119,8 @@ struct Data {
 ## `@args()`
 
 Returns the command line arguments the program was started with. The first element is the
-program's path.
+program's path. With `ncc run <file> -- <args>...` (or `ncc test`), the arguments after `--`
+follow it.
 
 ```nc
 fn @args() str[]

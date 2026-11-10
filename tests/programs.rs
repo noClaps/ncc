@@ -358,3 +358,54 @@ fn unused_code() {
     assert!(stderr.contains("found 4 errors"), "{stderr}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `ncc run <file> -- <args>...` and `ncc test <file> -- <args>...` pass the arguments on.
+#[test]
+fn program_arguments() {
+    let dir = std::env::temp_dir().join(format!("ncc-args-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("main.nc");
+    std::fs::write(
+        &src,
+        "str[] a = @args()\nfor i in a {\n  if {\n    i > 0 -> { @println(a[i]) }\n    _ -> {}\n  }\n}\ntest \"sees args\" {\n  assert @args().len == 3\n}\n",
+    )
+    .unwrap();
+    let out = Command::new(ncc())
+        .args(["run"])
+        .arg(&src)
+        .args(["--", "one", "two words", "--flag", "-r"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "one\ntwo words\n--flag\n-r\n"
+    );
+    // `-r` before `--` is still an option of `ncc run`
+    let out = Command::new(ncc())
+        .args(["run", "-r"])
+        .arg(&src)
+        .args(["--", "x"])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "x\n");
+    // tests see them too
+    let out = Command::new(ncc())
+        .arg("test")
+        .arg(&src)
+        .args(["--", "a", "b"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let (stdout, _, code) = run(&["test"], &src);
+    assert_ne!(code, 0, "{stdout}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

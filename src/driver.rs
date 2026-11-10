@@ -20,6 +20,8 @@ pub struct Options {
     pub release: bool,
     pub format: Option<Format>,
     pub output: Option<PathBuf>,
+    /// arguments for the program (`ncc run <file> -- <args>...`)
+    pub args: Vec<String>,
 }
 
 /// Parse and type-check a program, printing diagnostics on failure.
@@ -304,8 +306,8 @@ pub fn build(o: &Options) -> ExitCode {
     }
 }
 
-fn run_exe(exe: &Path) -> ExitCode {
-    match Command::new(exe).status() {
+fn run_exe(exe: &Path, args: &[String]) -> ExitCode {
+    match Command::new(exe).args(args).status() {
         Ok(s) => match s.code() {
             Some(c) => ExitCode::from(c as u8),
             None => {
@@ -337,7 +339,7 @@ fn build_and_run(o: &Options, mode: Mode) -> ExitCode {
     if !compile(&p, &sm, mode, o.release, Format::Exe, &exe) {
         return ExitCode::FAILURE;
     }
-    run_exe(&exe)
+    run_exe(&exe, &o.args)
 }
 
 pub fn run(o: &Options) -> ExitCode {
