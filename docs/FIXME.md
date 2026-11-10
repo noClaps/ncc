@@ -49,3 +49,19 @@ A: No stdlib for now.
 
 **Q: How are import paths resolved?**
 A: Relative imports start with `./`. All other imports resolve to `$ROOT/.nc/deps/`, where `$ROOT` is the directory containing `nc.toml`.
+
+**Q: Is `.nc` appended to import paths, and how is `nc.toml` found?**
+A: `.nc` is appended, and `./x` resolves to `<importing file's dir>/x.nc`. `nc.toml` is searched for upward from the entry file's directory. It is only required (missing is an error) when a non-`./` import is used. Its contents are ignored for now.
+
+## Conditionals
+
+**Q: Do if-branches produce values with `break <value>` only, or also with a bare trailing expression (as in enum.md's `render` example)?**
+A: Only `break <value>`. The enum.md example is wrong, and a bare non-void expression statement is an error.
+
+## Printing
+
+**Q: Are nested strings/chars quoted when printed inside containers?**
+A: Never quote. The enum example should print `Node.Comment(hello)`.
+
+**Q: How are floats converted to `str`?**
+A: As the shortest digits that round-trip, always with `.0` when the value is integral. Infinity and NaN print as `inf`, `-inf` and `nan`. Very large or small values use exponent form (e.g. `1e+300`).
