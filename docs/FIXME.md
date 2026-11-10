@@ -50,8 +50,10 @@ A: No stdlib for now.
 **Q: How are import paths resolved?**
 A: Relative imports start with `./` or `../` and resolve against the importing file's directory, the way paths normally work. Imports starting with `.../` resolve from `$ROOT`, so `.../lib/math` is `$ROOT/lib/math.nc`. All other imports resolve to `$ROOT/.nc/deps/`. `$ROOT` is the directory containing `nc.toml`.
 
-**Q: Is `.nc` appended to import paths, and how is `nc.toml` found?**
-A: `.nc` is appended, so `./x` resolves to `<importing file's dir>/x.nc`. `nc.toml` is searched for upward from the entry file's directory. It is only required (missing is an error) when an import is neither `./` nor `../`. Its contents are ignored for now.
+**Update:** The config file moved to `.nc/config.toml`. `$ROOT` is the directory containing the `.nc` directory. Everything else is unchanged.
+
+**Q: Is `.nc` appended to import paths, and how is the config file found?**
+A: `.nc` is appended, so `./x` resolves to `<importing file's dir>/x.nc`. `.nc/config.toml` (originally `nc.toml`) is searched for upward from the entry file's directory. It is only required (missing is an error) when an import is neither `./` nor `../`. Its contents are ignored for now.
 
 ## Conditionals
 

@@ -24,7 +24,7 @@ pub struct ModuleGraph {
 fn find_root(start: &Path) -> Option<PathBuf> {
     let mut dir = Some(start);
     while let Some(d) = dir {
-        if d.join("nc.toml").is_file() {
+        if d.join(".nc").join("config.toml").is_file() {
             return Some(d.to_path_buf());
         }
         dir = d.parent();
@@ -113,7 +113,7 @@ fn load_one(
                     return Err(Diag::new(
                         im.span,
                         format!(
-                            "cannot resolve import `{}`: no `nc.toml` found in `{}` or any parent directory",
+                            "cannot resolve import `{}`: no `.nc/config.toml` found in `{}` or any parent directory",
                             im.path,
                             entry_dir.display()
                         ),
