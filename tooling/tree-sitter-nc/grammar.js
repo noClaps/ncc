@@ -30,7 +30,6 @@ const PREC = {
   generic: 15,
 };
 
-const commaSep = (rule) => optional(commaSep1(rule));
 const commaSep1 = (rule) => seq(rule, repeat(seq(',', rule)));
 /** comma separated list allowing a trailing comma */
 const commaSepTrailing = (rule) => optional(seq(commaSep1(rule), optional(',')));
@@ -198,13 +197,13 @@ module.exports = grammar({
 
     assignment: ($) => seq(field('left', $._expression), '=', field('right', $._expression)),
 
-    return_statement: ($) => prec.right(seq('return', optional(commaSep1($._expression)))),
+    return_statement: ($) => seq('return', optional(commaSep1($._expression))),
 
     throw_statement: ($) => seq('throw', $._expression),
 
-    break_statement: ($) => prec.right(seq('break', optional(choice($.label_reference, $._expression)))),
+    break_statement: ($) => seq('break', optional(choice($.label_reference, $._expression))),
 
-    continue_statement: ($) => prec.right(seq('continue', optional($.label_reference))),
+    continue_statement: ($) => seq('continue', optional($.label_reference)),
 
     label_reference: ($) => seq(':', alias($.identifier, $.label)),
 
@@ -328,7 +327,7 @@ module.exports = grammar({
     arguments: ($) => seq('(', commaSepTrailing($._expression), ')'),
 
     builtin_call: ($) =>
-      prec(PREC.postfix, choice(
+      choice(
         // `@as(T, value)` takes a type first
         seq(
           field('name', alias('@as', $.builtin_identifier)),
@@ -340,7 +339,7 @@ module.exports = grammar({
           ')',
         ),
         seq(field('name', $.builtin_identifier), field('arguments', $.arguments)),
-      )),
+      ),
 
     builtin_identifier: (_) => /@[A-Za-z_][A-Za-z0-9_]*/,
 
@@ -427,7 +426,7 @@ module.exports = grammar({
         seq('(', $._constant, ')'),
       ),
 
-    map_type: ($) => prec(PREC.unary, seq('[', field('key', $._type), ']', field('value', $._type))),
+    map_type: ($) => seq('[', field('key', $._type), ']', field('value', $._type)),
 
     optional_type: ($) => prec(PREC.postfix, seq($._type, '?')),
 
@@ -444,7 +443,7 @@ module.exports = grammar({
         ')',
       ),
 
-    future_type: ($) => prec(PREC.unary, seq('fut', $._type)),
+    future_type: ($) => seq('fut', $._type),
 
     // ------------------------------------------------------------------ lexical
 

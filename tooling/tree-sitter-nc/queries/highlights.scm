@@ -80,7 +80,6 @@
 (char) @character
 (string) @string
 (multiline_string) @string
-(string_content) @string
 (escape_sequence) @string.escape
 
 (interpolation
