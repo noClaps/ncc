@@ -136,3 +136,19 @@ A: Outer `mut` variables are shared by reference and kept alive by refcount even
 
 **Q: How do optionals, error unions, functions and futures print?**
 A: An optional prints `none` or the inner value. An error union prints the value or `error: msg`. Everything else (functions, futures, mutexes, void) is a compile error.
+
+**Q: What is the default `ncc build` output path, and which wins when `-f` and `-o` disagree?**
+A: The default is the input path without `.nc`, plus `.c` or `.s` for those formats and no extension for exe. An explicit `-f` wins. Without `-f`, the format comes from `-o`'s extension: `.c` → c, `.s`/`.asm` → asm, anything else → exe.
+
+## Maps
+
+**Q: What does reading a missing key do, which types can be keys, and can a map be mutated while iterating it?**
+A: Reading a missing key panics. Any type that supports `==` can be a key, hashed structurally. `for key in m` iterates a snapshot of the keys taken when the loop starts, so mutating the map inside the loop is allowed.
+
+**Q: Can floats be map keys and match patterns?**
+A: Yes, using IEEE equality: NaN never matches and is never found, and `-0.0 == 0.0`.
+
+## Generics
+
+**Q: Are type arguments ever inferred, e.g. `Result<int, str> res = Result.Ok(1)`?**
+A: No, they are always explicit. Write `Result<int, str>.Ok(1)`. The doc example is a typo.
