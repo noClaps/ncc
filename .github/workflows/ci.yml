@@ -30,9 +30,14 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: |
+          cargo fmt --check
+          cargo fmt --check --manifest-path tooling/zed/Cargo.toml
 
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
