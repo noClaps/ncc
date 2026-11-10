@@ -100,9 +100,19 @@ impl<'a> Checker<'a> {
                     let v = match &value.kind {
                         ast::ExprKind::Tuple(items) if items.len() == targets.len() => {
                             let tt = self.types.tuple(tys.clone());
-                            self.expect_expr(value, tt)?
+                            self.expect_expr(value, tt)
                         }
-                        _ => self.check_expr(value, None)?,
+                        _ => self.check_expr(value, None),
+                    };
+                    let v = match v {
+                        Ok(v) => v,
+                        Err(d) => {
+                            // declare the targets anyway to avoid follow-up errors
+                            for (t, ty) in targets.iter().zip(&tys) {
+                                self.declare_var(&t.name, *ty, *mutable, *public, t.span)?;
+                            }
+                            return Err(d);
+                        }
                     };
                     let elems = match self.types.kind(v.ty) {
                         TyKind::Tuple(ts) => ts.clone(),

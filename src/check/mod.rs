@@ -150,6 +150,7 @@ fn check_inner(graph: ModuleGraph) -> (Program, index::Index, Vec<Diag>) {
     };
     let p = c.run();
     let mut errors = std::mem::take(&mut c.errors);
+    errors.retain(|d| !d.msg.is_empty());
     errors.sort_by_key(|d| (d.span.file, d.span.start));
     errors.dedup_by(|a, b| a.span == b.span && a.msg == b.msg);
     (p, std::mem::take(&mut c.ix.index), errors)
@@ -163,7 +164,10 @@ impl<'a> Checker<'a> {
 
     pub fn report(&mut self, r: Result<()>) {
         if let Err(d) = r {
-            self.errors.push(d);
+            // empty messages mark errors that were already reported by the parser
+            if !d.msg.is_empty() {
+                self.errors.push(d);
+            }
         }
     }
 

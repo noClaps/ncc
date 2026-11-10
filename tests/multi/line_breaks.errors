@@ -1,0 +1,4 @@
+expected an expression after `+` (to continue an expression on the next line, wrap it in parentheses)
+unused value of type `int`
+an expression continued on the next line after `+` must be wrapped in parentheses
+an expression continued on the next line after `and` must be wrapped in parentheses

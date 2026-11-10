@@ -141,6 +141,8 @@ pub enum ExprKind {
     Try(Box<Expr>),
     Async(Box<Expr>),
     Await(Box<Expr>),
+    /// A value that failed to parse (the error has already been reported)
+    Error,
 }
 
 #[derive(Clone, Debug)]

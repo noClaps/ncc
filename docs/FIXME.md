@@ -275,3 +275,10 @@ Implementation:
 - The checker reports each failing statement or declaration and keeps going. A variable whose initialiser fails is still declared, to avoid follow-up "unknown name" errors.
 - Compile-time panics are reported alongside type errors.
 - Errors are listed in source order, followed by a count.
+
+## Line breaks in expressions
+
+**Request:** Expressions split over several lines, such as `int y = 1 +` followed by `2`, must be wrapped in parentheses.
+
+**Q: Do other brackets also allow an expression to continue onto the next line?**
+A: Yes, any bracket: inside `( )`, `[ ]` (array and map literals, indexing) or a struct literal's `{ }`, a newline after an operator is allowed. Outside brackets it is an error.

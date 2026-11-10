@@ -5,8 +5,10 @@ described in [`docs/syntax`](../../docs/syntax).
 
 ## Notes
 
-- Statements end at a newline. Newlines inside brackets, or after a binary operator, are
-  ignored, as in the compiler.
+- Statements end at a newline, and newlines inside brackets are ignored. The grammar also
+  accepts a newline right after a binary operator. The compiler rejects that outside
+  brackets (`(1 +` followed by `2)` is required), but the leniency is harmless for
+  highlighting.
 - Operator precedence follows [`docs/FIXME.md`](../../docs/FIXME.md). From tightest to
   loosest:
   - postfix

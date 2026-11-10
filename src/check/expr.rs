@@ -470,6 +470,7 @@ impl<'a> Checker<'a> {
                     Target::Variant(..) => err(call.span, "`async` must be followed by a function call"),
                 }
             }
+            E::Error => Err(Diag::new(span, String::new())),
             E::Await(x) => {
                 let v = self.check_expr(x, None)?;
                 let TyKind::Fut(inner) = *self.types.kind(v.ty) else {

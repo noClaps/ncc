@@ -26,6 +26,8 @@ pub struct Parser {
     src: String,
     /// token index where the current statement started
     stmt_start: usize,
+    /// set when a statement recovered from an error itself
+    recovered: bool,
 }
 
 /// Parse a module, failing with the first error.
@@ -38,7 +40,7 @@ pub fn parse_module(src: &str, file: u32) -> Result<Module> {
 /// parsed and every error found.
 pub fn parse_module_recover(src: &str, file: u32) -> (Module, Vec<Diag>) {
     let (toks, lex_errors) = crate::lexer::lex_all(src, file, 0);
-    let mut p = Parser { toks, pos: 0, file, no_struct: false, errors: lex_errors, src: src.to_string(), stmt_start: 0 };
+    let mut p = Parser { toks, pos: 0, file, no_struct: false, errors: lex_errors, src: src.to_string(), stmt_start: 0, recovered: false };
     let m = p.module();
     let mut errors = p.errors;
     errors.dedup_by(|a, b| a.span == b.span && a.msg == b.msg);
@@ -138,7 +140,27 @@ impl Parser {
             self.bump();
         }
     }
+    /// Parse a declaration's value. On error the error is recorded and the statement is
+    /// skipped, but the declaration is kept (with an `Error` value) so that its variables
+    /// still exist and later uses don't report follow-up errors.
+    fn decl_value(&mut self) -> Expr {
+        let at = self.span();
+        match self.expr() {
+            Ok(e) => e,
+            Err(d) => {
+                let start = self.stmt_start;
+                self.recover(d, start);
+                self.recovered = true;
+                Expr { kind: ExprKind::Error, span: at }
+            }
+        }
+    }
+
     fn end_stmt(&mut self) -> Result<()> {
+        if std::mem::take(&mut self.recovered) {
+            // the statement already skipped to the start of the next one
+            return Ok(());
+        }
         match self.peek() {
             Tok::Newline => {
                 self.skip_nl();
@@ -237,6 +259,26 @@ impl Parser {
         if self.pos == start && !self.at(&Tok::Eof) {
             self.bump();
             self.skip_nl();
+        }
+        // lines indented deeper than the broken statement belong to it
+        if let Some(sc) = self.column(start) {
+            while !matches!(self.peek(), Tok::Eof | Tok::RBrace) && self.column(self.pos).is_some_and(|c| c > sc) {
+                let mut depth: i32 = 0;
+                loop {
+                    match self.peek() {
+                        Tok::Eof => break,
+                        Tok::Newline if depth <= 0 => {
+                            self.skip_nl();
+                            break;
+                        }
+                        Tok::LBrace | Tok::LParen | Tok::LBracket => depth += 1,
+                        Tok::RBrace if depth <= 0 => break,
+                        Tok::RBrace | Tok::RParen | Tok::RBracket => depth -= 1,
+                        _ => {}
+                    }
+                    self.bump();
+                }
+            }
         }
     }
 
@@ -720,7 +762,7 @@ impl Parser {
                 self.bump();
                 let targets = self.decl_targets()?;
                 self.expect(&Tok::Assign)?;
-                let value = self.expr()?;
+                let value = self.decl_value();
                 StmtKind::VarDecl { public, mutable: k == "mut", mutex: k == "mutex", targets, value }
             }
             _ => {
@@ -729,7 +771,7 @@ impl Parser {
                 if let Ok(targets) = self.decl_targets() {
                     if self.at(&Tok::Assign) {
                         self.bump();
-                        let value = self.expr()?;
+                        let value = self.decl_value();
                         return Ok(Stmt {
                             kind: StmtKind::VarDecl { public, mutable: false, mutex: false, targets, value },
                             span: start.to(self.prev_span()),
@@ -846,9 +888,9 @@ impl Parser {
                 return err(self.span(), "comparison operators cannot be chained; use parentheses");
             }
             let opsp = self.bump().span;
-            let at_eol = self.at(&Tok::Newline);
+            self.check_line_break(opsp, op.symbol())?;
             self.skip_nl();
-            let rhs = self.binary(prec + 1).map_err(|d| self.missing_operand(d, opsp, op.symbol(), at_eol))?;
+            let rhs = self.binary(prec + 1)?;
             last_cmp = prec == 3;
             let sp = lhs.span.to(rhs.span);
             let _ = opsp;
@@ -857,21 +899,25 @@ impl Parser {
         Ok(lhs)
     }
 
-    /// The operand after an operator at the end of a line failed to parse. If the next line
-    /// is indented no deeper than the statement, the operand was most likely left out.
-    fn missing_operand(&self, d: Diag, opsp: Span, sym: &str, at_eol: bool) -> Diag {
-        let mut j = self.toks.iter().position(|t| t.span.start > opsp.start).unwrap_or(self.toks.len() - 1);
+    /// An expression may only continue onto the next line after an operator when it is inside
+    /// brackets (`( )`, `[ ]` or a struct literal's `{ }`).
+    fn check_line_break(&self, opsp: Span, sym: &str) -> Result<()> {
+        if !self.at(&Tok::Newline) || !self.open_brackets(self.stmt_start, self.pos).is_empty() {
+            return Ok(());
+        }
+        let mut j = self.pos;
         while matches!(self.toks[j].tok, Tok::Newline) && j + 1 < self.toks.len() {
             j += 1;
         }
-        let next_col = self.column(j);
-        let stmt_col = self.column(self.stmt_start);
-        let new_line = matches!(self.toks[j].tok, Tok::Eof | Tok::RBrace)
-            || matches!((next_col, stmt_col), (Some(n), Some(s)) if n <= s);
-        if at_eol && new_line {
-            Diag::new(opsp, format!("expected an expression after `{sym}`"))
+        let continued = !matches!(self.toks[j].tok, Tok::Eof | Tok::RBrace)
+            && matches!((self.column(j), self.column(self.stmt_start)), (Some(n), Some(s)) if n > s);
+        if continued {
+            err(opsp, format!("an expression continued on the next line after `{sym}` must be wrapped in parentheses"))
         } else {
-            d
+            err(
+                opsp,
+                format!("expected an expression after `{sym}` (to continue an expression on the next line, wrap it in parentheses)"),
+            )
         }
     }
 
@@ -879,9 +925,9 @@ impl Parser {
         let base = self.unary()?;
         if self.at(&Tok::StarStar) {
             let opsp = self.bump().span;
-            let at_eol = self.at(&Tok::Newline);
+            self.check_line_break(opsp, "**")?;
             self.skip_nl();
-            let exp = self.pow().map_err(|d| self.missing_operand(d, opsp, "**", at_eol))?; // right-assoc
+            let exp = self.pow()?; // right-assoc
             let sp = base.span.to(exp.span);
             return Ok(Expr { kind: ExprKind::Binary(BinOp::Pow, Box::new(base), Box::new(exp)), span: sp });
         }
@@ -1066,7 +1112,7 @@ impl Parser {
                         StrPart::Lit(s) => segs.push(StrSeg::Lit(s)),
                         StrPart::Expr(text, off) => {
                             let toks = lex(&text, self.file, off)?;
-                            let mut sub = Parser { toks, pos: 0, file: self.file, no_struct: false, errors: vec![], src: String::new(), stmt_start: 0 };
+                            let mut sub = Parser { toks, pos: 0, file: self.file, no_struct: false, errors: vec![], src: String::new(), stmt_start: 0, recovered: false };
                             sub.skip_nl();
                             let e = sub.expr()?;
                             sub.skip_nl();
