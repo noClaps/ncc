@@ -1,0 +1,20 @@
+PASS shadowing
+PASS $ indexing
+PASS fixed-size arrays
+PASS fixed-size array concatenation
+PASS mutable struct
+PASS function return tuple
+PASS tuple indexing
+PASS partial tuple destructuring
+PASS destructuring optional tuple
+FAIL checking none tuple (should fail): Cannot destructure a none tuple
+FAIL failing test: assertion failed at tests/programs/tests_basic.nc:88
+PASS breaking for assignment
+PASS type in type[]
+PASS converting int to float
+PASS optional set default
+FAIL optional throw error: should fail
+PASS operators
+PASS maps
+PASS value semantics
+16 passed, 3 failed

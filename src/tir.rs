@@ -13,6 +13,7 @@ pub type ExternId = usize;
 pub type JumpId = usize;
 
 #[derive(Clone, Debug, PartialEq)]
+#[allow(dead_code)]
 pub enum Lit {
     Bool(bool),
     Byte(u8),
@@ -211,6 +212,7 @@ pub struct Capture {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct Func {
     pub name: String,
     pub params: Vec<LocalId>,
@@ -227,6 +229,7 @@ pub struct Func {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct Global {
     pub name: String,
     pub ty: TyId,

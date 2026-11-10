@@ -1,0 +1,35 @@
+<!doctype html><p>hi</p><!--c-->
+Node.Comment(hello)
+7
+Matrix<int>{.rows = 2, .cols = 2, .data = [1, 0, 0, 1]}
+[1, 2, 3]
+3
+hello
+0
+1
+6
+7
+15
+3
+c,o,o,k,i,e, ,🍪,
+8
+Hello World
+  Indented line
+Unindented line
+3 + 5 = 8
+8 + 10 = 18
+escaped: {5 + 2}
+abc literal
+5.0 0.30000000000000004 1.5 inf
+true 97 x 1
+(Nathan, 24)
+none 3
+[first: 1]
+42!
+[104, 195, 169]
+[h, é]
+Small number
+Incorrect age: 30
+last 4 values: [2, 3, 4, 5]
+Incorrect age: 20
+11 21 31 

@@ -3,6 +3,7 @@
 use crate::diag::Span;
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub enum TypeExpr {
     /// `int`, `Foo`, `Matrix<int>`, `mod.Foo<T>`
     Named { module: Option<String>, name: String, args: Vec<TypeExpr>, span: Span },
@@ -18,6 +19,7 @@ pub enum TypeExpr {
     Fut(Box<TypeExpr>, Span),
 }
 
+#[allow(dead_code)]
 impl TypeExpr {
     pub fn span(&self) -> Span {
         match self {
@@ -148,6 +150,7 @@ pub enum StrSeg {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct IfExpr {
     pub label: Option<String>,
     pub scrutinee: Option<Expr>,
@@ -156,6 +159,7 @@ pub struct IfExpr {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct Arm {
     /// Comma-separated alternatives; `_` is `ExprKind::Wildcard`
     pub patterns: Vec<Expr>,

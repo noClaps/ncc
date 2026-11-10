@@ -66,12 +66,6 @@ impl SourceMap {
     pub fn file(&self, id: u32) -> &SourceFile {
         &self.files[id as usize]
     }
-    /// `path:line` for runtime panic locations.
-    pub fn location(&self, span: Span) -> String {
-        let f = self.file(span.file);
-        let (l, _) = f.line_col(span.start as usize);
-        format!("{}:{}", f.path.display(), l)
-    }
 }
 
 #[derive(Debug, Clone)]

@@ -1,0 +1,8 @@
+pi = 3.141592653589793
+0 <= uint <= 18446744073709551615
+69376
+Point{.x = 1, .y = 2}
+5
+hello, nc
+division by zero (extern)
+0

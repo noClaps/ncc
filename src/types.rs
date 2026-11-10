@@ -146,9 +146,6 @@ impl Types {
     pub fn is_numeric(&self, t: TyId) -> bool {
         matches!(t, BYTE | INT | UINT | FLOAT)
     }
-    pub fn is_string_like(&self, t: TyId) -> bool {
-        t == STR || t == ERROR
-    }
 
     /// Element type for indexable sequences (arrays, fixed arrays, str).
     pub fn elem(&self, t: TyId) -> Option<TyId> {

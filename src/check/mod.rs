@@ -950,10 +950,6 @@ impl<'a> Checker<'a> {
         if same_file { list[0].0 } else { list.last().unwrap().0 }
     }
 
-    pub fn file_of_module(&self, m: usize) -> u32 {
-        self.mods[m].file
-    }
-
     // ------------------------------------------------------------ main assembly
 
     fn assemble_main(&mut self) -> Block {
