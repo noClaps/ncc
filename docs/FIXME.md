@@ -152,3 +152,30 @@ A: Yes, using IEEE equality: NaN never matches and is never found, and `-0.0 == 
 
 **Q: Are type arguments ever inferred, e.g. `Result<int, str> res = Result.Ok(1)`?**
 A: No, they are always explicit. Write `Result<int, str>.Ok(1)`. The doc example is a typo.
+Patterns must be explicit too: `Result<int, str>.Ok(n) ->`.
+
+## Errors and optionals
+
+**Q: How can a `catch`/`else` block end with a call that never returns (e.g. `os.exit(1)`)?**
+A: Through a new builtin `never` return type, e.g. `fn exit(int code) never`, usable in NC and `extern` functions. A call to such a function counts as diverging. A `never` function body must not reach its end or `return`.
+
+**Q: What must a `catch`/`else` block do when its result is used?**
+A: Every path must diverge or provide a value: `break <value>`, `return`, `throw`, `break`/`continue` an enclosing loop, or call a `never` function. Falling off the end is a compile error. If the result is discarded (`_ =`) or void, falling through is allowed.
+
+## Mutex
+
+**Q: The async.md example reads a mutex outside `lock`. Is that allowed?**
+A: No. Any access to a mutex variable outside `lock` is a compile error, so the example is wrong.
+
+**Q: Can an `async` function touch outer `mut` (non-mutex) variables?**
+A: Allowed, at the user's risk. There is no check.
+
+## Named types
+
+**Q: Do nominal `type` definitions keep the underlying type's operators?**
+A: No. Apart from `==`, printing and construction with the underlying literal syntax, values must be converted back with `@as`.
+
+## Compile-time checks
+
+**Q: Does compile-time panic detection run the same in all modes?**
+A: Yes. `check`, debug and release reject the same programs. Only release also rewrites the program with folded results.
