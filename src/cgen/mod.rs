@@ -179,11 +179,11 @@ impl<'p> CGen<'p> {
         out.push_str(&self.tg.bodies);
         out.push_str("/* ---------------------------------------------------------------- string literals */\n\n");
         out.push_str(&self.str_defs);
+        out.push_str("\n/* ---------------------------------------------------------------- functions */\n\n");
+        out.push_str(&self.protos);
         out.push_str("\n/* ---------------------------------------------------------------- closures and futures */\n\n");
         out.push_str(&self.env_defs);
         out.push_str(&self.fut_defs);
-        out.push_str("\n/* ---------------------------------------------------------------- functions */\n\n");
-        out.push_str(&self.protos);
         out.push('\n');
         out.push_str(&globals);
         out.push('\n');
