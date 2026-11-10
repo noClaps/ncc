@@ -65,3 +65,22 @@ A: Never quote. The enum example should print `Node.Comment(hello)`.
 
 **Q: How are floats converted to `str`?**
 A: As the shortest digits that round-trip, always with `.0` when the value is integral. Infinity and NaN print as `inf`, `-inf` and `nan`. Very large or small values use exponent form (e.g. `1e+300`).
+
+## Runtime failures
+
+**Q: What happens on a panic (overflow, out-of-bounds index, division by zero, missing map key) or an uncaught top-level error?**
+A: If it can be detected at compile time, compilation fails. Otherwise a panic prints `panic: <reason>` with file:line to stderr and exits with code 101. An uncaught thrown error prints `error: <msg>` to stderr and exits with code 1.
+
+## Literals
+
+**Q: How are untyped numeric literals typed?**
+A: Integer literals take the expected integer type (`byte`/`int`/`uint`) from context and default to `int`. An out-of-range literal is a compile error. Integer literals never become `float`, so `float f = 1` is an error. Literals with a `.` are `float`, and the `u` suffix forces `uint`.
+
+## Declarations
+
+**Q: Does top-level code in imported modules run? Are declarations hoisted?**
+A: Top-level code in imported modules does not run unless the imported symbols depend on it. Functions and types are hoisted.
+
+**Q: Are these doc examples typos?**
+A: Yes, except the array pattern case. The typos are `Person(.name = ..)` (struct patterns use `{}`), `fn get_len_of_first<T>` (missing `type`), `uint len == ...`, and `int?[] = none` (missing name).
+Matching an `int[]` against `[1, _]` is intended: a dynamic array's size may not be known at compile time, so patterns of different lengths are allowed. Each pattern only matches arrays of exactly its length. In the docs example the `[1, a, b, c, d]` branch is chosen, and this may be resolved at compile time when the contents are known.
