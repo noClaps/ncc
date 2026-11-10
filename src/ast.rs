@@ -165,6 +165,24 @@ pub enum BinOp {
 }
 
 impl BinOp {
+    /// Precedence of a binary operator: higher binds tighter.
+    pub fn prec(self) -> u8 {
+        use BinOp::*;
+        match self {
+            Or => 1,
+            And => 2,
+            Eq | Ne | Lt | Gt | Le | Ge | In => 3,
+            Concat => 4,
+            BitOr => 5,
+            BitXor => 6,
+            BitAnd => 7,
+            Shl | Shr => 8,
+            Add | Sub => 9,
+            Mul | Div | Mod => 10,
+            Pow => 11,
+        }
+    }
+
     pub fn symbol(self) -> &'static str {
         use BinOp::*;
         match self {
@@ -198,6 +216,16 @@ pub enum UnOp {
     Neg,
     BitNot,
     Not,
+}
+
+impl UnOp {
+    pub fn symbol(self) -> &'static str {
+        match self {
+            UnOp::Neg => "-",
+            UnOp::BitNot => "!",
+            UnOp::Not => "not",
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

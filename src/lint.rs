@@ -162,7 +162,7 @@ pub struct Unused {
 }
 
 /// The span of `name` as a whole word inside `span` (the first or the last occurrence).
-fn name_in(text: &str, span: Span, name: &str, first: bool) -> Option<Span> {
+pub fn name_in(text: &str, span: Span, name: &str, first: bool) -> Option<Span> {
     let (s, e) = (span.start as usize, (span.end as usize).min(text.len()));
     let seg = text.get(s..e)?;
     let ident = |c: char| c.is_alphanumeric() || c == '_';

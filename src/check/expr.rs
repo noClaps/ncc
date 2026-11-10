@@ -305,15 +305,11 @@ impl Checker {
                     UnOp::Not => x.ty == BOOL,
                 };
                 if !ok {
-                    let sym = match op {
-                        UnOp::Neg => "-",
-                        UnOp::BitNot => "!",
-                        UnOp::Not => "not",
-                    };
                     return err(
                         span,
                         format!(
-                            "operator `{sym}` cannot be applied to `{}`",
+                            "operator `{}` cannot be applied to `{}`",
+                            op.symbol(),
                             self.types.show(x.ty)
                         ),
                     );

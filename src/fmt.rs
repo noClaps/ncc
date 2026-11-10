@@ -640,16 +640,12 @@ impl<'a> Printer<'a> {
             ExprKind::Dollar => "$".into(),
             ExprKind::Error => self.literal(e),
             ExprKind::Unary(op, x) => {
-                let sym = match op {
-                    UnOp::Neg => "-",
-                    UnOp::BitNot => "!",
-                    UnOp::Not => "not ",
-                };
+                let space = if *op == UnOp::Not { " " } else { "" };
                 let inner = self.paren(x, indent, prec(x) < UNARY);
-                format!("{sym}{inner}")
+                format!("{}{space}{inner}", op.symbol())
             }
             ExprKind::Binary(op, l, r) => {
-                let p = binop_prec(*op);
+                let p = op.prec();
                 let lp = prec(l);
                 let rp = prec(r);
                 let left_parens =
@@ -833,32 +829,15 @@ fn item_range(it: &Item) -> (usize, usize) {
     (s as usize, e as usize)
 }
 
-// precedence levels, matching the parser (higher binds tighter)
+// precedence levels around the binary operators' (`BinOp::prec`; higher binds tighter)
 const ELSE: u8 = 0;
 const COMPARE: u8 = 3;
 const UNARY: u8 = 12;
 const POSTFIX: u8 = 14;
 
-fn binop_prec(op: BinOp) -> u8 {
-    use BinOp::*;
-    match op {
-        Or => 1,
-        And => 2,
-        Eq | Ne | Lt | Gt | Le | Ge | In => COMPARE,
-        Concat => 4,
-        BitOr => 5,
-        BitXor => 6,
-        BitAnd => 7,
-        Shl | Shr => 8,
-        Add | Sub => 9,
-        Mul | Div | Mod => 10,
-        Pow => 11,
-    }
-}
-
 fn prec(e: &Expr) -> u8 {
     match &e.kind {
-        ExprKind::Binary(op, ..) => binop_prec(*op),
+        ExprKind::Binary(op, ..) => op.prec(),
         ExprKind::Unary(..) | ExprKind::Try(_) | ExprKind::Async(_) | ExprKind::Await(_) => UNARY,
         ExprKind::Else(..) | ExprKind::Catch(..) | ExprKind::If(_) | ExprKind::FnLit(..) => ELSE,
         _ => POSTFIX,

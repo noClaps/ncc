@@ -100,7 +100,6 @@ pub struct CGen<'p> {
     /// the program uses `@args`, so `main` records `argc`/`argv`
     uses_args: bool,
     embeds: usize,
-    cwd: Option<std::path::PathBuf>,
 }
 
 pub fn generate(p: &Program, sm: &SourceMap, mode: Mode) -> (String, String) {
@@ -126,7 +125,6 @@ pub fn generate(p: &Program, sm: &SourceMap, mode: Mode) -> (String, String) {
         value_fns: HashSet::new(),
         uses_args: false,
         embeds: 0,
-        cwd: std::env::current_dir().ok(),
     };
     g.run(mode)
 }
@@ -156,23 +154,15 @@ impl<'p> CGen<'p> {
             writeln!(self.protos, "{proto};").unwrap();
         }
         for x in &self.p.externs {
-            let mut ps = Vec::new();
-            for t in &x.params {
-                ps.push(self.tg.ct(*t));
-            }
+            let ps = c_params(x.params.iter().map(|t| self.tg.ct(*t)).collect());
             let rc = self.tg.ret_ct(x.ret);
-            let ps = if ps.is_empty() {
-                "void".to_string()
-            } else {
-                ps.join(", ")
-            };
             writeln!(
                 self.protos,
                 "{rc} {}({ps}); /* extern {} */",
                 x.symbol, x.name
             )
             .unwrap();
-            for t in x.params.clone().iter().chain([x.ret].iter()) {
+            for t in x.params.iter().chain([&x.ret]) {
                 self.tg.need(*t);
             }
         }
@@ -317,19 +307,9 @@ impl<'p> CGen<'p> {
         format!("nc_env_{}", self.fname(f))
     }
 
-    fn loc(&mut self, span: Span) -> String {
-        if self.sm.files.is_empty() {
-            return "\"?\"".into();
-        }
-        let f = self.sm.file(span.file);
-        let (l, _) = f.line_col(span.start as usize);
-        let mut path = f.path.clone();
-        if let Some(cwd) = &self.cwd
-            && let Ok(rel) = path.strip_prefix(cwd)
-        {
-            path = rel.to_path_buf();
-        }
-        format!("\"{}:{l}\"", c_escape_str(&path.display().to_string()))
+    /// The source location of a span as a C string literal.
+    fn loc(&self, span: Span) -> String {
+        format!("\"{}\"", c_escape_str(&self.sm.location(span)))
     }
 
     // ------------------------------------------------------------ output helpers
@@ -354,6 +334,22 @@ impl<'p> CGen<'p> {
         self.p.types.base(t)
     }
 
+    fn push_clean(&mut self, var: String, kind: CleanKind, temp: bool) {
+        self.cleanup.push(Clean {
+            var,
+            kind,
+            temp,
+            moved: false,
+        });
+    }
+
+    fn var_ty(&self, v: VarRef) -> TyId {
+        match v {
+            VarRef::Local(l) => self.local(l).ty,
+            VarRef::Global(g) => self.p.globals[g].ty,
+        }
+    }
+
     /// Declare a temporary holding an owned value.
     fn temp(&mut self, ty: TyId, init: &str) -> CVal {
         self.tg.need(ty);
@@ -361,12 +357,7 @@ impl<'p> CGen<'p> {
         let v = self.fresh("t");
         self.line(format!("{c} {v} = {init};"));
         if self.managed(ty) {
-            self.cleanup.push(Clean {
-                var: v.clone(),
-                kind: CleanKind::Release(self.h(ty)),
-                temp: true,
-                moved: false,
-            });
+            self.push_clean(v.clone(), CleanKind::Release(self.h(ty)), true);
             CVal {
                 code: v,
                 owned: true,
@@ -407,34 +398,22 @@ impl<'p> CGen<'p> {
 
     /// Emit releases for all live entries above `height` (without popping them).
     fn unwind_to(&mut self, height: usize) {
-        let entries: Vec<Clean> = self.cleanup[height..]
-            .iter()
-            .rev()
+        let codes: Vec<String> = (self.cleanup[height..].iter().rev())
             .filter(|c| !c.moved)
-            .cloned()
+            .map(release_code)
             .collect();
-        for c in entries {
-            let code = release_code(&c);
+        for code in codes {
             self.line(code);
         }
     }
 
     /// Release and pop temporaries above `height`, keeping variables.
     fn end_stmt(&mut self, height: usize) {
-        let mut keep = Vec::new();
-        let entries: Vec<Clean> = self.cleanup.drain(height..).collect();
-        for c in entries.into_iter().rev() {
-            if c.temp {
-                if !c.moved {
-                    let code = release_code(&c);
-                    self.line(code);
-                }
-            } else {
-                keep.push(c);
-            }
+        let entries = self.cleanup.split_off(height);
+        for c in entries.iter().rev().filter(|c| c.temp && !c.moved) {
+            self.line(release_code(c));
         }
-        keep.reverse();
-        self.cleanup.extend(keep);
+        self.cleanup.extend(entries.into_iter().filter(|c| !c.temp));
     }
 
     /// Release and pop everything above `height` (end of scope).
@@ -470,12 +449,7 @@ impl<'p> CGen<'p> {
             let c = self.tg.ct(t);
             ps.push(format!("{c} {}", self.lname(p)));
         }
-        let ps = if ps.is_empty() {
-            "void".to_string()
-        } else {
-            ps.join(", ")
-        };
-        format!("static {rc} {}({ps})", self.fname(i))
+        format!("static {rc} {}({})", self.fname(i), c_params(ps))
     }
 
     fn gen_fn(&mut self, i: FuncId, init_body: Option<(&str, Block)>) {
@@ -531,13 +505,10 @@ impl<'p> CGen<'p> {
             drop.push_str("}\n");
             self.env_defs.push_str(&s);
             self.env_defs.push_str(&drop);
+            self.line(format!("struct {en} *E = (struct {en} *)env;"));
         }
         if self.value_fns.contains(&i) && !is_init {
             self.line("(void)env;");
-        }
-        if !f.captures.is_empty() && !is_init {
-            let en = self.env_name(i);
-            self.line(format!("struct {en} *E = (struct {en} *)env;"));
         }
         if let Some(sl) = f.self_local {
             let n = self.lname(sl);
@@ -621,22 +592,12 @@ impl<'p> CGen<'p> {
                     let h = self.h(loc.ty);
                     self.line(format!("nc_cell *{n} = nc_cell_new(&ti_{h});"));
                     self.line(format!("*({c} *){n}->val = {value};"));
-                    self.cleanup.push(Clean {
-                        var: n,
-                        kind: CleanKind::Cell,
-                        temp: false,
-                        moved: false,
-                    });
+                    self.push_clean(n, CleanKind::Cell, false);
                 } else {
                     self.line(format!("{c} {n} = {value};"));
                     self.line(format!("(void){n};"));
                     if self.managed(loc.ty) {
-                        self.cleanup.push(Clean {
-                            var: n,
-                            kind: CleanKind::Release(self.h(loc.ty)),
-                            temp: false,
-                            moved: false,
-                        });
+                        self.push_clean(n, CleanKind::Release(self.h(loc.ty)), false);
                     }
                 }
             }
@@ -669,11 +630,7 @@ impl<'p> CGen<'p> {
                     self.expr(e);
                 } else {
                     let val = self.expr(e);
-                    let mty = match v {
-                        Some(VarRef::Local(l)) => self.local(*l).ty,
-                        Some(VarRef::Global(g)) => self.p.globals[*g].ty,
-                        None => e.ty,
-                    };
+                    let mty = v.map_or(e.ty, |v| self.var_ty(v));
                     match (self.p.types.kind(mty).clone(), v) {
                         (TyKind::Mutex(inner), Some(var))
                             if !matches!(self.p.types.kind(e.ty), TyKind::Mutex(_)) =>
@@ -709,10 +666,7 @@ impl<'p> CGen<'p> {
                         self.own(CVal::b(format!("{tv}.f{start}")), t)
                     } else {
                         let sub: Vec<TyId> = elems[*start..*start + *count].to_vec();
-                        let sty = match var {
-                            VarRef::Local(l) => self.local(*l).ty,
-                            VarRef::Global(g) => self.p.globals[*g].ty,
-                        };
+                        let sty = self.var_ty(*var);
                         let mut parts = Vec::new();
                         for (k, t) in sub.iter().enumerate() {
                             parts.push(self.own(CVal::b(format!("{tv}.f{}", start + k)), *t));
@@ -839,18 +793,13 @@ impl<'p> CGen<'p> {
                 let ic = self.tg.ct(iter.ty);
                 let ih = self.h(iter.ty);
                 self.line(format!("{ic} {sv} = {snap};"));
-                self.cleanup.push(Clean {
-                    var: sv.clone(),
-                    kind: CleanKind::Release(ih),
-                    temp: false,
-                    moved: false,
-                });
+                self.push_clean(sv.clone(), CleanKind::Release(ih), false);
                 let hloop = self.cleanup.len();
                 let n = self.fresh("n");
                 let i = self.fresh("i");
                 match kind {
                     ForKind::Index => {
-                        let len = if iter.ty == STR || self.p.types.base(iter.ty) == STR {
+                        let len = if self.p.types.base(iter.ty) == STR {
                             format!("(uint64_t){sv}->clen")
                         } else {
                             format!("(uint64_t){sv}->len")
@@ -869,12 +818,7 @@ impl<'p> CGen<'p> {
                         let kc = self.tg.ct(kt);
                         let keys = self.fresh("keys");
                         self.line(format!("nc_arr *{keys} = nc_map_keys({sv}, &ti_{kh});"));
-                        self.cleanup.push(Clean {
-                            var: keys.clone(),
-                            kind: CleanKind::Arr,
-                            temp: false,
-                            moved: false,
-                        });
+                        self.push_clean(keys.clone(), CleanKind::Arr, false);
                         self.line(format!("uint64_t {n} = (uint64_t){keys}->len;"));
                         self.line(format!("for (uint64_t {i} = 0; {i} < {n}; {i}++) {{"));
                         self.ind += 1;
@@ -920,12 +864,7 @@ impl<'p> CGen<'p> {
                 let mv = self.fresh("mx");
                 self.line(format!("nc_mutex *{mv} = {};", m.code));
                 self.line(format!("pthread_mutex_lock(&{mv}->mu);"));
-                self.cleanup.push(Clean {
-                    var: mv.clone(),
-                    kind: CleanKind::Unlock,
-                    temp: false,
-                    moved: false,
-                });
+                self.push_clean(mv.clone(), CleanKind::Unlock, false);
                 let an = self.lname(*alias);
                 self.line(format!("{ic} *{an} = ({ic} *){mv}->val;"));
                 self.jumps.insert(
@@ -993,8 +932,7 @@ impl<'p> CGen<'p> {
 
     fn place_ty(&self, p: &Place) -> TyId {
         match p {
-            Place::Var(VarRef::Local(l)) => self.local(*l).ty,
-            Place::Var(VarRef::Global(g)) => self.p.globals[*g].ty,
+            Place::Var(v) => self.var_ty(*v),
             Place::Field(b, i) => {
                 let t = self.place_ty(b);
                 self.p.types.struct_def(t).unwrap().fields[*i].1
@@ -1043,15 +981,32 @@ impl<'p> CGen<'p> {
                     self.line(format!("{kc} {kn} = {};", kv.code));
                     format!("(({ec} *)nc_map_slot({bpv}, &{kn}))")
                 } else {
-                    let l = self.loc(idx.span);
-                    self.dollar.push(format!("nc_dollar((*{bpv})->len, {l})"));
-                    let i = self.index_value(idx);
-                    self.dollar.pop();
+                    let i = self.dollar_index(format!("(*{bpv})->len"), idx);
                     let loc = self.loc(idx.span);
                     format!("(({ec} *)nc_arr_slot({bpv}, {i}, {loc}))")
                 }
             }
         }
+    }
+
+    /// An index into a sequence of length `len`, where `$` is the last index.
+    fn dollar_index(&mut self, len: String, idx: &Expr) -> String {
+        let loc = self.loc(idx.span);
+        self.dollar.push(format!("nc_dollar({len}, {loc})"));
+        let i = self.index_value(idx);
+        self.dollar.pop();
+        i
+    }
+
+    /// Owned values of expressions (for aggregate initialisers).
+    fn owned_all(&mut self, items: &[Expr]) -> Vec<String> {
+        items
+            .iter()
+            .map(|it| {
+                let v = self.expr(it);
+                self.own(v, it.ty)
+            })
+            .collect()
     }
 
     /// Evaluate an index (int or uint) into a uint64 expression.
@@ -1094,13 +1049,7 @@ impl<'p> CGen<'p> {
         let ty = e.ty;
         match &e.kind {
             EK::Lit(l) => CVal::b(match l {
-                Lit::Bool(b) => {
-                    if *b {
-                        "true".into()
-                    } else {
-                        "false".into()
-                    }
-                }
+                Lit::Bool(b) => b.to_string(),
                 Lit::Byte(b) => format!("(uint8_t){b}"),
                 Lit::Int(i) => {
                     if *i == i64::MIN {
@@ -1160,8 +1109,7 @@ impl<'p> CGen<'p> {
                 CVal::b("")
             }
             EK::Print(to, nl, args) => {
-                let sb = self.fresh("sb");
-                self.line(format!("nc_sb {sb} = nc_sb_new();"));
+                let sb = self.new_sb();
                 for a in args {
                     let v = self.expr(a);
                     self.str_into(&sb, a.ty, &v.code);
@@ -1176,14 +1124,10 @@ impl<'p> CGen<'p> {
             EK::Cast(x) => self.cast(x, ty, e.span),
             EK::ToStr(x) => {
                 let v = self.expr(x);
-                let sb = self.fresh("sb");
-                self.line(format!("nc_sb {sb} = nc_sb_new();"));
-                self.str_into(&sb, x.ty, &v.code);
-                self.temp(STR, &format!("nc_sb_finish(&{sb})"))
+                self.to_str(x.ty, &v.code)
             }
             EK::Format(parts) => {
-                let sb = self.fresh("sb");
-                self.line(format!("nc_sb {sb} = nc_sb_new();"));
+                let sb = self.new_sb();
                 for p in parts {
                     if let (EK::Lit(Lit::Str(s)), _) = (&p.kind, p.ty) {
                         if !s.is_empty() {
@@ -1233,18 +1177,12 @@ impl<'p> CGen<'p> {
                         CVal::b(format!("(*({ec} *)nc_map_get({bn}, &{kn}, {loc}))"))
                     }
                     TyKind::Str => {
-                        let loc = self.loc(idx.span);
-                        self.dollar.push(format!("nc_dollar({bn}->clen, {loc})"));
-                        let i = self.index_value(idx);
-                        self.dollar.pop();
+                        let i = self.dollar_index(format!("{bn}->clen"), idx);
                         let loc = self.loc(e.span);
                         CVal::b(format!("nc_str_at({bn}, {i}, {loc})"))
                     }
                     _ => {
-                        let loc = self.loc(idx.span);
-                        self.dollar.push(format!("nc_dollar({bn}->len, {loc})"));
-                        let i = self.index_value(idx);
-                        self.dollar.pop();
+                        let i = self.dollar_index(format!("{bn}->len"), idx);
                         let loc = self.loc(e.span);
                         CVal::b(format!("(*({ec} *)nc_arr_at({bn}, {i}, {loc}))"))
                     }
@@ -1276,11 +1214,7 @@ impl<'p> CGen<'p> {
                 })
             }
             EK::Tuple(items) | EK::Struct(items) => {
-                let mut parts = Vec::new();
-                for it in items {
-                    let v = self.expr(it);
-                    parts.push(self.own(v, it.ty));
-                }
+                let mut parts = self.owned_all(items);
                 let c = self.tg.ct(ty);
                 self.tg.need(ty);
                 if parts.is_empty() {
@@ -1332,21 +1266,15 @@ impl<'p> CGen<'p> {
                 if !self.p.types.enum_has_payload(self.p.types.base(ty)) {
                     return CVal::b(format!("UINT32_C({idx})"));
                 }
-                let mut parts = Vec::new();
-                for p in payload {
-                    let v = self.expr(p);
-                    parts.push(self.own(v, p.ty));
-                }
+                let parts = self.owned_all(payload);
                 self.tg.need(ty);
                 let name = self.tg.mangle(ty);
-                let ct = self.tg.ct(ty);
                 let v = self.temp(ty, &format!("nc_alloc(sizeof(nc_{name}))"));
                 self.line(format!("atomic_init(&{}->rc, 1);", v.code));
                 self.line(format!("{}->tag = {idx};", v.code));
                 for (k, p) in parts.iter().enumerate() {
                     self.line(format!("{}->u.v{idx}.p{k} = {p};", v.code));
                 }
-                let _ = ct;
                 v
             }
             EK::Some(x) => {
@@ -1456,6 +1384,20 @@ impl<'p> CGen<'p> {
         }
     }
 
+    /// Declare a new string builder.
+    fn new_sb(&mut self) -> String {
+        let sb = self.fresh("sb");
+        self.line(format!("nc_sb {sb} = nc_sb_new();"));
+        sb
+    }
+
+    /// The string form of a value of type `ty`.
+    fn to_str(&mut self, ty: TyId, code: &str) -> CVal {
+        let sb = self.new_sb();
+        self.str_into(&sb, ty, code);
+        self.temp(STR, &format!("nc_sb_finish(&{sb})"))
+    }
+
     /// Append the string form of a value to a string builder.
     fn str_into(&mut self, sb: &str, ty: TyId, code: &str) {
         self.tg.need(ty);
@@ -1495,24 +1437,18 @@ impl<'p> CGen<'p> {
     }
 
     fn fn_type_of(&self, f: FuncId) -> TyId {
+        let k = TyKind::Fn(self.param_tys(f), self.p.funcs[f].ret);
+        self.p.types.lookup(&k).expect("function type is interned")
+    }
+
+    fn param_tys(&self, f: FuncId) -> Vec<TyId> {
         let func = &self.p.funcs[f];
-        let ps: Vec<TyId> = func.params.iter().map(|p| func.locals[*p].ty).collect();
-        let k = TyKind::Fn(ps, func.ret);
-        // find interned id
-        for i in 0..self.p.types.count() as TyId {
-            if self.p.types.kind(i) == &k {
-                return i;
-            }
-        }
-        panic!("function type not interned")
+        func.params.iter().map(|p| func.locals[*p].ty).collect()
     }
 
     fn callee_params(&self, c: &Callee) -> Vec<TyId> {
         match c {
-            Callee::Direct(f) => {
-                let func = &self.p.funcs[*f];
-                func.params.iter().map(|p| func.locals[*p].ty).collect()
-            }
+            Callee::Direct(f) => self.param_tys(*f),
             Callee::Extern(x) => self.p.externs[*x].params.clone(),
             Callee::Value(f) => match self.p.types.kind(f.ty) {
                 TyKind::Fn(ps, _) => ps.clone(),
@@ -1704,11 +1640,12 @@ impl<'p> CGen<'p> {
                 if op == Ne { format!("(!{eq})") } else { eq }
             }
             Concat => {
-                return match self.p.types.kind(ot) {
-                    TyKind::Str => self.temp(ty, &format!("nc_str_cat({x}, {y})")),
-                    TyKind::Map(..) => self.temp(ty, &format!("nc_map_cat({x}, {y})")),
-                    _ => self.temp(ty, &format!("nc_arr_cat({x}, {y})")),
+                let f = match self.p.types.kind(ot) {
+                    TyKind::Str => "nc_str_cat",
+                    TyKind::Map(..) => "nc_map_cat",
+                    _ => "nc_arr_cat",
                 };
+                return self.temp(ty, &format!("{f}({x}, {y})"));
             }
             In => {
                 let bt = self.p.types.base(b.ty);
@@ -1720,17 +1657,15 @@ impl<'p> CGen<'p> {
                             format!("nc_str_has_str({y}, {x})")
                         }
                     }
-                    TyKind::Map(..) => {
+                    kind => {
+                        let f = match kind {
+                            TyKind::Map(..) => "nc_map_has",
+                            _ => "nc_arr_has",
+                        };
                         let c = self.tg.ct(a.ty);
                         let k = self.fresh("k");
                         self.line(format!("{c} {k} = {x};"));
-                        format!("nc_map_has({y}, &{k})")
-                    }
-                    _ => {
-                        let c = self.tg.ct(a.ty);
-                        let k = self.fresh("k");
-                        self.line(format!("{c} {k} = {x};"));
-                        format!("nc_arr_has({y}, &{k})")
+                        format!("{f}({y}, &{k})")
                     }
                 }
             }
@@ -1750,10 +1685,7 @@ impl<'p> CGen<'p> {
         let loc = self.loc(span);
         let tk = self.p.types.kind(to).clone();
         if to == STR {
-            let sb = self.fresh("sb");
-            self.line(format!("nc_sb {sb} = nc_sb_new();"));
-            self.str_into(&sb, x.ty, &v.code);
-            return self.temp(STR, &format!("nc_sb_finish(&{sb})"));
+            return self.to_str(x.ty, &v.code);
         }
         let c = &v.code;
         match (from, &tk) {
@@ -1808,12 +1740,7 @@ impl<'p> CGen<'p> {
         match r {
             Some(r) => {
                 if self.managed(ty) {
-                    self.cleanup.push(Clean {
-                        var: r.clone(),
-                        kind: CleanKind::Release(self.h(ty)),
-                        temp: true,
-                        moved: false,
-                    });
+                    self.push_clean(r.clone(), CleanKind::Release(self.h(ty)), true);
                     CVal {
                         code: r,
                         owned: true,
@@ -1826,19 +1753,26 @@ impl<'p> CGen<'p> {
         }
     }
 
-    fn if_expr(&mut self, i: &If, ty: TyId) -> CVal {
-        let r = self.result_var(ty);
-        let end = format!("end_{}", i.id);
-        let h = self.cleanup.len();
+    /// Register the jump `id` of a value-producing construct (`if`, `else` or `catch` block),
+    /// storing its value in `r`; returns its end label.
+    fn value_jump(&mut self, id: JumpId, height: usize, r: &Option<String>, ty: TyId) -> String {
+        let end = format!("end_{id}");
         self.jumps.insert(
-            i.id,
+            id,
             JumpInfo {
-                height: h,
+                height,
                 brk: end.clone(),
                 cont: None,
                 result: r.clone().map(|r| (r, ty)),
             },
         );
+        end
+    }
+
+    fn if_expr(&mut self, i: &If, ty: TyId) -> CVal {
+        let r = self.result_var(ty);
+        let h = self.cleanup.len();
+        let end = self.value_jump(i.id, h, &r, ty);
         self.line("{");
         self.ind += 1;
         let scrut = match &i.scrutinee {
@@ -1908,8 +1842,6 @@ impl<'p> CGen<'p> {
             self.line(format!("{next}:;"));
         }
         // exhaustive: unreachable, but keep C happy
-        let loc = self.loc(Span::default());
-        let _ = loc;
         self.line("unreachable();");
         self.end_scope(h);
         self.ind -= 1;
@@ -1922,7 +1854,7 @@ impl<'p> CGen<'p> {
     fn pat_test(&mut self, p: &Pat, sv: &str, st: TyId, ok: &str) {
         let st = self.p.types.base(st);
         match p {
-            Pat::Wild | Pat::Bind(_) => {}
+            Pat::Wild | Pat::Bind(_) => return,
             Pat::Cond(_) => unreachable!(),
             Pat::Value(e) => {
                 self.line(format!("if ({ok}) {{"));
@@ -1937,102 +1869,73 @@ impl<'p> CGen<'p> {
                 self.line(format!("{ok} = {eq};"));
                 self.ind -= 1;
                 self.line("}");
+                return;
             }
-            Pat::Tuple(ps) => {
-                let ts = match self.p.types.kind(st) {
-                    TyKind::Tuple(ts) => ts.clone(),
-                    _ => unreachable!(),
-                };
-                for (k, sp) in ps.iter().enumerate() {
-                    self.pat_test(sp, &format!("({sv}).f{k}"), ts[k], ok);
-                }
+            Pat::Array(ps) if matches!(self.p.types.kind(st), TyKind::Array(_)) => {
+                self.line(format!("if ({sv}->len != {}) {ok} = false;", ps.len()));
             }
-            Pat::Struct(ps) => {
-                let def = self.p.types.struct_def(st).unwrap().clone();
-                for (k, sp) in ps.iter().enumerate() {
-                    let f = field_name(&def.fields[k].0);
-                    self.pat_test(sp, &format!("({sv}).{f}"), def.fields[k].1, ok);
-                }
+            Pat::Variant(idx, _) if !self.p.types.enum_has_payload(st) => {
+                self.line(format!("if ({sv} != {idx}) {ok} = false;"));
+                return;
             }
-            Pat::Array(ps) => {
-                let et = self.p.types.elem(st).unwrap();
-                let ec = self.tg.ct(et);
-                if matches!(self.p.types.kind(st), TyKind::Array(_)) {
-                    self.line(format!("if ({sv}->len != {}) {ok} = false;", ps.len()));
-                }
-                for (k, sp) in ps.iter().enumerate() {
-                    if matches!(sp, Pat::Wild | Pat::Bind(_)) {
-                        continue;
-                    }
-                    self.line(format!("if ({ok}) {{"));
-                    self.ind += 1;
-                    self.pat_test(sp, &format!("(({ec} *){sv}->data)[{k}]"), et, ok);
-                    self.ind -= 1;
-                    self.line("}");
-                }
+            Pat::Variant(idx, _) => self.line(format!("if ({sv}->tag != {idx}) {ok} = false;")),
+            _ => {}
+        }
+        for (sp, ssv, sty) in self.pat_parts(p, sv, st) {
+            if matches!(sp, Pat::Wild | Pat::Bind(_)) {
+                continue;
             }
-            Pat::Variant(idx, ps) => {
-                if !self.p.types.enum_has_payload(st) {
-                    self.line(format!("if ({sv} != {idx}) {ok} = false;"));
-                    return;
-                }
-                self.line(format!("if ({sv}->tag != {idx}) {ok} = false;"));
-                let payload = self.p.types.enum_def(st).unwrap().variants[*idx].1.clone();
-                for (k, sp) in ps.iter().enumerate() {
-                    if matches!(sp, Pat::Wild | Pat::Bind(_)) {
-                        continue;
-                    }
-                    self.line(format!("if ({ok}) {{"));
-                    self.ind += 1;
-                    self.pat_test(sp, &format!("{sv}->u.v{idx}.p{k}"), payload[k], ok);
-                    self.ind -= 1;
-                    self.line("}");
-                }
-            }
+            self.line(format!("if ({ok}) {{"));
+            self.ind += 1;
+            self.pat_test(sp, &ssv, sty, ok);
+            self.ind -= 1;
+            self.line("}");
         }
     }
 
     fn pat_bind(&mut self, p: &Pat, sv: &str, st: TyId) {
+        if let Pat::Bind(l) = p {
+            let ty = self.local(*l).ty;
+            let o = self.own(CVal::b(sv.to_string()), ty);
+            self.declare(VarRef::Local(*l), o);
+            return;
+        }
         let st = self.p.types.base(st);
+        for (sp, ssv, sty) in self.pat_parts(p, sv, st) {
+            self.pat_bind(sp, &ssv, sty);
+        }
+    }
+
+    /// The sub-patterns of a tuple, struct, array or variant pattern on the subject `sv` (of
+    /// base type `st`), each with its part of the subject and that part's type.
+    fn pat_parts<'a>(&mut self, p: &'a Pat, sv: &str, st: TyId) -> Vec<(&'a Pat, String, TyId)> {
+        let types = &self.p.types;
         match p {
-            Pat::Bind(l) => {
-                let ty = self.local(*l).ty;
-                let o = self.own(CVal::b(sv.to_string()), ty);
-                self.declare(VarRef::Local(*l), o);
-            }
             Pat::Tuple(ps) => {
-                let ts = match self.p.types.kind(st) {
-                    TyKind::Tuple(ts) => ts.clone(),
-                    _ => unreachable!(),
+                let TyKind::Tuple(ts) = types.kind(st) else {
+                    unreachable!()
                 };
-                for (k, sp) in ps.iter().enumerate() {
-                    self.pat_bind(sp, &format!("({sv}).f{k}"), ts[k]);
-                }
+                (ps.iter().zip(ts).enumerate())
+                    .map(|(k, (sp, t))| (sp, format!("({sv}).f{k}"), *t))
+                    .collect()
             }
-            Pat::Struct(ps) => {
-                let def = self.p.types.struct_def(st).unwrap().clone();
-                for (k, sp) in ps.iter().enumerate() {
-                    let f = field_name(&def.fields[k].0);
-                    self.pat_bind(sp, &format!("({sv}).{f}"), def.fields[k].1);
-                }
-            }
+            Pat::Struct(ps) => (ps.iter().zip(&types.struct_def(st).unwrap().fields))
+                .map(|(sp, (name, t))| (sp, format!("({sv}).{}", field_name(name)), *t))
+                .collect(),
             Pat::Array(ps) => {
-                let et = self.p.types.elem(st).unwrap();
+                let et = types.elem(st).unwrap();
                 let ec = self.tg.ct(et);
-                for (k, sp) in ps.iter().enumerate() {
-                    self.pat_bind(sp, &format!("(({ec} *){sv}->data)[{k}]"), et);
-                }
+                (ps.iter().enumerate())
+                    .map(|(k, sp)| (sp, format!("(({ec} *){sv}->data)[{k}]"), et))
+                    .collect()
             }
-            Pat::Variant(idx, ps) => {
-                if ps.is_empty() {
-                    return;
-                }
-                let payload = self.p.types.enum_def(st).unwrap().variants[*idx].1.clone();
-                for (k, sp) in ps.iter().enumerate() {
-                    self.pat_bind(sp, &format!("{sv}->u.v{idx}.p{k}"), payload[k]);
-                }
+            Pat::Variant(idx, ps) if !ps.is_empty() => {
+                let payload = &types.enum_def(st).unwrap().variants[*idx].1;
+                (ps.iter().zip(payload).enumerate())
+                    .map(|(k, (sp, t))| (sp, format!("{sv}->u.v{idx}.p{k}"), *t))
+                    .collect()
             }
-            _ => {}
+            _ => vec![],
         }
     }
 
@@ -2071,16 +1974,7 @@ impl<'p> CGen<'p> {
                 self.end_stmt(h);
             }
             Fallback::Block(b, id) => {
-                let end = format!("end_{id}");
-                self.jumps.insert(
-                    *id,
-                    JumpInfo {
-                        height: h,
-                        brk: end.clone(),
-                        cont: None,
-                        result: r.clone().map(|r| (r, ty)),
-                    },
-                );
+                let end = self.value_jump(*id, h, &r, ty);
                 self.block(b);
                 self.line(format!("{end}:;"));
             }
@@ -2101,22 +1995,13 @@ impl<'p> CGen<'p> {
         let xv = self.expr(x);
         let xn = self.bind(x.ty, &xv);
         let r = self.result_var(ty);
-        let end = format!("end_{id}");
         self.line(format!("if ({xn}.err) {{"));
         self.ind += 1;
         let h = self.cleanup.len();
         if let Some(l) = local {
             self.declare(VarRef::Local(l), format!("nc_str_rt({xn}.err)"));
         }
-        self.jumps.insert(
-            id,
-            JumpInfo {
-                height: h,
-                brk: end.clone(),
-                cont: None,
-                result: r.clone().map(|r| (r, ty)),
-            },
-        );
+        let end = self.value_jump(id, h, &r, ty);
         self.block(b);
         self.end_scope(h);
         self.line(format!("goto {end};"));
@@ -2185,5 +2070,14 @@ fn release_code(c: &Clean) -> String {
         CleanKind::Arr => format!("nc_arr_release({});", c.var),
         CleanKind::Release(h) => format!("rl_{h}({});", c.var),
         CleanKind::Unlock => format!("pthread_mutex_unlock(&{}->mu);", c.var),
+    }
+}
+
+/// A C parameter list: `void` when there are none.
+fn c_params(ps: Vec<String>) -> String {
+    if ps.is_empty() {
+        "void".into()
+    } else {
+        ps.join(", ")
     }
 }

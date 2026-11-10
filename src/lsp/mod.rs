@@ -43,6 +43,9 @@ use crate::ast;
 use crate::check::index::{DeclKind, Index};
 use crate::diag::{Diag, SourceMap, Span};
 use crate::lexer::Tok;
+/// The identifier itself within a reference or declaration span: types and `struct`/`enum`/`type`
+/// declarations put the name first (`Matrix<int>`), everything else ends with it (`p.x`).
+use crate::lint::name_in as name_span;
 
 use crate::parser::KEYWORDS;
 /// Builtin functions: name, signature and documentation.
@@ -1126,37 +1129,6 @@ type SymKey = (PathBuf, u32);
 
 fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
-}
-
-/// Byte ranges of whole-word occurrences of `name` in `text[start..end]`.
-fn word_occurrences(text: &str, start: usize, end: usize, name: &str) -> Vec<(usize, usize)> {
-    let mut out = Vec::new();
-    let bytes = text.as_bytes();
-    let end = end.min(text.len());
-    let mut from = start;
-    while let Some(i) = text[from..end].find(name) {
-        let s = from + i;
-        let e = s + name.len();
-        let before_ok = s == 0 || !is_ident_byte(bytes[s - 1]);
-        let after_ok = e >= bytes.len() || !is_ident_byte(bytes[e]);
-        if before_ok && after_ok {
-            out.push((s, e));
-        }
-        from = s + 1;
-    }
-    out
-}
-
-/// The identifier itself within a reference or declaration span. Types and `struct`/`enum`/`type`
-/// declarations put the name first (`Matrix<int>`); everything else ends with it (`p.x`, `int a`).
-fn name_span(text: &str, span: Span, name: &str, name_first: bool) -> Option<Span> {
-    let occ = word_occurrences(text, span.start as usize, span.end as usize, name);
-    let (s, e) = if name_first {
-        *occ.first()?
-    } else {
-        *occ.last()?
-    };
-    Some(Span::new(span.file, s, e))
 }
 
 fn word_at(text: &str, off: usize) -> Option<(usize, usize)> {

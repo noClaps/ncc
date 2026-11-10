@@ -335,64 +335,46 @@ impl<'t> TypeGen<'t> {
         kind: &TyKind,
     ) -> (String, String, String, String, String) {
         let s = |x: &str| x.to_string();
+        // plain values: compared with `==`
+        let prim = |hash: &str, st: &str| {
+            (
+                s(""),
+                s(""),
+                s("return a == b;"),
+                format!("return {hash};"),
+                s(st),
+            )
+        };
+        // reference-counted runtime objects with their own helpers (`nc_str_retain`, ...)
+        let object = |p: &str, st: &str| {
+            (
+                format!("{p}_retain(x);"),
+                format!("{p}_release(x);"),
+                format!("return {p}_eq(a, b);"),
+                format!("return {p}_hash(x);"),
+                s(st),
+            )
+        };
+        // handles compared by identity
+        let handle = |p: &str| {
+            (
+                format!("{p}_rt(x);"),
+                format!("{p}_release(x);"),
+                s("return a == b;"),
+                s("return 0;"),
+                s(""),
+            )
+        };
         match kind {
             TyKind::Void => (s(""), s(""), s("return true;"), s("return 0;"), s("")),
-            TyKind::Bool => (
-                s(""),
-                s(""),
-                s("return a == b;"),
-                s("return nc_hash_u64(x);"),
-                s("nc_sb_bool(sb, x);"),
-            ),
-            TyKind::Byte | TyKind::UInt => (
-                s(""),
-                s(""),
-                s("return a == b;"),
-                s("return nc_hash_u64(x);"),
-                s("nc_sb_u64(sb, x);"),
-            ),
-            TyKind::Int => (
-                s(""),
-                s(""),
-                s("return a == b;"),
-                s("return nc_hash_u64((uint64_t)x);"),
-                s("nc_sb_i64(sb, x);"),
-            ),
-            TyKind::Char => (
-                s(""),
-                s(""),
-                s("return a == b;"),
-                s("return nc_hash_u64(x);"),
-                s("nc_sb_char(sb, x);"),
-            ),
-            TyKind::Float => (
-                s(""),
-                s(""),
-                s("return a == b;"),
-                s("return nc_hs_float(&x);"),
-                s("nc_sb_f64(sb, x);"),
-            ),
-            TyKind::Str | TyKind::Error => (
-                s("nc_str_retain(x);"),
-                s("nc_str_release(x);"),
-                s("return nc_str_eq(a, b);"),
-                s("return nc_str_hash(x);"),
-                s("nc_sb_str(sb, x);"),
-            ),
-            TyKind::Array(_) | TyKind::Fixed(..) => (
-                s("nc_arr_retain(x);"),
-                s("nc_arr_release(x);"),
-                s("return nc_arr_eq(a, b);"),
-                s("return nc_arr_hash(x);"),
-                s("nc_arr_str(sb, x);"),
-            ),
-            TyKind::Map(..) => (
-                s("nc_map_retain(x);"),
-                s("nc_map_release(x);"),
-                s("return nc_map_eq(a, b);"),
-                s("return nc_map_hash(x);"),
-                s("nc_map_str(sb, x);"),
-            ),
+            TyKind::Bool => prim("nc_hash_u64(x)", "nc_sb_bool(sb, x);"),
+            TyKind::Byte | TyKind::UInt => prim("nc_hash_u64(x)", "nc_sb_u64(sb, x);"),
+            TyKind::Int => prim("nc_hash_u64((uint64_t)x)", "nc_sb_i64(sb, x);"),
+            TyKind::Char => prim("nc_hash_u64(x)", "nc_sb_char(sb, x);"),
+            TyKind::Float => prim("nc_hs_float(&x)", "nc_sb_f64(sb, x);"),
+            TyKind::Str | TyKind::Error => object("nc_str", "nc_sb_str(sb, x);"),
+            TyKind::Array(_) | TyKind::Fixed(..) => object("nc_arr", "nc_arr_str(sb, x);"),
+            TyKind::Map(..) => object("nc_map", "nc_map_str(sb, x);"),
             TyKind::Opt(i) => {
                 let i = self.hid(*i);
                 let ic = self.ct(i);
@@ -465,13 +447,7 @@ impl<'t> TypeGen<'t> {
                         .unwrap();
                     }
                     st.push_str(" }");
-                    return (
-                        s(""),
-                        s(""),
-                        s("return a == b;"),
-                        s("return nc_hash_u64(x);"),
-                        st,
-                    );
+                    return prim("nc_hash_u64(x)", &st);
                 }
                 let mut rl = s("if (x && nc_dec(&x->rc)) { switch (x->tag) {");
                 let mut eq = s(
@@ -525,20 +501,8 @@ impl<'t> TypeGen<'t> {
                 s("return 0;"),
                 s(""),
             ),
-            TyKind::Fut(_) => (
-                s("nc_fut_rt(x);"),
-                s("nc_fut_release(x);"),
-                s("return a == b;"),
-                s("return 0;"),
-                s(""),
-            ),
-            TyKind::Mutex(_) => (
-                s("nc_mutex_rt(x);"),
-                s("nc_mutex_release(x);"),
-                s("return a == b;"),
-                s("return 0;"),
-                s(""),
-            ),
+            TyKind::Fut(_) => handle("nc_fut"),
+            TyKind::Mutex(_) => handle("nc_mutex"),
             TyKind::Never | TyKind::Named(_) | TyKind::Const(..) => unreachable!(),
         }
     }

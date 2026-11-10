@@ -138,21 +138,6 @@ impl<'p> Evaluator<'p> {
         }
     }
 
-    fn loc(&self, span: Span) -> String {
-        if self.sm.files.is_empty() {
-            return "?".into();
-        }
-        let f = self.sm.file(span.file);
-        let (l, _) = f.line_col(span.start as usize);
-        let mut path = f.path.clone();
-        if let Ok(cwd) = std::env::current_dir()
-            && let Ok(rel) = path.strip_prefix(&cwd)
-        {
-            path = rel.to_path_buf();
-        }
-        format!("{}:{l}", path.display())
-    }
-
     fn tick(&mut self) -> R<()> {
         if self.fuel == 0 {
             return Err(Stop::Unknown);
@@ -241,7 +226,10 @@ impl<'p> Evaluator<'p> {
             // the panic happens elsewhere (e.g. inside a called function): say where
             Diag::new(
                 at,
-                format!("this expression always panics: {msg} ({})", self.loc(inner)),
+                format!(
+                    "this expression always panics: {msg} ({})",
+                    self.sm.location(inner)
+                ),
             )
         }
     }

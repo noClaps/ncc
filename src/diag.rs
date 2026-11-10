@@ -1,6 +1,5 @@
 //! Source files, spans and diagnostics.
 
-use std::fmt;
 use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
@@ -83,6 +82,18 @@ impl SourceMap {
     pub fn file(&self, id: u32) -> &SourceFile {
         &self.files[id as usize]
     }
+
+    /// `path:line` of a span, the path relative to the current directory when inside it.
+    pub fn location(&self, span: Span) -> String {
+        if self.files.is_empty() {
+            return "?".into();
+        }
+        let f = self.file(span.file);
+        let (line, _) = f.line_col(span.start as usize);
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let path = f.path.strip_prefix(&cwd).unwrap_or(&f.path);
+        format!("{}:{line}", path.display())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -122,12 +133,6 @@ impl Diag {
             " ".repeat(col - 1),
             "^".repeat(width)
         )
-    }
-}
-
-impl fmt::Display for Diag {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.msg)
     }
 }
 

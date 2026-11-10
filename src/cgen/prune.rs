@@ -202,12 +202,7 @@ fn split(src: &str) -> Vec<Item> {
             continue;
         }
         // comments at top level attach to the next item
-        if b[i] == b'/' && i + 1 < b.len() && (b[i + 1] == b'*' || b[i + 1] == b'/') {
-            let end = if b[i + 1] == b'*' {
-                src[i + 2..].find("*/").map_or(b.len(), |e| i + 2 + e + 2)
-            } else {
-                src[i..].find('\n').map_or(b.len(), |e| i + e)
-            };
+        if let Some(end) = comment_end(src, i) {
             comments.push_str(&src[i..end]);
             comments.push('\n');
             i = end;
@@ -239,14 +234,12 @@ fn split(src: &str) -> Vec<Item> {
         let start = i;
         let mut depth = 0i32;
         while i < b.len() {
+            if let Some(end) = comment_end(src, i) {
+                i = end;
+                continue;
+            }
             match b[i] {
                 b'"' | b'\'' => i = skip_literal(b, i),
-                b'/' if i + 1 < b.len() && b[i + 1] == b'*' => {
-                    i = src[i + 2..].find("*/").map_or(b.len(), |e| i + 2 + e + 2);
-                }
-                b'/' if i + 1 < b.len() && b[i + 1] == b'/' => {
-                    i = src[i..].find('\n').map_or(b.len(), |e| i + e);
-                }
                 b'{' | b'(' | b'[' => {
                     depth += 1;
                     i += 1;
@@ -282,6 +275,16 @@ fn split(src: &str) -> Vec<Item> {
         });
     }
     items
+}
+
+/// The end of the comment starting at `i`, if one does.
+fn comment_end(src: &str, i: usize) -> Option<usize> {
+    let b = src.as_bytes();
+    match (b[i], b.get(i + 1)) {
+        (b'/', Some(b'*')) => Some(src[i + 2..].find("*/").map_or(b.len(), |e| i + 2 + e + 2)),
+        (b'/', Some(b'/')) => Some(src[i..].find('\n').map_or(b.len(), |e| i + e)),
+        _ => None,
+    }
 }
 
 fn skip_literal(b: &[u8], mut i: usize) -> usize {
@@ -326,14 +329,12 @@ fn identifiers(code: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < b.len() {
+        if let Some(end) = comment_end(code, i) {
+            i = end;
+            continue;
+        }
         match b[i] {
             b'"' | b'\'' => i = skip_literal(b, i),
-            b'/' if i + 1 < b.len() && b[i + 1] == b'*' => {
-                i = code[i + 2..].find("*/").map_or(b.len(), |e| i + 2 + e + 2);
-            }
-            b'/' if i + 1 < b.len() && b[i + 1] == b'/' => {
-                i = code[i..].find('\n').map_or(b.len(), |e| i + e);
-            }
             c if c.is_ascii_alphabetic() || c == b'_' => {
                 let s = i;
                 while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
@@ -358,7 +359,6 @@ fn decl_names(code: &str) -> Vec<String> {
     // the part before any body or initializer, at nesting depth 0
     let b = code.as_bytes();
     let mut depth = 0;
-    let mut head = String::new();
     let mut i = 0;
     let mut paren_ident: Option<String> = None;
     let mut last_ident_before_paren: Option<String> = None;
@@ -371,12 +371,7 @@ fn decl_names(code: &str) -> Vec<String> {
                 i = skip_literal(b, i);
                 continue;
             }
-            b'{' | b'[' => {
-                if depth == 0 && c == b'{' && !head.contains('(') {
-                    // struct/union body: the tag was before the brace; the typedef name follows it
-                }
-                depth += 1;
-            }
+            b'{' | b'[' => depth += 1,
             b'}' | b']' | b')' => depth -= 1,
             b'(' => {
                 if depth == 0 && !first_paren_seen {
@@ -403,15 +398,11 @@ fn decl_names(code: &str) -> Vec<String> {
                 while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
                     i += 1;
                 }
-                let t = code[s..i].to_string();
-                head.push_str(&t);
-                head.push(' ');
-                tokens.push(t);
+                tokens.push(code[s..i].to_string());
                 continue;
             }
             _ => {}
         }
-        head.push(c as char);
         i += 1;
     }
     let first = tokens.first().map_or("", String::as_str);

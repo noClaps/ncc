@@ -1078,32 +1078,32 @@ impl Parser {
         Ok(e)
     }
 
+    /// The binary operator at the current token and its precedence (`**` is parsed apart).
     fn binop_info(&self) -> Option<(BinOp, u8)> {
-        // (op, precedence) -- higher binds tighter
         let op = match self.peek() {
-            Tok::Ident(s) if s == "or" => (BinOp::Or, 1),
-            Tok::Ident(s) if s == "and" => (BinOp::And, 2),
-            Tok::Eq => (BinOp::Eq, 3),
-            Tok::Ne => (BinOp::Ne, 3),
-            Tok::Lt => (BinOp::Lt, 3),
-            Tok::Gt => (BinOp::Gt, 3),
-            Tok::Le => (BinOp::Le, 3),
-            Tok::Ge => (BinOp::Ge, 3),
-            Tok::Ident(s) if s == "in" => (BinOp::In, 3),
-            Tok::Concat => (BinOp::Concat, 4),
-            Tok::Pipe => (BinOp::BitOr, 5),
-            Tok::Caret => (BinOp::BitXor, 6),
-            Tok::Amp => (BinOp::BitAnd, 7),
-            Tok::Shl => (BinOp::Shl, 8),
-            Tok::Shr => (BinOp::Shr, 8),
-            Tok::Plus => (BinOp::Add, 9),
-            Tok::Minus => (BinOp::Sub, 9),
-            Tok::Star => (BinOp::Mul, 10),
-            Tok::Slash => (BinOp::Div, 10),
-            Tok::Percent => (BinOp::Mod, 10),
+            Tok::Ident(s) if s == "or" => BinOp::Or,
+            Tok::Ident(s) if s == "and" => BinOp::And,
+            Tok::Ident(s) if s == "in" => BinOp::In,
+            Tok::Eq => BinOp::Eq,
+            Tok::Ne => BinOp::Ne,
+            Tok::Lt => BinOp::Lt,
+            Tok::Gt => BinOp::Gt,
+            Tok::Le => BinOp::Le,
+            Tok::Ge => BinOp::Ge,
+            Tok::Concat => BinOp::Concat,
+            Tok::Pipe => BinOp::BitOr,
+            Tok::Caret => BinOp::BitXor,
+            Tok::Amp => BinOp::BitAnd,
+            Tok::Shl => BinOp::Shl,
+            Tok::Shr => BinOp::Shr,
+            Tok::Plus => BinOp::Add,
+            Tok::Minus => BinOp::Sub,
+            Tok::Star => BinOp::Mul,
+            Tok::Slash => BinOp::Div,
+            Tok::Percent => BinOp::Mod,
             _ => return None,
         };
-        Some(op)
+        Some((op, op.prec()))
     }
 
     fn binary(&mut self, min: u8) -> Result<Expr> {

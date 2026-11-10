@@ -135,8 +135,9 @@ impl Types {
         &self.kinds[t as usize]
     }
 
-    pub fn count(&self) -> usize {
-        self.kinds.len()
+    /// The id of a type that has been interned.
+    pub fn lookup(&self, k: &TyKind) -> Option<TyId> {
+        self.map.get(k).copied()
     }
 
     pub fn array(&mut self, t: TyId) -> TyId {
@@ -244,7 +245,7 @@ impl Types {
     }
 
     /// Does `t` contain `target` by value (not behind a heap pointer)?
-    pub fn contains_by_value(&self, t: TyId, target: TyId, seen: &mut Vec<TyId>) -> bool {
+    fn contains_by_value(&self, t: TyId, target: TyId, seen: &mut Vec<TyId>) -> bool {
         if t == target {
             return true;
         }
@@ -254,24 +255,12 @@ impl Types {
         seen.push(t);
         let r = match self.kind(t) {
             TyKind::Named(_) => self.contains_by_value(self.base(t), target, seen),
-            TyKind::Tuple(ts) => ts
-                .clone()
-                .iter()
-                .any(|x| self.contains_by_value(*x, target, seen)),
-            TyKind::Struct(i) => {
-                let fs: Vec<TyId> = self.structs[*i as usize]
-                    .fields
-                    .iter()
-                    .map(|f| f.1)
-                    .collect();
-                fs.iter().any(|x| self.contains_by_value(*x, target, seen))
-            }
-            TyKind::Opt(i) => {
-                // a boxed optional breaks the cycle, but we are computing boxedness itself:
-                // optionals are considered by-value containers here.
-                self.contains_by_value(*i, target, seen)
-            }
-            TyKind::ErrU(i) => self.contains_by_value(*i, target, seen),
+            TyKind::Tuple(ts) => ts.iter().any(|x| self.contains_by_value(*x, target, seen)),
+            TyKind::Struct(i) => (self.structs[*i as usize].fields.iter())
+                .any(|f| self.contains_by_value(f.1, target, seen)),
+            // a boxed optional breaks the cycle, but boxedness is what is being computed:
+            // optionals count as by-value containers here
+            TyKind::Opt(i) | TyKind::ErrU(i) => self.contains_by_value(*i, target, seen),
             _ => false,
         };
         seen.pop();
@@ -311,16 +300,21 @@ impl Types {
 
     pub fn show(&self, t: TyId) -> String {
         match self.kind(t) {
-            TyKind::Void => "void".into(),
-            TyKind::Never => "never".into(),
-            TyKind::Bool => "bool".into(),
-            TyKind::Byte => "byte".into(),
-            TyKind::Int => "int".into(),
-            TyKind::UInt => "uint".into(),
-            TyKind::Float => "float".into(),
-            TyKind::Char => "char".into(),
-            TyKind::Str => "str".into(),
-            TyKind::Error => "error".into(),
+            TyKind::Void
+            | TyKind::Never
+            | TyKind::Bool
+            | TyKind::Byte
+            | TyKind::Int
+            | TyKind::UInt
+            | TyKind::Float
+            | TyKind::Char
+            | TyKind::Str
+            | TyKind::Error => BUILTIN_TYPES
+                .iter()
+                .find(|(_, b)| *b == t)
+                .unwrap()
+                .0
+                .into(),
             TyKind::Array(e) => format!("{}[]", self.show(*e)),
             TyKind::Fixed(e, n) => format!("{}[{}]", self.show(*e), self.show_size(*n)),
             TyKind::Map(k, v) => format!("[{}]{}", self.show(*k), self.show(*v)),
