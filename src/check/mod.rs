@@ -552,8 +552,27 @@ impl<'a> Checker<'a> {
                         // generic declarations are only checked when instantiated; index
                         // them so that uses link to them (and unused ones are found)
                         ast::Item::Fn(f) => {
-                            let detail =
-                                format!("fn {}<{}>", f.sig.name, f.sig.type_params.join(", "));
+                            // `fn map<type I, type O>(I[] arr, (fn(I) O) f) O[]`
+                            let tps: Vec<String> = f
+                                .sig
+                                .type_params
+                                .iter()
+                                .map(|t| format!("type {t}"))
+                                .collect();
+                            let ps: Vec<String> = f
+                                .sig
+                                .params
+                                .iter()
+                                .map(|p| format!("{} {}", p.ty.show(), p.name))
+                                .collect();
+                            let ret = f.sig.ret.as_ref().map(|r| format!(" {}", r.show()));
+                            let detail = format!(
+                                "fn {}<{}>({}){}",
+                                f.sig.name,
+                                tps.join(", "),
+                                ps.join(", "),
+                                ret.unwrap_or_default()
+                            );
                             self.idx_decl(
                                 &f.sig.name,
                                 f.sig.span,

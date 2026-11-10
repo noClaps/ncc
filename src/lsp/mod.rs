@@ -8,6 +8,7 @@
 //! - `mod.rs`: document sync, diagnostics, hover, definition, symbols, references, rename,
 //!   signature help, folding, formatting
 //! - `complete.rs`: completion
+//! - `calls.rs`: the call at the cursor (signature help) and signature labels
 //! - `docs.rs`: doc comments (`///`) and builtin documentation
 //! - `hints.rs`: inlay hints and semantic tokens
 //! - `nav.rs`: type definition, call hierarchy, selection ranges, document links
@@ -16,6 +17,7 @@
 //! - `ssr.rs`: structural search and replace, join lines and pulled diagnostics
 
 mod actions;
+mod calls;
 mod complete;
 mod docs;
 mod hints;
@@ -1472,164 +1474,6 @@ impl Server {
                 value: format!("```nc\n{sig}\n```\n\n---\n\n{doc}"),
             }),
             range: Some(Range::new(offset_to_pos(&text, s), offset_to_pos(&text, e))),
-        })
-    }
-
-    fn signature_help(&self, p: SignatureHelpParams) -> Option<SignatureHelp> {
-        let pp = p.text_document_position_params;
-        let path = uri_to_path(&pp.text_document.uri)?;
-        let text = self.text_of(&path)?;
-        let off = pos_to_offset(&text, pp.position);
-        // find the unclosed `(` before the cursor and count the commas at its level, skipping
-        // string and character literals and comments
-        let b = text.as_bytes();
-        let mut skip = vec![false; b.len()];
-        let (toks, _) = crate::lexer::lex_all(&text, 0, 0);
-        for t in &toks {
-            if matches!(
-                t.tok,
-                crate::lexer::Tok::Str(_) | crate::lexer::Tok::Char(_)
-            ) {
-                let (s, e) = (t.span.start as usize, (t.span.end as usize).min(b.len()));
-                skip[s..e].iter_mut().for_each(|x| *x = true);
-            }
-        }
-        for (s, e) in crate::lexer::comments(&text) {
-            skip[s..e.min(b.len())].iter_mut().for_each(|x| *x = true);
-        }
-        let (mut depth, mut commas, mut i) = (0i32, 0u32, off);
-        let open = loop {
-            if i == 0 {
-                return None;
-            }
-            i -= 1;
-            if skip[i] {
-                continue;
-            }
-            match b[i] {
-                b')' | b']' | b'}' => depth += 1,
-                b'(' | b'[' | b'{' if depth > 0 => depth -= 1,
-                b'(' => break i,
-                b'[' | b'{' => return None,
-                b',' if depth == 0 => commas += 1,
-                b'\n' if depth == 0 && i + 1 < off && text[i + 1..off].trim().is_empty() => {}
-                _ => {}
-            }
-        };
-        let mut e = open;
-        while e > 0 && b[e - 1] == b' ' {
-            e -= 1;
-        }
-        // skip explicit generic arguments: `map<int, str>(`
-        if e > 0 && b[e - 1] == b'>' {
-            let mut d = 0;
-            while e > 0 {
-                e -= 1;
-                match b[e] {
-                    b'>' => d += 1,
-                    b'<' => {
-                        d -= 1;
-                        if d == 0 {
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        let mut s = e;
-        while s > 0 && (is_ident_byte(b[s - 1]) || b[s - 1] == b'@' || b[s - 1] == b'.') {
-            s -= 1;
-        }
-        let is_builtin = text[s..e].starts_with('@');
-        let name = text[s..e].trim_start_matches('@');
-        // a module function: `math.sqrt(`
-        let (module, name) = match name.rsplit_once('.') {
-            Some((m, n)) => (Some(m), n),
-            None => (None, name),
-        };
-        let mut documentation = None;
-        let mut param_docs: Vec<String> = Vec::new();
-        let label = if is_builtin {
-            let b = BUILTINS.iter().find(|(n, ..)| *n == name)?;
-            documentation = Some(b.2.to_string());
-            b.1.to_string()
-        } else {
-            let a = self.analyses.get(&path)?;
-            let fid = a.file_id(&path);
-            let target_file = module
-                .and_then(|m| a.imports.get(m))
-                .and_then(|mp| a.file_id(mp));
-            let d = a
-                .index
-                .decls
-                .iter()
-                .filter(|d| d.name == name && d.kind == DeclKind::Function)
-                .filter(|d| target_file.is_none() || Some(d.span.file) == target_file)
-                .filter(|d| {
-                    d.scope.is_none_or(|sc| {
-                        Some(sc.file) != fid || (sc.start as usize <= off && off <= sc.end as usize)
-                    })
-                })
-                .max_by_key(|d| (Some(d.span.file) == fid, d.span.start as usize <= off))?;
-            let ftext = &a.sm.file(d.span.file).text;
-            if let Some(doc) = docs::doc_comment(ftext, d.span) {
-                param_docs = docs::param_docs(&doc);
-                documentation = Some(doc);
-            }
-            d.detail.clone()
-        };
-        // parameter label offsets within `fn name(a, b) ret`
-        let lp = label.find('(')?;
-        let rp = label.rfind(')')?;
-        let mut params = Vec::new();
-        let mut start = lp + 1;
-        let mut depth = 0;
-        for (k, c) in label[lp + 1..rp].char_indices() {
-            let k = lp + 1 + k;
-            match c {
-                '(' | '[' => depth += 1,
-                ')' | ']' => depth -= 1,
-                ',' if depth == 0 => {
-                    params.push((start, k));
-                    start = k + 2;
-                }
-                _ => {}
-            }
-        }
-        if start < rp {
-            params.push((start, rp));
-        }
-        let parameters = params
-            .iter()
-            .enumerate()
-            .map(|(i, (s, e))| ParameterInformation {
-                label: ParameterLabel::LabelOffsets([
-                    label[..*s].encode_utf16().count() as u32,
-                    label[..*e].encode_utf16().count() as u32,
-                ]),
-                documentation: param_docs.get(i).map(|d| {
-                    Documentation::MarkupContent(MarkupContent {
-                        kind: MarkupKind::Markdown,
-                        value: d.clone(),
-                    })
-                }),
-            })
-            .collect();
-        Some(SignatureHelp {
-            signatures: vec![SignatureInformation {
-                label,
-                documentation: documentation.map(|d| {
-                    Documentation::MarkupContent(MarkupContent {
-                        kind: MarkupKind::Markdown,
-                        value: d,
-                    })
-                }),
-                parameters: Some(parameters),
-                active_parameter: Some(commas),
-            }],
-            active_signature: Some(0),
-            active_parameter: Some(commas),
         })
     }
 

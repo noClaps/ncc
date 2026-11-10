@@ -151,32 +151,11 @@ pub(super) fn visible_names(a: &Analysis, fid: u32, off: usize) -> Vec<String> {
         .collect()
 }
 
-/// Parameter names from a function detail (`fn add(int a, int b) int` -> `a`, `b`).
+/// Parameter names from a function detail (`fn add(int a, int b) (int, int)` -> `a`, `b`).
 fn param_names(detail: &str) -> Vec<String> {
-    let (Some(l), Some(r)) = (detail.find('('), detail.rfind(')')) else {
-        return vec![];
-    };
-    if r <= l + 1 {
-        return vec![];
-    }
-    let inner = &detail[l + 1..r];
-    let mut out = Vec::new();
-    let mut depth = 0;
-    let mut start = 0;
-    for (i, c) in inner.char_indices() {
-        match c {
-            '(' | '[' | '<' => depth += 1,
-            ')' | ']' | '>' => depth -= 1,
-            ',' if depth == 0 => {
-                out.push(&inner[start..i]);
-                start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    out.push(&inner[start..]);
-    out.iter()
-        .map(|p| p.trim().rsplit(' ').next().unwrap_or("").to_string())
+    super::calls::params(detail)
+        .into_iter()
+        .map(|(_, n)| n)
         .collect()
 }
 
@@ -191,7 +170,19 @@ impl Server {
         })
     }
 
-    fn decl_item(&self, a: &Analysis, d: &SymDecl, call_parens: bool) -> CompletionItem {
+    /// A completion for a declaration; with a qualifier (`alias`), the item inserts
+    /// `alias.name` and is found by typing the name.
+    fn decl_item(
+        &self,
+        a: &Analysis,
+        d: &SymDecl,
+        call_parens: bool,
+        qualifier: Option<&str>,
+    ) -> CompletionItem {
+        let full = match qualifier {
+            Some(q) => format!("{q}.{}", d.name),
+            None => d.name.clone(),
+        };
         let kind = match d.kind {
             DeclKind::Function => CompletionItemKind::FUNCTION,
             DeclKind::Struct => CompletionItemKind::STRUCT,
@@ -203,15 +194,18 @@ impl Server {
             DeclKind::Variable => CompletionItemKind::CONSTANT,
         };
         let mut item = CompletionItem {
-            label: d.name.clone(),
+            label: full.clone(),
+            filter_text: qualifier.map(|_| d.name.clone()),
+            insert_text: qualifier.map(|_| full.clone()),
             kind: Some(kind),
             detail: Some(d.detail.clone()),
             documentation: self.doc_of(a, d),
             sort_text: Some(format!(
                 "{}{}",
-                match (d.kind, d.scope.is_some()) {
-                    (DeclKind::Variable, true) => 0,
-                    (DeclKind::Variable, false) | (DeclKind::Function, _) => 1,
+                match (d.kind, d.scope.is_some(), qualifier.is_some()) {
+                    (_, _, true) => 6,
+                    (DeclKind::Variable, true, _) => 0,
+                    (DeclKind::Variable, false, _) | (DeclKind::Function, _, _) => 1,
                     _ => 2,
                 },
                 d.name
@@ -220,12 +214,21 @@ impl Server {
         };
         if d.kind == DeclKind::Function && call_parens && self.snippets {
             let ps = param_names(&d.detail);
-            let args: Vec<String> = ps
-                .iter()
-                .enumerate()
-                .map(|(i, p)| format!("${{{}:{p}}}", i + 1))
-                .collect();
-            item.insert_text = Some(format!("{}({})$0", d.name, args.join(", ")));
+            // a generic function takes its type arguments first: `map<${1:I}, ${2:O}>(...)`
+            let tps = super::calls::type_params(&d.detail);
+            let mut k = 0;
+            let mut slot = |name: &str| {
+                k += 1;
+                format!("${{{k}:{name}}}")
+            };
+            let targs: Vec<String> = tps.iter().map(|t| slot(t)).collect();
+            let args: Vec<String> = ps.iter().map(|p| slot(p)).collect();
+            let generics = if targs.is_empty() {
+                String::new()
+            } else {
+                format!("<{}>", targs.join(", "))
+            };
+            item.insert_text = Some(format!("{full}{generics}({})$0", args.join(", ")));
             item.insert_text_format = Some(InsertTextFormat::SNIPPET);
             if !ps.is_empty() {
                 item.command = Some(Command::new(
@@ -374,7 +377,7 @@ impl Server {
         // names, keywords and types
         if let (Some(a), Some(fid)) = (analysis, fid) {
             for d in visible(a, fid, off) {
-                items.push(self.decl_item(a, d, call_parens));
+                items.push(self.decl_item(a, d, call_parens, None));
             }
             for alias in a.imports.keys() {
                 items.push(item(
@@ -400,6 +403,36 @@ impl Server {
                     Some(format!("extern \"{file}\"")),
                 ));
             }
+            // items reached through a qualifier, found by their own name: `c_` offers
+            // `libc.c_exit`, `Ratio` offers `rational.Rational`
+            for d in &a.index.decls {
+                if d.span.file == fid
+                    && d.scope.is_none()
+                    && let Some(q) = &d.extern_alias
+                {
+                    items.push(self.decl_item(a, d, call_parens, Some(q)));
+                }
+            }
+            for (alias, mpath) in &a.imports {
+                let Some(mfid) = a.file_id(mpath) else {
+                    continue;
+                };
+                let Some(facts) = a.index.modules.iter().find(|m| m.file == mfid) else {
+                    continue;
+                };
+                let mut seen = HashSet::new();
+                for d in &a.index.decls {
+                    if d.span.file == mfid
+                        && d.scope.is_none()
+                        && d.extern_alias.is_none()
+                        && !matches!(d.kind, DeclKind::Field | DeclKind::Variant)
+                        && facts.public.contains(&d.name)
+                        && seen.insert(d.name.clone())
+                    {
+                        items.push(self.decl_item(a, d, call_parens, Some(alias)));
+                    }
+                }
+            }
             // modules that are not imported yet: accepting one adds the import
             let taken: HashSet<String> = a
                 .imports
@@ -423,6 +456,29 @@ impl Server {
                     ..Default::default()
                 });
             }
+        }
+        // builtins, found without typing `@`
+        for (n, sig, doc) in BUILTINS {
+            let snippet = self.snippets && call_parens;
+            items.push(CompletionItem {
+                label: format!("@{n}"),
+                kind: Some(CompletionItemKind::FUNCTION),
+                detail: Some(sig.to_string()),
+                documentation: Some(Documentation::String(doc.to_string())),
+                filter_text: Some(n.to_string()),
+                insert_text: Some(if snippet {
+                    format!("@{n}($0)")
+                } else {
+                    format!("@{n}")
+                }),
+                insert_text_format: snippet.then_some(InsertTextFormat::SNIPPET),
+                sort_text: Some(format!("7{n}")),
+                ..Default::default()
+            });
+        }
+        // a function literal for an argument that takes a function
+        if self.snippets {
+            items.extend(self.fn_literal_items(&pp.text_document.uri, off));
         }
         for k in KEYWORDS {
             let mut it = item(k, CompletionItemKind::KEYWORD, None);
@@ -554,7 +610,7 @@ impl Server {
                 return Some(
                     externs
                         .into_iter()
-                        .map(|d| self.decl_item(a, d, call_parens))
+                        .map(|d| self.decl_item(a, d, call_parens, None))
                         .collect(),
                 );
             };
@@ -577,7 +633,7 @@ impl Server {
                         && public.contains(&d.name)
                         && seen.insert(d.name.clone())
                     {
-                        out.push(self.decl_item(a, d, call_parens));
+                        out.push(self.decl_item(a, d, call_parens, None));
                     }
                 }
                 return Some(out);

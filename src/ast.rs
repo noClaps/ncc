@@ -26,6 +26,32 @@ pub enum TypeExpr {
 
 #[allow(dead_code)]
 impl TypeExpr {
+    /// The type as NC source (`int[]`, `[str]int`, `(fn(int) str)`, `Matrix<T>`).
+    pub fn show(&self) -> String {
+        let list = |ts: &[TypeExpr]| ts.iter().map(|t| t.show()).collect::<Vec<_>>().join(", ");
+        match self {
+            TypeExpr::Named {
+                module, name, args, ..
+            } => {
+                let m = module.as_ref().map(|m| format!("{m}.")).unwrap_or_default();
+                if args.is_empty() {
+                    format!("{m}{name}")
+                } else {
+                    format!("{m}{name}<{}>", list(args))
+                }
+            }
+            TypeExpr::Array(e, Some(n), _) => format!("{}[{n}]", e.show()),
+            TypeExpr::Array(e, None, _) => format!("{}[]", e.show()),
+            TypeExpr::Map(k, v, _) => format!("[{}]{}", k.show(), v.show()),
+            TypeExpr::Optional(i, _) => format!("{}?", i.show()),
+            TypeExpr::ErrorUnion(i, _) => format!("{}!", i.show()),
+            TypeExpr::Tuple(ts, _) => format!("({})", list(ts)),
+            TypeExpr::Fn(ps, Some(r), _) => format!("(fn({}) {})", list(ps), r.show()),
+            TypeExpr::Fn(ps, None, _) => format!("(fn({}))", list(ps)),
+            TypeExpr::Fut(i, _) => format!("fut {}", i.show()),
+        }
+    }
+
     pub fn span(&self) -> Span {
         match self {
             TypeExpr::Named { span, .. } => *span,

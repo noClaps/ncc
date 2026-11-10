@@ -1757,3 +1757,111 @@ fn extern_completion() {
 
     s.finish();
 }
+
+#[test]
+fn qualified_and_generic_completion() {
+    let mut s = Session::start("qualified");
+    std::fs::write(s.dir.join("libc.c"), "").unwrap();
+    std::fs::write(
+        s.dir.join("rational.nc"),
+        "pub struct Rational {\n  int numerator\n  int denominator\n}\n\npub fn map<type I, type O>(I[] arr, (fn(I) O) f) O[] {\n  mut O[] out = []\n  for i in arr {\n    out = out <> [f(arr[i])]\n  }\n  return out\n}\n",
+    )
+    .unwrap();
+    let src = "import { \"./rational\" as rational }\nextern \"./libc.c\" as libc {\n  fn c_exit(int code) never = \"c_exit\"\n  fn c_read(str path) str = \"c_read\"\n}\n\nfn pair(int a) (int, str) {\n  return (a, \"x\")\n}\n\nrational.Rational r = rational.Rational{.numerator = 1, .denominator = 2}\nstr[] names = rational.map<int, str>([1, 2], fn(int n) str {\n  return \"{n}\"\n})\n@println(r.numerator, names, pair(1), libc.c_read(\"x\"))\n";
+    let diags = s.open(src);
+    assert!(diags.iter().all(|d| d["severity"] != 1), "{diags:?}");
+    let item = |comp: &Value, label: &str| -> Value {
+        comp.as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["label"] == label)
+            .cloned()
+            .unwrap_or_else(|| panic!("no `{label}` in {comp}"))
+    };
+
+    // extern functions and module items, by their own name, inserted with the qualifier
+    let text = format!("{src}c_\n");
+    s.change(&text);
+    let end = at(&text, "c_\n", 0, 2);
+    let comp = s.req("textDocument/completion", json!({"position": end}));
+    let e = item(&comp, "libc.c_exit");
+    assert_eq!(e["filterText"], "c_exit");
+    assert_eq!(e["insertText"], "libc.c_exit(${1:code})$0");
+    item(&comp, "libc.c_read");
+    let r = item(&comp, "rational.Rational");
+    assert_eq!(
+        (r["filterText"].clone(), r["insertText"].clone()),
+        (json!("Rational"), json!("rational.Rational"))
+    );
+
+    // builtins without `@`
+    let e = item(&comp, "@eprintln");
+    assert_eq!(
+        (e["filterText"].clone(), e["insertText"].clone()),
+        (json!("eprintln"), json!("@eprintln($0)"))
+    );
+
+    // a function returning a tuple completes with its parameters
+    assert_eq!(item(&comp, "pair")["insertText"], "pair(${1:a})$0");
+
+    // generic functions fill in their type parameters first
+    let g = item(&comp, "rational.map");
+    assert_eq!(
+        g["insertText"],
+        "rational.map<${1:I}, ${2:O}>(${3:arr}, ${4:f})$0"
+    );
+    assert_eq!(
+        g["detail"],
+        "fn map<type I, type O>(I[] arr, (fn(I) O) f) O[]"
+    );
+
+    // a function literal for a callback argument, with the generic arguments substituted
+    let text = format!("{src}str[] more = rational.map<int, str>([3], \n");
+    s.change(&text);
+    let comp = s.req(
+        "textDocument/completion",
+        json!({"position": at(&text, "[3], \n", 0, 5)}),
+    );
+    let f = item(&comp, "fn(int a) str {}");
+    assert_eq!(f["insertText"], "fn(int ${1:a}) str {\n\t$0\n}");
+
+    // signature help shows the instantiated signature
+    let sig = s.req(
+        "textDocument/signatureHelp",
+        json!({"position": at(&text, "[3], \n", 0, 5)}),
+    );
+    assert_eq!(
+        sig["signatures"][0]["label"], "fn map<int, str>(int[] arr, (fn(int) str) f) str[]",
+        "{sig}"
+    );
+    assert_eq!(sig["activeParameter"], 1);
+
+    // generic calls are highlighted as functions
+    s.change(src);
+    let t = s.req("textDocument/semanticTokens/full", json!({}));
+    let data: Vec<u64> = t["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_u64().unwrap())
+        .collect();
+    let (mut line, mut col) = (0, 0);
+    let mut toks = Vec::new();
+    for c in data.chunks(5) {
+        if c[0] > 0 {
+            line += c[0];
+            col = c[1];
+        } else {
+            col += c[1];
+        }
+        toks.push((line, col, c[3]));
+    }
+    let p = at(src, "map<int, str>", 0, 0);
+    let tok = toks
+        .iter()
+        .find(|t| t.0 == p["line"].as_u64().unwrap() && t.1 == p["character"].as_u64().unwrap())
+        .unwrap_or_else(|| panic!("no token for map in {toks:?}"));
+    assert_eq!(tok.2, 5, "function");
+
+    s.finish();
+}

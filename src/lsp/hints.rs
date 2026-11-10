@@ -179,6 +179,16 @@ impl Server {
                     e - d.name.len()
                 } else if seg.starts_with(&d.name) {
                     s
+                } else if let Some(ns) = seg.find('<').and_then(|lt| {
+                    super::name_span(
+                        &text,
+                        crate::diag::Span::new(r.span.file, s, s + lt),
+                        &d.name,
+                        false,
+                    )
+                }) {
+                    // a generic reference: `m.map<int, str>`
+                    ns.start as usize
                 } else {
                     continue;
                 };
