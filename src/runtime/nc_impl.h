@@ -99,23 +99,16 @@ static void nc_test_runner_init(void) {
   nc_fail_hook = nc_test_fail;
 }
 
-static void *nc_alloc(size_t n) {
-  void *p = malloc(n ? n : 1);
+static void *nc_check_alloc(void *p) {
   if (!p) {
     fputs("panic: out of memory\n", stderr);
     exit(101);
   }
   return p;
 }
-
-static void *nc_zalloc(size_t n) {
-  void *p = calloc(1, n ? n : 1);
-  if (!p) {
-    fputs("panic: out of memory\n", stderr);
-    exit(101);
-  }
-  return p;
-}
+static void *nc_alloc(size_t n) { return nc_check_alloc(malloc(n ? n : 1)); }
+static void *nc_zalloc(size_t n) { return nc_check_alloc(calloc(1, n ? n : 1)); }
+static void *nc_dup(const void *p, size_t n) { return memcpy(nc_alloc(n), p, n); }
 
 static inline void nc_inc(_Atomic int64_t *rc) {
   if (atomic_load_explicit(rc, memory_order_relaxed) >= 0) atomic_fetch_add_explicit(rc, 1, memory_order_relaxed);
@@ -170,7 +163,6 @@ static inline uint64_t nc_mul_u64(uint64_t a, uint64_t b, const char *loc) {
   return r;
 }
 static inline uint64_t nc_pow_u64(uint64_t a, uint64_t b, const char *loc) {
-  if (b < 0) nc_panic("negative exponent", loc);
   uint64_t r = 1;
   while (b > 0) {
     if ((b & 1) && ckd_mul(&r, r, a)) nc_panic("integer overflow", loc);
@@ -195,7 +187,6 @@ static inline uint8_t nc_mul_u8(uint8_t a, uint8_t b, const char *loc) {
   return r;
 }
 static inline uint8_t nc_pow_u8(uint8_t a, uint8_t b, const char *loc) {
-  if (b < 0) nc_panic("negative exponent", loc);
   uint8_t r = 1;
   while (b > 0) {
     if ((b & 1) && ckd_mul(&r, r, a)) nc_panic("integer overflow", loc);
@@ -478,8 +469,7 @@ static void nc_sb_put(nc_sb *sb, const char *p, int64_t n) {
   if (sb->len + n > sb->cap) {
     int64_t cap = sb->cap ? sb->cap * 2 : 64;
     while (cap < sb->len + n) cap *= 2;
-    sb->buf = realloc(sb->buf, (size_t)cap);
-    if (!sb->buf) nc_panic("out of memory", "runtime");
+    sb->buf = nc_check_alloc(realloc(sb->buf, (size_t)cap));
     sb->cap = cap;
   }
   memcpy(sb->buf + sb->len, p, (size_t)n);
@@ -533,11 +523,13 @@ static void nc_sb_char(nc_sb *sb, uint32_t c) {
   nc_sb_put(sb, enc, n);
 }
 static void nc_sb_bool(nc_sb *sb, bool b) { nc_sb_cstr(sb, b ? "true" : "false"); }
+static void nc_sb_free(nc_sb *sb) {
+  free(sb->buf);
+  *sb = nc_sb_new();
+}
 static nc_str *nc_sb_finish(nc_sb *sb) {
   nc_str *s = nc_str_new(sb->buf, sb->len);
-  free(sb->buf);
-  sb->buf = NULL;
-  sb->len = sb->cap = 0;
+  nc_sb_free(sb);
   return s;
 }
 
@@ -546,9 +538,7 @@ static void nc_sb_write(nc_sb *sb, bool err, bool nl) {
   if (nl) nc_sb_put(sb, "\n", 1);
   if (err) fflush(stdout);
   if (sb->len) fwrite(sb->buf, 1, (size_t)sb->len, err ? stderr : stdout);
-  free(sb->buf);
-  sb->buf = NULL;
-  sb->len = sb->cap = 0;
+  nc_sb_free(sb);
 }
 
 /* ------------------------------------------------------------------ float hashing */
@@ -591,28 +581,32 @@ static inline uint64_t nc_dollar(int64_t len, const char *loc) {
   if (len == 0) nc_panic("`$` used on an empty sequence", loc);
   return (uint64_t)(len - 1);
 }
+/* append retained copies of `n` elements at `data`; the capacity must suffice */
+static void nc_arr_append(nc_arr *a, const void *data, int64_t n) {
+  if (!n) return;
+  void *dst = (char *)a->data + (size_t)a->len * a->ti->size;
+  memcpy(dst, data, (size_t)n * a->ti->size);
+  if (a->ti->retain)
+    for (int64_t i = 0; i < n; i++) a->ti->retain((char *)dst + (size_t)i * a->ti->size);
+  a->len += n;
+}
+/* a new array holding copies of `n` elements at `data` */
+static nc_arr *nc_arr_copy(const nc_ti *ti, const void *data, int64_t n) {
+  nc_arr *a = nc_arr_new(ti, n);
+  nc_arr_append(a, data, n);
+  return a;
+}
 /* a[lo:hi], bounds inclusive (`lo <= hi < len`): a new array holding copies */
 static nc_arr *nc_arr_slice(const nc_arr *a, uint64_t lo, uint64_t hi, const char *loc) {
   if (lo > hi || hi >= (uint64_t)a->len) nc_panic("slice out of bounds", loc);
-  int64_t n = (int64_t)(hi + 1 - lo);
-  nc_arr *b = nc_arr_new(a->ti, n);
-  if (n) memcpy(b->data, (char *)a->data + lo * a->ti->size, (size_t)n * a->ti->size);
-  b->len = n;
-  if (a->ti->retain)
-    for (int64_t i = 0; i < n; i++) a->ti->retain((char *)b->data + (size_t)i * a->ti->size);
-  return b;
+  return nc_arr_copy(a->ti, (char *)a->data + lo * a->ti->size, (int64_t)(hi + 1 - lo));
 }
 /* make `*ap` uniquely owned (copy-on-write) */
 static void nc_arr_unique(nc_arr **ap) {
   nc_arr *a = *ap;
   if (nc_unique(&a->rc)) return;
-  nc_arr *b = nc_arr_new(a->ti, a->len);
-  memcpy(b->data, a->data, (size_t)a->len * a->ti->size);
-  b->len = a->len;
-  if (a->ti->retain)
-    for (int64_t i = 0; i < b->len; i++) a->ti->retain((char *)b->data + (size_t)i * a->ti->size);
+  *ap = nc_arr_copy(a->ti, a->data, a->len);
   nc_arr_release(a);
-  *ap = b;
 }
 static inline void *nc_arr_slot(nc_arr **ap, uint64_t i, const char *loc) {
   if (i >= (uint64_t)(*ap)->len) nc_panic("index out of bounds", loc);
@@ -624,20 +618,15 @@ void nc_arr_push(nc_arr **ap, const void *elem) {
   nc_arr *a = *ap;
   if (a->len == a->cap) {
     a->cap = a->cap ? a->cap * 2 : 4;
-    a->data = realloc(a->data, (size_t)a->cap * a->ti->size);
-    if (!a->data) nc_panic("out of memory", "runtime");
+    a->data = nc_check_alloc(realloc(a->data, (size_t)a->cap * a->ti->size));
   }
   memcpy((char *)a->data + (size_t)a->len * a->ti->size, elem, a->ti->size);
   a->len++;
 }
 static nc_arr *nc_arr_cat(const nc_arr *a, const nc_arr *b) {
   nc_arr *r = nc_arr_new(a->ti, a->len + b->len);
-  size_t sz = a->ti->size;
-  memcpy(r->data, a->data, (size_t)a->len * sz);
-  memcpy((char *)r->data + (size_t)a->len * sz, b->data, (size_t)b->len * sz);
-  r->len = a->len + b->len;
-  if (a->ti->retain)
-    for (int64_t i = 0; i < r->len; i++) a->ti->retain((char *)r->data + (size_t)i * sz);
+  nc_arr_append(r, a->data, a->len);
+  nc_arr_append(r, b->data, b->len);
   return r;
 }
 static bool nc_arr_eq(const nc_arr *a, const nc_arr *b) {
@@ -678,12 +667,7 @@ static nc_arr *nc_str_to_chars(const nc_str *s, const nc_ti *ti) {
   }
   return a;
 }
-static nc_arr *nc_bytes_of(const void *p, int64_t n, const nc_ti *ti) {
-  nc_arr *a = nc_arr_new(ti, n);
-  memcpy(a->data, p, (size_t)n);
-  a->len = n;
-  return a;
-}
+static nc_arr *nc_bytes_of(const void *p, int64_t n, const nc_ti *ti) { return nc_arr_copy(ti, p, n); }
 static nc_arr *nc_u64_le_bytes(uint64_t v, const nc_ti *ti) {
   unsigned char b[8];
   for (int i = 0; i < 8; i++) b[i] = (unsigned char)(v >> (8 * i));
@@ -697,18 +681,26 @@ static nc_arr *nc_char_bytes(uint32_t c, const nc_ti *ti) {
 
 /* ------------------------------------------------------------------ maps */
 
+/* empty slots for `m->cap` entries */
+static void nc_map_alloc_slots(nc_map *m) {
+  m->len = 0;
+  m->used = nc_zalloc((size_t)m->cap);
+  m->keys = nc_zalloc((size_t)m->cap * m->kti->size);
+  m->vals = nc_zalloc((size_t)m->cap * m->vti->size);
+}
+static void nc_map_free_slots(const nc_map *m) {
+  free(m->used);
+  free(m->keys);
+  free(m->vals);
+}
 static nc_map *nc_map_new(const nc_ti *kti, const nc_ti *vti, int64_t cap) {
   nc_map *m = nc_alloc(sizeof(nc_map));
   atomic_init(&m->rc, 1);
-  int64_t c = 8;
-  while (c < cap * 2) c *= 2;
-  m->len = 0;
-  m->cap = c;
+  m->cap = 8;
+  while (m->cap < cap * 2) m->cap *= 2;
   m->kti = kti;
   m->vti = vti;
-  m->used = nc_zalloc((size_t)c);
-  m->keys = nc_zalloc((size_t)c * kti->size);
-  m->vals = nc_zalloc((size_t)c * vti->size);
+  nc_map_alloc_slots(m);
   return m;
 }
 static inline void *nc_map_key(const nc_map *m, int64_t i) { return (char *)m->keys + (size_t)i * m->kti->size; }
@@ -727,9 +719,7 @@ static void nc_map_release(nc_map *m) {
       if (m->kti->release) m->kti->release(nc_map_key(m, i));
       if (m->vti->release) m->vti->release(nc_map_val(m, i));
     }
-    free(m->used);
-    free(m->keys);
-    free(m->vals);
+    nc_map_free_slots(m);
     free(m);
   }
 }
@@ -750,10 +740,7 @@ static bool nc_map_has(const nc_map *m, const void *k) { return nc_map_find(m, k
 static void nc_map_grow(nc_map *m) {
   nc_map old = *m;
   m->cap *= 2;
-  m->len = 0;
-  m->used = nc_zalloc((size_t)m->cap);
-  m->keys = nc_zalloc((size_t)m->cap * m->kti->size);
-  m->vals = nc_zalloc((size_t)m->cap * m->vti->size);
+  nc_map_alloc_slots(m);
   for (int64_t i = 0; i < old.cap; i++) {
     if (!old.used[i]) continue;
     int64_t j = -1 - nc_map_find(m, nc_map_key(&old, i));
@@ -762,25 +749,20 @@ static void nc_map_grow(nc_map *m) {
     memcpy(nc_map_val(m, j), nc_map_val(&old, i), m->vti->size);
     m->len++;
   }
-  free(old.used);
-  free(old.keys);
-  free(old.vals);
+  nc_map_free_slots(&old);
 }
 static void nc_map_unique(nc_map **mp) {
   nc_map *m = *mp;
   if (nc_unique(&m->rc)) return;
-  nc_map *n = nc_map_new(m->kti, m->vti, m->len);
-  free(n->used);
-  free(n->keys);
-  free(n->vals);
+  nc_map *n = nc_alloc(sizeof(nc_map));
+  atomic_init(&n->rc, 1);
   n->cap = m->cap;
   n->len = m->len;
-  n->used = nc_alloc((size_t)m->cap);
-  memcpy(n->used, m->used, (size_t)m->cap);
-  n->keys = nc_alloc((size_t)m->cap * m->kti->size);
-  memcpy(n->keys, m->keys, (size_t)m->cap * m->kti->size);
-  n->vals = nc_alloc((size_t)m->cap * m->vti->size);
-  memcpy(n->vals, m->vals, (size_t)m->cap * m->vti->size);
+  n->kti = m->kti;
+  n->vti = m->vti;
+  n->used = nc_dup(m->used, (size_t)m->cap);
+  n->keys = nc_dup(m->keys, (size_t)m->cap * m->kti->size);
+  n->vals = nc_dup(m->vals, (size_t)m->cap * m->vti->size);
   for (int64_t i = 0; i < n->cap; i++) {
     if (!n->used[i]) continue;
     if (n->kti->retain) n->kti->retain(nc_map_key(n, i));

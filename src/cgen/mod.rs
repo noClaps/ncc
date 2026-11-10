@@ -1124,7 +1124,7 @@ impl<'p> CGen<'p> {
             EK::Cast(x) => self.cast(x, ty, e.span),
             EK::ToStr(x) => {
                 let v = self.expr(x);
-                self.to_str(x.ty, &v.code)
+                self.str_of(x.ty, &v.code)
             }
             EK::Format(parts) => {
                 let sb = self.new_sb();
@@ -1392,7 +1392,7 @@ impl<'p> CGen<'p> {
     }
 
     /// The string form of a value of type `ty`.
-    fn to_str(&mut self, ty: TyId, code: &str) -> CVal {
+    fn str_of(&mut self, ty: TyId, code: &str) -> CVal {
         let sb = self.new_sb();
         self.str_into(&sb, ty, code);
         self.temp(STR, &format!("nc_sb_finish(&{sb})"))
@@ -1685,7 +1685,7 @@ impl<'p> CGen<'p> {
         let loc = self.loc(span);
         let tk = self.p.types.kind(to).clone();
         if to == STR {
-            return self.to_str(x.ty, &v.code);
+            return self.str_of(x.ty, &v.code);
         }
         let c = &v.code;
         match (from, &tk) {
