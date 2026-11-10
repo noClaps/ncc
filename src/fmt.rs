@@ -474,7 +474,7 @@ impl<'a> Printer<'a> {
                 }
             }
             TypeExpr::Array(e, n, _) => match n {
-                Some(n) => format!("{}[{n}]", self.ty(e)),
+                Some(n) => format!("{}[{}]", self.ty(e), n.show()),
                 None => format!("{}[]", self.ty(e)),
             },
             TypeExpr::Map(k, v, _) => format!("[{}]{}", self.ty(k), self.ty(v)),
@@ -492,6 +492,7 @@ impl<'a> Printer<'a> {
                 }
             }
             TypeExpr::Fut(i, _) => format!("fut {}", self.ty(i)),
+            TypeExpr::Const(c) => c.show(),
         }
     }
 
@@ -904,18 +905,8 @@ impl<'a> Printer<'a> {
     }
 }
 
-fn tparams(ps: &[String]) -> String {
-    if ps.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "<{}>",
-            ps.iter()
-                .map(|p| format!("type {p}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    }
+fn tparams(ps: &[GenericParam]) -> String {
+    GenericParam::list(ps)
 }
 
 /// Source range of an item (for comments and blank lines).

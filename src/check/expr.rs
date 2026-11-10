@@ -698,6 +698,15 @@ impl<'a> Checker<'a> {
                 span,
             });
         }
+        // a generic constant: `N` in `fn f<uint N>`
+        if let Some(&t) = self.ctx_ref().tparams.get(name)
+            && let TyKind::Const(ty, v) = *self.types.kind(t)
+        {
+            let def = self.ctx_ref().tspans.get(name).copied();
+            let hover = format!("{} {name}", self.types.show(ty));
+            self.idx_ref(span, def, hover);
+            return self.int_lit(v, false, Some(ty), span);
+        }
         let m = self.module();
         match self.mods[m].syms.get(name).map(|e| e.sym.clone()) {
             Some(Sym::Fn { func: Some(f), .. }) => {
@@ -770,8 +779,12 @@ impl<'a> Checker<'a> {
             _ => return Ok(None),
         };
         let m = self.module();
-        if module.is_none() && self.ctx_ref().tparams.contains_key(&name) && args.is_empty() {
-            return Ok(Some(self.ctx_ref().tparams[&name]));
+        if module.is_none()
+            && args.is_empty()
+            && let Some(&t) = self.ctx_ref().tparams.get(&name)
+        {
+            // a generic constant is a value
+            return Ok((!matches!(self.types.kind(t), TyKind::Const(..))).then_some(t));
         }
         let sym = match &module {
             Some(alias) if self.mods[m].externs.contains_key(alias) => return Ok(None),
@@ -814,8 +827,9 @@ impl<'a> Checker<'a> {
         match self.lookup_sym(m, module.as_deref(), &name, e.span)? {
             Some((dm, Sym::Fn { decl, func: None })) => {
                 let mut args = Vec::new();
+                let tp = self.tparams();
                 for t in targs {
-                    args.push(self.resolve_type_here(t)?);
+                    args.push(self.resolve_targ(t, m, &tp)?);
                 }
                 Ok(Some(self.instantiate_fn(dm, decl, args, e.span)?))
             }

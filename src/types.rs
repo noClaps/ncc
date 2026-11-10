@@ -28,6 +28,9 @@ pub enum TyKind {
     Struct(u32),
     Enum(u32),
     Named(u32),
+    /// The value of a generic constant (`3` in `f<int, 3>`), with the constant's integer type.
+    /// Only appears as a generic argument, never as the type of a value.
+    Const(TyId, i128),
 }
 
 #[derive(Clone, Debug)]
@@ -299,6 +302,7 @@ impl Types {
             TyKind::Struct(i) => self.structs[*i as usize].name.clone(),
             TyKind::Enum(i) => self.enums[*i as usize].name.clone(),
             TyKind::Named(i) => self.named[*i as usize].name.clone(),
+            TyKind::Const(_, v) => v.to_string(),
         }
     }
 }

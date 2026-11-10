@@ -71,7 +71,8 @@ pub fn params(label: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The type parameters of a generic signature label (`fn map<type I, type O>(` -> `I`, `O`).
+/// The generic parameters of a signature label (`fn map<type I, type O>(` -> `I`, `O`;
+/// `fn f<type T, uint N>(` -> `T`, `N`).
 pub fn type_params(label: &str) -> Vec<String> {
     let Some(lp) = label.find('(') else {
         return vec![];
@@ -82,7 +83,7 @@ pub fn type_params(label: &str) -> Vec<String> {
     };
     head[a + 1..b]
         .split(',')
-        .map(|t| t.trim().trim_start_matches("type ").trim().to_string())
+        .map(|t| t.trim().rsplit(' ').next().unwrap_or("").to_string())
         .filter(|t| !t.is_empty())
         .collect()
 }
@@ -387,5 +388,15 @@ mod tests {
             "(int[] arr, (fn(int) str) f) str[]"
         );
         assert_eq!(params("fn f()"), vec![]);
+        let c = "fn split<type T, uint N, uint M>(T[N + M] arr) (T[N], T[M])";
+        assert_eq!(type_params(c), ["T", "N", "M"]);
+        assert_eq!(
+            substitute(
+                "(T[N + M] arr) (T[N], T[M])",
+                &type_params(c),
+                &["int".into(), "2".into(), "3".into()]
+            ),
+            "(int[2 + 3] arr) (int[2], int[3])"
+        );
     }
 }

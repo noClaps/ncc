@@ -13,6 +13,17 @@
 (parameter
   name: (identifier) @variable.parameter)
 
+; Generic constants: `uint N`, `T[N - 1]`
+
+(constant_parameter
+  name: (identifier) @constant)
+
+(array_type
+  size: (identifier) @constant)
+
+(constant_expression
+  (identifier) @constant)
+
 ; Functions
 
 (function_declaration

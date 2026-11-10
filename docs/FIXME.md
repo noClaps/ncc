@@ -314,3 +314,22 @@ A: Yes, everywhere, so helpers only used by tests don't fail release builds.
 
 **Q: Are dependencies (`.nc/deps`) checked?**
 A: No, only the project's own modules.
+
+## Generic constants
+
+**Request:** Support generic constants known at compile time, as in `fn func<type T, uint N>(T[N] array)`, with arithmetic on them (`T[N-1]`) and between several of them (`fn func<type T, uint N, uint M>(T[N+M] arr) (T[N], T[M])`).
+
+**Q: Which types can a generic constant have?**
+A: `int`, `uint` and `byte`. Any other word before the name is a syntax error, so a typo such as `unit M` is caught where it is written.
+
+**Q: Are constant arguments inferred from the argument types?**
+A: No. Like type arguments, they are written explicitly: `func<int, 3>(arr)`.
+
+**Q: What arithmetic is allowed?**
+A: `+`, `-`, `*`, `/` (integer division) and `%` on integer literals and generic constants, with parentheses and unary `-`. It is evaluated when the generic is instantiated. Overflow, division by zero and a negative array size are compile errors that name the instantiation.
+
+**Q: Can `N` be used as a value inside the body?**
+A: Yes. It has the type it was declared with (`return N` in a `uint N` function is a `uint`).
+
+**Q: Do structs and enums take generic constants too?**
+A: Yes, the same way: `struct Grid<type T, uint W, uint H> { T[W * H] cells }`, used as `Grid<str, 2, 3>`.

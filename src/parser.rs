@@ -496,13 +496,34 @@ impl Parser {
         }
     }
 
-    fn type_params(&mut self) -> Result<Vec<String>> {
+    /// `<type T, uint N>`
+    fn type_params(&mut self) -> Result<Vec<GenericParam>> {
         let mut out = Vec::new();
         if self.eat(&Tok::Lt) {
             loop {
-                self.expect_kw("type")?;
-                let (n, _) = self.ident()?;
-                out.push(n);
+                let start = self.span();
+                let konst = match self.peek().clone() {
+                    Tok::Ident(k) if k == "type" => {
+                        self.bump();
+                        None
+                    }
+                    Tok::Ident(k) if matches!(k.as_str(), "int" | "uint" | "byte") => {
+                        self.bump();
+                        Some(k)
+                    }
+                    t => {
+                        return err(
+                            start,
+                            format!(
+                                "expected `type` or a constant's type (`int`, `uint` or `byte`) \
+                                 before a generic parameter, found {}",
+                                t.describe()
+                            ),
+                        );
+                    }
+                };
+                let (name, span) = self.ident()?;
+                out.push(GenericParam { name, konst, span });
                 if !self.eat(&Tok::Comma) {
                     break;
                 }
@@ -510,6 +531,79 @@ impl Parser {
             self.expect_gt()?;
         }
         Ok(out)
+    }
+
+    /// One argument in a generic argument list: a type, or a constant such as `3` or `N - 1`.
+    /// A bare name (`N`) parses as a type; the checker tells constants and types apart.
+    fn generic_arg(&mut self) -> Result<TypeExpr> {
+        let save = self.pos;
+        if let Ok(c) = self.const_expr()
+            && !matches!(c, ConstExpr::Name(..))
+            && matches!(self.peek(), Tok::Comma | Tok::Gt | Tok::Shr | Tok::Ge)
+        {
+            return Ok(TypeExpr::Const(c));
+        }
+        self.pos = save;
+        self.parse_type()
+    }
+
+    /// A compile-time integer: literals, generic constants, `+ - * / %` and parentheses.
+    fn const_expr(&mut self) -> Result<ConstExpr> {
+        let mut l = self.const_term()?;
+        loop {
+            let op = match self.peek() {
+                Tok::Plus => BinOp::Add,
+                Tok::Minus => BinOp::Sub,
+                _ => return Ok(l),
+            };
+            self.bump();
+            let r = self.const_term()?;
+            l = ConstExpr::Bin(op, Box::new(l), Box::new(r));
+        }
+    }
+
+    fn const_term(&mut self) -> Result<ConstExpr> {
+        let mut l = self.const_atom()?;
+        loop {
+            let op = match self.peek() {
+                Tok::Star => BinOp::Mul,
+                Tok::Slash => BinOp::Div,
+                Tok::Percent => BinOp::Mod,
+                _ => return Ok(l),
+            };
+            self.bump();
+            let r = self.const_atom()?;
+            l = ConstExpr::Bin(op, Box::new(l), Box::new(r));
+        }
+    }
+
+    fn const_atom(&mut self) -> Result<ConstExpr> {
+        let start = self.span();
+        match self.peek().clone() {
+            Tok::Int(n, _) => {
+                self.bump();
+                Ok(ConstExpr::Int(n, start))
+            }
+            Tok::Ident(n) if !is_keyword(&n) => {
+                self.bump();
+                Ok(ConstExpr::Name(n, start))
+            }
+            Tok::Minus => {
+                self.bump();
+                let e = self.const_atom()?;
+                Ok(ConstExpr::Neg(Box::new(e), start.to(self.prev_span())))
+            }
+            Tok::LParen => {
+                self.bump();
+                let e = self.const_expr()?;
+                self.expect(&Tok::RParen)?;
+                Ok(ConstExpr::Paren(Box::new(e), start.to(self.prev_span())))
+            }
+            t => err(
+                start,
+                format!("expected a constant, found {}", t.describe()),
+            ),
+        }
     }
 
     /// After `fn`: `name<type T>(params) ret`
@@ -603,17 +697,24 @@ impl Parser {
                         self.bump();
                         ty = TypeExpr::Array(Box::new(ty), None, start.to(self.prev_span()));
                     }
-                    Tok::Int(n, _) if matches!(self.peek_n(2), Tok::RBracket) => {
+                    _ => {
+                        // `T[3]`, `T[N]`, `T[N - 1]`
+                        let save = self.pos;
                         self.bump();
-                        self.bump();
-                        self.bump();
-                        ty = TypeExpr::Array(
-                            Box::new(ty),
-                            Some(n as u64),
-                            start.to(self.prev_span()),
-                        );
+                        match self.const_expr() {
+                            Ok(n) if self.eat(&Tok::RBracket) => {
+                                ty = TypeExpr::Array(
+                                    Box::new(ty),
+                                    Some(n),
+                                    start.to(self.prev_span()),
+                                );
+                            }
+                            _ => {
+                                self.pos = save;
+                                break;
+                            }
+                        }
                     }
-                    _ => break,
                 },
                 Tok::Question => {
                     self.bump();
@@ -689,7 +790,7 @@ impl Parser {
                 if self.at(&Tok::Lt) {
                     self.bump();
                     loop {
-                        args.push(self.parse_type()?);
+                        args.push(self.generic_arg()?);
                         if !self.eat(&Tok::Comma) {
                             break;
                         }
@@ -1208,7 +1309,7 @@ impl Parser {
                         self.bump();
                         let mut args = Vec::new();
                         loop {
-                            args.push(self.parse_type()?);
+                            args.push(self.generic_arg()?);
                             if !self.eat(&Tok::Comma) {
                                 break;
                             }

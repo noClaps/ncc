@@ -78,6 +78,8 @@ pub struct FnCtx {
     pub jumps: Vec<JumpCtx>,
     pub module: usize,
     pub tparams: HashMap<String, TyId>,
+    /// Where the generic parameters in `tparams` are declared
+    pub tspans: HashMap<String, Span>,
     pub is_test: bool,
     /// The module top-level context: declarations at scope depth 1 become globals.
     pub is_main: bool,
@@ -553,12 +555,11 @@ impl<'a> Checker<'a> {
                         // them so that uses link to them (and unused ones are found)
                         ast::Item::Fn(f) => {
                             // `fn map<type I, type O>(I[] arr, (fn(I) O) f) O[]`
-                            let tps: Vec<String> = f
-                                .sig
-                                .type_params
-                                .iter()
-                                .map(|t| format!("type {t}"))
-                                .collect();
+                            let tps: Vec<String> =
+                                f.sig.type_params.iter().map(|t| t.show()).collect();
+                            for t in &f.sig.type_params {
+                                self.idx_ref(t.span, Some(t.span), t.show());
+                            }
                             let ps: Vec<String> = f
                                 .sig
                                 .params
@@ -582,8 +583,14 @@ impl<'a> Checker<'a> {
                             );
                         }
                         ast::Item::Struct(st) if !st.type_params.is_empty() => {
-                            let detail =
-                                format!("struct {}<{}>", st.name, st.type_params.join(", "));
+                            for t in &st.type_params {
+                                self.idx_ref(t.span, Some(t.span), t.show());
+                            }
+                            let detail = format!(
+                                "struct {}{}",
+                                st.name,
+                                ast::GenericParam::list(&st.type_params)
+                            );
                             self.idx_decl(
                                 &st.name,
                                 st.span,
@@ -593,7 +600,14 @@ impl<'a> Checker<'a> {
                             );
                         }
                         ast::Item::Enum(en) if !en.type_params.is_empty() => {
-                            let detail = format!("enum {}<{}>", en.name, en.type_params.join(", "));
+                            for t in &en.type_params {
+                                self.idx_ref(t.span, Some(t.span), t.show());
+                            }
+                            let detail = format!(
+                                "enum {}{}",
+                                en.name,
+                                ast::GenericParam::list(&en.type_params)
+                            );
                             self.idx_decl(&en.name, en.span, index::DeclKind::Enum, detail, vec![]);
                         }
                         ast::Item::Extern(e) => {
@@ -849,6 +863,7 @@ impl<'a> Checker<'a> {
             jumps: vec![],
             module,
             tparams,
+            tspans: HashMap::new(),
             is_test: false,
             is_main: false,
             is_never: false,
@@ -884,6 +899,9 @@ impl<'a> Checker<'a> {
     fn check_fn_body(&mut self, p: PendingFn) -> Result<()> {
         let (params, ret) = self.sigs[p.func].clone();
         let mut ctx = self.new_ctx(p.func, p.module, ret, p.tparams);
+        ctx.tspans = (p.decl.sig.type_params.iter())
+            .map(|t| (t.name.clone(), t.span))
+            .collect();
         ctx.is_never = ret == NEVER;
         self.fns.push(ctx);
         let mut pids = Vec::new();
@@ -949,33 +967,18 @@ impl<'a> Checker<'a> {
         args: Vec<TyId>,
         span: Span,
     ) -> Result<FuncId> {
-        let key = (m, decl, args.clone());
-        if let Some(&f) = self.fn_insts.get(&key) {
-            return Ok(f);
-        }
         let f = match &self.mods[m].ast.items[decl] {
             ast::Item::Fn(f) => f.clone(),
             _ => unreachable!(),
         };
-        if f.sig.type_params.len() != args.len() {
-            return err(
-                span,
-                format!(
-                    "`{}` expects {} type argument(s), found {}",
-                    f.sig.name,
-                    f.sig.type_params.len(),
-                    args.len()
-                ),
-            );
+        let (args, tp) = self.bind_generics(&f.sig.name, &f.sig.type_params, args, span)?;
+        let key = (m, decl, args.clone());
+        if let Some(&f) = self.fn_insts.get(&key) {
+            return Ok(f);
         }
-        let tp: HashMap<String, TyId> = f
-            .sig
-            .type_params
-            .iter()
-            .cloned()
-            .zip(args.iter().cloned())
-            .collect();
-        let (params, ret) = self.resolve_sig(&f.sig, m, &tp)?;
+        let (params, ret) = self
+            .resolve_sig(&f.sig, m, &tp)
+            .map_err(|d| self.in_instance(d, &f.sig.name, &args))?;
         let name = format!(
             "{}<{}>",
             f.sig.name,
@@ -1014,6 +1017,146 @@ impl<'a> Checker<'a> {
         Ok(id)
     }
 
+    /// Match generic arguments to parameters: types to `type T`, constants to `uint N`.
+    /// Constants are checked against their declared type and retagged with it.
+    fn bind_generics(
+        &mut self,
+        name: &str,
+        params: &[ast::GenericParam],
+        args: Vec<TyId>,
+        span: Span,
+    ) -> Result<(Vec<TyId>, HashMap<String, TyId>)> {
+        if params.len() != args.len() {
+            return err(
+                span,
+                format!(
+                    "`{name}` expects {} generic argument(s), found {}",
+                    params.len(),
+                    args.len()
+                ),
+            );
+        }
+        let mut out = Vec::new();
+        let mut tp = HashMap::new();
+        for (p, a) in params.iter().zip(args) {
+            let a = match (&p.konst, self.types.kind(a).clone()) {
+                (None, TyKind::Const(_, v)) => {
+                    return err(
+                        span,
+                        format!(
+                            "`{}` is a type parameter of `{name}`, but `{v}` is a constant",
+                            p.name
+                        ),
+                    );
+                }
+                (None, _) => a,
+                (Some(k), TyKind::Const(_, v)) => {
+                    let (ty, lo, hi) = match k.as_str() {
+                        "byte" => (BYTE, 0, 255),
+                        "int" => (INT, i64::MIN as i128, i64::MAX as i128),
+                        _ => (UINT, 0, u64::MAX as i128),
+                    };
+                    if v < lo || v > hi {
+                        return err(
+                            span,
+                            format!("`{v}` is out of range for `{k} {}` of `{name}`", p.name),
+                        );
+                    }
+                    self.types.intern(TyKind::Const(ty, v))
+                }
+                (Some(k), _) => {
+                    return err(
+                        span,
+                        format!(
+                            "`{} {}` of `{name}` is a constant, but `{}` is a type",
+                            k,
+                            p.name,
+                            self.types.show(a)
+                        ),
+                    );
+                }
+            };
+            tp.insert(p.name.clone(), a);
+            out.push(a);
+        }
+        Ok((out, tp))
+    }
+
+    /// Evaluate a compile-time integer (an array size or a generic constant argument).
+    pub fn const_value(&self, c: &ast::ConstExpr, tp: &HashMap<String, TyId>) -> Result<i128> {
+        use ast::ConstExpr as C;
+        Ok(match c {
+            C::Int(n, sp) => {
+                i128::try_from(*n).map_err(|_| Diag::new(*sp, "constant is too large"))?
+            }
+            C::Name(n, sp) => match tp.get(n).map(|t| self.types.kind(*t)) {
+                Some(TyKind::Const(_, v)) => *v,
+                Some(_) => return err(*sp, format!("`{n}` is a type, not a constant")),
+                None => return err(*sp, format!("unknown constant `{n}`")),
+            },
+            C::Neg(e, _) => -self.const_value(e, tp)?,
+            C::Paren(e, _) => self.const_value(e, tp)?,
+            C::Bin(op, a, b) => {
+                let (x, y) = (self.const_value(a, tp)?, self.const_value(b, tp)?);
+                let r = match op {
+                    ast::BinOp::Add => x.checked_add(y),
+                    ast::BinOp::Sub => x.checked_sub(y),
+                    ast::BinOp::Mul => x.checked_mul(y),
+                    ast::BinOp::Div | ast::BinOp::Mod if y == 0 => {
+                        return err(c.span(), format!("division by zero in `{}`", c.show()));
+                    }
+                    ast::BinOp::Div => x.checked_div(y),
+                    ast::BinOp::Mod => x.checked_rem(y),
+                    _ => unreachable!("not a constant operator"),
+                };
+                match r {
+                    Some(r) if i64::MIN as i128 <= r && r <= u64::MAX as i128 => r,
+                    _ => return err(c.span(), format!("`{}` overflows", c.show())),
+                }
+            }
+        })
+    }
+
+    /// A generic argument: a type, or a constant (`3`, `N - 1`, or a bare constant `N`).
+    pub fn resolve_targ(
+        &mut self,
+        te: &ast::TypeExpr,
+        m: usize,
+        tp: &HashMap<String, TyId>,
+    ) -> Result<TyId> {
+        match te {
+            ast::TypeExpr::Const(c) => {
+                let v = self.const_value(c, tp)?;
+                Ok(self.types.intern(TyKind::Const(INT, v)))
+            }
+            ast::TypeExpr::Named {
+                module: None,
+                name,
+                args,
+                ..
+            } if args.is_empty()
+                && tp
+                    .get(name)
+                    .is_some_and(|t| matches!(self.types.kind(*t), TyKind::Const(..))) =>
+            {
+                Ok(tp[name])
+            }
+            _ => self.resolve_type(te, m, tp),
+        }
+    }
+
+    /// Name the instantiation an error in a generic declaration came from.
+    fn in_instance(&self, mut d: Diag, name: &str, args: &[TyId]) -> Diag {
+        if !d.msg.contains("(in instantiation") {
+            d.msg = format!(
+                "{} (in instantiation `{}`)",
+                d.msg,
+                self.types_name(name, args)
+            );
+        }
+        d
+    }
+
     fn types_name(&self, base: &str, args: &[TyId]) -> String {
         format!(
             "{}<{}>",
@@ -1032,40 +1175,32 @@ impl<'a> Checker<'a> {
         args: Vec<TyId>,
         span: Span,
     ) -> Result<TyId> {
-        let key = (m, decl, args.clone());
-        if let Some(&t) = self.type_insts.get(&key) {
-            return Ok(t);
-        }
         let item = self.mods[m].ast.items[decl].clone();
         let (tparams, name) = match &item {
             ast::Item::Struct(s) => (s.type_params.clone(), s.name.clone()),
             ast::Item::Enum(e) => (e.type_params.clone(), e.name.clone()),
             _ => unreachable!(),
         };
-        if tparams.len() != args.len() {
-            return err(
-                span,
-                format!(
-                    "`{name}` expects {} type argument(s), found {}",
-                    tparams.len(),
-                    args.len()
-                ),
-            );
+        let (args, tp) = self.bind_generics(&name, &tparams, args, span)?;
+        let key = (m, decl, args.clone());
+        if let Some(&t) = self.type_insts.get(&key) {
+            return Ok(t);
         }
         let display = self.types_name(&name, &args);
-        let tp: HashMap<String, TyId> = tparams.into_iter().zip(args.iter().cloned()).collect();
         let ty = match &item {
             ast::Item::Struct(s) => {
                 let ty = self.types.new_struct(display);
                 self.type_insts.insert(key, ty);
-                self.fill_struct(ty, s, m, &tp)?;
+                self.fill_struct(ty, s, m, &tp)
+                    .map_err(|d| self.in_instance(d, &name, &args))?;
                 self.check_finite(ty, span)?;
                 ty
             }
             ast::Item::Enum(e) => {
                 let ty = self.types.new_enum(display);
                 self.type_insts.insert(key, ty);
-                self.fill_enum(ty, e, m, &tp)?;
+                self.fill_enum(ty, e, m, &tp)
+                    .map_err(|d| self.in_instance(d, &name, &args))?;
                 ty
             }
             _ => unreachable!(),
@@ -1118,6 +1253,9 @@ impl<'a> Checker<'a> {
             } => {
                 if module.is_none() {
                     if let Some(t) = tp.get(name) {
+                        if let TyKind::Const(..) = self.types.kind(*t) {
+                            return err(*span, format!("`{name}` is a constant, not a type"));
+                        }
                         if !args.is_empty() {
                             return err(*span, "type parameters cannot take type arguments");
                         }
@@ -1145,7 +1283,7 @@ impl<'a> Checker<'a> {
                 }
                 let mut targs = Vec::new();
                 for a in args {
-                    targs.push(self.resolve_type(a, m, tp)?);
+                    targs.push(self.resolve_targ(a, m, tp)?);
                 }
                 let resolved = match self.lookup_sym(m, module.as_deref(), name, *span)? {
                     Some((dm, Sym::Struct { decl, ty })) | Some((dm, Sym::Enum { decl, ty })) => {
@@ -1187,7 +1325,19 @@ impl<'a> Checker<'a> {
                 self.check_elem_type(et, *sp)?;
                 match n {
                     None => self.types.array(et),
-                    Some(n) => self.types.intern(TyKind::Fixed(et, *n)),
+                    Some(n) => {
+                        let v = self.const_value(n, tp)?;
+                        if v < 0 || v > u32::MAX as i128 {
+                            return err(
+                                n.span(),
+                                format!(
+                                    "array size `{}` is {v}, which is not a valid size",
+                                    n.show()
+                                ),
+                            );
+                        }
+                        self.types.intern(TyKind::Fixed(et, v as u64))
+                    }
                 }
             }
             T::Map(k, v, sp) => {
@@ -1257,6 +1407,12 @@ impl<'a> Checker<'a> {
                     );
                 }
                 self.types.intern(TyKind::Fut(it))
+            }
+            T::Const(c) => {
+                return err(
+                    c.span(),
+                    format!("`{}` is a constant, not a type", c.show()),
+                );
             }
         })
     }

@@ -52,7 +52,7 @@ Arrays are dynamically sized by default. However, in certain cases, it may be us
 int[5] fixed_array = [1, 2, 3, 4, 5]
 ```
 
-Fixed-size arrays must have exactly the number of elements as stated in their type. All of the other syntax that applies for normal arrays also applies to fixed-size arrays.
+Fixed-size arrays must have exactly the number of elements as stated in their type. The size can also be a [generic constant](../generics#constants), or computed from generic constants, such as `T[N + 1]`. All of the other syntax that applies for normal arrays also applies to fixed-size arrays.
 
 ```nc
 test "fixed-size arrays" {

@@ -616,6 +616,7 @@ fn type_spans<'a>(t: &'a ast::TypeExpr, out: &mut dyn FnMut(Node<'a>)) {
                 type_spans(a, out);
             }
         }
+        ast::TypeExpr::Const(_) => {}
         ast::TypeExpr::Array(x, _, _)
         | ast::TypeExpr::Optional(x, _)
         | ast::TypeExpr::ErrorUnion(x, _)

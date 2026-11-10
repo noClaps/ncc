@@ -129,7 +129,11 @@ module.exports = grammar({
     type_declaration: ($) =>
       seq(optional($.visibility), 'type', field('name', alias($.identifier, $.type_identifier)), '=', field('type', $._type)),
 
-    type_parameters: ($) => seq('<', commaSep1(seq('type', alias($.identifier, $.type_identifier))), '>'),
+    type_parameters: ($) =>
+      seq('<', commaSep1(choice(seq('type', alias($.identifier, $.type_identifier)), $.constant_parameter)), '>'),
+
+    // `uint N`: a generic constant
+    constant_parameter: ($) => seq(field('type', $.primitive_type), field('name', $.identifier)),
 
     function_declaration: ($) =>
       seq(
@@ -395,9 +399,21 @@ module.exports = grammar({
         field('type_arguments', $.type_arguments),
       )),
 
-    type_arguments: ($) => seq(token.immediate('<'), commaSep1($._type), '>'),
+    type_arguments: ($) =>
+      seq(token.immediate('<'), commaSep1(choice($._type, $.integer, $.constant_expression)), '>'),
 
-    array_type: ($) => prec(PREC.postfix, seq(field('element', $._type), '[', optional(field('size', $.integer)), ']')),
+    array_type: ($) => prec(PREC.postfix, seq(field('element', $._type), '[', optional(field('size', $._constant)), ']')),
+
+    // compile-time integers: array sizes and generic constant arguments (`N - 1`, `2 * N`)
+    _constant: ($) => choice($.integer, $.identifier, $.constant_expression),
+
+    constant_expression: ($) =>
+      choice(
+        prec.left(PREC.additive, seq(field('left', $._constant), field('operator', choice('+', '-')), field('right', $._constant))),
+        prec.left(PREC.multiplicative, seq(field('left', $._constant), field('operator', choice('*', '/', '%')), field('right', $._constant))),
+        prec(PREC.unary, seq('-', $._constant)),
+        seq('(', $._constant, ')'),
+      ),
 
     map_type: ($) => prec(PREC.unary, seq('[', field('key', $._type), ']', field('value', $._type))),
 

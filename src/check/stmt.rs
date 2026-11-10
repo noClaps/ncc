@@ -539,7 +539,9 @@ impl<'a> Checker<'a> {
             self.never_funcs.insert(fid);
         }
         let parent = self.ctx_ref().func;
+        let tspans = self.ctx_ref().tspans.clone();
         let mut ctx = self.new_ctx(fid, m, ret, tp);
+        ctx.tspans = tspans;
         ctx.is_never = ret == NEVER;
         self.fns.push(ctx);
         let r = (|| {

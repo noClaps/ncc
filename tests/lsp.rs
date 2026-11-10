@@ -1865,3 +1865,49 @@ fn qualified_and_generic_completion() {
 
     s.finish();
 }
+
+#[test]
+fn generic_constants() {
+    let mut s = Session::start("constants");
+    let src = "fn join<type T, uint N, uint M>(T[N] a, T[M] b) T[N + M] {\n  @println(\"{N}\")\n  return a <> b\n}\n\nint[3] xs = join<int, 1, 2>([1], [2, 3])\n@println(xs)\n";
+    let diags = s.open(src);
+    assert!(diags.iter().all(|d| d["severity"] != 1), "{diags:?}");
+
+    // `N` in the body: hover shows the parameter, definition jumps to it
+    let use_n = at(src, "{N}", 0, 1);
+    let h = s.req("textDocument/hover", json!({"position": use_n}));
+    assert!(h.to_string().contains("uint N"), "{h}");
+    let d = s.req("textDocument/definition", json!({"position": use_n}));
+    assert_eq!(d["range"]["start"], at(src, "N, uint M", 0, 0), "{d}");
+
+    // completion fills in every generic parameter, constants included
+    let text = format!("{src}jo\n");
+    s.change(&text);
+    let comp = s.req(
+        "textDocument/completion",
+        json!({"position": at(&text, "jo\n", 0, 2)}),
+    );
+    let j = comp
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["label"] == "join")
+        .unwrap_or_else(|| panic!("no join in {comp}"));
+    assert_eq!(
+        j["insertText"],
+        "join<${1:T}, ${2:N}, ${3:M}>(${4:a}, ${5:b})$0"
+    );
+
+    // signature help substitutes the constants
+    let text = format!("{src}_ = join<int, 2, 3>(\n");
+    s.change(&text);
+    let sig = s.req(
+        "textDocument/signatureHelp",
+        json!({"position": at(&text, "3>(\n", 0, 3)}),
+    );
+    assert_eq!(
+        sig["signatures"][0]["label"], "fn join<int, 2, 3>(int[2] a, int[3] b) int[2 + 3]",
+        "{sig}"
+    );
+    s.finish();
+}

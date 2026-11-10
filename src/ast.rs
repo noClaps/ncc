@@ -12,8 +12,8 @@ pub enum TypeExpr {
         args: Vec<TypeExpr>,
         span: Span,
     },
-    /// `T[]` (None) or `T[N]`
-    Array(Box<TypeExpr>, Option<u64>, Span),
+    /// `T[]` (None) or `T[N]`, `T[N - 1]`
+    Array(Box<TypeExpr>, Option<ConstExpr>, Span),
     /// `[K]V`
     Map(Box<TypeExpr>, Box<TypeExpr>, Span),
     Optional(Box<TypeExpr>, Span),
@@ -22,6 +22,74 @@ pub enum TypeExpr {
     /// `(fn(int, int) int)`
     Fn(Vec<TypeExpr>, Option<Box<TypeExpr>>, Span),
     Fut(Box<TypeExpr>, Span),
+    /// A compile-time constant given as a generic argument: `3`, `N + 1`
+    Const(ConstExpr),
+}
+
+/// A compile-time integer: an array size or a generic constant argument.
+#[derive(Clone, Debug)]
+pub enum ConstExpr {
+    Int(u128, Span),
+    /// A generic constant parameter
+    Name(String, Span),
+    Neg(Box<ConstExpr>, Span),
+    /// `+ - * / %`
+    Bin(BinOp, Box<ConstExpr>, Box<ConstExpr>),
+    Paren(Box<ConstExpr>, Span),
+}
+
+impl ConstExpr {
+    /// The constant as NC source (`N - 1`, `(N + M) * 2`).
+    pub fn show(&self) -> String {
+        match self {
+            ConstExpr::Int(n, _) => n.to_string(),
+            ConstExpr::Name(n, _) => n.clone(),
+            ConstExpr::Neg(e, _) => format!("-{}", e.show()),
+            ConstExpr::Bin(op, a, b) => format!("{} {} {}", a.show(), op.symbol(), b.show()),
+            ConstExpr::Paren(e, _) => format!("({})", e.show()),
+        }
+    }
+
+    pub fn span(&self) -> Span {
+        match self {
+            ConstExpr::Int(_, s)
+            | ConstExpr::Name(_, s)
+            | ConstExpr::Neg(_, s)
+            | ConstExpr::Paren(_, s) => *s,
+            ConstExpr::Bin(_, a, b) => a.span().to(b.span()),
+        }
+    }
+}
+
+/// A generic parameter: `type T`, or a constant such as `uint N`.
+#[derive(Clone, Debug)]
+pub struct GenericParam {
+    pub name: String,
+    /// The constant's integer type (`int`, `uint` or `byte`); `None` for a type parameter
+    pub konst: Option<String>,
+    /// The name's span
+    pub span: Span,
+}
+
+impl GenericParam {
+    /// `type T` or `uint N`
+    pub fn show(&self) -> String {
+        match &self.konst {
+            Some(t) => format!("{t} {}", self.name),
+            None => format!("type {}", self.name),
+        }
+    }
+
+    /// `<type T, uint N>` (empty for no parameters)
+    pub fn list(ps: &[GenericParam]) -> String {
+        if ps.is_empty() {
+            return String::new();
+        }
+        format!(
+            "<{}>",
+            ps.iter().map(|p| p.show()).collect::<Vec<_>>().join(", ")
+        )
+    }
 }
 
 #[allow(dead_code)]
@@ -40,7 +108,7 @@ impl TypeExpr {
                     format!("{m}{name}<{}>", list(args))
                 }
             }
-            TypeExpr::Array(e, Some(n), _) => format!("{}[{n}]", e.show()),
+            TypeExpr::Array(e, Some(n), _) => format!("{}[{}]", e.show(), n.show()),
             TypeExpr::Array(e, None, _) => format!("{}[]", e.show()),
             TypeExpr::Map(k, v, _) => format!("[{}]{}", k.show(), v.show()),
             TypeExpr::Optional(i, _) => format!("{}?", i.show()),
@@ -49,6 +117,7 @@ impl TypeExpr {
             TypeExpr::Fn(ps, Some(r), _) => format!("(fn({}) {})", list(ps), r.show()),
             TypeExpr::Fn(ps, None, _) => format!("(fn({}))", list(ps)),
             TypeExpr::Fut(i, _) => format!("fut {}", i.show()),
+            TypeExpr::Const(c) => c.show(),
         }
     }
 
@@ -62,6 +131,7 @@ impl TypeExpr {
             | TypeExpr::Tuple(_, s)
             | TypeExpr::Fn(_, _, s)
             | TypeExpr::Fut(_, s) => *s,
+            TypeExpr::Const(c) => c.span(),
         }
     }
 }
@@ -217,7 +287,7 @@ pub struct Param {
 #[derive(Clone, Debug)]
 pub struct FnSig {
     pub name: String,
-    pub type_params: Vec<String>,
+    pub type_params: Vec<GenericParam>,
     pub params: Vec<Param>,
     pub ret: Option<TypeExpr>,
     pub span: Span,
@@ -298,7 +368,7 @@ pub struct Stmt {
 #[derive(Clone, Debug)]
 pub struct StructDecl {
     pub name: String,
-    pub type_params: Vec<String>,
+    pub type_params: Vec<GenericParam>,
     pub fields: Vec<(TypeExpr, String, Span)>,
     pub public: bool,
     pub span: Span,
@@ -307,7 +377,7 @@ pub struct StructDecl {
 #[derive(Clone, Debug)]
 pub struct EnumDecl {
     pub name: String,
-    pub type_params: Vec<String>,
+    pub type_params: Vec<GenericParam>,
     pub variants: Vec<(String, Vec<TypeExpr>, Span)>,
     pub public: bool,
     pub span: Span,

@@ -384,3 +384,73 @@ test "passing test" {
             (integer)
             (integer))
           (integer))))))
+
+================================================================================
+Generic constants
+================================================================================
+
+fn split<type T, uint N, uint M>(T[N + M] arr) (T[N], T[M]) {
+  return f<T, 2 * (N - 1)>(arr)
+}
+Vec<int, 3> v = x
+int[N] a = y
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_declaration
+    (identifier)
+    (type_parameters
+      (type_identifier)
+      (constant_parameter
+        (primitive_type)
+        (identifier))
+      (constant_parameter
+        (primitive_type)
+        (identifier)))
+    (parameter_list
+      (parameter
+        (array_type
+          (type_identifier)
+          (constant_expression
+            (identifier)
+            (identifier)))
+        (identifier)))
+    (tuple_type
+      (array_type
+        (type_identifier)
+        (identifier))
+      (array_type
+        (type_identifier)
+        (identifier)))
+    (block
+      (return_statement
+        (call_expression
+          (generic_expression
+            (identifier)
+            (type_arguments
+              (type_identifier)
+              (constant_expression
+                (integer)
+                (constant_expression
+                  (constant_expression
+                    (identifier)
+                    (integer))))))
+          (arguments
+            (identifier))))))
+  (variable_declaration
+    (declaration_target
+      (generic_type
+        (type_identifier)
+        (type_arguments
+          (primitive_type)
+          (integer)))
+      (identifier))
+    (identifier))
+  (variable_declaration
+    (declaration_target
+      (array_type
+        (primitive_type)
+        (identifier))
+      (identifier))
+    (identifier)))

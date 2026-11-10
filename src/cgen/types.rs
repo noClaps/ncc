@@ -95,6 +95,8 @@ impl<'t> TypeGen<'t> {
             TyKind::Mutex(i) => format!("mutex_{}", self.mangle(i)),
             TyKind::Struct(_) | TyKind::Enum(_) => ident(&self.t.show(t)),
             TyKind::Named(_) => unreachable!(),
+            TyKind::Const(_, v) if v < 0 => format!("m{}", -v),
+            TyKind::Const(_, v) => v.to_string(),
         };
         let mut name = base.clone();
         if name.len() > 60 {
@@ -132,7 +134,7 @@ impl<'t> TypeGen<'t> {
             TyKind::Fn(..) => "nc_fn".into(),
             TyKind::Fut(_) => "nc_fut *".into(),
             TyKind::Mutex(_) => "nc_mutex *".into(),
-            TyKind::Named(_) => unreachable!(),
+            TyKind::Named(_) | TyKind::Const(..) => unreachable!(),
         }
     }
 
@@ -545,7 +547,7 @@ impl<'t> TypeGen<'t> {
                 s("return 0;"),
                 s(""),
             ),
-            TyKind::Never | TyKind::Named(_) => unreachable!(),
+            TyKind::Never | TyKind::Named(_) | TyKind::Const(..) => unreachable!(),
         }
     }
 
