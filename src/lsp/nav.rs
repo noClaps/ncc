@@ -19,22 +19,15 @@ impl Server {
         p: GotoDefinitionParams,
     ) -> Option<GotoDefinitionResponse> {
         let pp = p.text_document_position_params;
-        let target = match self.lookup(&pp.text_document.uri, pp.position) {
-            Some((a, r)) => r.type_def.map(|d| (a, d)),
-            None => None,
-        };
+        let target = self
+            .lookup(&pp.text_document.uri, pp.position)
+            .and_then(|(a, r)| Some((a, r.type_def?)));
         let (a, def) = if let Some(t) = target {
             t
         } else {
             let (a, fid, text) = self.fresh(&pp.text_document.uri)?;
             let off = pos_to_offset(text, pp.position) as u32;
-            let e = a
-                .index
-                .exprs
-                .iter()
-                .filter(|e| e.span.file == fid && e.span.start <= off && off < e.span.end)
-                .filter(|e| e.type_def.is_some())
-                .min_by_key(|e| e.span.end - e.span.start)?;
+            let e = a.expr_around(fid, off, |e| e.type_def.is_some())?;
             (a, e.type_def?)
         };
         let f = a.sm.file(def.file);
@@ -74,10 +67,14 @@ impl Server {
         })?;
         let mut out = vec![span_range(&text, name_span(&text, decl, name, false)?)];
         let (toks, _) = crate::lexer::lex_all(&text, 0, 0);
-        alias_uses(&text, &toks, name, &mut out);
+        qualifier_uses(&toks, &mut |n, sp| {
+            if n == name {
+                out.push(span_range(&text, sp));
+            }
+        });
         // the cursor must be on one of them
         out.iter()
-            .any(|r| pos_to_offset(&text, r.start) <= off && off <= pos_to_offset(&text, r.end))
+            .any(|r| super::range_contains(&text, *r, off))
             .then(|| (name.to_string(), out))
     }
 
@@ -133,10 +130,7 @@ impl Server {
                     if path == im.path {
                         continue;
                     }
-                    let quoted = format!("\"{}\"", im.path);
-                    let seg = &text[im.span.start as usize..(im.span.end as usize).min(text.len())];
-                    if let Some(i) = seg.find(&quoted) {
-                        let s = im.span.start as usize + i + 1;
+                    if let Some(s) = quoted_at(&text, im.span, &im.path) {
                         changes
                             .entry(path_to_uri(importer))
                             .or_default()
@@ -175,10 +169,9 @@ impl Server {
             {
                 continue;
             }
-            let first = true;
             let key = (path.clone(), d.span.start);
-            let occ = self.occurrences(&key, &d.name, first);
-            let Some(ns) = name_span(text, d.span, &d.name, first) else {
+            let occ = self.occurrences(&key, &d.name, true);
+            let Some(ns) = name_span(text, d.span, &d.name, true) else {
                 continue;
             };
             let decl_range = span_range(text, ns);
@@ -401,30 +394,20 @@ impl Server {
         let dir = path.parent()?.to_path_buf();
         let imports = self.analyses.get(&path).map(|a| &a.imports);
         let mut out = Vec::new();
-        let mut link = |span: Span, lit: &str, target: Option<PathBuf>| {
-            let Some(target) = target.filter(|t| t.is_file()) else {
-                return;
-            };
-            let quoted = format!("\"{lit}\"");
-            let seg = &text[span.start as usize..(span.end as usize).min(text.len())];
-            if let Some(i) = seg.find(&quoted) {
-                let s = span.start as usize + i + 1;
-                out.push(DocumentLink {
-                    range: range(&text, s, s + lit.len()),
-                    target: Some(path_to_uri(&target)),
-                    tooltip: Some(target.display().to_string()),
-                    data: None,
-                });
-            }
-        };
         for it in &module.items {
-            match it {
-                ast::Item::Import(im) => {
-                    let target = imports.and_then(|m| m.get(&im.alias)).cloned();
-                    link(im.span, &im.path, target);
-                }
-                ast::Item::Extern(e) => link(e.span, &e.path, Some(dir.join(&e.path))),
-                _ => {}
+            let (span, lit, target) = match it {
+                ast::Item::Import(im) => (
+                    im.span,
+                    &im.path,
+                    imports.and_then(|m| m.get(&im.alias)).cloned(),
+                ),
+                ast::Item::Extern(e) => (e.span, &e.path, Some(dir.join(&e.path))),
+                _ => continue,
+            };
+            if let Some(target) = target.filter(|t| t.is_file())
+                && let Some(s) = quoted_at(&text, span, lit)
+            {
+                out.push(link(&text, s, s + lit.len(), &target));
             }
         }
         // `@embed("./file")`
@@ -436,12 +419,7 @@ impl Server {
             };
             let lit = &text[s..s + len];
             if let Some(target) = resolve_relative(&dir, lit) {
-                out.push(DocumentLink {
-                    range: range(&text, s, s + len),
-                    target: Some(path_to_uri(&target)),
-                    tooltip: Some(target.display().to_string()),
-                    data: None,
-                });
+                out.push(link(&text, s, s + len, &target));
             }
             from = s + len;
         }
@@ -478,26 +456,40 @@ fn import_path(dir: &Path, target: &Path, old: &str) -> Option<String> {
     })
 }
 
-/// Ranges of `name.` uses in tokens, including string interpolations.
-fn alias_uses(text: &str, toks: &[crate::lexer::Token], name: &str, out: &mut Vec<Range>) {
+/// Every name used as a qualifier (`name.`) in tokens, including in string interpolations:
+/// the name and its span.
+pub(super) fn qualifier_uses(toks: &[crate::lexer::Token], out: &mut dyn FnMut(&str, Span)) {
     use crate::lexer::{StrPart, Tok};
     for (i, t) in toks.iter().enumerate() {
         match &t.tok {
-            Tok::Ident(n)
-                if n == name && matches!(toks.get(i + 1).map(|t| &t.tok), Some(Tok::Dot)) =>
-            {
-                out.push(span_range(text, t.span));
+            Tok::Ident(n) if matches!(toks.get(i + 1).map(|t| &t.tok), Some(Tok::Dot)) => {
+                out(n, t.span);
             }
             Tok::Str(parts) => {
                 for p in parts {
                     if let StrPart::Expr(src, off) = p {
-                        let (inner, _) = crate::lexer::lex_all(src, 0, *off);
-                        alias_uses(text, &inner, name, out);
+                        qualifier_uses(&crate::lexer::lex_all(src, 0, *off).0, out);
                     }
                 }
             }
             _ => {}
         }
+    }
+}
+
+/// The offset of `lit` written as a quoted string inside `span`.
+fn quoted_at(text: &str, span: Span, lit: &str) -> Option<usize> {
+    let seg = &text[span.start as usize..(span.end as usize).min(text.len())];
+    seg.find(&format!("\"{lit}\""))
+        .map(|i| span.start as usize + i + 1)
+}
+
+fn link(text: &str, s: usize, e: usize, target: &Path) -> DocumentLink {
+    DocumentLink {
+        range: range(text, s, e),
+        target: Some(path_to_uri(target)),
+        tooltip: Some(target.display().to_string()),
+        data: None,
     }
 }
 
@@ -516,23 +508,6 @@ pub fn resolve_relative(dir: &Path, path: &str) -> Option<PathBuf> {
 // ------------------------------------------------------------------ syntax tree walk
 
 /// A node of the syntax tree, visited by `walk`. `Span` is reported for every node.
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn import_paths() {
-        let p = |d: &str, t: &str, o: &str| import_path(Path::new(d), Path::new(t), o);
-        assert_eq!(p("/a/b", "/a/b/c.nc", "./x").as_deref(), Some("./c"));
-        assert_eq!(p("/a/b", "/a/lib/c.nc", "./x").as_deref(), Some("../lib/c"));
-        assert_eq!(
-            p("/a/b", "/a/b/sub/c.nc", "../x").as_deref(),
-            Some("./sub/c")
-        );
-        assert_eq!(p("/a/b", "/a/b/c.nc", "std/x"), None);
-    }
-}
-
 #[derive(Clone, Copy)]
 pub enum Node<'a> {
     Span(Span),
@@ -779,5 +754,22 @@ pub fn expr_spans<'a>(e: &'a ast::Expr, out: &mut dyn FnMut(Node<'a>)) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn import_paths() {
+        let p = |d: &str, t: &str, o: &str| import_path(Path::new(d), Path::new(t), o);
+        assert_eq!(p("/a/b", "/a/b/c.nc", "./x").as_deref(), Some("./c"));
+        assert_eq!(p("/a/b", "/a/lib/c.nc", "./x").as_deref(), Some("../lib/c"));
+        assert_eq!(
+            p("/a/b", "/a/b/sub/c.nc", "../x").as_deref(),
+            Some("./sub/c")
+        );
+        assert_eq!(p("/a/b", "/a/b/c.nc", "std/x"), None);
     }
 }

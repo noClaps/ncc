@@ -976,12 +976,8 @@ fn unify(p: &str, c: &str, tps: &[String], binds: &mut HashMap<String, String>) 
 
 /// The doc comment of the declaration at `span`, as Markdown.
 fn doc_at(a: &Analysis, span: Span) -> Option<Documentation> {
-    docs::doc_comment(&a.sm.file(span.file).text, span).map(|value| {
-        Documentation::MarkupContent(MarkupContent {
-            kind: MarkupKind::Markdown,
-            value,
-        })
-    })
+    docs::doc_comment(&a.sm.file(span.file).text, span)
+        .map(|value| Documentation::MarkupContent(super::markdown(value)))
 }
 
 /// Fields of the struct literal or pattern around a `.` that starts a field (`Point{.x = 1, .`).

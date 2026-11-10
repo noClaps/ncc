@@ -81,16 +81,20 @@ fn parse_rule(query: &str) -> Result<(Vec<PTok>, String), String> {
     // every placeholder of the replacement must be bound by the pattern
     let mut rest = tmpl;
     while let Some(i) = rest.find('$') {
-        let name: String = rest[i + 1..]
-            .chars()
-            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-            .collect();
+        let name = hole_name(&rest[i + 1..]);
         if !holes.contains(name.as_str()) {
             return Err(format!("`${name}` is not a placeholder of the pattern"));
         }
         rest = &rest[i + 1..];
     }
     Ok((out, tmpl.to_string()))
+}
+
+/// The placeholder name at the start of `s` (after its `$`).
+fn hole_name(s: &str) -> String {
+    s.chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect()
 }
 
 /// Tokens of a source range: (start, end, text).
@@ -106,8 +110,8 @@ struct Matcher<'a> {
     text: &'a str,
     pat: &'a [PTok],
     toks: &'a [(usize, usize)],
-    /// spans of the file's expressions: a placeholder binds exactly one
-    exprs: &'a HashSet<(usize, usize)>,
+    /// the file's expressions by span: a placeholder binds exactly one
+    exprs: &'a HashMap<(usize, usize), &'a ast::Expr>,
 }
 
 impl Matcher<'_> {
@@ -126,14 +130,13 @@ impl Matcher<'_> {
             PTok::Hole(name) => {
                 for end in ti + 1..=self.toks.len() {
                     let span = (self.toks[ti].0, self.toks[end - 1].1);
-                    if !self.exprs.contains(&span) {
+                    if !self.exprs.contains_key(&span) {
                         continue;
                     }
                     if let Some(prev) = binds.get(name) {
-                        if self.text[prev.0..prev.1] != self.text[span.0..span.1] {
-                            continue;
-                        }
-                        if self.go(pi + 1, end, binds) {
+                        if self.text[prev.0..prev.1] == self.text[span.0..span.1]
+                            && self.go(pi + 1, end, binds)
+                        {
                             return true;
                         }
                         continue;
@@ -176,10 +179,6 @@ fn ssr_file(text: &str, pat: &[PTok], tmpl: &str) -> Vec<(usize, usize, String)>
             exprs.push(e);
         }
     });
-    let spans: HashSet<(usize, usize)> = exprs
-        .iter()
-        .map(|e| (e.span.start as usize, e.span.end as usize))
-        .collect();
     let by_span: HashMap<(usize, usize), &ast::Expr> = exprs
         .iter()
         .map(|e| ((e.span.start as usize, e.span.end as usize), *e))
@@ -196,7 +195,7 @@ fn ssr_file(text: &str, pat: &[PTok], tmpl: &str) -> Vec<(usize, usize, String)>
             text,
             pat,
             toks: &toks,
-            exprs: &spans,
+            exprs: &by_span,
         };
         let mut binds = HashMap::new();
         if !m.go(0, 0, &mut binds) {
@@ -207,10 +206,7 @@ fn ssr_file(text: &str, pat: &[PTok], tmpl: &str) -> Vec<(usize, usize, String)>
         let mut rest = tmpl;
         while let Some(i) = rest.find('$') {
             result.push_str(&rest[..i]);
-            let name: String = rest[i + 1..]
-                .chars()
-                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-                .collect();
+            let name = hole_name(&rest[i + 1..]);
             let span = binds[&name];
             let sub = &text[span.0..span.1];
             // brackets, commas and `=` around the placeholder keep its expression whole

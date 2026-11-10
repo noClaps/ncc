@@ -156,16 +156,17 @@ impl Server {
                 }
                 let Some(def) = r.def else { continue };
                 let Some(d) = a.decl(def) else { continue };
-                let (ty, mut mods) = match d.kind {
-                    DeclKind::Variable if d.param => (PARAMETER, 0),
-                    DeclKind::Variable => (VARIABLE, 0),
-                    DeclKind::Function => (FUNCTION, 0),
-                    DeclKind::Struct => (STRUCT, 0),
-                    DeclKind::Enum => (ENUM, 0),
-                    DeclKind::Type => (TYPE, 0),
-                    DeclKind::Field => (PROPERTY, 0),
-                    DeclKind::Variant => (ENUM_MEMBER, 0),
+                let ty = match d.kind {
+                    DeclKind::Variable if d.param => PARAMETER,
+                    DeclKind::Variable => VARIABLE,
+                    DeclKind::Function => FUNCTION,
+                    DeclKind::Struct => STRUCT,
+                    DeclKind::Enum => ENUM,
+                    DeclKind::Type => TYPE,
+                    DeclKind::Field => PROPERTY,
+                    DeclKind::Variant => ENUM_MEMBER,
                 };
+                let mut mods = 0;
                 if d.kind == DeclKind::Variable {
                     mods |= if d.mutable { M_MUTABLE } else { M_READONLY };
                 }

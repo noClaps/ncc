@@ -129,11 +129,8 @@ fn doc_lines(text: &str, span: Span) -> Vec<&str> {
         let Some(rest) = line.strip_prefix("///") else {
             break;
         };
-        lines.push(
-            rest.trim_start_matches('/')
-                .strip_prefix(' ')
-                .unwrap_or(rest),
-        );
+        let rest = rest.trim_start_matches('/');
+        lines.push(rest.strip_prefix(' ').unwrap_or(rest));
         end = prev_start;
     }
     lines.reverse();
@@ -185,8 +182,7 @@ pub fn doc_comment(text: &str, span: Span) -> Option<String> {
 fn render_param(p: &str) -> String {
     match p.split_once(' ') {
         Some((name, rest))
-            if !name.is_empty()
-                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
                 && name
                     .chars()
                     .next()

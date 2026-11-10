@@ -38,11 +38,11 @@ use lsp_types::request::{
     Completion, DocumentSymbolRequest, GotoDefinition, HoverRequest, Request as _,
 };
 use lsp_types::*;
-use ssr::{JoinLinesParams, SsrParams};
 
 use crate::ast;
 use crate::check::index::{DeclKind, Index};
 use crate::diag::{Diag, SourceMap, Span};
+use crate::lexer::Tok;
 
 const KEYWORDS: &[&str] = &[
     "fn", "return", "if", "else", "while", "for", "in", "break", "continue", "mut", "mutex",
@@ -120,6 +120,20 @@ impl Analysis {
             .exprs
             .iter()
             .find(|x| x.span.file == fid && x.span.start == start && x.span.end == end)
+    }
+
+    /// The innermost expression around offset `off` of file `fid` that satisfies `want`.
+    fn expr_around(
+        &self,
+        fid: u32,
+        off: u32,
+        want: impl Fn(&crate::check::index::ExprTy) -> bool,
+    ) -> Option<&crate::check::index::ExprTy> {
+        self.index
+            .exprs
+            .iter()
+            .filter(|e| e.span.file == fid && e.span.start <= off && off < e.span.end && want(e))
+            .min_by_key(|e| e.span.end - e.span.start)
     }
 
     /// The innermost reference at offset `off` of file `fid`.
@@ -392,6 +406,20 @@ fn pos_to_offset(text: &str, pos: Position) -> usize {
         off += line.len();
     }
     text.len()
+}
+
+fn markdown(value: String) -> MarkupContent {
+    MarkupContent {
+        kind: MarkupKind::Markdown,
+        value,
+    }
+}
+
+fn md_hover(value: String, range: Range) -> Option<Hover> {
+    Some(Hover {
+        contents: HoverContents::Markup(markdown(value)),
+        range: Some(range),
+    })
 }
 
 fn range(text: &str, s: usize, e: usize) -> Range {
@@ -737,129 +765,50 @@ impl Server {
         ) {
             self.index_workspace();
         }
+        let params = req.params;
         let result = match req.method.as_str() {
-            HoverRequest::METHOD => serde_json::from_value::<HoverParams>(req.params)
-                .ok()
-                .map(|p| serde_json::to_value(self.hover(p)).unwrap()),
-            GotoDefinition::METHOD => serde_json::from_value::<GotoDefinitionParams>(req.params)
-                .ok()
-                .map(|p| serde_json::to_value(self.definition(p)).unwrap()),
-            DocumentSymbolRequest::METHOD => {
-                serde_json::from_value::<DocumentSymbolParams>(req.params)
-                    .ok()
-                    .map(|p| serde_json::to_value(self.symbols(p)).unwrap())
+            HoverRequest::METHOD => handle(params, |p| self.hover(p)),
+            GotoDefinition::METHOD | "textDocument/declaration" => {
+                handle(params, |p| self.definition(p))
             }
-            Completion::METHOD => serde_json::from_value::<CompletionParams>(req.params)
-                .ok()
-                .map(|p| serde_json::to_value(self.completion(p)).unwrap()),
-            "textDocument/references" => serde_json::from_value::<ReferenceParams>(req.params)
-                .ok()
-                .map(|p| serde_json::to_value(self.references(p)).unwrap()),
-            "textDocument/documentHighlight" => {
-                serde_json::from_value::<DocumentHighlightParams>(req.params)
-                    .ok()
-                    .map(|p| serde_json::to_value(self.highlights(p)).unwrap())
-            }
-            "textDocument/prepareRename" => {
-                serde_json::from_value::<TextDocumentPositionParams>(req.params)
-                    .ok()
-                    .map(|p| serde_json::to_value(self.prepare_rename(p)).unwrap())
-            }
-            "textDocument/rename" => match serde_json::from_value::<RenameParams>(req.params) {
-                Ok(p) => match self.rename(p) {
-                    Ok(edit) => Some(serde_json::to_value(edit).unwrap()),
-                    Err(msg) => {
-                        return Response::new_err(
-                            id,
-                            lsp_server::ErrorCode::InvalidParams as i32,
-                            msg,
-                        );
-                    }
-                },
-                Err(_) => None,
+            DocumentSymbolRequest::METHOD => handle(params, |p| self.symbols(p)),
+            Completion::METHOD => handle(params, |p| self.completion(p)),
+            "textDocument/references" => handle(params, |p| self.references(p)),
+            "textDocument/documentHighlight" => handle(params, |p| self.highlights(p)),
+            "textDocument/prepareRename" => handle(params, |p| self.prepare_rename(p)),
+            "textDocument/rename" => match serde_json::from_value(params).map(|p| self.rename(p)) {
+                Ok(Err(msg)) => return invalid_params(id, msg),
+                r => r.ok().map(|r| serde_json::to_value(r.unwrap()).unwrap()),
             },
-            "textDocument/signatureHelp" => {
-                serde_json::from_value::<SignatureHelpParams>(req.params)
-                    .ok()
-                    .map(|p| serde_json::to_value(self.signature_help(p)).unwrap())
-            }
-            "textDocument/foldingRange" => serde_json::from_value::<FoldingRangeParams>(req.params)
-                .ok()
-                .map(|p| serde_json::to_value(self.folding(p)).unwrap()),
-            "workspace/symbol" => serde_json::from_value::<WorkspaceSymbolParams>(req.params)
-                .ok()
-                .map(|p| serde_json::to_value(self.workspace_symbols(p)).unwrap()),
-            "textDocument/formatting" => {
-                serde_json::from_value::<DocumentFormattingParams>(req.params)
-                    .ok()
-                    .map(|p| serde_json::to_value(self.formatting(p)).unwrap())
-            }
-            "textDocument/codeAction" => serde_json::from_value::<CodeActionParams>(req.params)
-                .ok()
-                .map(|p| serde_json::to_value(self.code_actions(p)).unwrap()),
-            "textDocument/declaration" => {
-                serde_json::from_value::<GotoDefinitionParams>(req.params)
-                    .ok()
-                    .map(|p| serde_json::to_value(self.definition(p)).unwrap())
-            }
-            "textDocument/typeDefinition" => {
-                serde_json::from_value::<GotoDefinitionParams>(req.params)
-                    .ok()
-                    .map(|p| serde_json::to_value(self.type_definition(p)).unwrap())
-            }
-            "textDocument/inlayHint" => serde_json::from_value::<InlayHintParams>(req.params)
-                .ok()
-                .map(|p| serde_json::to_value(self.inlay_hints(p)).unwrap()),
-            "textDocument/semanticTokens/full" => {
-                serde_json::from_value::<SemanticTokensParams>(req.params)
-                    .ok()
-                    .map(|p| {
-                        serde_json::to_value(self.semantic_tokens(&p.text_document.uri, None))
-                            .unwrap()
-                    })
-            }
-            "textDocument/semanticTokens/range" => serde_json::from_value::<
-                SemanticTokensRangeParams,
-            >(req.params)
-            .ok()
-            .map(|p| {
-                serde_json::to_value(self.semantic_tokens(&p.text_document.uri, Some(p.range)))
-                    .unwrap()
+            "textDocument/signatureHelp" => handle(params, |p| self.signature_help(p)),
+            "textDocument/foldingRange" => handle(params, |p| self.folding(p)),
+            "workspace/symbol" => handle(params, |p| self.workspace_symbols(p)),
+            "textDocument/formatting" => handle(params, |p: DocumentFormattingParams| {
+                self.formatting(&p.text_document.uri, None)
             }),
+            "textDocument/codeAction" => handle(params, |p| self.code_actions(p)),
+            "textDocument/typeDefinition" => handle(params, |p| self.type_definition(p)),
+            "textDocument/inlayHint" => handle(params, |p| self.inlay_hints(p)),
+            "textDocument/semanticTokens/full" => handle(params, |p: SemanticTokensParams| {
+                self.semantic_tokens(&p.text_document.uri, None)
+            }),
+            "textDocument/semanticTokens/range" => {
+                handle(params, |p: SemanticTokensRangeParams| {
+                    self.semantic_tokens(&p.text_document.uri, Some(p.range))
+                })
+            }
             "textDocument/prepareCallHierarchy" => {
-                serde_json::from_value::<CallHierarchyPrepareParams>(req.params)
-                    .ok()
-                    .map(|p| serde_json::to_value(self.prepare_call_hierarchy(p)).unwrap())
+                handle(params, |p| self.prepare_call_hierarchy(p))
             }
-            "callHierarchy/incomingCalls" => {
-                serde_json::from_value::<CallHierarchyIncomingCallsParams>(req.params)
-                    .ok()
-                    .map(|p| serde_json::to_value(self.incoming_calls(p)).unwrap())
-            }
-            "callHierarchy/outgoingCalls" => {
-                serde_json::from_value::<CallHierarchyOutgoingCallsParams>(req.params)
-                    .ok()
-                    .map(|p| serde_json::to_value(self.outgoing_calls(p)).unwrap())
-            }
-            "textDocument/selectionRange" => {
-                serde_json::from_value::<SelectionRangeParams>(req.params)
-                    .ok()
-                    .map(|p| serde_json::to_value(self.selection_ranges(p)).unwrap())
-            }
-            "textDocument/documentLink" => serde_json::from_value::<DocumentLinkParams>(req.params)
-                .ok()
-                .map(|p| serde_json::to_value(self.document_links(p)).unwrap()),
-            "workspace/willRenameFiles" => serde_json::from_value::<RenameFilesParams>(req.params)
-                .ok()
-                .map(|p| serde_json::to_value(self.will_rename_files(p)).unwrap()),
-            "textDocument/onTypeFormatting" => {
-                serde_json::from_value::<DocumentOnTypeFormattingParams>(req.params)
-                    .ok()
-                    .map(|p| serde_json::to_value(self.on_type_formatting(p)).unwrap())
-            }
+            "callHierarchy/incomingCalls" => handle(params, |p| self.incoming_calls(p)),
+            "callHierarchy/outgoingCalls" => handle(params, |p| self.outgoing_calls(p)),
+            "textDocument/selectionRange" => handle(params, |p| self.selection_ranges(p)),
+            "textDocument/documentLink" => handle(params, |p| self.document_links(p)),
+            "workspace/willRenameFiles" => handle(params, |p| self.will_rename_files(p)),
+            "textDocument/onTypeFormatting" => handle(params, |p| self.on_type_formatting(p)),
             // the parsed syntax tree, for debugging (like rust-analyzer's "view syntax tree")
             "ncc/syntaxTree" => serde_json::from_value::<TextDocumentIdentifier>(
-                req.params.get("textDocument").cloned().unwrap_or_default(),
+                params.get("textDocument").cloned().unwrap_or_default(),
             )
             .ok()
             .and_then(|d| uri_to_path(&d.uri))
@@ -868,44 +817,21 @@ impl Server {
                 let (module, _) = crate::parser::parse_module_recover(&text, 0);
                 serde_json::Value::String(format!("{module:#?}"))
             }),
-            "textDocument/codeLens" => serde_json::from_value::<CodeLensParams>(req.params)
-                .ok()
-                .map(|p| serde_json::to_value(self.code_lenses(p)).unwrap()),
-            "textDocument/diagnostic" => {
-                serde_json::from_value::<DocumentDiagnosticParams>(req.params)
-                    .ok()
-                    .map(|p| serde_json::to_value(self.pull_diagnostics(p)).unwrap())
-            }
-            "experimental/joinLines" => serde_json::from_value::<JoinLinesParams>(req.params)
-                .ok()
-                .map(|p| serde_json::to_value(self.join_lines(p)).unwrap()),
-            "experimental/ssr" => match serde_json::from_value::<SsrParams>(req.params) {
-                Ok(p) => match self.ssr(p) {
-                    Ok(edit) => Some(serde_json::to_value(edit).unwrap()),
-                    Err(msg) => {
-                        return Response::new_err(
-                            id,
-                            lsp_server::ErrorCode::InvalidParams as i32,
-                            msg,
-                        );
-                    }
-                },
-                Err(_) => None,
+            "textDocument/codeLens" => handle(params, |p| self.code_lenses(p)),
+            "textDocument/diagnostic" => handle(params, |p| self.pull_diagnostics(p)),
+            "experimental/joinLines" => handle(params, |p| self.join_lines(p)),
+            "experimental/ssr" => match serde_json::from_value(params).map(|p| self.ssr(p)) {
+                Ok(Err(msg)) => return invalid_params(id, msg),
+                r => r.ok().map(|r| serde_json::to_value(r.unwrap()).unwrap()),
             },
-            "textDocument/rangeFormatting" => {
-                serde_json::from_value::<DocumentRangeFormattingParams>(req.params)
-                    .ok()
-                    .map(|p| serde_json::to_value(self.range_formatting(p)).unwrap())
-            }
+            "textDocument/rangeFormatting" => handle(params, |p: DocumentRangeFormattingParams| {
+                self.formatting(&p.text_document.uri, Some(p.range))
+            }),
             _ => return method_not_found(id, &req.method),
         };
         match result {
             Some(v) => Response::new_ok(id, v),
-            None => Response::new_err(
-                id,
-                lsp_server::ErrorCode::InvalidParams as i32,
-                "invalid parameters".into(),
-            ),
+            None => invalid_params(id, "invalid parameters".into()),
         }
     }
 
@@ -929,13 +855,10 @@ impl Server {
             return Some(h);
         }
         if let Some((target, range)) = self.alias_target(&pp) {
-            return Some(Hover {
-                contents: HoverContents::Markup(MarkupContent {
-                    kind: MarkupKind::Markdown,
-                    value: format!("```nc\nmodule {}\n```\n\n`{}`", range.0, target.display()),
-                }),
-                range: Some(range.1),
-            });
+            return md_hover(
+                format!("```nc\nmodule {}\n```\n\n`{}`", range.0, target.display()),
+                range.1,
+            );
         }
         if let Some((a, r)) = self.lookup(&pp.text_document.uri, pp.position) {
             let text = &a.sm.file(r.span.file).text;
@@ -951,13 +874,7 @@ impl Server {
                     value.push_str(&format!("\n\n*Defined in `{name}`*"));
                 }
             }
-            return Some(Hover {
-                contents: HoverContents::Markup(MarkupContent {
-                    kind: MarkupKind::Markdown,
-                    value,
-                }),
-                range: Some(span_range(text, r.span)),
-            });
+            return md_hover(value, span_range(text, r.span));
         }
         // keywords
         if let Some(path) = uri_to_path(&pp.text_document.uri)
@@ -966,30 +883,16 @@ impl Server {
             && let Some((_, doc)) = docs::KEYWORD_DOCS.iter().find(|(k, _)| *k == &text[s..e])
             && !in_string_or_comment(&text, s)
         {
-            return Some(Hover {
-                contents: HoverContents::Markup(MarkupContent {
-                    kind: MarkupKind::Markdown,
-                    value: format!("```nc\n{}\n```\n\n---\n\n{doc}", &text[s..e]),
-                }),
-                range: Some(range(&text, s, e)),
-            });
+            return md_hover(
+                format!("```nc\n{}\n```\n\n---\n\n{doc}", &text[s..e]),
+                range(&text, s, e),
+            );
         }
         // the type of the innermost expression under the cursor
         let (a, fid, text) = self.fresh(&pp.text_document.uri)?;
         let off = pos_to_offset(text, pp.position) as u32;
-        let e = a
-            .index
-            .exprs
-            .iter()
-            .filter(|e| e.span.file == fid && e.span.start <= off && off < e.span.end)
-            .min_by_key(|e| e.span.end - e.span.start)?;
-        Some(Hover {
-            contents: HoverContents::Markup(MarkupContent {
-                kind: MarkupKind::Markdown,
-                value: format!("```nc\n{}\n```", e.ty),
-            }),
-            range: Some(span_range(text, e.span)),
-        })
+        let e = a.expr_around(fid, off, |_| true)?;
+        md_hover(format!("```nc\n{}\n```", e.ty), span_range(text, e.span))
     }
 
     /// The module file of an import or extern alias under the cursor, with the alias's path text
@@ -1001,7 +904,7 @@ impl Server {
         let off = pos_to_offset(&text, pp.position);
         let range = ranges
             .into_iter()
-            .find(|r| pos_to_offset(&text, r.start) <= off && off <= pos_to_offset(&text, r.end))?;
+            .find(|r| range_contains(&text, *r, off))?;
         let (module, _) = crate::parser::parse_module_recover(&text, 0);
         for it in &module.items {
             match it {
@@ -1285,7 +1188,7 @@ impl Server {
     fn symbol_at(&self, uri: &Uri, pos: Position) -> Option<(SymKey, String, bool)> {
         let (a, r) = self.lookup(uri, pos)?;
         let def = r.def?;
-        let decl = a.index.decls.iter().find(|d| d.span == def)?;
+        let decl = a.decl(def)?;
         let name_first = matches!(
             decl.kind,
             DeclKind::Struct | DeclKind::Enum | DeclKind::Type
@@ -1305,9 +1208,8 @@ impl Server {
                 }
                 let f = a.sm.file(r.span.file);
                 // a reference to a type shows the type's declaration: its name comes first
-                let first = name_first || r.span == def && name_first;
-                let Some(ns) = name_span(&f.text, r.span, name, first || is_type_ref(&r.hover))
-                else {
+                let first = name_first || is_type_ref(&r.hover);
+                let Some(ns) = name_span(&f.text, r.span, name, first) else {
                     continue;
                 };
                 if seen.insert((f.path.clone(), ns.start)) {
@@ -1338,21 +1240,18 @@ impl Server {
             );
         }
         let (key, name, first) = self.symbol_at(&pp.text_document.uri, pp.position)?;
-        let mut locs: Vec<Location> = self
-            .occurrences(&key, &name, first)
-            .into_iter()
-            .map(|(path, range)| Location::new(path_to_uri(&path), range))
-            .collect();
-        if !p.context.include_declaration {
-            let decl_line = self
-                .occurrences(&key, &name, first)
-                .into_iter()
-                .find(|(path, _)| *path == key.0);
-            if let Some((_, r)) = decl_line {
-                locs.retain(|l| l.range != r || uri_to_path(&l.uri).as_ref() != Some(&key.0));
-            }
-        }
-        Some(locs)
+        let occ = self.occurrences(&key, &name, first);
+        let decl = if p.context.include_declaration {
+            None
+        } else {
+            occ.iter().find(|(path, _)| *path == key.0).cloned()
+        };
+        Some(
+            occ.into_iter()
+                .filter(|o| Some(o) != decl.as_ref())
+                .map(|(path, range)| Location::new(path_to_uri(&path), range))
+                .collect(),
+        )
     }
 
     fn highlights(&self, p: DocumentHighlightParams) -> Option<Vec<DocumentHighlight>> {
@@ -1391,30 +1290,24 @@ impl Server {
     }
 
     fn prepare_rename(&self, p: TextDocumentPositionParams) -> Option<PrepareRenameResponse> {
-        if let Some((name, ranges)) = self.alias_at(&p.text_document.uri, p.position) {
-            let path = uri_to_path(&p.text_document.uri)?;
-            let text = self.text_of(&path)?;
-            let off = pos_to_offset(&text, p.position);
-            return ranges
-                .into_iter()
-                .find(|r| {
-                    pos_to_offset(&text, r.start) <= off && off <= pos_to_offset(&text, r.end)
-                })
-                .map(|range| PrepareRenameResponse::RangeWithPlaceholder {
-                    range,
-                    placeholder: name,
-                });
-        }
         let path = uri_to_path(&p.text_document.uri)?;
-        let (key, name, first) = self.symbol_at(&p.text_document.uri, p.position)?;
+        let (name, ranges) = match self.alias_at(&p.text_document.uri, p.position) {
+            Some(alias) => alias,
+            None => {
+                let (key, name, first) = self.symbol_at(&p.text_document.uri, p.position)?;
+                let ranges = (self.occurrences(&key, &name, first).into_iter())
+                    .filter(|(p, _)| *p == path)
+                    .map(|(_, r)| r)
+                    .collect();
+                (name, ranges)
+            }
+        };
         let text = self.text_of(&path)?;
         let off = pos_to_offset(&text, p.position);
         // the cursor must be on the name itself
-        self.occurrences(&key, &name, first)
+        ranges
             .into_iter()
-            .filter(|(p, _)| *p == path)
-            .map(|(_, r)| r)
-            .find(|r| pos_to_offset(&text, r.start) <= off && off <= pos_to_offset(&text, r.end))
+            .find(|r| range_contains(&text, *r, off))
             .map(|range| PrepareRenameResponse::RangeWithPlaceholder {
                 range,
                 placeholder: name,
@@ -1435,23 +1328,35 @@ impl Server {
         if !valid || crate::parser::is_keyword(new) {
             return Err(format!("`{new}` is not a valid name"));
         }
-        if let Some((_, ranges)) = self.alias_at(&pp.text_document.uri, pp.position) {
-            let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
-            changes.insert(
-                pp.text_document.uri.clone(),
-                ranges
-                    .into_iter()
-                    .map(|r| TextEdit::new(r, new.to_string()))
-                    .collect(),
-            );
-            return Ok(Some(WorkspaceEdit {
-                changes: Some(changes),
-                ..Default::default()
-            }));
-        }
-        let Some((key, name, first)) = self.symbol_at(&pp.text_document.uri, pp.position) else {
-            return Ok(None);
+        let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
+        let mut rename = |uri: Uri, range: Range| {
+            changes
+                .entry(uri)
+                .or_default()
+                .push(TextEdit::new(range, new.to_string()));
         };
+        if let Some((_, ranges)) = self.alias_at(&pp.text_document.uri, pp.position) {
+            for r in ranges {
+                rename(pp.text_document.uri.clone(), r);
+            }
+        } else {
+            let Some((key, name, first)) = self.symbol_at(&pp.text_document.uri, pp.position)
+            else {
+                return Ok(None);
+            };
+            self.check_clash(&key, new)?;
+            for (path, range) in self.occurrences(&key, &name, first) {
+                rename(path_to_uri(&path), range);
+            }
+        }
+        Ok(Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }))
+    }
+
+    /// Fails when renaming the symbol `key` to `new` would clash with a declaration.
+    fn check_clash(&self, key: &SymKey, new: &str) -> Result<(), String> {
         // a name that is already declared where the symbol is declared would clash
         if let Some(a) = self.analyses.get(&key.0)
             && let Some(fid) = a.file_id(&key.0)
@@ -1482,17 +1387,7 @@ impl Server {
                 return Err(format!("`{new}` is already declared here"));
             }
         }
-        let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
-        for (path, range) in self.occurrences(&key, &name, first) {
-            changes
-                .entry(path_to_uri(&path))
-                .or_default()
-                .push(TextEdit::new(range, new.to_string()));
-        }
-        Ok(Some(WorkspaceEdit {
-            changes: Some(changes),
-            ..Default::default()
-        }))
+        Ok(())
     }
 
     fn builtin_hover(&self, pp: &TextDocumentPositionParams) -> Option<Hover> {
@@ -1502,13 +1397,10 @@ impl Server {
         let (s, e) = word_at(&text, off)?;
         let word = text[s..e].strip_prefix('@')?;
         let (_, sig, doc) = BUILTINS.iter().find(|(n, ..)| *n == word)?;
-        Some(Hover {
-            contents: HoverContents::Markup(MarkupContent {
-                kind: MarkupKind::Markdown,
-                value: format!("```nc\n{sig}\n```\n\n---\n\n{doc}"),
-            }),
-            range: Some(range(&text, s, e)),
-        })
+        md_hover(
+            format!("```nc\n{sig}\n```\n\n---\n\n{doc}"),
+            range(&text, s, e),
+        )
     }
 
     fn folding(&self, p: FoldingRangeParams) -> Option<Vec<FoldingRange>> {
@@ -1517,33 +1409,23 @@ impl Server {
         let (toks, _) = crate::lexer::lex_all(&text, 0, 0);
         let line = |off: u32| offset_to_pos(&text, off as usize).line;
         let mut out = Vec::new();
-        let mut stack: Vec<u32> = Vec::new();
-        let mut import_braces = HashSet::new();
+        // open brackets: (offset, whether it is an import block)
+        let mut stack: Vec<(u32, bool)> = Vec::new();
         for (i, t) in toks.iter().enumerate() {
-            if t.tok == crate::lexer::Tok::LBrace
-                && i > 0
-                && matches!(&toks[i - 1].tok, crate::lexer::Tok::Ident(k) if k == "import")
-            {
-                import_braces.insert(t.span.start);
-            }
-        }
-        for t in &toks {
             match t.tok {
-                crate::lexer::Tok::LBrace
-                | crate::lexer::Tok::LBracket
-                | crate::lexer::Tok::LParen => stack.push(t.span.start),
-                crate::lexer::Tok::RBrace
-                | crate::lexer::Tok::RBracket
-                | crate::lexer::Tok::RParen => {
-                    if let Some(open) = stack.pop() {
+                Tok::LBrace | Tok::LBracket | Tok::LParen => {
+                    let import =
+                        i > 0 && matches!(&toks[i - 1].tok, Tok::Ident(k) if k == "import");
+                    stack.push((t.span.start, import));
+                }
+                Tok::RBrace | Tok::RBracket | Tok::RParen => {
+                    if let Some((open, import)) = stack.pop() {
                         let (a, b) = (line(open), line(t.span.start));
                         if b > a {
                             out.push(FoldingRange {
                                 start_line: a,
-                                end_line: b.saturating_sub(1).max(a),
-                                kind: import_braces
-                                    .contains(&open)
-                                    .then_some(FoldingRangeKind::Imports),
+                                end_line: b - 1,
+                                kind: import.then_some(FoldingRangeKind::Imports),
                                 ..Default::default()
                             });
                         }
@@ -1617,12 +1499,12 @@ impl Server {
 }
 
 impl Server {
-    /// Whole-document formatting with `ncc fmt`'s rules (nothing when it has syntax errors).
-    fn formatting(&self, p: DocumentFormattingParams) -> Option<Vec<TextEdit>> {
-        let path = uri_to_path(&p.text_document.uri)?;
-        let text = self.text_of(&path)?;
+    /// Formatting with `ncc fmt`'s rules (nothing when the document has syntax errors). With a
+    /// range, the whole document is formatted and only the changes to its lines are kept.
+    fn formatting(&self, uri: &Uri, range: Option<Range>) -> Option<Vec<TextEdit>> {
+        let text = self.text_of(&uri_to_path(uri)?)?;
         let formatted = crate::fmt::format(&text).ok()?;
-        Some(minimal_edits(&text, &formatted, None))
+        Some(minimal_edits(&text, &formatted, range))
     }
 
     /// After a `}` that starts its line, indent it like the line of its `{`.
@@ -1633,22 +1515,22 @@ impl Server {
         let (toks, _) = crate::lexer::lex_all(&text, 0, 0);
         let close = toks
             .iter()
-            .position(|t| t.tok == crate::lexer::Tok::RBrace && t.span.end as usize == off)?;
+            .position(|t| t.tok == Tok::RBrace && t.span.end as usize == off)?;
         let ls = line_start(&text, off - 1);
         if !text[ls..off - 1].trim().is_empty() {
             return Some(vec![]);
         }
         let mut depth = 0;
         let open = toks[..close].iter().rev().find(|t| match t.tok {
-            crate::lexer::Tok::RBrace => {
+            Tok::RBrace => {
                 depth += 1;
                 false
             }
-            crate::lexer::Tok::LBrace if depth > 0 => {
+            Tok::LBrace if depth > 0 => {
                 depth -= 1;
                 false
             }
-            crate::lexer::Tok::LBrace => true,
+            Tok::LBrace => true,
             _ => false,
         })?;
         let indent = indent_at(&text, open.span.start as usize);
@@ -1659,14 +1541,6 @@ impl Server {
             range(&text, ls, off - 1),
             indent.to_string(),
         )])
-    }
-
-    /// Formats the whole document, keeping only the changes to the lines in the range.
-    fn range_formatting(&self, p: DocumentRangeFormattingParams) -> Option<Vec<TextEdit>> {
-        let path = uri_to_path(&p.text_document.uri)?;
-        let text = self.text_of(&path)?;
-        let formatted = crate::fmt::format(&text).ok()?;
-        Some(minimal_edits(&text, &formatted, Some(p.range)))
     }
 }
 
@@ -1680,10 +1554,8 @@ fn in_string_or_comment(text: &str, off: usize) -> bool {
     }
     let (toks, _) = crate::lexer::lex_all(text, 0, 0);
     toks.iter().any(|t| {
-        matches!(
-            t.tok,
-            crate::lexer::Tok::Str(_) | crate::lexer::Tok::Char(_)
-        ) && (t.span.start as usize) <= off
+        matches!(t.tok, Tok::Str(_) | Tok::Char(_))
+            && (t.span.start as usize) <= off
             && off < t.span.end as usize
     })
 }
@@ -1777,6 +1649,11 @@ fn collect_nc_files(dir: &Path, all: bool, out: &mut Vec<PathBuf>, depth: usize)
     }
 }
 
+/// Whether `range` of `text` contains the offset `off`.
+fn range_contains(text: &str, range: Range, off: usize) -> bool {
+    pos_to_offset(text, range.start) <= off && off <= pos_to_offset(text, range.end)
+}
+
 /// Hover text of a reference to a type (whose spans start with the name).
 fn is_type_ref(hover: &str) -> bool {
     hover.starts_with("struct ") || hover.starts_with("enum ") || hover.starts_with("type ")
@@ -1791,6 +1668,19 @@ fn publish(path: &Path, diagnostics: Vec<Diagnostic>, version: Option<i32>) -> N
             version,
         },
     )
+}
+
+/// Deserialize a request's parameters, run its handler and serialize the result.
+fn handle<P: serde::de::DeserializeOwned, R: serde::Serialize>(
+    params: serde_json::Value,
+    f: impl FnOnce(P) -> R,
+) -> Option<serde_json::Value> {
+    let p = serde_json::from_value(params).ok()?;
+    Some(serde_json::to_value(f(p)).unwrap())
+}
+
+fn invalid_params(id: RequestId, msg: String) -> Response {
+    Response::new_err(id, lsp_server::ErrorCode::InvalidParams as i32, msg)
 }
 
 fn method_not_found(id: RequestId, method: &str) -> Response {

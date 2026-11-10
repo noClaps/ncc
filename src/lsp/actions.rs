@@ -21,7 +21,6 @@ use super::{
 use crate::ast::{self, ExprKind as E, StmtKind as S};
 use crate::check::index::DeclKind;
 use crate::diag::Span;
-use crate::lexer::Tok;
 
 const UNUSED_IMPORT: &str = "unused-import";
 const UNREACHABLE_BRANCH: &str = "unreachable-branch";
@@ -32,28 +31,10 @@ const UNREACHABLE_BRANCH: &str = "unreachable-branch";
 fn unused_imports(text: &str) -> Vec<(Span, Span, String)> {
     let (module, _) = crate::parser::parse_module_recover(text, 0);
     let (toks, _) = crate::lexer::lex_all(text, 0, 0);
-    let note = |toks: &[crate::lexer::Token], used: &mut HashSet<String>| {
-        for (i, t) in toks.iter().enumerate() {
-            if let Tok::Ident(n) = &t.tok
-                && matches!(toks.get(i + 1).map(|t| &t.tok), Some(Tok::Dot))
-            {
-                used.insert(n.clone());
-            }
-        }
-    };
     let mut used = HashSet::new();
-    note(&toks, &mut used);
-    // names used inside string interpolations
-    for t in &toks {
-        if let Tok::Str(parts) = &t.tok {
-            for p in parts {
-                if let crate::lexer::StrPart::Expr(src, off) = p {
-                    let (inner, _) = crate::lexer::lex_all(src, 0, *off);
-                    note(&inner, &mut used);
-                }
-            }
-        }
-    }
+    super::nav::qualifier_uses(&toks, &mut |n, _| {
+        used.insert(n.to_string());
+    });
     let mut out = Vec::new();
     for it in &module.items {
         if let ast::Item::Import(im) = it

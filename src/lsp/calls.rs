@@ -3,7 +3,7 @@
 
 use lsp_types::*;
 
-use super::{BUILTINS, DeclKind, Server, docs, is_ident_byte, uri_to_path};
+use super::{BUILTINS, DeclKind, Server, docs, is_ident_byte, markdown, uri_to_path};
 
 /// The byte range inside the parentheses of a signature label's parameter list: from the first
 /// `(` to its matching `)` (a tuple return type has parentheses too).
@@ -168,8 +168,7 @@ impl Server {
             e -= 1;
         }
         // explicit generic arguments: `map<int, str>(`
-        let mut generic_args: Vec<String> = Vec::new();
-        if e > 0 && b[e - 1] == b'>' {
+        let generic_args: Vec<String> = if e > 0 && b[e - 1] == b'>' {
             let close = e - 1;
             let mut d = 0;
             while e > 0 {
@@ -186,11 +185,13 @@ impl Server {
                 }
             }
             let inner = &text[e + 1..close];
-            generic_args = split_top(inner)
+            split_top(inner)
                 .into_iter()
                 .map(|(a, b)| inner[a..b].to_string())
-                .collect();
-        }
+                .collect()
+        } else {
+            vec![]
+        };
         let mut s = e;
         while s > 0 && (is_ident_byte(b[s - 1]) || b[s - 1] == b'@' || b[s - 1] == b'.') {
             s -= 1;
@@ -277,23 +278,18 @@ impl Server {
                     label[..l + s].encode_utf16().count() as u32,
                     label[..l + e].encode_utf16().count() as u32,
                 ]),
-                documentation: c.param_docs.get(i).map(|d| {
-                    Documentation::MarkupContent(MarkupContent {
-                        kind: MarkupKind::Markdown,
-                        value: d.clone(),
-                    })
-                }),
+                documentation: c
+                    .param_docs
+                    .get(i)
+                    .map(|d| Documentation::MarkupContent(markdown(d.clone()))),
             })
             .collect();
         Some(SignatureHelp {
             signatures: vec![SignatureInformation {
                 label: c.label.clone(),
-                documentation: c.documentation.map(|d| {
-                    Documentation::MarkupContent(MarkupContent {
-                        kind: MarkupKind::Markdown,
-                        value: d,
-                    })
-                }),
+                documentation: c
+                    .documentation
+                    .map(|d| Documentation::MarkupContent(markdown(d))),
                 parameters: Some(parameters),
                 active_parameter: Some(c.arg),
             }],
