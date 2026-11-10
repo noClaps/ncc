@@ -38,7 +38,7 @@ pub fn visit_stmt(s: &Stmt, f: &mut dyn FnMut(&Expr)) {
     }
 }
 
-pub fn visit_place(p: &Place, f: &mut dyn FnMut(&Expr)) {
+fn visit_place(p: &Place, f: &mut dyn FnMut(&Expr)) {
     match p {
         Place::Var(_) => {}
         Place::Field(b, _) | Place::TupleIndex(b, _) => visit_place(b, f),
@@ -49,7 +49,7 @@ pub fn visit_place(p: &Place, f: &mut dyn FnMut(&Expr)) {
     }
 }
 
-pub fn visit_block(b: &Block, f: &mut dyn FnMut(&Expr)) {
+fn visit_block(b: &Block, f: &mut dyn FnMut(&Expr)) {
     for s in &b.stmts {
         visit_stmt(s, f);
     }
@@ -61,7 +61,7 @@ fn visit_callee(c: &Callee, f: &mut dyn FnMut(&Expr)) {
     }
 }
 
-pub fn visit_pat(p: &Pat, f: &mut dyn FnMut(&Expr)) {
+fn visit_pat(p: &Pat, f: &mut dyn FnMut(&Expr)) {
     match p {
         Pat::Wild | Pat::Bind(_) => {}
         Pat::Value(e) | Pat::Cond(e) => visit_expr(e, f),
@@ -182,9 +182,8 @@ pub fn place_root(p: &Place) -> Option<VarRef> {
     }
 }
 
-/// Globals written (declared or assigned) by a statement, including nested blocks.
 /// The blocks directly inside an expression: `if` arms, `catch` and `else` blocks.
-pub fn nested_blocks(e: &Expr) -> Vec<&Block> {
+fn nested_blocks(e: &Expr) -> Vec<&Block> {
     match &e.kind {
         EK::If(i) => i.arms.iter().map(|a| &a.body).collect(),
         EK::Catch(_, _, b, _) | EK::Else(_, Fallback::Block(b, _)) => vec![b],
@@ -192,51 +191,54 @@ pub fn nested_blocks(e: &Expr) -> Vec<&Block> {
     }
 }
 
+/// Visit a statement and every statement nested in it, in the blocks of statements and of
+/// expressions.
+pub fn visit_stmts(s: &Stmt, f: &mut dyn FnMut(&Stmt)) {
+    // through statement bodies only: blocks inside expressions are found by `visit_stmt`
+    fn bodies(s: &Stmt, f: &mut dyn FnMut(&Stmt)) {
+        f(s);
+        if let SK::While { body, .. }
+        | SK::For { body, .. }
+        | SK::Lock { body, .. }
+        | SK::Block(body) = &s.kind
+        {
+            for s in &body.stmts {
+                bodies(s, f);
+            }
+        }
+    }
+    bodies(s, f);
+    visit_stmt(s, &mut |e| {
+        for b in nested_blocks(e) {
+            for s in &b.stmts {
+                bodies(s, f);
+            }
+        }
+    });
+}
+
+/// Globals written (declared or assigned) by a statement, including nested blocks.
 pub fn writes_stmt(s: &Stmt, out: &mut HashSet<GlobalId>) {
-    match &s.kind {
+    visit_stmts(s, &mut |s| match &s.kind {
         SK::Let(Some(VarRef::Global(g)), _) => {
             out.insert(*g);
         }
         SK::Destructure(ts, _) => {
-            for (t, _, _) in ts {
-                if let Some(VarRef::Global(g)) = t {
-                    out.insert(*g);
-                }
-            }
+            out.extend(ts.iter().filter_map(|(t, _, _)| match t {
+                Some(VarRef::Global(g)) => Some(*g),
+                _ => None,
+            }));
         }
         SK::Assign(p, _) => {
             if let Some(VarRef::Global(g)) = place_root(p) {
                 out.insert(g);
             }
         }
-        SK::While { body, .. } | SK::For { body, .. } | SK::Lock { body, .. } | SK::Block(body) => {
-            for s in &body.stmts {
-                writes_stmt(s, out);
-            }
-        }
         _ => {}
-    }
-    // assignments nested in if-arms / catch blocks
-    let mut nested = |e: &Expr| {
-        for b in nested_blocks(e) {
-            for s in &b.stmts {
-                if let SK::Assign(p, _) = &s.kind
-                    && let Some(VarRef::Global(g)) = place_root(p)
-                {
-                    out.insert(g);
-                }
-            }
-        }
-    };
-    if !matches!(
-        s.kind,
-        SK::While { .. } | SK::For { .. } | SK::Lock { .. } | SK::Block(_)
-    ) {
-        visit_stmt(s, &mut nested);
-    }
+    });
 }
 
-impl<'a> Checker<'a> {
+impl Checker {
     /// Whether execution can fall off the end of the block.
     pub fn block_completes(&self, b: &Block) -> bool {
         for s in &b.stmts {

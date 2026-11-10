@@ -696,7 +696,9 @@ pub fn expr_spans<'a>(e: &'a ast::Expr, out: &mut dyn FnMut(Node<'a>)) {
     out(Node::Span(e.span));
     out(Node::Expr(e));
     match &e.kind {
-        E::Unary(_, x) | E::Try(x) | E::Async(x) | E::Await(x) => expr_spans(x, out),
+        E::Unary(_, x) | E::Try(x) | E::Async(x) | E::Await(x) | E::Field(x, _) => {
+            expr_spans(x, out)
+        }
         E::Binary(_, a, b) | E::Index(a, b) => {
             expr_spans(a, out);
             expr_spans(b, out);
@@ -721,7 +723,6 @@ pub fn expr_spans<'a>(e: &'a ast::Expr, out: &mut dyn FnMut(Node<'a>)) {
                 expr_spans(a, out);
             }
         }
-        E::Field(x, _) => expr_spans(x, out),
         E::Tuple(xs) | E::Array(xs) => {
             for x in xs {
                 expr_spans(x, out);

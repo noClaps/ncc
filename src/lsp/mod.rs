@@ -460,7 +460,7 @@ impl Server {
         self.workspace_indexed = true;
         let mut files = Vec::new();
         for root in self.roots.clone() {
-            collect_nc_files(&root, &mut files, 0);
+            collect_nc_files(&root, false, &mut files, 0);
         }
         let files: Vec<PathBuf> = files
             .into_iter()
@@ -1741,8 +1741,9 @@ fn minimal_edits(old: &str, new: &str, range: Option<Range>) -> Vec<TextEdit> {
     edits
 }
 
-/// `.nc` files under a directory (skipping hidden directories and build output).
-fn collect_nc_files(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
+/// `.nc` files under a directory, skipping hidden directories and build output unless `all`
+/// is set (dependencies live under `.nc/`).
+fn collect_nc_files(dir: &Path, all: bool, out: &mut Vec<PathBuf>, depth: usize) {
     if depth > 12 {
         return;
     }
@@ -1753,11 +1754,11 @@ fn collect_nc_files(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
         let p = e.path();
         let name = e.file_name();
         let name = name.to_string_lossy();
-        if name.starts_with('.') || name == "target" || name == "node_modules" {
+        if !all && (name.starts_with('.') || name == "target" || name == "node_modules") {
             continue;
         }
         match e.file_type() {
-            Ok(t) if t.is_dir() => collect_nc_files(&p, out, depth + 1),
+            Ok(t) if t.is_dir() => collect_nc_files(&p, all, out, depth + 1),
             Ok(t) if t.is_file() && name.ends_with(".nc") => out.push(p),
             _ => {}
         }

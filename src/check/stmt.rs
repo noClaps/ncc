@@ -2,7 +2,7 @@
 
 use super::*;
 
-impl<'a> Checker<'a> {
+impl Checker {
     pub fn check_block(&mut self, b: &ast::Block) -> Block {
         self.ix.scopes.push(b.span);
         self.push_scope();
@@ -549,7 +549,7 @@ impl<'a> Checker<'a> {
         let (params, ret) = self.resolve_sig(sig, m, &tp)?;
         let fty = self.types.intern(TyKind::Fn(params.clone(), ret));
         let display = name.unwrap_or("fn literal").to_string();
-        let fid = self.reserve_fn(display.clone(), params.clone(), ret);
+        let fid = self.reserve_fn(params.clone(), ret);
         self.ix.fn_spans.insert(fid, sig.span);
         self.ix
             .fn_params

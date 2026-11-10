@@ -3,7 +3,7 @@
 use super::*;
 use crate::ast::ExprKind as E;
 
-impl<'a> Checker<'a> {
+impl Checker {
     pub fn check_pattern(&mut self, p: &ast::Expr, ty: TyId, multi: bool) -> Result<Pat> {
         let span = p.span;
         match &p.kind {
@@ -22,7 +22,7 @@ impl<'a> Checker<'a> {
                 }
                 let l = self.declare_local(name, ty, false, LocalKind::Normal, span);
                 let label = format!("{} ", self.types.show(ty));
-                self.idx_hint(span.start, span.file, label, super::index::HintKind::Type);
+                self.idx_hint(span.start, span.file, label, index::HintKind::Type);
                 Ok(Pat::Bind(l))
             }
             E::Tuple(items) => {

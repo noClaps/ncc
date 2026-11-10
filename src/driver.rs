@@ -86,19 +86,13 @@ fn uses_target(p: &Program) -> bool {
 
 /// The C compiler's target as `(os, cpu)`, from its predefined macros.
 fn detect_target() -> Result<(String, String), String> {
-    use std::io::Write;
     let (prog, mut args) = cc_command();
     args.extend(["-dM", "-E", "-x", "c", "-"].map(String::from));
-    let mut child = Command::new(&prog)
+    let out = Command::new(&prog)
         .args(&args)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
+        .stdin(std::process::Stdio::null())
+        .output()
         .map_err(|e| format!("cannot run the C compiler `{prog}` to detect the target: {e}"))?;
-    drop(child.stdin.take().map(|mut i| i.write_all(b"")));
-    let out = child
-        .wait_with_output()
-        .map_err(|e| format!("C compiler failed: {e}"))?;
     let macros = String::from_utf8_lossy(&out.stdout);
     let defined = |m: &str| {
         macros
@@ -118,9 +112,6 @@ fn detect_target() -> Result<(String, String), String> {
     .iter()
     .find(|(m, _)| defined(m))
     .map_or("unknown", |(_, n)| *n);
-    let riscv64 = macros
-        .lines()
-        .any(|l| l.starts_with("#define __riscv_xlen 64"));
     let cpu = match [
         ("__aarch64__", "aarch64"),
         ("__x86_64__", "x86_64"),
@@ -134,7 +125,7 @@ fn detect_target() -> Result<(String, String), String> {
     .find(|(m, _)| defined(m))
     {
         Some((_, n)) => n,
-        None if riscv64 => "riscv64",
+        None if macros.contains("#define __riscv_xlen 64") => "riscv64",
         None if defined("__riscv") => "riscv32",
         None => "unknown",
     };

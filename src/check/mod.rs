@@ -96,7 +96,7 @@ struct PendingFn {
     tparams: HashMap<String, TyId>,
 }
 
-pub struct Checker<'a> {
+pub struct Checker {
     pub mods: Vec<ModInfo>,
     pub types: Types,
     pub funcs: Vec<Option<Func>>,
@@ -118,7 +118,6 @@ pub struct Checker<'a> {
     pub errors: Vec<Diag>,
     /// Checking for the language server: also index generic bodies that are never instantiated
     pub editor: bool,
-    _p: std::marker::PhantomData<&'a ()>,
 }
 
 /// Check a program, returning the (possibly partial) program, every error found and the
@@ -168,7 +167,6 @@ fn check_inner(graph: ModuleGraph, editor: bool) -> (Program, index::Index, Vec<
         ix: Default::default(),
         errors: vec![],
         editor,
-        _p: std::marker::PhantomData,
     };
     let p = c.run();
     c.record_module_facts();
@@ -179,7 +177,7 @@ fn check_inner(graph: ModuleGraph, editor: bool) -> (Program, index::Index, Vec<
     (p, std::mem::take(&mut c.ix.index), errors)
 }
 
-impl<'a> Checker<'a> {
+impl Checker {
     /// Public names, imports (and whether they are used) and project membership of each
     /// module, for the unused-code lint.
     fn record_module_facts(&mut self) {
@@ -260,7 +258,7 @@ impl<'a> Checker<'a> {
         }
         // Phase C: top-level statements, module by module in dependency order
         let main_ret = self.types.erru(VOID);
-        let main = self.reserve_fn("main".into(), vec![], main_ret);
+        let main = self.reserve_fn(vec![], main_ret);
         let mut main_ctx = self.new_ctx(main, 0, main_ret, HashMap::new());
         main_ctx.is_main = true;
         self.fns.push(main_ctx);
@@ -285,7 +283,7 @@ impl<'a> Checker<'a> {
             for it in &items {
                 if let ast::Item::Test(name, body, _) = it {
                     let erru = self.types.erru(VOID);
-                    let f = self.reserve_fn(format!("test {name}"), vec![], erru);
+                    let f = self.reserve_fn(vec![], erru);
                     let mut ctx = self.new_ctx(f, m, erru, HashMap::new());
                     ctx.is_test = true;
                     self.fns.push(ctx);
@@ -509,7 +507,7 @@ impl<'a> Checker<'a> {
                 match it {
                     ast::Item::Fn(f) if f.sig.type_params.is_empty() => {
                         let (params, ret) = self.resolve_sig(&f.sig, m, &none)?;
-                        let id = self.reserve_fn(f.sig.name.clone(), params, ret);
+                        let id = self.reserve_fn(params, ret);
                         if is_never_ret(&f.sig) {
                             self.never_funcs.insert(id);
                         }
@@ -549,7 +547,7 @@ impl<'a> Checker<'a> {
                             .sig
                             .type_params
                             .iter()
-                            .map(super::ast::GenericParam::show)
+                            .map(ast::GenericParam::show)
                             .collect();
                         for t in &f.sig.type_params {
                             self.idx_ref(t.span, Some(t.span), t.show());
@@ -826,7 +824,7 @@ impl<'a> Checker<'a> {
         Ok((params, ret))
     }
 
-    pub fn reserve_fn(&mut self, _name: String, params: Vec<TyId>, ret: TyId) -> FuncId {
+    pub fn reserve_fn(&mut self, params: Vec<TyId>, ret: TyId) -> FuncId {
         self.funcs.push(None);
         self.sigs.push((params, ret));
         self.funcs.len() - 1
@@ -948,15 +946,7 @@ impl<'a> Checker<'a> {
         let (params, ret) = self
             .resolve_sig(&f.sig, m, &tp)
             .map_err(|d| self.in_instance(d, &f.sig.name, &args))?;
-        let name = format!(
-            "{}<{}>",
-            f.sig.name,
-            args.iter()
-                .map(|a| self.types.show(*a))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        let id = self.reserve_fn(name, params, ret);
+        let id = self.reserve_fn(params, ret);
         if is_never_ret(&f.sig) {
             self.never_funcs.insert(id);
         }
@@ -968,17 +958,17 @@ impl<'a> Checker<'a> {
         // generic bodies are type-checked at instantiation; check right away so that errors
         // point at the instantiation that caused them.
         let saved = std::mem::take(&mut self.fns);
-        let mut decl2 = f.clone();
-        decl2.sig.name = self.types_name(&f.sig.name, &args);
+        let inst = self.types_name(&f.sig.name, &args);
+        let mut decl = f;
+        decl.sig.name = inst.clone();
         let before = self.errors.len();
         self.check_fn_body(PendingFn {
             func: id,
             module: m,
-            decl: decl2,
+            decl,
             tparams: tp,
         });
         self.fns = saved;
-        let inst = self.types_name(&f.sig.name, &args);
         for d in &mut self.errors[before..] {
             d.msg = format!("{} (in instantiation `{inst}`)", d.msg);
         }
@@ -1167,7 +1157,7 @@ impl<'a> Checker<'a> {
                 self.types.sym_consts = consts;
                 let before = self.errors.len();
                 if let Ok((params, ret)) = self.resolve_sig(&f.sig, m, &tp) {
-                    let id = self.reserve_fn(f.sig.name.clone(), params, ret);
+                    let id = self.reserve_fn(params, ret);
                     self.ix.fn_spans.insert(id, f.sig.span);
                     self.ix
                         .fn_params

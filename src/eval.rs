@@ -128,28 +128,11 @@ pub fn purity(p: &Program) -> Vec<bool> {
 fn stmt_pure(s: &Stmt) -> bool {
     let mut w = std::collections::HashSet::new();
     flow::writes_stmt(s, &mut w);
-    if !w.is_empty() {
-        return false;
-    }
-    match &s.kind {
-        SK::Lock { .. } | SK::Assert(_) | SK::Let(Some(VarRef::Global(_)), _) => false,
-        SK::While { body, .. } | SK::For { body, .. } | SK::Block(body) => {
-            body.stmts.iter().all(stmt_pure)
-        }
-        _ => {
-            let mut ok = true;
-            let mut check = |e: &Expr| {
-                if !flow::nested_blocks(e)
-                    .iter()
-                    .all(|b| b.stmts.iter().all(stmt_pure))
-                {
-                    ok = false;
-                }
-            };
-            flow::visit_stmt(s, &mut check);
-            ok
-        }
-    }
+    let mut ok = w.is_empty();
+    flow::visit_stmts(s, &mut |s| {
+        ok &= !matches!(s.kind, SK::Lock { .. } | SK::Assert(_));
+    });
+    ok
 }
 
 impl<'p> Evaluator<'p> {
@@ -406,8 +389,9 @@ impl<'p> Evaluator<'p> {
             | EK::Format(_)
             | EK::Len(_)
             | EK::Index(..)
-            | EK::Slice(..) => all_children_lit(e),
-            EK::Field(..) | EK::TupleIndex(..) => all_children_lit(e),
+            | EK::Slice(..)
+            | EK::Field(..)
+            | EK::TupleIndex(..) => all_children_lit(e),
             EK::Call(Callee::Direct(f), args) => self.pure[*f] && args.iter().all(is_lit_tree),
             _ => false,
         };
@@ -1677,7 +1661,8 @@ fn for_children(e: &mut Expr, f: &mut dyn FnMut(&mut Expr)) {
         | EK::Some(a)
         | EK::Retype(a)
         | EK::Try(a)
-        | EK::Await(a) => f(a),
+        | EK::Await(a)
+        | EK::Catch(a, _, _, _) => f(a),
         EK::Binary(_, a, b) | EK::Index(a, b) => {
             f(a);
             f(b);
@@ -1716,7 +1701,6 @@ fn for_children(e: &mut Expr, f: &mut dyn FnMut(&mut Expr)) {
                 f(b);
             }
         }
-        EK::Catch(a, _, _, _) => f(a),
     }
 }
 

@@ -2182,21 +2182,10 @@ fn lit_text(e: &Expr) -> Option<String> {
 
 /// Whether a block can throw (contains `throw` or `try` outside nested functions).
 fn block_throws(b: &Block) -> bool {
-    b.stmts.iter().any(stmt_throws)
-}
-
-fn stmt_throws(s: &Stmt) -> bool {
-    let nested = match &s.kind {
-        SK::Throw(_) => return true,
-        SK::While { body, .. } | SK::For { body, .. } | SK::Lock { body, .. } | SK::Block(body) => {
-            block_throws(body)
-        }
-        _ => false,
-    };
-    let mut found = nested;
-    flow::visit_stmt(s, &mut |e: &Expr| {
-        found |=
-            matches!(e.kind, EK::Try(_)) || flow::nested_blocks(e).into_iter().any(block_throws);
-    });
+    let mut found = false;
+    for s in &b.stmts {
+        flow::visit_stmts(s, &mut |s| found |= matches!(s.kind, SK::Throw(_)));
+        flow::visit_stmt(s, &mut |e| found |= matches!(e.kind, EK::Try(_)));
+    }
     found
 }

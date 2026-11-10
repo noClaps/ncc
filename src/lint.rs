@@ -27,8 +27,8 @@ fn shared_accesses(p: &Program, f: FuncId) -> Vec<(String, Span)> {
         flow::visit_stmt(s, &mut visit);
     }
     // assignment targets
-    fn places(b: &Block, func: &Func, p: &Program, out: &mut Vec<(String, Span)>) {
-        for s in &b.stmts {
+    for s in &func.body.stmts {
+        flow::visit_stmts(s, &mut |s| {
             if let SK::Assign(pl, _) = &s.kind {
                 match flow::place_root(pl) {
                     Some(VarRef::Global(g)) if p.globals[g].mutable => {
@@ -42,23 +42,8 @@ fn shared_accesses(p: &Program, f: FuncId) -> Vec<(String, Span)> {
                     _ => {}
                 }
             }
-            match &s.kind {
-                SK::While { body, .. }
-                | SK::For { body, .. }
-                | SK::Lock { body, .. }
-                | SK::Block(body) => places(body, func, p, out),
-                _ => {}
-            }
-            let mut nested: Vec<Block> = Vec::new();
-            flow::visit_stmt(s, &mut |e: &Expr| {
-                nested.extend(flow::nested_blocks(e).into_iter().cloned());
-            });
-            for b in &nested {
-                places(b, func, p, out);
-            }
-        }
+        });
     }
-    places(&func.body, func, p, &mut out);
     out
 }
 

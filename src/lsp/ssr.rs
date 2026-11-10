@@ -151,7 +151,7 @@ impl Matcher<'_> {
 }
 
 /// Whether an expression can be put anywhere without parentheses.
-fn atomic(e: &ast::Expr) -> bool {
+pub(super) fn atomic(e: &ast::Expr) -> bool {
     !matches!(
         e.kind,
         E::Binary(..)

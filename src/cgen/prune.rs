@@ -377,7 +377,7 @@ fn decl_names(code: &str) -> Vec<String> {
                 }
                 depth += 1;
             }
-            b'}' | b']' => depth -= 1,
+            b'}' | b']' | b')' => depth -= 1,
             b'(' => {
                 if depth == 0 && !first_paren_seen {
                     first_paren_seen = true;
@@ -397,7 +397,6 @@ fn decl_names(code: &str) -> Vec<String> {
                 }
                 depth += 1;
             }
-            b')' => depth -= 1,
             b'=' if depth == 0 => break,
             c if (c.is_ascii_alphabetic() || c == b'_') && depth == 0 => {
                 let s = i;

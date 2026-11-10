@@ -9,7 +9,7 @@ enum Target {
     Variant(TyId, usize, Vec<TyId>),
 }
 
-impl<'a> Checker<'a> {
+impl Checker {
     /// A reference to the function `f` as a value.
     fn fn_ref(&mut self, f: FuncId, name: &str, span: Span) -> Expr {
         self.idx_fn_ref(f, name, span);

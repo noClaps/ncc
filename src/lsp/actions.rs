@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use lsp_types::*;
 
 use super::nav::{Node, walk};
+use super::ssr::atomic;
 use super::{
     Analysis, Server, edit_action, indent_at, line_end, line_start, name_span, offset_to_pos,
     pos_to_offset, range, span_range, uri_to_path,
@@ -244,7 +245,7 @@ pub(super) fn importable_modules(file: &Path) -> Vec<(String, String)> {
         return out;
     };
     let mut files = Vec::new();
-    super::collect_nc_files(&root, &mut files, 0);
+    super::collect_nc_files(&root, false, &mut files, 0);
     for f in files {
         if f.parent() != Some(dir)
             && let Ok(rel) = f.with_extension("").strip_prefix(&root)
@@ -257,7 +258,7 @@ pub(super) fn importable_modules(file: &Path) -> Vec<(String, String)> {
     }
     let deps = root.join(".nc").join("deps");
     let mut files = Vec::new();
-    collect_all_nc(&deps, &mut files, 0);
+    super::collect_nc_files(&deps, true, &mut files, 0);
     for f in files {
         if let Ok(rel) = f.with_extension("").strip_prefix(&deps) {
             out.push((
@@ -291,24 +292,6 @@ fn find_modules(file: &Path, name: &str) -> Vec<String> {
         .filter(|(n, _)| n == name)
         .map(|(_, p)| p)
         .collect()
-}
-
-/// `.nc` files under a directory, including hidden ones (dependencies live under `.nc/`).
-fn collect_all_nc(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
-    if depth > 8 {
-        return;
-    }
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for e in rd.flatten() {
-        let p = e.path();
-        match e.file_type() {
-            Ok(t) if t.is_dir() => collect_all_nc(&p, out, depth + 1),
-            Ok(t) if t.is_file() && p.extension().is_some_and(|x| x == "nc") => out.push(p),
-            _ => {}
-        }
-    }
 }
 
 /// An edit adding `import { "path" as alias }` after the last import (or at the top).
@@ -368,30 +351,6 @@ fn default_value(ty: &str) -> String {
         t if t.starts_with('[') && !t.ends_with(']') => "[:]".into(),
         _ => "_".into(),
     }
-}
-
-/// Whether an expression can replace a name without parentheses.
-fn atomic(e: &ast::Expr) -> bool {
-    matches!(
-        e.kind,
-        E::Int(..)
-            | E::Float(_)
-            | E::Char(_)
-            | E::Str(_)
-            | E::Bool(_)
-            | E::None
-            | E::Ident(_)
-            | E::Call(..)
-            | E::Builtin(..)
-            | E::Field(..)
-            | E::Index(..)
-            | E::Slice(..)
-            | E::Tuple(_)
-            | E::Array(_)
-            | E::Map(_)
-            | E::Struct(..)
-            | E::Generic(..)
-    )
 }
 
 // ------------------------------------------------------------------ code actions

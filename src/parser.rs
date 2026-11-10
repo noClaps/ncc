@@ -654,7 +654,7 @@ impl Parser {
 
     pub fn parse_type(&mut self) -> Result<TypeExpr> {
         let start = self.span();
-        let mut ty = match self.peek().clone() {
+        let ty = match self.peek().clone() {
             Tok::Ident(s) if s == "fut" => {
                 self.bump();
                 let inner = self.parse_type()?;
@@ -670,11 +670,10 @@ impl Parser {
             }
             _ => self.parse_type_atom()?,
         };
-        ty = self.type_postfix(ty, start)?;
-        Ok(ty)
+        Ok(self.type_postfix(ty, start))
     }
 
-    fn type_postfix(&mut self, mut ty: TypeExpr, start: Span) -> Result<TypeExpr> {
+    fn type_postfix(&mut self, mut ty: TypeExpr, start: Span) -> TypeExpr {
         loop {
             match self.peek() {
                 Tok::LBracket => {
@@ -712,7 +711,7 @@ impl Parser {
                 _ => break,
             }
         }
-        Ok(ty)
+        ty
     }
 
     fn parse_type_atom(&mut self) -> Result<TypeExpr> {

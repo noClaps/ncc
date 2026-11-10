@@ -50,13 +50,9 @@ enum Seg {
     Slice,
 }
 
-/// Parse the receiver chain at the end of `head` (`a.b(x)[0].c`), outermost last.
-fn receiver_chain(head: &str) -> Option<Vec<Seg>> {
-    receiver_chain_at(head).map(|(s, _)| s)
-}
-
-/// Like `receiver_chain`, with the offset where the receiver starts.
-fn receiver_chain_at(head: &str) -> Option<(Vec<Seg>, usize)> {
+/// Parse the receiver chain at the end of `head` (`a.b(x)[0].c`), outermost last, with the
+/// offset where the receiver starts.
+fn receiver_chain(head: &str) -> Option<(Vec<Seg>, usize)> {
     let b = head.as_bytes();
     let mut i = head.trim_end().len();
     let mut segs = Vec::new();
@@ -308,7 +304,7 @@ impl Server {
                 return Some(CompletionResponse::Array(fields));
             }
             let head = &text[..dot];
-            let Some(chain) = receiver_chain(head) else {
+            let Some((chain, start)) = receiver_chain(head) else {
                 return Some(CompletionResponse::Array(items));
             };
             let fid = fid?;
@@ -324,16 +320,13 @@ impl Server {
                 _ => false,
             };
             let postfix = if is_value && self.snippets {
-                let (_, start) = receiver_chain_at(head)?;
                 postfix_items(&text, start, dot, off)
             } else {
                 vec![]
             };
             if let Some((mut items, ty)) = self.member_items(a, fid, dot, &chain, call_parens) {
                 // functions taking the value as their first argument: `v.f` -> `f(v, ...)`
-                if let Some(ty) = ty
-                    && let Some((_, start)) = receiver_chain_at(head)
-                {
+                if let Some(ty) = ty {
                     items.extend(self.first_arg_items(a, fid, &text, start, dot, off, &ty));
                 }
                 items.extend(postfix);
@@ -1103,7 +1096,7 @@ mod tests {
     fn first_argument_types() {
         let t = |names: &[&str]| names.iter().map(ToString::to_string).collect::<Vec<_>>();
         let b = |p: &str, ty: &str, tps: &[&str]| {
-            super::accepts(p, ty, &t(tps)).map(|m| {
+            accepts(p, ty, &t(tps)).map(|m| {
                 let mut v: Vec<(String, String)> = m.into_iter().collect();
                 v.sort();
                 v
@@ -1140,13 +1133,16 @@ mod tests {
     fn parses_receiver_chains() {
         assert_eq!(
             receiver_chain("x = a.b(1, f(2))[i].c"),
-            Some(vec![
-                Seg::Name("a".into()),
-                Seg::Name("b".into()),
-                Seg::Call,
-                Seg::Index,
-                Seg::Name("c".into()),
-            ])
+            Some((
+                vec![
+                    Seg::Name("a".into()),
+                    Seg::Name("b".into()),
+                    Seg::Call,
+                    Seg::Index,
+                    Seg::Name("c".into()),
+                ],
+                4
+            ))
         );
         assert_eq!(receiver_chain("1 + "), None);
         assert_eq!(

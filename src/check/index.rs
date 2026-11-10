@@ -139,7 +139,7 @@ pub struct IndexState {
     pub scopes: Vec<Span>,
 }
 
-impl<'a> Checker<'a> {
+impl Checker {
     pub fn members_of(&self, t: TyId) -> Vec<(String, String)> {
         match self.types.kind(t) {
             TyKind::Struct(i) => self.types.structs[*i as usize]
