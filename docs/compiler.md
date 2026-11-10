@@ -109,5 +109,22 @@ Options:
 ```
 
 ```
+Usage: ncc init
 
+Initialises a project.
+
+Options:
+  --name <name>  Initialises the project with the given name.
+                 (default: directory name)
+  -h, --help     Show this help and exit.
+```
+
+## Project layout
+
+```
+.nc/
+  config.toml
+  deps/
+.gitignore
+main.nc
 ```
