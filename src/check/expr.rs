@@ -1274,8 +1274,73 @@ impl<'a> Checker<'a> {
                 let x = self.check_expr(&args[0], Some(t))?;
                 self.check_cast(x, t, span)
             }
+            "args" | "env" | "target" => {
+                if ty.is_some() || !args.is_empty() {
+                    return err(span, format!("`@{name}` takes no arguments"));
+                }
+                let (kind, ty) = match name {
+                    "args" => (EK::Args, self.types.array(STR)),
+                    "env" => (EK::Env, self.types.intern(TyKind::Map(STR, STR))),
+                    _ => (EK::Target, self.types.tuple(vec![STR, STR])),
+                };
+                Ok(Expr { kind, ty, span })
+            }
+            "embed" => {
+                let [arg] = args else {
+                    return err(span, "`@embed` expects one path: `@embed(\"./file\")`");
+                };
+                let path = match &arg.kind {
+                    ast::ExprKind::Str(segs) => match segs.as_slice() {
+                        [ast::StrSeg::Lit(s)] => s.clone(),
+                        _ => return err(arg.span, "`@embed` paths must be plain string literals"),
+                    },
+                    _ => return err(arg.span, "`@embed` paths must be plain string literals"),
+                };
+                let file = self.resolve_embed_path(&path, arg.span)?;
+                let bytes = std::fs::read(&file).map_err(|e| {
+                    Diag::new(arg.span, format!("cannot read `{}`: {e}", file.display()))
+                })?;
+                let ty = self.types.array(BYTE);
+                Ok(Expr {
+                    kind: EK::Embed(std::rc::Rc::new(bytes), file),
+                    ty,
+                    span,
+                })
+            }
             _ => err(span, format!("unknown builtin function `@{name}`")),
         }
+    }
+
+    /// Resolve an `@embed` path like a relative import: `./` and `../` from the current file,
+    /// `.../` from the project root.
+    fn resolve_embed_path(&self, path: &str, span: Span) -> Result<std::path::PathBuf> {
+        let m = self.module();
+        let dir = self.mods[m].path.parent().unwrap().to_path_buf();
+        let file = if let Some(rel) = path.strip_prefix(".../") {
+            match crate::modules::find_root(&dir) {
+                Some(root) => root.join(rel),
+                None => {
+                    return err(
+                        span,
+                        format!(
+                            "cannot resolve `{path}`: no `.nc/config.toml` found in `{}` or any parent directory",
+                            dir.display()
+                        ),
+                    );
+                }
+            }
+        } else if path.starts_with("./") || path.starts_with("../") {
+            dir.join(path.strip_prefix("./").unwrap_or(path))
+        } else {
+            return err(span, "`@embed` paths must start with `./`, `../` or `.../`");
+        };
+        if !file.is_file() {
+            return err(
+                span,
+                format!("cannot find `{path}` (looked for `{}`)", file.display()),
+            );
+        }
+        Ok(file)
     }
 
     fn check_cast(&mut self, x: Expr, t: TyId, span: Span) -> Result<Expr> {

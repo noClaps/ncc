@@ -23,10 +23,18 @@ pub struct Options {
 }
 
 /// Parse and type-check a program, printing diagnostics on failure.
-fn frontend(file: &Path, sm: &mut SourceMap, release: bool) -> Option<Program> {
+/// `codegen` is set when the program will be compiled to C (not just checked): the
+/// compilation target is then needed for `@target`.
+fn frontend(file: &Path, sm: &mut SourceMap, release: bool, codegen: bool) -> Option<Program> {
     let r = crate::modules::load_with(sm, file, &Default::default()).map(|(graph, load_errors)| {
         let (mut p, mut errors, _) = crate::check::check_partial(graph);
         errors.extend(load_errors);
+        if codegen && errors.is_empty() && uses_target(&p) {
+            match detect_target() {
+                Ok(t) => p.target = Some(t),
+                Err(e) => errors.push(crate::diag::Diag::new(Default::default(), e)),
+            }
+        }
         // compile-time panics are reported alongside type errors
         if let Err(more) = crate::eval::Evaluator::run(&mut p, sm, release && errors.is_empty()) {
             errors.extend(more);
@@ -52,6 +60,80 @@ fn frontend(file: &Path, sm: &mut SourceMap, release: bool) -> Option<Program> {
         eprintln!("error: found {} errors", errors.len());
     }
     None
+}
+
+fn uses_target(p: &Program) -> bool {
+    let mut found = false;
+    for f in &p.funcs {
+        for s in &f.body.stmts {
+            crate::check::flow::visit_stmt(s, &mut |e| {
+                found |= matches!(e.kind, crate::tir::EK::Target)
+            });
+        }
+    }
+    found
+}
+
+/// The C compiler's target as `(os, cpu)`, from its predefined macros.
+fn detect_target() -> Result<(String, String), String> {
+    use std::io::Write;
+    let (prog, mut args) = cc_command();
+    args.extend(["-dM", "-E", "-x", "c", "-"].map(String::from));
+    let mut child = Command::new(&prog)
+        .args(&args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("cannot run the C compiler `{prog}` to detect the target: {e}"))?;
+    drop(child.stdin.take().map(|mut i| i.write_all(b"")));
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("C compiler failed: {e}"))?;
+    let macros = String::from_utf8_lossy(&out.stdout);
+    let defined = |m: &str| {
+        macros
+            .lines()
+            .any(|l| l.split_whitespace().nth(1) == Some(m))
+    };
+    let os = [
+        ("__ANDROID__", "android"),
+        ("__APPLE__", "macos"),
+        ("__linux__", "linux"),
+        ("_WIN32", "windows"),
+        ("__FreeBSD__", "freebsd"),
+        ("__OpenBSD__", "openbsd"),
+        ("__NetBSD__", "netbsd"),
+        ("__wasi__", "wasi"),
+    ]
+    .iter()
+    .find(|(m, _)| defined(m))
+    .map(|(_, n)| *n)
+    .unwrap_or("unknown");
+    let riscv64 = macros
+        .lines()
+        .any(|l| l.starts_with("#define __riscv_xlen 64"));
+    let cpu = [
+        ("__aarch64__", "aarch64"),
+        ("__x86_64__", "x86_64"),
+        ("__i386__", "x86"),
+        ("__arm__", "arm"),
+        ("__powerpc64__", "powerpc64"),
+        ("__wasm32__", "wasm32"),
+        ("__wasm64__", "wasm64"),
+    ]
+    .iter()
+    .find(|(m, _)| defined(m))
+    .map(|(_, n)| n.to_string())
+    .unwrap_or_else(|| {
+        if riscv64 {
+            "riscv64".into()
+        } else if defined("__riscv") {
+            "riscv32".into()
+        } else {
+            "unknown".into()
+        }
+    });
+    Ok((os.to_string(), cpu))
 }
 
 /// The C compiler command from `$CC`, falling back to `cc`.
@@ -172,7 +254,7 @@ fn compile(
 
 pub fn check(o: &Options) -> ExitCode {
     let mut sm = SourceMap::default();
-    match frontend(o.file.as_ref().unwrap(), &mut sm, false) {
+    match frontend(o.file.as_ref().unwrap(), &mut sm, false, false) {
         Some(_) => ExitCode::SUCCESS,
         None => ExitCode::FAILURE,
     }
@@ -203,7 +285,7 @@ pub fn build(o: &Options) -> ExitCode {
         }
     });
     let mut sm = SourceMap::default();
-    let Some(p) = frontend(file, &mut sm, o.release) else {
+    let Some(p) = frontend(file, &mut sm, o.release, true) else {
         return ExitCode::FAILURE;
     };
     if compile(&p, &sm, Mode::Run, o.release, format, &out) {
@@ -232,7 +314,7 @@ fn run_exe(exe: &Path) -> ExitCode {
 fn build_and_run(o: &Options, mode: Mode) -> ExitCode {
     let file = o.file.as_ref().unwrap();
     let mut sm = SourceMap::default();
-    let Some(p) = frontend(file, &mut sm, o.release) else {
+    let Some(p) = frontend(file, &mut sm, o.release, true) else {
         return ExitCode::FAILURE;
     };
     let tmp = match TempDir::new() {

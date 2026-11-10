@@ -90,6 +90,9 @@ pub struct CGen<'p> {
     main_void: bool,
     /// functions used as values (`nc_fn`), which take a closure environment parameter
     value_fns: HashSet<FuncId>,
+    /// the program uses `@args`, so `main` records `argc`/`argv`
+    uses_args: bool,
+    embeds: usize,
     cwd: Option<std::path::PathBuf>,
 }
 
@@ -114,6 +117,8 @@ pub fn generate(p: &Program, sm: &SourceMap, mode: Mode) -> (String, String) {
         fut_sites: 0,
         main_void: false,
         value_fns: HashSet::new(),
+        uses_args: false,
+        embeds: 0,
         cwd: std::env::current_dir().ok(),
     };
     g.run(mode)
@@ -127,6 +132,9 @@ impl<'p> CGen<'p> {
                 flow::visit_stmt(st, &mut |e: &Expr| {
                     if let EK::FnRef(g) | EK::Closure(g) = e.kind {
                         self.value_fns.insert(g);
+                    }
+                    if let EK::Args = e.kind {
+                        self.uses_args = true;
                     }
                 });
             }
@@ -234,21 +242,35 @@ impl<'p> CGen<'p> {
     fn run_main(&mut self) -> String {
         let m = self.p.main;
         let f = self.fname(m);
+        let (params, init) = self.main_params();
         if self.main_void {
-            return format!("int main(void) {{\n  {f}();\n  return 0;\n}}\n");
+            return format!("int main({params}) {{\n{init}  {f}();\n  return 0;\n}}\n");
         }
         let rc = self.tg.ct(self.p.funcs[m].ret);
         format!(
-            "int main(void) {{\n  {rc} r = {f}();\n  if (r.err) nc_uncaught(r.err);\n  return 0;\n}}\n"
+            "int main({params}) {{\n{init}  {rc} r = {f}();\n  if (r.err) nc_uncaught(r.err);\n  return 0;\n}}\n"
         )
+    }
+
+    /// `main`'s parameters and the code recording them (only when `@args` is used).
+    fn main_params(&self) -> (&'static str, &'static str) {
+        if self.uses_args {
+            (
+                "int argc, char **argv",
+                "  nc_argc = argc;\n  nc_argv = argv;\n",
+            )
+        } else {
+            ("void", "")
+        }
     }
 
     fn test_main(&mut self) -> String {
         let erru = self.tg.ct(self.p.funcs[self.p.main].ret);
         let mut s = String::new();
+        let (params, init) = self.main_params();
         writeln!(
             s,
-            "int main(void) {{\n  nc_test_runner_init();\n  int passed = 0, failed = 0;"
+            "int main({params}) {{\n{init}  nc_test_runner_init();\n  int passed = 0, failed = 0;"
         )
         .unwrap();
         writeln!(
@@ -1385,6 +1407,47 @@ impl<'p> CGen<'p> {
                 CVal::b(format!("{rv}.val"))
             }
             EK::Async(c, args) => self.async_call(c, args, ty, e.span),
+            EK::Args => {
+                self.tg.need(STR);
+                self.temp(ty, &format!("nc_args(&ti_{STR})"))
+            }
+            EK::Env => {
+                self.tg.need(STR);
+                self.temp(ty, &format!("nc_environ(&ti_{STR})"))
+            }
+            EK::Target => {
+                let (os, cpu) = self
+                    .p
+                    .target
+                    .clone()
+                    .expect("target is detected before code generation");
+                let (os, cpu) = (self.lit_str(&os), self.lit_str(&cpu));
+                self.tg.need(ty);
+                let c = self.tg.ct(ty);
+                CVal::b(format!("(({c}){{&{os}, &{cpu}}})"))
+            }
+            EK::Embed(bytes, path) => {
+                // an immortal array over the file's bytes, embedded with C23 `#embed`
+                self.tg.need(BYTE);
+                let n = self.embeds;
+                self.embeds += 1;
+                let len = bytes.len();
+                if len == 0 {
+                    writeln!(
+                        self.str_defs,
+                        "static nc_arr nc_embed{n} = {{-1, 0, 0, &ti_{BYTE}, NULL}};"
+                    )
+                    .unwrap();
+                } else {
+                    let p = c_escape_str(&path.display().to_string());
+                    writeln!(
+                        self.str_defs,
+                        "static const uint8_t nc_embed{n}_data[] = {{\n#embed \"{p}\"\n}};\nstatic nc_arr nc_embed{n} = {{-1, {len}, {len}, &ti_{BYTE}, (void *)nc_embed{n}_data}};"
+                    )
+                    .unwrap();
+                }
+                CVal::b(format!("(&nc_embed{n})"))
+            }
             EK::Await(x) => {
                 let v = self.expr(x);
                 let c = self.tg.ct(ty);

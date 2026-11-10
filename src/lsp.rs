@@ -36,6 +36,10 @@ const BUILTINS: &[(&str, &str)] = &[
     ("eprint", "fn @eprint(...)"),
     ("eprintln", "fn @eprintln(...)"),
     ("as", "fn @as(type T, value) T"),
+    ("args", "fn @args() str[]"),
+    ("env", "fn @env() [str]str"),
+    ("target", "fn @target() (str, str)"),
+    ("embed", "fn @embed(path) byte[]"),
 ];
 
 /// Result of analysing one entry document.

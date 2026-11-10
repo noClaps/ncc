@@ -1068,6 +1068,38 @@ static void *nc_fut_await(nc_fut *f) {
   return f->result;
 }
 
+/* ------------------------------------------------------------------ process */
+
+/* Set by `main` when the program uses `@args`. */
+static int nc_argc;
+static char **nc_argv;
+
+/* `@args()`: the command line arguments, program name first. */
+static nc_arr *nc_args(const nc_ti *str_ti) {
+  nc_arr *a = nc_arr_new(str_ti, nc_argc);
+  for (int i = 0; i < nc_argc; i++) {
+    nc_str *s = nc_str_from_cstr(nc_argv[i]);
+    nc_arr_push(&a, &s);
+  }
+  return a;
+}
+
+extern char **environ;
+
+/* `@env()`: a snapshot of the environment variables. */
+static nc_map *nc_environ(const nc_ti *str_ti) {
+  nc_map *m = nc_map_new(str_ti, str_ti, 16);
+  for (char **e = environ; e && *e; e++) {
+    const char *eq = strchr(*e, '=');
+    if (!eq) continue;
+    nc_str *k = nc_str_new(*e, (int64_t)(eq - *e));
+    nc_str *v = nc_str_from_cstr(eq + 1);
+    nc_map_set(&m, &k, &v); /* borrows the key, takes the value */
+    nc_str_release(k);
+  }
+  return m;
+}
+
 /* ------------------------------------------------------------------ errors */
 
 static _Noreturn void nc_uncaught(nc_str *err) {

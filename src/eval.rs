@@ -208,6 +208,7 @@ impl<'p> Evaluator<'p> {
             externs: p.externs.clone(),
             main: p.main,
             tests: p.tests.clone(),
+            target: p.target.clone(),
         };
         let r = (|| {
             let mut ev = Evaluator::new(&snapshot, sm);
@@ -220,6 +221,23 @@ impl<'p> Evaluator<'p> {
                     // panics are reported when the statement itself is folded below
                     if let Ok(Some(v)) = ev.try_const(e) {
                         ev.gconst.insert(*g, v);
+                    }
+                }
+                // destructured immutable globals: `str os, str cpu = @target()`
+                if let SK::Destructure(targets, e) = &s.kind
+                    && let Ok(Some(Val::Tuple(items))) = ev.try_const(e)
+                {
+                    for (t, start, count) in targets {
+                        if let Some(VarRef::Global(g)) = t
+                            && !snapshot.globals[*g].mutable
+                        {
+                            let v = if *count == 1 {
+                                items[*start].clone()
+                            } else {
+                                Val::Tuple(Rc::new(items[*start..*start + *count].to_vec()))
+                            };
+                            ev.gconst.insert(*g, v);
+                        }
                     }
                 }
             }
@@ -390,6 +408,7 @@ impl<'p> Evaluator<'p> {
                 for arm in i.arms.iter_mut() {
                     self.fold_block(&mut arm.body, locals, consts)?;
                 }
+                self.select_arm(i);
             }
             EK::Else(_, Fallback::Block(b, _)) | EK::Catch(_, _, b, _) => {
                 self.fold_block(b, locals, consts)?
@@ -426,6 +445,71 @@ impl<'p> Evaluator<'p> {
             }
             Err(Stop::Unknown) => Ok(()),
             Err(Stop::Panic(m, sp)) => Err(self.panic_diag(e.span, &m, sp)),
+        }
+    }
+
+    /// When an `if` is decided at compile time, keep only the arm that runs.
+    fn select_arm(&mut self, i: &mut If) {
+        let scrut = match &i.scrutinee {
+            Some(s) if is_lit_tree(s) => {
+                let mut env = Env {
+                    locals: vec![],
+                    dollar: vec![],
+                };
+                self.fuel = CALL_FUEL;
+                match self.expr(s, &mut env, true) {
+                    Ok(v) => Some(v),
+                    Err(_) => return,
+                }
+            }
+            Some(_) => return,
+            None => None,
+        };
+        for (k, arm) in i.arms.iter().enumerate() {
+            // Some(true): definitely matches; Some(false): definitely not; None: unknown
+            let mut decided = Some(false);
+            for p in &arm.patterns {
+                let m = match (p, &scrut) {
+                    (Pat::Wild, _) => Some(true),
+                    (
+                        Pat::Cond(Expr {
+                            kind: EK::Lit(Lit::Bool(b)),
+                            ..
+                        }),
+                        None,
+                    ) => Some(*b),
+                    (Pat::Value(e), Some(v)) if is_lit_tree(e) => {
+                        let mut env = Env {
+                            locals: vec![],
+                            dollar: vec![],
+                        };
+                        match self.expr(e, &mut env, true) {
+                            Ok(x) => Some(val_eq(&x, v)),
+                            Err(_) => None,
+                        }
+                    }
+                    _ => None,
+                };
+                match m {
+                    Some(true) => {
+                        decided = Some(true);
+                        break;
+                    }
+                    Some(false) => {}
+                    None => decided = None,
+                }
+            }
+            match decided {
+                Some(true) => {
+                    let mut arm = i.arms[k].clone();
+                    arm.patterns = vec![Pat::Wild];
+                    i.arms = vec![arm];
+                    i.scrutinee = None;
+                    return;
+                }
+                Some(false) => {}
+                None => return,
+            }
         }
     }
 
@@ -994,7 +1078,17 @@ impl<'p> Evaluator<'p> {
                     Err(_) => return Err(Stop::Unknown),
                 }
             }
-            EK::Print(..) | EK::Async(..) | EK::Await(_) => return Err(Stop::Unknown),
+            EK::Print(..) | EK::Async(..) | EK::Await(_) | EK::Args | EK::Env => {
+                return Err(Stop::Unknown);
+            }
+            EK::Target => match &self.p.target {
+                Some((os, cpu)) => Val::Tuple(Rc::new(vec![
+                    Val::Str(os.as_str().into()),
+                    Val::Str(cpu.as_str().into()),
+                ])),
+                None => return Err(Stop::Unknown),
+            },
+            EK::Embed(bytes, _) => Val::Arr(Rc::new(bytes.iter().map(|b| Val::Byte(*b)).collect())),
         })
     }
 
@@ -1546,7 +1640,16 @@ fn contains_control(e: &Expr) -> bool {
 /// Apply `f` to each direct sub-expression (not inside nested blocks).
 fn for_children(e: &mut Expr, f: &mut dyn FnMut(&mut Expr)) {
     match &mut e.kind {
-        EK::Lit(_) | EK::None | EK::Var(_) | EK::FnRef(_) | EK::Closure(_) | EK::Dollar => {}
+        EK::Lit(_)
+        | EK::None
+        | EK::Var(_)
+        | EK::FnRef(_)
+        | EK::Closure(_)
+        | EK::Dollar
+        | EK::Args
+        | EK::Env
+        | EK::Target
+        | EK::Embed(..) => {}
         EK::Unary(_, a)
         | EK::Cast(a)
         | EK::ToStr(a)

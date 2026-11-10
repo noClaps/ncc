@@ -284,6 +284,7 @@ impl<'a> Checker<'a> {
             externs: std::mem::take(&mut self.externs),
             main,
             tests: std::mem::take(&mut self.tests),
+            target: None,
         }
     }
 

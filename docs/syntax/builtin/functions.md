@@ -115,3 +115,69 @@ struct Data {
 (str, int) data = ("Nathan", 24)
 @println(data) // output: (Nathan, 24)
 ```
+
+## `@args()`
+
+Returns the command line arguments the program was started with. The first element is the
+program's path.
+
+```nc
+fn @args() str[]
+```
+
+```nc
+str[] args = @args()
+@println("called as {args[0]} with {args.len - 1} arguments")
+```
+
+## `@env()`
+
+Returns a snapshot of the environment variables at the time of the call.
+
+```nc
+fn @env() [str]str
+```
+
+```nc
+[str]str env = @env()
+if {
+  "HOME" in env -> { @println("home is {env["HOME"]}") }
+  _ -> {}
+}
+```
+
+## `@target()`
+
+Returns the operating system and CPU architecture the program was compiled for. These are
+fixed at compile time, so a release build only keeps the code for its own target.
+
+```nc
+fn @target() (str, str)
+```
+
+The OS is one of `"macos"`, `"linux"`, `"windows"`, `"freebsd"`, `"openbsd"`, `"netbsd"`,
+`"android"` or `"wasi"`. The CPU is one of `"aarch64"`, `"x86_64"`, `"x86"`, `"arm"`,
+`"riscv64"`, `"riscv32"`, `"powerpc64"`, `"wasm32"` or `"wasm64"`. Anything else is
+`"unknown"`.
+
+```nc
+str os, str cpu = @target()
+if os {
+  "windows" -> { @println("hello from Windows on {cpu}") }
+  _ -> { @println("hello from {os} on {cpu}") }
+}
+```
+
+## `@embed()`
+
+Embeds a file's contents into the program at compile time. The path must be a string literal,
+and is resolved like an import: `./` and `../` are relative to the current file, and `.../`
+is relative to the project root.
+
+```nc
+fn @embed(path) byte[]
+```
+
+```nc
+byte[] logo = @embed("./assets/logo.png")
+```

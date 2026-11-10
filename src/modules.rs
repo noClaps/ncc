@@ -21,7 +21,7 @@ pub struct ModuleGraph {
     pub order: Vec<usize>,
 }
 
-fn find_root(start: &Path) -> Option<PathBuf> {
+pub fn find_root(start: &Path) -> Option<PathBuf> {
     let mut dir = Some(start);
     while let Some(d) = dir {
         if d.join(".nc").join("config.toml").is_file() {

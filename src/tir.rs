@@ -96,6 +96,14 @@ pub enum EK {
     Try(Box<Expr>),
     Async(Callee, Vec<Expr>),
     Await(Box<Expr>),
+    /// `@args()`: the command line arguments, program name first
+    Args,
+    /// `@env()`: a snapshot of the environment variables
+    Env,
+    /// `@target()`: `(os, cpu)` of the compilation target
+    Target,
+    /// `@embed(path)`: the file's bytes, read at compile time
+    Embed(std::rc::Rc<Vec<u8>>, std::path::PathBuf),
 }
 
 #[derive(Clone, Debug)]
@@ -276,4 +284,6 @@ pub struct Program {
     /// The program entry: a function running the module initialisers and the entry module's top level.
     pub main: FuncId,
     pub tests: Vec<Test>,
+    /// `(os, cpu)` of the C compiler's target, when known (see `@target`)
+    pub target: Option<(String, String)>,
 }

@@ -76,7 +76,16 @@ pub fn visit_pat(p: &Pat, f: &mut dyn FnMut(&Expr)) {
 pub fn visit_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
     f(e);
     match &e.kind {
-        EK::Lit(_) | EK::None | EK::Var(_) | EK::FnRef(_) | EK::Closure(_) | EK::Dollar => {}
+        EK::Lit(_)
+        | EK::None
+        | EK::Var(_)
+        | EK::FnRef(_)
+        | EK::Closure(_)
+        | EK::Dollar
+        | EK::Args
+        | EK::Env
+        | EK::Target
+        | EK::Embed(..) => {}
         EK::Unary(_, a)
         | EK::Cast(a)
         | EK::ToStr(a)
