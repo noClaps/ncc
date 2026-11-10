@@ -35,6 +35,11 @@
   function: (generic_expression
     name: (identifier) @function.call))
 
+(call_expression
+  function: (generic_expression
+    name: (field_expression
+      field: (field_identifier) @function.method.call)))
+
 (builtin_identifier) @function.builtin
 
 ; Enum members and module paths

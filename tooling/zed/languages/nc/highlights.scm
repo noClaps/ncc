@@ -55,6 +55,11 @@
   function: (generic_expression
     name: (identifier) @function))
 
+(call_expression
+  function: (generic_expression
+    name: (field_expression
+      field: (field_identifier) @function.method)))
+
 (builtin_identifier) @function.builtin
 
 ; Enum constructors: `Node.Text(...)`
