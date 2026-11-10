@@ -12,21 +12,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest]
+        # Ubuntu 26.04's default GCC (15) supports the C23 the generated code needs
+        os: [macos-latest, ubuntu-26.04]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
-      # the generated C needs C23 (`<stdckdint.h>`, GCC 14+), so use the newest GCC the
-      # Ubuntu release packages rather than its default one
-      - name: Install the newest GCC
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          version=$(apt-cache search --names-only '^gcc-[0-9]+$' | grep -oE '^gcc-[0-9]+' | cut -d- -f2 | sort -n | tail -1)
-          sudo apt-get install -y "gcc-$version"
-          echo "CC=gcc-$version" >> "$GITHUB_ENV"
-          "gcc-$version" --version
+      - name: C compiler version
+        run: cc --version
 
       - uses: dtolnay/rust-toolchain@stable
         with:
