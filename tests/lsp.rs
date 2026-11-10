@@ -841,6 +841,38 @@ fn completion_features() {
     let comp = s.req("textDocument/completion", json!({"position": pos(0, 12)}));
     assert_eq!(labels(&comp), ["util"], "{comp}");
 
+    // modules that are not imported yet, adding the import
+    std::fs::write(
+        s.dir.join("geometry.nc"),
+        "pub fn pi() float {\n  return 3.14\n}\n",
+    )
+    .unwrap();
+    let text = format!("{src}\n");
+    s.change(&text);
+    let comp = s.req(
+        "textDocument/completion",
+        json!({"position": at(&text, "helper())\n", 0, 10)}),
+    );
+    let g = comp
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["label"] == "geometry")
+        .unwrap_or_else(|| panic!("{comp}"));
+    assert_eq!(
+        g["additionalTextEdits"][0]["newText"],
+        "import { \"./geometry\" as geometry }\n"
+    );
+    assert_eq!(g["additionalTextEdits"][0]["range"]["start"], pos(1, 0));
+    let text = format!("{src}float f = geometry.\n");
+    s.change(&text);
+    let comp = s.req(
+        "textDocument/completion",
+        json!({"position": at(&text, "geometry.\n", 0, 9)}),
+    );
+    assert_eq!(labels(&comp), ["pi"], "{comp}");
+    assert!(comp[0]["additionalTextEdits"].is_array());
+
     // builtins with documentation
     let text = format!("{src}@\n");
     s.change(&text);
@@ -990,6 +1022,41 @@ fn diagnostics_and_code_actions() {
     let edits = ex["edit"]["changes"][&s.uri].as_array().unwrap();
     assert_eq!(edits[0]["newText"], "int value = add(ps[0].x, 3)\n");
     assert_eq!(edits[1]["newText"], "value");
+
+    // generate a function that does not exist yet
+    let text = format!("{src}int got = compute(total, \"x\")\n@println(got)\n");
+    let diags = s.change(&text);
+    let d = diags[0].clone();
+    let acts = s.actions(
+        (d["range"]["start"].clone(), d["range"]["start"].clone()),
+        std::slice::from_ref(&d),
+    );
+    let g = acts
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["title"] == "Generate function `compute`")
+        .unwrap_or_else(|| panic!("{acts}"));
+    assert_eq!(
+        g["edit"]["changes"][&s.uri][0]["newText"],
+        "\nfn compute(int total, str arg2) int {\n}\n"
+    );
+
+    // match on an enum value
+    let text = format!("{src}Shape sh = Shape.Line\n");
+    s.change(&text);
+    let acts = s.actions((at(&text, "sh =", 0, 0), at(&text, "sh =", 0, 0)), &[]);
+    let m = acts
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["title"] == "Match on `sh`")
+        .unwrap_or_else(|| panic!("{acts}"));
+    assert_eq!(
+        m["edit"]["changes"][&s.uri][0]["newText"],
+        "if sh {\n  Shape.Circle(_) -> {}\n  Shape.Square -> {}\n  Shape.Line -> {}\n}\n"
+    );
+    s.change(src);
 
     // inline a variable
     let acts = s.actions((at(src, "total =", 0, 0), at(src, "total =", 0, 0)), &[]);

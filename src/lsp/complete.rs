@@ -120,6 +120,11 @@ fn visible(a: &Analysis, fid: u32, off: usize) -> Vec<&SymDecl> {
     ds
 }
 
+/// Declarations visible at `off`.
+pub(super) fn visible_decls(a: &Analysis, fid: u32, off: usize) -> Vec<&SymDecl> {
+    visible(a, fid, off)
+}
+
 /// Names visible at `off` (for suggestions).
 pub(super) fn visible_names(a: &Analysis, fid: u32, off: usize) -> Vec<String> {
     visible(a, fid, off)
@@ -287,6 +292,43 @@ impl Server {
             if let Some(items) = self.member_items(a, fid, dot, &chain, call_parens) {
                 return Some(CompletionResponse::Array(items));
             }
+            // `name.` where `name` is a module that is not imported: its public items, adding
+            // the import
+            if let [Seg::Name(name)] = chain.as_slice()
+                && !a.imports.contains_key(name)
+                && let Some((_, ipath)) = super::actions::importable_modules(&path)
+                    .into_iter()
+                    .find(|(n, _)| n == name)
+            {
+                let dir = path.parent()?;
+                let file = if let Some(rel) = ipath.strip_prefix(".../") {
+                    crate::modules::find_root(dir)?.join(format!("{rel}.nc"))
+                } else if let Some(rel) = ipath.strip_prefix("./") {
+                    dir.join(format!("{rel}.nc"))
+                } else {
+                    crate::modules::find_root(dir)?
+                        .join(".nc")
+                        .join("deps")
+                        .join(format!("{ipath}.nc"))
+                };
+                let (module, _) = crate::parser::parse_module_recover(&text, 0);
+                let edit = super::actions::add_import(&text, &module, &ipath, name);
+                let mut names: Vec<String> = public_names(&std::fs::read_to_string(file).ok()?)
+                    .into_iter()
+                    .collect();
+                names.sort();
+                return Some(CompletionResponse::Array(
+                    names
+                        .into_iter()
+                        .map(|n| CompletionItem {
+                            label: n,
+                            detail: Some(format!("import \"{ipath}\"")),
+                            additional_text_edits: Some(vec![edit.clone()]),
+                            ..Default::default()
+                        })
+                        .collect(),
+                ));
+            }
             return Some(CompletionResponse::Array(vec![]));
         }
 
@@ -301,6 +343,29 @@ impl Server {
                     CompletionItemKind::MODULE,
                     Some("module".into()),
                 ));
+            }
+            // modules that are not imported yet: accepting one adds the import
+            let (module, _) = crate::parser::parse_module_recover(&text, 0);
+            let taken: HashSet<String> = a
+                .imports
+                .keys()
+                .cloned()
+                .chain(visible(a, fid, off).into_iter().map(|d| d.name.clone()))
+                .collect();
+            let mut offered = HashSet::new();
+            for (name, ipath) in super::actions::importable_modules(&path) {
+                if taken.contains(&name) || !offered.insert(name.clone()) {
+                    continue;
+                }
+                let edit = super::actions::add_import(&text, &module, &ipath, &name);
+                items.push(CompletionItem {
+                    label: name.clone(),
+                    kind: Some(CompletionItemKind::MODULE),
+                    detail: Some(format!("import \"{ipath}\"")),
+                    sort_text: Some(format!("5{name}")),
+                    additional_text_edits: Some(vec![edit]),
+                    ..Default::default()
+                });
             }
         }
         for k in KEYWORDS {

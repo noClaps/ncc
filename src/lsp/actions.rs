@@ -197,42 +197,75 @@ fn remove_import(text: &str, span: Span) -> TextEdit {
     }
 }
 
-/// Import paths of modules named `name` that `file` could import: a sibling (`./name`), other
-/// project files (`.../dir/name`) and dependencies (`std/name`).
-fn find_modules(file: &Path, name: &str) -> Vec<String> {
+/// Modules `file` could import, as (name, import path): siblings (`./name`), other project files
+/// (`.../dir/name`) and dependencies (`std/name`), best first.
+pub(super) fn importable_modules(file: &Path) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let Some(dir) = file.parent() else {
         return out;
     };
-    let fname = format!("{name}.nc");
-    if dir.join(&fname).is_file() && dir.join(&fname) != file {
-        out.push(format!("./{name}"));
+    let stem = |f: &Path| f.file_stem().map(|n| n.to_string_lossy().into_owned());
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let f = e.path();
+            if f.extension().is_some_and(|x| x == "nc") && f != file && f.is_file() {
+                let n = stem(&f).unwrap_or_default();
+                out.push((n.clone(), format!("./{n}")));
+            }
+        }
     }
     let Some(root) = crate::modules::find_root(dir) else {
+        out.sort();
         return out;
     };
     let mut files = Vec::new();
     super::collect_nc_files(&root, &mut files, 0);
     for f in files {
-        if f.file_name().is_some_and(|n| n.to_string_lossy() == fname)
-            && f.parent() != Some(dir)
+        if f.parent() != Some(dir)
             && let Ok(rel) = f.with_extension("").strip_prefix(&root)
         {
-            out.push(format!(".../{}", rel.to_string_lossy()));
+            out.push((
+                stem(&f).unwrap_or_default(),
+                format!(".../{}", rel.to_string_lossy()),
+            ));
         }
     }
     let deps = root.join(".nc").join("deps");
     let mut files = Vec::new();
     collect_all_nc(&deps, &mut files, 0);
     for f in files {
-        if f.file_name().is_some_and(|n| n.to_string_lossy() == fname)
-            && let Ok(rel) = f.with_extension("").strip_prefix(&deps)
-        {
-            out.push(rel.to_string_lossy().into_owned());
+        if let Ok(rel) = f.with_extension("").strip_prefix(&deps) {
+            out.push((
+                stem(&f).unwrap_or_default(),
+                rel.to_string_lossy().into_owned(),
+            ));
         }
     }
-    out.sort_by_key(|p| (!p.starts_with("./"), p.starts_with(".../"), p.clone()));
+    out.sort_by_key(|(n, p)| {
+        (
+            n.clone(),
+            !p.starts_with("./"),
+            p.starts_with(".../"),
+            p.clone(),
+        )
+    });
+    out.retain(|(n, _)| {
+        n.chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            && !crate::parser::is_keyword(n)
+    });
     out
+}
+
+/// Import paths of modules named `name` that `file` could import.
+fn find_modules(file: &Path, name: &str) -> Vec<String> {
+    importable_modules(file)
+        .into_iter()
+        .filter(|(n, _)| n == name)
+        .map(|(_, p)| p)
+        .collect()
 }
 
 /// `.nc` files under a directory, including hidden ones (dependencies live under `.nc/`).
@@ -254,7 +287,7 @@ fn collect_all_nc(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
 }
 
 /// An edit adding `import { "path" as alias }` after the last import (or at the top).
-fn add_import(text: &str, module: &ast::Module, path: &str, alias: &str) -> TextEdit {
+pub(super) fn add_import(text: &str, module: &ast::Module, path: &str, alias: &str) -> TextEdit {
     let last = module
         .items
         .iter()
@@ -457,6 +490,17 @@ impl Server {
                                 ));
                             }
                         }
+                        // a call to a function that does not exist yet
+                        if text[s + i + name.len()..].starts_with('(')
+                            && let Some(x) =
+                                self.generate_function(a, fid, &module, &text, s + i, name, &uri)
+                        {
+                            let mut x = x;
+                            if let CodeActionOrCommand::CodeAction(ca) = &mut x {
+                                ca.diagnostics = Some(vec![d.clone()]);
+                            }
+                            out.push(x);
+                        }
                         for (k, (_, c)) in cands.into_iter().take(3).enumerate() {
                             out.push(action(
                                 format!("Change to `{c}`"),
@@ -621,6 +665,9 @@ impl Server {
                 out.push(x);
             }
             if let Some(x) = self.inline_variable(a, fid, &module, ftext, s, &uri) {
+                out.push(x);
+            }
+            if let Some(x) = self.match_on_value(a, fid, &module, ftext, s, &uri) {
                 out.push(x);
             }
         }
@@ -856,6 +903,236 @@ impl Server {
         Some(CodeActionOrCommand::CodeAction(CodeAction {
             title: "Extract into a variable".into(),
             kind: Some(CodeActionKind::REFACTOR_EXTRACT),
+            edit: Some(WorkspaceEdit {
+                changes: Some(changes),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
+    }
+
+    /// "Generate function" for a call to an unknown name: a function after the current item,
+    /// with parameters typed from the arguments and the return type from the context.
+    #[allow(clippy::too_many_arguments, clippy::mutable_key_type)]
+    fn generate_function(
+        &self,
+        a: &Analysis,
+        fid: u32,
+        module: &ast::Module,
+        text: &str,
+        at: usize,
+        name: &str,
+        uri: &Uri,
+    ) -> Option<CodeActionOrCommand> {
+        let at = at as u32;
+        let mut call: Option<&ast::Expr> = None;
+        walk(module, &mut |n| {
+            if let Node::Expr(e) = n
+                && let E::Call(c, _) = &e.kind
+                && matches!(&c.kind, E::Ident(n) if n == name)
+                && c.span.start == at
+            {
+                call = Some(e);
+            }
+        });
+        let call = call?;
+        let E::Call(_, args) = &call.kind else {
+            return None;
+        };
+        let visible = super::complete::visible_decls(a, fid, at as usize);
+        let mut params = Vec::new();
+        let mut used = HashSet::new();
+        for (i, arg) in args.iter().enumerate() {
+            let ty = match &arg.kind {
+                E::Int(..) => Some("int".to_string()),
+                E::Float(_) => Some("float".into()),
+                E::Str(_) => Some("str".into()),
+                E::Bool(_) => Some("bool".into()),
+                E::Char(_) => Some("char".into()),
+                E::Ident(n) => visible
+                    .iter()
+                    .find(|d| &d.name == n)
+                    .and_then(|d| d.ty.clone()),
+                _ => None,
+            }
+            .or_else(|| {
+                a.index
+                    .exprs
+                    .iter()
+                    .find(|x| x.span.start == arg.span.start && x.span.end == arg.span.end)
+                    .map(|x| x.ty.clone())
+            })
+            .unwrap_or_else(|| "int".into());
+            let mut pname = match &arg.kind {
+                E::Ident(n) => n.clone(),
+                E::Field(_, n) => n.clone(),
+                _ => format!("arg{}", i + 1),
+            };
+            while !used.insert(pname.clone()) {
+                pname.push('_');
+            }
+            params.push(format!("{ty} {pname}"));
+        }
+        // the return type: the declared type of `T x = name(...)`, or the enclosing function's
+        // return type for `return name(...)`
+        let mut ret: Option<String> = None;
+        walk(module, &mut |n| {
+            if let Node::Stmt(st) = n
+                && let S::VarDecl { targets, value, .. } = &st.kind
+                && targets.len() == 1
+                && value.span == call.span
+            {
+                let t = targets[0].ty.span();
+                ret = Some(text[t.start as usize..t.end as usize].to_string());
+            }
+        });
+        if ret.is_none() {
+            // `return name(...)` inside a function with a return type
+            let mut fsig: Option<&ast::FnSig> = None;
+            let mut is_return = false;
+            walk(module, &mut |n| match n {
+                Node::Fn(sig) if sig.span.start <= at => {
+                    if fsig.is_none_or(|f| f.span.start < sig.span.start) {
+                        fsig = Some(sig);
+                    }
+                }
+                Node::Stmt(st) => {
+                    if let S::Return(Some(v)) = &st.kind
+                        && v.span == call.span
+                    {
+                        is_return = true;
+                    }
+                }
+                _ => {}
+            });
+            if is_return && let Some(r) = fsig.and_then(|f| f.ret.as_ref()) {
+                let sp = r.span();
+                ret = Some(text[sp.start as usize..sp.end as usize].to_string());
+            }
+        }
+        // after the top-level item containing the call
+        let mut item_end = text.len();
+        for it in &module.items {
+            let mut lo = u32::MAX;
+            let mut hi = 0;
+            super::nav::item_spans(it, &mut |n| {
+                if let Node::Span(sp) = n {
+                    lo = lo.min(sp.start);
+                    hi = hi.max(sp.end);
+                }
+            });
+            if lo <= at && at <= hi {
+                item_end = line_end(text, hi as usize);
+            }
+        }
+        let ret = ret.map(|r| format!(" {r}")).unwrap_or_default();
+        let lead = if text[..item_end].ends_with('\n') {
+            ""
+        } else {
+            "\n"
+        };
+        let body = format!("{lead}\nfn {name}({}){ret} {{\n}}\n", params.join(", "));
+        let p = offset_to_pos(text, item_end);
+        let mut changes = HashMap::new();
+        changes.insert(uri.clone(), vec![TextEdit::new(Range::new(p, p), body)]);
+        Some(CodeActionOrCommand::CodeAction(CodeAction {
+            title: format!("Generate function `{name}`"),
+            kind: Some(CodeActionKind::QUICKFIX),
+            edit: Some(WorkspaceEdit {
+                changes: Some(changes),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
+    }
+
+    /// "Match on `x`" for a variable of an enum type: an `if` with a branch per variant after the
+    /// statement at the cursor.
+    #[allow(clippy::mutable_key_type)]
+    fn match_on_value(
+        &self,
+        a: &Analysis,
+        fid: u32,
+        module: &ast::Module,
+        text: &str,
+        off: u32,
+        uri: &Uri,
+    ) -> Option<CodeActionOrCommand> {
+        let r = a
+            .index
+            .refs
+            .iter()
+            .filter(|r| r.span.file == fid && r.span.start <= off && off <= r.span.end)
+            .min_by_key(|r| r.span.end - r.span.start)?;
+        let d = a.decl(r.def?)?;
+        if d.kind != DeclKind::Variable {
+            return None;
+        }
+        let edecl = a.decl(r.type_def?)?;
+        // only plain enum values (not arrays or optionals of them)
+        if edecl.kind != DeclKind::Enum || d.ty.as_deref() != Some(edecl.name.as_str()) {
+            return None;
+        }
+        // the enum as written from this file
+        let prefix = if edecl.span.file == fid {
+            edecl.name.clone()
+        } else {
+            let epath = &a.sm.file(edecl.span.file).path;
+            let alias = a.imports.iter().find(|(_, p)| *p == epath)?.0;
+            format!("{alias}.{}", edecl.name)
+        };
+        // the statement around the cursor that sits directly in a block or at the top level
+        let mut in_block: HashSet<(u32, u32)> = HashSet::new();
+        walk(module, &mut |n| {
+            if let Node::Block(b) = n {
+                for st in &b.stmts {
+                    in_block.insert((st.span.start, st.span.end));
+                }
+            }
+        });
+        for it in &module.items {
+            if let ast::Item::Stmt(st) = it {
+                in_block.insert((st.span.start, st.span.end));
+            }
+        }
+        let mut stmt: Option<&ast::Stmt> = None;
+        walk(module, &mut |n| {
+            if let Node::Stmt(st) = n
+                && st.span.start <= off
+                && off <= st.span.end
+                && in_block.contains(&(st.span.start, st.span.end))
+                && stmt.is_none_or(|o| o.span.start <= st.span.start)
+            {
+                stmt = Some(st);
+            }
+        });
+        let st = stmt?;
+        let indent = indent_at(text, st.span.start as usize).to_string();
+        let mut body = format!("{indent}if {} {{\n", d.name);
+        for (m, detail) in &edecl.members {
+            let arity = detail
+                .split_once('(')
+                .map(|(_, ps)| ps.trim_end_matches(')').split(',').count())
+                .unwrap_or(0);
+            let pat = if arity == 0 {
+                format!("{prefix}.{m}")
+            } else {
+                format!("{prefix}.{m}({})", vec!["_"; arity].join(", "))
+            };
+            body.push_str(&format!("{indent}  {pat} -> {{}}\n"));
+        }
+        body.push_str(&format!("{indent}}}\n"));
+        let at = line_end(text, st.span.end as usize);
+        let lead = if text[..at].ends_with('\n') { "" } else { "\n" };
+        let p = offset_to_pos(text, at);
+        let mut changes = HashMap::new();
+        changes.insert(
+            uri.clone(),
+            vec![TextEdit::new(Range::new(p, p), format!("{lead}{body}"))],
+        );
+        Some(CodeActionOrCommand::CodeAction(CodeAction {
+            title: format!("Match on `{}`", d.name),
+            kind: Some(CodeActionKind::REFACTOR_REWRITE),
             edit: Some(WorkspaceEdit {
                 changes: Some(changes),
                 ..Default::default()
