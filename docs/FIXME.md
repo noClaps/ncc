@@ -191,3 +191,15 @@ A: Both are allowed: `s[i] = c` works on a `mut str`, and `T??` is legal.
 
 **Q: Where is `$` valid?**
 A: Anywhere inside the `[]` of an array, string or fixed-array index (not maps or tuples). It is a `uint` equal to `len - 1`, and it panics (underflow) on an empty array.
+
+**Q: Do floats panic when a result leaves the finite range (inf/NaN)?**
+A: No. Floats follow IEEE 754, so inf and NaN are ordinary values.
+
+**Q: What happens when a left shift loses bits?**
+A: It panics like multiplication: `a << n` panics whenever `a * 2^n` is out of range for the type.
+
+**Q: Are nested named functions hoisted within their block?**
+A: No. A nested function is usable after its declaration (and recursively within itself), and it captures the variables visible at that point.
+
+**Q: What happens when code inside an `async` future panics?**
+A: The whole process panics: message to stderr, exit 101. Under `ncc test` the whole test run aborts.
