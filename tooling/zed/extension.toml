@@ -1,0 +1,12 @@
+id = "nc"
+name = "NC"
+version = "0.1.0"
+schema_version = 1
+authors = ["noClaps"]
+description = "NC language support: syntax highlighting, outline, brackets and tasks"
+repository = "https://github.com/noClaps/ncc"
+
+[grammars.nc]
+repository = "https://github.com/noClaps/ncc"
+rev = "c09e0bce827bc21b6b0d8c24a22681f1a8a6bc85"
+path = "tooling/tree-sitter-nc"

@@ -1,0 +1,27 @@
+[
+  {
+    "label": "ncc run $ZED_FILENAME",
+    "command": "ncc",
+    "args": ["run", "$ZED_FILE"],
+    "cwd": "$ZED_DIRNAME"
+  },
+  {
+    "label": "ncc run --release $ZED_FILENAME",
+    "command": "ncc",
+    "args": ["run", "-r", "$ZED_FILE"],
+    "cwd": "$ZED_DIRNAME"
+  },
+  {
+    "label": "ncc check $ZED_FILENAME",
+    "command": "ncc",
+    "args": ["check", "$ZED_FILE"],
+    "cwd": "$ZED_DIRNAME"
+  },
+  {
+    "label": "ncc test $ZED_FILENAME",
+    "command": "ncc",
+    "args": ["test", "$ZED_FILE"],
+    "cwd": "$ZED_DIRNAME",
+    "tags": ["nc-test"]
+  }
+]
