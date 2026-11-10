@@ -6,14 +6,12 @@ impl<'a> Checker<'a> {
     pub fn check_block(&mut self, b: &ast::Block) -> Result<Block> {
         self.push_scope();
         let mut out = Vec::new();
-        let r = (|| {
-            for s in &b.stmts {
-                self.check_stmt(s, &mut out)?;
-            }
-            Ok(())
-        })();
+        for s in &b.stmts {
+            // report the error and keep checking the following statements
+            let r = self.check_stmt(s, &mut out);
+            self.report(r);
+        }
         self.pop_scope();
-        r?;
         Ok(Block { stmts: out })
     }
 
@@ -85,10 +83,11 @@ impl<'a> Checker<'a> {
                     if *mutex && matches!(self.types.kind(ty), TyKind::Fut(_)) {
                         return err(span, "futures cannot be placed in a mutex");
                     }
-                    let v = self.expect_expr(value, ty)?;
+                    let v = self.expect_expr(value, ty);
                     let vty = if *mutex { self.types.intern(TyKind::Mutex(ty)) } else { ty };
+                    // declare the variable even if its value is invalid, to avoid follow-up errors
                     let var = self.declare_var(&t.name, vty, *mutable, *public, t.span)?;
-                    push(out, SK::Let(var, v));
+                    push(out, SK::Let(var, v?));
                 } else {
                     if *mutex {
                         return err(span, "a mutex cannot be destructured");
@@ -371,8 +370,11 @@ impl<'a> Checker<'a> {
             for (i, p) in sig.params.iter().enumerate() {
                 pids.push(self.declare_local(&p.name, params[i], false, LocalKind::Param, p.span)?);
             }
+            let before = self.errors.len();
             let b = self.check_block(body)?;
-            self.check_fn_end(&b, ret, sig.span, &display)?;
+            if self.errors.len() == before {
+                self.check_fn_end(&b, ret, sig.span, &display)?;
+            }
             Ok((pids, b))
         })();
         let ctx = self.fns.pop().unwrap();

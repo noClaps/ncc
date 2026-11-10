@@ -125,17 +125,36 @@ pub struct Lexer<'a> {
 }
 
 pub fn lex(src: &str, file: u32, base: usize) -> Result<Vec<Token>> {
+    let (toks, mut errors) = lex_all(src, file, base);
+    if errors.is_empty() { Ok(toks) } else { Err(errors.remove(0)) }
+}
+
+/// Tokenize everything, recovering from errors by skipping the offending character.
+pub fn lex_all(src: &str, file: u32, base: usize) -> (Vec<Token>, Vec<crate::diag::Diag>) {
     let mut lx = Lexer { src, bytes: src.as_bytes(), pos: 0, base, file };
     let mut out = Vec::new();
+    let mut errors = Vec::new();
     loop {
-        let t = lx.next()?;
-        let eof = t.tok == Tok::Eof;
-        out.push(t);
-        if eof {
-            break;
+        let start = lx.pos;
+        match lx.next() {
+            Ok(t) => {
+                let eof = t.tok == Tok::Eof;
+                out.push(t);
+                if eof {
+                    break;
+                }
+            }
+            Err(d) => {
+                errors.push(d);
+                if lx.pos <= start {
+                    // skip one character to make progress
+                    let ch = src[start..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+                    lx.pos = start + ch;
+                }
+            }
         }
     }
-    Ok(out)
+    (out, errors)
 }
 
 impl<'a> Lexer<'a> {

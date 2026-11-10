@@ -104,15 +104,18 @@ pub struct Checker<'a> {
     tests: Vec<Test>,
     order: Vec<usize>,
     pub ix: index::IndexState,
+    pub errors: Vec<Diag>,
     _p: std::marker::PhantomData<&'a ()>,
 }
 
-pub fn check(graph: ModuleGraph) -> Result<Program> {
-    check_indexed(graph).0
+/// Check a program, returning the (possibly partial) program, every error found and the
+/// symbol index. Statements that failed to check are left out of the program.
+pub fn check_partial(graph: ModuleGraph) -> (Program, Vec<Diag>, index::Index) {
+    let (r, ix, errors) = check_inner(graph);
+    (r, errors, ix)
 }
 
-/// Check a program, also returning the symbol index (filled even when checking fails).
-pub fn check_indexed(graph: ModuleGraph) -> (Result<Program>, index::Index) {
+fn check_inner(graph: ModuleGraph) -> (Program, index::Index, Vec<Diag>) {
     let mut c = Checker {
         mods: graph
             .modules
@@ -142,10 +145,14 @@ pub fn check_indexed(graph: ModuleGraph) -> (Result<Program>, index::Index) {
         tests: vec![],
         order: graph.order.clone(),
         ix: Default::default(),
+        errors: vec![],
         _p: std::marker::PhantomData,
     };
-    let r = c.run();
-    (r, std::mem::take(&mut c.ix.index))
+    let p = c.run();
+    let mut errors = std::mem::take(&mut c.errors);
+    errors.sort_by_key(|d| (d.span.file, d.span.start));
+    errors.dedup_by(|a, b| a.span == b.span && a.msg == b.msg);
+    (p, std::mem::take(&mut c.ix.index), errors)
 }
 
 impl<'a> Checker<'a> {
@@ -154,14 +161,22 @@ impl<'a> Checker<'a> {
         self.next_jump
     }
 
-    fn run(&mut self) -> Result<Program> {
+    pub fn report(&mut self, r: Result<()>) {
+        if let Err(d) = r {
+            self.errors.push(d);
+        }
+    }
+
+    fn run(&mut self) -> Program {
         // Phase A: declare names
         for m in 0..self.mods.len() {
-            self.declare_names(m)?;
+            let r = self.declare_names(m);
+            self.report(r);
         }
         // Phase B: resolve type definitions and function signatures
         for m in 0..self.mods.len() {
-            self.resolve_decls(m)?;
+            let r = self.resolve_decls(m);
+            self.report(r);
         }
         // Phase C: top-level statements, module by module in dependency order
         let main_ret = self.types.erru(VOID);
@@ -177,7 +192,8 @@ impl<'a> Checker<'a> {
             let mut init = vec![];
             for it in &items {
                 if let ast::Item::Stmt(s) = it {
-                    self.check_stmt(s, &mut init)?;
+                    let r = self.check_stmt(s, &mut init);
+                    self.report(r);
                 }
             }
             self.mods[m].init = init;
@@ -193,8 +209,15 @@ impl<'a> Checker<'a> {
                     let mut ctx = self.new_ctx(f, m, erru, HashMap::new());
                     ctx.is_test = true;
                     self.fns.push(ctx);
-                    let body = self.check_block(body)?;
+                    let body = self.check_block(body);
                     let ctx = self.fns.pop().unwrap();
+                    let body = match body {
+                        Ok(b) => b,
+                        Err(d) => {
+                            self.errors.push(d);
+                            Block { stmts: vec![] }
+                        }
+                    };
                     self.finish_fn(ctx, format!("test {name}"), vec![], body, *span, None);
                     if m == 0 {
                         self.tests.push(Test { name: name.clone(), func: f });
@@ -204,20 +227,41 @@ impl<'a> Checker<'a> {
         }
         // Phase D: function bodies (including generic instances discovered on the way)
         while let Some(p) = self.pending.pop() {
-            self.check_fn_body(p)?;
+            let r = self.check_fn_body(p);
+            self.report(r);
         }
+
         // assemble main
         let main_body = self.assemble_main();
         self.finish_fn(main_ctx, "main".into(), vec![], main_body, Span::default(), None);
-        let funcs = std::mem::take(&mut self.funcs).into_iter().map(|f| f.expect("unfinished function")).collect();
-        Ok(Program {
+        // functions whose checking failed early get empty bodies
+        let sigs = self.sigs.clone();
+        let funcs = std::mem::take(&mut self.funcs)
+            .into_iter()
+            .enumerate()
+            .map(|(i, f)| {
+                f.unwrap_or_else(|| Func {
+                    name: "<invalid>".into(),
+                    params: vec![],
+                    ret: sigs[i].1,
+                    locals: vec![],
+                    captures: vec![],
+                    body: Block { stmts: vec![] },
+                    span: Span::default(),
+                    parent: None,
+                    self_local: None,
+                    is_never: false,
+                })
+            })
+            .collect();
+        Program {
             types: std::mem::take(&mut self.types),
             funcs,
             globals: std::mem::take(&mut self.globals),
             externs: std::mem::take(&mut self.externs),
             main,
             tests: std::mem::take(&mut self.tests),
-        })
+        }
     }
 
     // ------------------------------------------------------------ declarations
@@ -240,7 +284,7 @@ impl<'a> Checker<'a> {
         let items = self.mods[m].ast.items.clone();
         let r = (|| {
             for (i, it) in items.iter().enumerate() {
-                match it {
+                let item_r: Result<()> = (|| { match it {
                     ast::Item::Fn(f) => {
                         self.add_sym(m, &f.sig.name, Sym::Fn { decl: i, func: None }, f.public, f.sig.span)?
                     }
@@ -264,6 +308,11 @@ impl<'a> Checker<'a> {
                     }
                     _ => {}
                 }
+                Ok(())
+                })();
+                if let Err(d) = item_r {
+                    self.errors.push(d);
+                }
             }
             Ok(())
         })();
@@ -275,7 +324,7 @@ impl<'a> Checker<'a> {
         let r = (|| {
             let none = HashMap::new();
             for it in items.iter() {
-                match it {
+                let item_r: Result<()> = (|| { match it {
                     ast::Item::Type(t) => {
                         let ty = match self.mods[m].syms[&t.name].sym {
                             Sym::Type(ty) => ty,
@@ -321,9 +370,14 @@ impl<'a> Checker<'a> {
                     }
                     _ => {}
                 }
+                Ok(())
+                })();
+                if let Err(d) = item_r {
+                    self.errors.push(d);
+                }
             }
             for (i, it) in items.iter().enumerate() {
-                match it {
+                let item_r: Result<()> = (|| { match it {
                     ast::Item::Fn(f) if f.sig.type_params.is_empty() => {
                         let (params, ret) = self.resolve_sig(&f.sig, m, &none)?;
                         let id = self.reserve_fn(f.sig.name.clone(), params, ret);
@@ -362,12 +416,19 @@ impl<'a> Checker<'a> {
                     }
                     _ => {}
                 }
+                Ok(())
+                })();
+                if let Err(d) = item_r {
+                    self.errors.push(d);
+                }
             }
             // reject infinitely sized structs
             for it in items.iter() {
                 if let ast::Item::Struct(s) = it {
                     if let Some(SymEntry { sym: Sym::Struct { ty: Some(ty), .. }, .. }) = self.mods[m].syms.get(&s.name) {
-                        self.check_finite(*ty, s.span)?;
+                        if let Err(d) = self.check_finite(*ty, s.span) {
+                            self.errors.push(d);
+                        }
                     }
                 }
             }
@@ -539,8 +600,13 @@ impl<'a> Checker<'a> {
             let id = self.declare_local(&prm.name, params[i], false, LocalKind::Param, prm.span)?;
             pids.push(id);
         }
+        let before = self.errors.len();
         let body = self.check_block(&p.decl.body)?;
-        self.check_fn_end(&body, ret, p.decl.sig.span, &p.decl.sig.name)?;
+        // a missing-return error would only be noise when statements failed to check
+        if self.errors.len() == before {
+            let r = self.check_fn_end(&body, ret, p.decl.sig.span, &p.decl.sig.name);
+            self.report(r);
+        }
         let ctx = self.fns.pop().unwrap();
         let name = self.fn_display_name(&p.decl.sig.name, p.func);
         self.finish_fn(ctx, name, pids, body, p.decl.sig.span, None);
@@ -605,13 +671,14 @@ impl<'a> Checker<'a> {
         let saved = std::mem::take(&mut self.fns);
         let mut decl2 = f.clone();
         decl2.sig.name = self.types_name(&f.sig.name, &args);
+        let before = self.errors.len();
         let r = self.check_fn_body(PendingFn { func: id, module: m, decl: decl2, tparams: tp });
         self.fns = saved;
+        self.report(r);
         let inst = self.types_name(&f.sig.name, &args);
-        r.map_err(|mut d| {
+        for d in &mut self.errors[before..] {
             d.msg = format!("{} (in instantiation `{inst}`)", d.msg);
-            d
-        })?;
+        }
         Ok(id)
     }
 

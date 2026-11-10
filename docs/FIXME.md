@@ -263,3 +263,13 @@ A: Diagnostics (errors and warnings), hover, go-to-definition, document symbols,
 
 **Q: Should the Zed extension launch `ncc lsp`?**
 A: Yes. The extension gets a small Rust crate (compiled to wasm) that runs `ncc lsp` from `PATH` for `.nc` files.
+
+## Error reporting
+
+**Request:** Show all errors, not just the first one, in the CLI and in the language server.
+Implementation:
+- The lexer and parser recover at statement boundaries.
+- Missing or broken imports don't stop the remaining modules from being checked.
+- The checker reports each failing statement or declaration and keeps going. A variable whose initialiser fails is still declared, to avoid follow-up "unknown name" errors.
+- Compile-time panics are reported alongside type errors.
+- Errors are listed in source order, followed by a count.

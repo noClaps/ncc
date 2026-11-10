@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::ast::{Item, Module};
-use crate::diag::{Diag, Result, SourceMap, Span};
-use crate::parser::parse_module;
+use crate::diag::{Diag, Result, Results, SourceMap, Span};
+use crate::parser::parse_module_recover;
 
 pub struct LoadedModule {
     pub path: PathBuf,
@@ -32,19 +32,24 @@ fn find_root(start: &Path) -> Option<PathBuf> {
     None
 }
 
-pub fn load(sm: &mut SourceMap, entry: &Path) -> Result<ModuleGraph> {
-    load_with(sm, entry, &HashMap::new())
-}
-
 /// Load the module graph, preferring in-memory contents from `overlay` (keyed by canonical path).
-pub fn load_with(sm: &mut SourceMap, entry: &Path, overlay: &HashMap<PathBuf, String>) -> Result<ModuleGraph> {
+/// Every parse and import error across all modules is reported.
+/// Returns the graph of everything that could be loaded together with those errors; fails
+/// outright only when the entry file itself cannot be read.
+pub fn load_with(
+    sm: &mut SourceMap,
+    entry: &Path,
+    overlay: &HashMap<PathBuf, String>,
+) -> Results<(ModuleGraph, Vec<Diag>)> {
     let entry = std::fs::canonicalize(entry)
-        .map_err(|e| Diag::new(Span::default(), format!("cannot open `{}`: {e}", entry.display())))?;
+        .map_err(|e| vec![Diag::new(Span::default(), format!("cannot open `{}`: {e}", entry.display()))])?;
     let entry_dir = entry.parent().unwrap().to_path_buf();
     let mut graph = ModuleGraph { modules: vec![], order: vec![] };
     let mut by_path: HashMap<PathBuf, usize> = HashMap::new();
     let mut root: Option<Option<PathBuf>> = None;
-    load_one(sm, &entry, &entry_dir, &mut graph, &mut by_path, &mut root, None, overlay)?;
+    let mut errors = Vec::new();
+    load_one(sm, &entry, &entry_dir, &mut graph, &mut by_path, &mut root, None, overlay, &mut errors)
+        .map_err(|d| vec![d])?;
     // order: DFS post-order from the entry
     let mut visited = vec![false; graph.modules.len()];
     fn visit(g: &ModuleGraph, i: usize, visited: &mut Vec<bool>, out: &mut Vec<usize>) {
@@ -71,7 +76,7 @@ pub fn load_with(sm: &mut SourceMap, entry: &Path, overlay: &HashMap<PathBuf, St
     let mut order = vec![];
     visit(&graph, 0, &mut visited, &mut order);
     graph.order = order;
-    Ok(graph)
+    Ok((graph, errors))
 }
 
 fn load_one(
@@ -83,6 +88,7 @@ fn load_one(
     root: &mut Option<Option<PathBuf>>,
     from: Option<Span>,
     overlay: &HashMap<PathBuf, String>,
+    errors: &mut Vec<Diag>,
 ) -> Result<usize> {
     if let Some(&i) = by_path.get(path) {
         return Ok(i);
@@ -95,8 +101,8 @@ fn load_one(
         Diag::new(from.unwrap_or_default(), format!("cannot read module `{}`: {e}", path.display()))
     })?;
     let file = sm.add(path.to_path_buf(), text.clone());
-    let ast = parse_module(&text, file)?;
-    let ast = ast;
+    let (ast, parse_errors) = parse_module_recover(&text, file);
+    errors.extend(parse_errors);
     let idx = graph.modules.len();
     by_path.insert(path.to_path_buf(), idx);
     graph.modules.push(LoadedModule { path: path.to_path_buf(), file, ast, imports: HashMap::new() });
@@ -110,7 +116,7 @@ fn load_one(
     for im in imports {
         let from_root = im.path.strip_prefix(".../");
         let target = if from_root.is_none() && (im.path.starts_with("./") || im.path.starts_with("../")) {
-            dir.join(format!("{}.nc", im.path))
+            dir.join(format!("{}.nc", im.path.strip_prefix("./").unwrap_or(&im.path)))
         } else {
             if root.is_none() {
                 *root = Some(find_root(entry_dir));
@@ -121,25 +127,32 @@ fn load_one(
                     None => r.join(".nc").join("deps").join(format!("{}.nc", im.path)),
                 },
                 None => {
-                    return Err(Diag::new(
+                    errors.push(Diag::new(
                         im.span,
                         format!(
                             "cannot resolve import `{}`: no `.nc/config.toml` found in `{}` or any parent directory",
                             im.path,
                             entry_dir.display()
                         ),
-                    ))
+                    ));
+                    continue;
                 }
             }
         };
-        let target = std::fs::canonicalize(&target).map_err(|_| {
-            Diag::new(im.span, format!("cannot find module `{}` (looked for `{}`)", im.path, target.display()))
-        })?;
+        let Ok(target) = std::fs::canonicalize(&target) else {
+            errors.push(Diag::new(im.span, format!("cannot find module `{}` (looked for `{}`)", im.path, target.display())));
+            continue;
+        };
         if graph.modules[idx].imports.contains_key(&im.alias) {
-            return Err(Diag::new(im.span, format!("duplicate import alias `{}`", im.alias)));
+            errors.push(Diag::new(im.span, format!("duplicate import alias `{}`", im.alias)));
+            continue;
         }
-        let m = load_one(sm, &target, entry_dir, graph, by_path, root, Some(im.span), overlay)?;
-        graph.modules[idx].imports.insert(im.alias.clone(), m);
+        match load_one(sm, &target, entry_dir, graph, by_path, root, Some(im.span), overlay, errors) {
+            Ok(m) => {
+                graph.modules[idx].imports.insert(im.alias.clone(), m);
+            }
+            Err(d) => errors.push(d),
+        }
     }
     Ok(idx)
 }

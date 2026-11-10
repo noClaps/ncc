@@ -24,6 +24,15 @@
    (`src/runtime/nc.h`) embedded, then calls the C compiler. Debug builds use
    `-O0 -g -fno-omit-frame-pointer`; release builds use `-O3 -DNDEBUG`, which also inlines.
 
+## Error reporting
+
+Every phase recovers and keeps going, so a single run reports all errors in source order:
+- the lexer skips bad characters;
+- the parser skips to the next statement;
+- the loader records missing imports;
+- the checker drops failing statements but still declares their variables;
+- the evaluator reports each expression that always panics.
+
 ## Language server
 
 `ncc lsp` (`src/lsp.rs`) speaks LSP over stdio. Each open document is analysed as an entry file,

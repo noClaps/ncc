@@ -1,0 +1,3 @@
+cannot find module `./missing`
+cannot find module `./also_missing`
+expected `int`, found `str`

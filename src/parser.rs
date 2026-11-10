@@ -1,7 +1,7 @@
 //! Recursive-descent parser producing [`ast::Module`].
 
 use crate::ast::*;
-use crate::diag::{err, Result, Span};
+use crate::diag::{err, Diag, Result, Span};
 use crate::lexer::{lex, StrPart, Tok, Token};
 
 const KEYWORDS: &[&str] = &[
@@ -20,12 +20,25 @@ pub struct Parser {
     file: u32,
     /// When set, `Name {` is not parsed as a struct literal unless followed by `.`
     no_struct: bool,
+    /// errors recovered from so far
+    errors: Vec<Diag>,
 }
 
+/// Parse a module, failing with the first error.
 pub fn parse_module(src: &str, file: u32) -> Result<Module> {
-    let toks = lex(src, file, 0)?;
-    let mut p = Parser { toks, pos: 0, file, no_struct: false };
-    p.module()
+    let (m, mut errors) = parse_module_recover(src, file);
+    if errors.is_empty() { Ok(m) } else { Err(errors.remove(0)) }
+}
+
+/// Parse a module, recovering from errors at statement boundaries. Returns the items that
+/// parsed and every error found.
+pub fn parse_module_recover(src: &str, file: u32) -> (Module, Vec<Diag>) {
+    let (toks, lex_errors) = crate::lexer::lex_all(src, file, 0);
+    let mut p = Parser { toks, pos: 0, file, no_struct: false, errors: lex_errors };
+    let m = p.module();
+    let mut errors = p.errors;
+    errors.dedup_by(|a, b| a.span == b.span && a.msg == b.msg);
+    (m, errors)
 }
 
 impl Parser {
@@ -134,14 +147,41 @@ impl Parser {
 
     // ---------------------------------------------------------------- items
 
-    fn module(&mut self) -> Result<Module> {
+    fn module(&mut self) -> Module {
         let mut items = Vec::new();
         self.skip_nl();
         while !self.at(&Tok::Eof) {
-            self.item(&mut items)?;
-            self.end_stmt()?;
+            let start = self.pos;
+            let r = self.item(&mut items).and_then(|_| self.end_stmt());
+            if let Err(d) = r {
+                self.recover(d, start);
+            }
         }
-        Ok(Module { items })
+        Module { items }
+    }
+
+    /// Record an error and skip to the start of the next statement.
+    fn recover(&mut self, d: Diag, start: usize) {
+        self.errors.push(d);
+        let mut depth: i32 = 0;
+        loop {
+            match self.peek() {
+                Tok::Eof => break,
+                Tok::Newline if depth <= 0 => {
+                    self.skip_nl();
+                    break;
+                }
+                Tok::LBrace | Tok::LParen | Tok::LBracket => depth += 1,
+                Tok::RBrace if depth <= 0 => break,
+                Tok::RBrace | Tok::RParen | Tok::RBracket => depth -= 1,
+                _ => {}
+            }
+            self.bump();
+        }
+        if self.pos == start && !self.at(&Tok::Eof) {
+            self.bump();
+            self.skip_nl();
+        }
     }
 
     fn item(&mut self, items: &mut Vec<Item>) -> Result<()> {
@@ -481,8 +521,11 @@ impl Parser {
             if self.at(&Tok::Eof) {
                 return err(start, "unclosed block");
             }
-            stmts.push(self.stmt(false)?);
-            self.end_stmt()?;
+            let at = self.pos;
+            match self.stmt(false).and_then(|s| self.end_stmt().map(|_| s)) {
+                Ok(s) => stmts.push(s),
+                Err(d) => self.recover(d, at),
+            }
         }
         let end = self.bump().span;
         self.no_struct = saved;
@@ -938,7 +981,7 @@ impl Parser {
                         StrPart::Lit(s) => segs.push(StrSeg::Lit(s)),
                         StrPart::Expr(text, off) => {
                             let toks = lex(&text, self.file, off)?;
-                            let mut sub = Parser { toks, pos: 0, file: self.file, no_struct: false };
+                            let mut sub = Parser { toks, pos: 0, file: self.file, no_struct: false, errors: vec![] };
                             sub.skip_nl();
                             let e = sub.expr()?;
                             sub.skip_nl();

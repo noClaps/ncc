@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use crate::ast::{BinOp, UnOp};
 use crate::check::flow;
-use crate::diag::{Diag, SourceMap, Span};
+use crate::diag::{Diag, Results, SourceMap, Span};
 use crate::tir::*;
 use crate::types::*;
 
@@ -63,6 +63,8 @@ pub struct Evaluator<'p> {
     depth: usize,
     /// constants known for immutable globals
     gconst: HashMap<GlobalId, Val>,
+    /// every always-panicking expression found
+    errs: Vec<Diag>,
 }
 
 const CALL_FUEL: u64 = 2_000_000;
@@ -148,7 +150,7 @@ fn stmt_pure(s: &Stmt) -> bool {
 
 impl<'p> Evaluator<'p> {
     pub fn new(p: &'p Program, sm: &'p SourceMap) -> Evaluator<'p> {
-        Evaluator { p, sm, pure: purity(p), fuel: 0, depth: 0, gconst: HashMap::new() }
+        Evaluator { p, sm, pure: purity(p), fuel: 0, depth: 0, gconst: HashMap::new(), errs: vec![] }
     }
 
     fn loc(&self, span: Span) -> String {
@@ -181,7 +183,7 @@ impl<'p> Evaluator<'p> {
     // ------------------------------------------------------------ program pass
 
     /// Check (and in release mode fold) the whole program.
-    pub fn run(p: &mut Program, sm: &SourceMap, fold: bool) -> Result<(), Diag> {
+    pub fn run(p: &mut Program, sm: &SourceMap, fold: bool) -> Results<()> {
         let snapshot = Program {
             types: std::mem::take(&mut p.types),
             funcs: p.funcs.clone(),
@@ -197,7 +199,8 @@ impl<'p> Evaluator<'p> {
             for s in &main.body.stmts {
                 if let SK::Let(Some(VarRef::Global(g)), e) = &s.kind {
                     if !snapshot.globals[*g].mutable {
-                        if let Some(v) = ev.try_const(e)? {
+                        // panics are reported when the statement itself is folded below
+                        if let Ok(Some(v)) = ev.try_const(e) {
                             ev.gconst.insert(*g, v);
                         }
                     }
@@ -207,12 +210,19 @@ impl<'p> Evaluator<'p> {
             for f in new_funcs.iter_mut() {
                 let mut consts: HashMap<LocalId, Val> = HashMap::new();
                 let mut body = f.body.clone();
-                ev.fold_block(&mut body, &f.locals, &mut consts)?;
+                ev.fold_block(&mut body, &f.locals, &mut consts).map_err(|d| vec![d])?;
                 if fold {
                     f.body = body;
                 }
             }
-            Ok(new_funcs)
+            if ev.errs.is_empty() {
+                Ok(new_funcs)
+            } else {
+                let mut errs = std::mem::take(&mut ev.errs);
+                errs.sort_by_key(|d| (d.span.file, d.span.start));
+                errs.dedup_by(|a, b| a.span == b.span && a.msg == b.msg);
+                Err(errs)
+            }
         })();
         p.types = snapshot.types;
         let funcs = r?;
@@ -232,16 +242,20 @@ impl<'p> Evaluator<'p> {
     }
 
     fn panic_diag(&self, at: Span, msg: &str, inner: Span) -> Diag {
-        if inner == at || inner.file != at.file || inner.start < at.start || inner.start > at.end {
-            Diag::new(at, format!("this expression always panics: {msg} ({})", self.loc(inner)))
-        } else {
+        let inside = inner.file == at.file && inner.start >= at.start && inner.end <= at.end;
+        if inside {
             Diag::new(at, format!("this expression always panics: {msg}"))
+        } else {
+            // the panic happens elsewhere (e.g. inside a called function): say where
+            Diag::new(at, format!("this expression always panics: {msg} ({})", self.loc(inner)))
         }
     }
 
     fn fold_block(&mut self, b: &mut Block, locals: &[Local], consts: &mut HashMap<LocalId, Val>) -> Result<(), Diag> {
         for s in b.stmts.iter_mut() {
-            self.fold_stmt(s, locals, consts)?;
+            if let Err(d) = self.fold_stmt(s, locals, consts) {
+                self.errs.push(d);
+            }
         }
         Ok(())
     }

@@ -161,6 +161,15 @@ fn language_server() {
     assert_eq!(diags.len(), 1, "{diags:?}");
     assert_eq!(diags[0]["severity"], 2);
 
+    // every error is published, not just the first
+    let many = "int a = \"x\"\nstr b = 1\nint c = 1 / 0\nint d = (\n";
+    c.notify(
+        "textDocument/didChange",
+        json!({"textDocument": {"uri": uri, "version": 5}, "contentChanges": [{"text": many}]}),
+    );
+    let diags = c.diagnostics(&uri);
+    assert_eq!(diags.len(), 4, "{diags:?}");
+
     c.request("shutdown", Value::Null);
     c.notify("exit", Value::Null);
     let status = c.child.wait().unwrap();

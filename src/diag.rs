@@ -113,6 +113,9 @@ impl fmt::Display for Diag {
 
 pub type Result<T> = std::result::Result<T, Diag>;
 
+/// Result carrying every error found.
+pub type Results<T> = std::result::Result<T, Vec<Diag>>;
+
 pub fn err<T>(span: Span, msg: impl Into<String>) -> Result<T> {
     Err(Diag::new(span, msg))
 }

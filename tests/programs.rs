@@ -134,3 +134,26 @@ fn init_creates_project() {
     assert!(!status.success());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Files in `tests/multi` contain several errors; `ncc check` must report all of them, in
+/// order (each line of the `.errors` file is a message that must appear).
+#[test]
+fn all_errors_reported() {
+    let mut failures = Vec::new();
+    for src in sorted_files(&root().join("multi"), ".nc") {
+        let expected = std::fs::read_to_string(src.with_extension("errors")).unwrap();
+        let (_, stderr, code) = run(&["check"], &src);
+        let mut rest = stderr.as_str();
+        for msg in expected.lines() {
+            match rest.find(msg) {
+                Some(i) => rest = &rest[i + msg.len()..],
+                None => failures.push(format!("{}: missing or out of order `{msg}`:\n{stderr}", src.display())),
+            }
+        }
+        let n = expected.lines().count();
+        if code == 0 || (n > 1 && !stderr.contains(&format!("found {n} errors"))) {
+            failures.push(format!("{}: expected {n} errors (exit {code}):\n{stderr}", src.display()));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}

@@ -24,20 +24,34 @@ pub struct Options {
 
 /// Parse and type-check a program, printing diagnostics on failure.
 fn frontend(file: &Path, sm: &mut SourceMap, release: bool) -> Option<Program> {
-    let r = crate::modules::load(sm, file).and_then(crate::check::check).and_then(|mut p| {
-        for w in crate::lint::race_warnings(&p) {
-            eprintln!("{}", w.render_as("warning", sm));
+    let r = crate::modules::load_with(sm, file, &Default::default()).map(|(graph, load_errors)| {
+        let (mut p, mut errors, _) = crate::check::check_partial(graph);
+        errors.extend(load_errors);
+        // compile-time panics are reported alongside type errors
+        if let Err(more) = crate::eval::Evaluator::run(&mut p, sm, release && errors.is_empty()) {
+            errors.extend(more);
         }
-        crate::eval::Evaluator::run(&mut p, sm, release)?;
-        Ok(p)
+        errors.sort_by_key(|d| (d.span.file, d.span.start));
+        errors.dedup_by(|a, b| a.span == b.span && a.msg == b.msg);
+        if errors.is_empty() {
+            for w in crate::lint::race_warnings(&p) {
+                eprintln!("{}", w.render_as("warning", sm));
+            }
+        }
+        (p, errors)
     });
-    match r {
-        Ok(p) => Some(p),
-        Err(d) => {
-            eprintln!("{}", d.render(sm));
-            None
-        }
+    let errors = match r {
+        Ok((p, errors)) if errors.is_empty() => return Some(p),
+        Ok((_, errors)) => errors,
+        Err(errors) => errors,
+    };
+    for d in &errors {
+        eprintln!("{}\n", d.render(sm));
     }
+    if errors.len() > 1 {
+        eprintln!("error: found {} errors", errors.len());
+    }
+    None
 }
 
 /// The C compiler command from `$CC`, falling back to `cc`.

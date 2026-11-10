@@ -1,0 +1,7 @@
+expected `int`, found `str`
+expected `str`, found `int`
+operator `+` requires both operands to have the same type, found `int` and `str`
+unknown name `undefined_fn`
+expected `int`, found `bool`
+this expression always panics: division by zero
+this expression always panics: integer overflow

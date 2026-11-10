@@ -251,24 +251,24 @@ impl Server {
         let mut index = None;
         let mut imports = None;
         match crate::modules::load_with(&mut sm, entry, &self.docs) {
-            Err(d) => diags.push((d, DiagnosticSeverity::ERROR)),
-            Ok(graph) => {
+            Err(errs) => diags.extend(errs.into_iter().map(|d| (d, DiagnosticSeverity::ERROR))),
+            Ok((graph, load_errors)) => {
+                diags.extend(load_errors.into_iter().map(|d| (d, DiagnosticSeverity::ERROR)));
                 let mut im = HashMap::new();
                 for (alias, &m) in &graph.modules[0].imports {
                     im.insert(alias.clone(), graph.modules[m].path.clone());
                 }
                 imports = Some(im);
-                let (r, ix) = crate::check::check_indexed(graph);
+                let (mut p, errs, ix) = crate::check::check_partial(graph);
                 index = Some(ix);
-                match r {
-                    Err(d) => diags.push((d, DiagnosticSeverity::ERROR)),
-                    Ok(mut p) => {
-                        for w in crate::lint::race_warnings(&p) {
-                            diags.push((w, DiagnosticSeverity::WARNING));
-                        }
-                        if let Err(d) = crate::eval::Evaluator::run(&mut p, &sm, false) {
-                            diags.push((d, DiagnosticSeverity::ERROR));
-                        }
+                let clean = errs.is_empty();
+                diags.extend(errs.into_iter().map(|d| (d, DiagnosticSeverity::ERROR)));
+                if let Err(errs) = crate::eval::Evaluator::run(&mut p, &sm, false) {
+                    diags.extend(errs.into_iter().map(|d| (d, DiagnosticSeverity::ERROR)));
+                }
+                if clean {
+                    for w in crate::lint::race_warnings(&p) {
+                        diags.push((w, DiagnosticSeverity::WARNING));
                     }
                 }
             }
@@ -370,7 +370,7 @@ impl Server {
     fn symbols(&self, p: DocumentSymbolParams) -> Option<DocumentSymbolResponse> {
         let path = uri_to_path(&p.text_document.uri)?;
         let text = self.text_of(&path)?;
-        let module = crate::parser::parse_module(&text, 0).ok()?;
+        let (module, _) = crate::parser::parse_module_recover(&text, 0);
         let sym = |name: &str, kind: SymbolKind, span: Span, detail: Option<String>, children: Option<Vec<DocumentSymbol>>| {
             let range = span_range(&text, span);
             DocumentSymbol {
