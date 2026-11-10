@@ -791,15 +791,11 @@ impl<'a> Printer<'a> {
             }
             ExprKind::Slice(b, lo, hi) => {
                 let base = self.paren(b, indent, prec(b) < POSTFIX);
-                let lo = lo
-                    .as_ref()
-                    .map(|x| self.expr(x, indent))
-                    .unwrap_or_default();
-                let hi = hi
-                    .as_ref()
-                    .map(|x| self.expr(x, indent))
-                    .unwrap_or_default();
-                format!("{base}[{lo}:{hi}]")
+                format!(
+                    "{base}[{}:{}]",
+                    self.expr(lo, indent),
+                    self.expr(hi, indent)
+                )
             }
             ExprKind::Tuple(items) => format!("({})", self.list(items, indent).join(", ")),
             ExprKind::Array(items) => {

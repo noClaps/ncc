@@ -356,14 +356,14 @@ module.exports = grammar({
     index_expression: ($) =>
       prec(PREC.postfix, seq(field('value', $._expression), '[', field('index', $._expression), ']')),
 
-    // `x[a:b]`, either bound optional
+    // `x[a:b]`
     slice_expression: ($) =>
       prec(PREC.postfix, seq(
         field('value', $._expression),
         '[',
-        optional(field('start', $._expression)),
+        field('start', $._expression),
         ':',
-        optional(field('end', $._expression)),
+        field('end', $._expression),
         ']',
       )),
 

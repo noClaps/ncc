@@ -34,8 +34,8 @@ Strings can be sliced like [arrays](../array#slicing), with `string[start:end]`.
 test "string slicing" {
   str s = "cookie 🍪"
   assert s[0:6] == "cookie"
-  assert s[7:] == "🍪"
-  assert s[:$] == "cookie "
+  assert s[7:s.len] == "🍪"
+  assert s[0:$] == "cookie "
 }
 ```
 

@@ -1286,10 +1286,7 @@ impl<'p> CGen<'p> {
                 let loc = self.loc(e.span);
                 self.dollar.push(format!("nc_dollar({bn}->{len}, {loc})"));
                 let l = self.index_value(lo);
-                let h = match hi {
-                    Some(h) => self.index_value(h),
-                    None => format!("(uint64_t){bn}->{len}"),
-                };
+                let h = self.index_value(hi);
                 self.dollar.pop();
                 let f = if is_str {
                     "nc_str_slice"

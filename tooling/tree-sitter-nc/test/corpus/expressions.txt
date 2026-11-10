@@ -242,10 +242,9 @@ Slices
 ================================================================================
 
 a = xs[1:3]
-b = xs[:N]
-c = s[i + 1:]
-d = xs[:]
-e = xs[$ - 1:][0]
+b = xs[0:N]
+c = s[i + 1:s.len]
+d = xs[$ - 1:$ + 1][0]
 
 --------------------------------------------------------------------------------
 
@@ -260,6 +259,7 @@ e = xs[$ - 1:][0]
     (identifier)
     (slice_expression
       (identifier)
+      (integer)
       (identifier)))
   (assignment
     (identifier)
@@ -267,16 +267,18 @@ e = xs[$ - 1:][0]
       (identifier)
       (binary_expression
         (identifier)
-        (integer))))
-  (assignment
-    (identifier)
-    (slice_expression
-      (identifier)))
+        (integer))
+      (field_expression
+        (identifier)
+        (field_identifier))))
   (assignment
     (identifier)
     (index_expression
       (slice_expression
         (identifier)
+        (binary_expression
+          (dollar)
+          (integer))
         (binary_expression
           (dollar)
           (integer)))

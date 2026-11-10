@@ -1834,7 +1834,7 @@
     "fields": {
       "end": {
         "multiple": false,
-        "required": false,
+        "required": true,
         "types": [
           {
             "type": "_expression",
@@ -1844,7 +1844,7 @@
       },
       "start": {
         "multiple": false,
-        "required": false,
+        "required": true,
         "types": [
           {
             "type": "_expression",

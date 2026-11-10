@@ -351,7 +351,7 @@ impl<'a> Checker<'a> {
                     ),
                 }
             }
-            E::Slice(base, lo, hi) => self.check_slice(base, lo.as_deref(), hi.as_deref(), span),
+            E::Slice(base, lo, hi) => self.check_slice(base, lo, hi, span),
             E::Tuple(items) => {
                 let exp =
                     expected
@@ -743,13 +743,13 @@ impl<'a> Checker<'a> {
     }
 
     /// `x[a:b]`. Slicing a fixed-size array with constant bounds (literals, generic constants,
-    /// `$`, omitted bounds) gives a fixed-size array; otherwise the result is a dynamic array,
+    /// `$`) gives a fixed-size array; otherwise the result is a dynamic array,
     /// or a `str` for strings, and the bounds are checked at run time.
     fn check_slice(
         &mut self,
         base: &ast::Expr,
-        lo: Option<&ast::Expr>,
-        hi: Option<&ast::Expr>,
+        lo: &ast::Expr,
+        hi: &ast::Expr,
         span: Span,
     ) -> Result<Expr> {
         let b = self.check_expr(base, None)?;
@@ -767,26 +767,13 @@ impl<'a> Checker<'a> {
                 );
             }
         };
-        let lo = match lo {
-            Some(x) => self.seq_index(x, b.ty)?,
-            None => Expr {
-                kind: EK::Lit(Lit::UInt(0)),
-                ty: UINT,
-                span,
-            },
-        };
-        let hi = match hi {
-            Some(x) => Some(Box::new(self.seq_index(x, b.ty)?)),
-            None => None,
-        };
+        let lo = self.seq_index(lo, b.ty)?;
+        let hi = self.seq_index(hi, b.ty)?;
         let mut ty = result;
         if let Some((el, n)) = fixed {
             let dollar = n as i128 - 1;
             let l = const_index(&lo, dollar);
-            let h = match &hi {
-                Some(h) => const_index(h, dollar),
-                None => Some(n as i128),
-            };
+            let h = const_index(&hi, dollar);
             if let (Some(l), Some(h)) = (l, h) {
                 if l < 0 || l > h || h > n as i128 {
                     return err(
@@ -801,7 +788,7 @@ impl<'a> Checker<'a> {
             }
         }
         Ok(Expr {
-            kind: EK::Slice(Box::new(b), Box::new(lo), hi),
+            kind: EK::Slice(Box::new(b), Box::new(lo), Box::new(hi)),
             ty,
             span,
         })

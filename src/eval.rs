@@ -1042,7 +1042,7 @@ impl<'p> Evaluator<'p> {
                 let base = self.expr(b, env, const_only)?;
                 env.dollar.push(base.clone());
                 let l = self.expr(lo, env, const_only);
-                let h = hi.as_ref().map(|h| self.expr(h, env, const_only));
+                let h = self.expr(hi, env, const_only);
                 env.dollar.pop();
                 let l = idx_checked(&l?, lo.span)? as usize;
                 let len = match &base {
@@ -1050,10 +1050,7 @@ impl<'p> Evaluator<'p> {
                     Val::Str(s) => s.chars().count(),
                     _ => return Err(Stop::Unknown),
                 };
-                let h = match h {
-                    Some(h) => idx_checked(&h?, hi.as_ref().unwrap().span)? as usize,
-                    None => len,
-                };
+                let h = idx_checked(&h?, hi.span)? as usize;
                 if l > h || h > len {
                     return self.panic("slice out of bounds", span);
                 }
@@ -1649,9 +1646,7 @@ fn all_children_lit(e: &Expr) -> bool {
         EK::Slice(a, lo, hi) => {
             f(a);
             f(lo);
-            if let Some(hi) = hi {
-                f(hi);
-            }
+            f(hi);
         }
         EK::Format(ps) => ps.iter().for_each(&mut f),
         _ => ok = false,
@@ -1702,9 +1697,7 @@ fn for_children(e: &mut Expr, f: &mut dyn FnMut(&mut Expr)) {
         EK::Slice(a, lo, hi) => {
             f(a);
             f(lo);
-            if let Some(hi) = hi {
-                f(hi);
-            }
+            f(hi);
         }
         EK::Call(c, args) | EK::Async(c, args) => {
             if let Callee::Value(x) = c {

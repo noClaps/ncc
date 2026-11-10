@@ -2864,40 +2864,24 @@
             "value": "["
           },
           {
-            "type": "CHOICE",
-            "members": [
-              {
-                "type": "FIELD",
-                "name": "start",
-                "content": {
-                  "type": "SYMBOL",
-                  "name": "_expression"
-                }
-              },
-              {
-                "type": "BLANK"
-              }
-            ]
+            "type": "FIELD",
+            "name": "start",
+            "content": {
+              "type": "SYMBOL",
+              "name": "_expression"
+            }
           },
           {
             "type": "STRING",
             "value": ":"
           },
           {
-            "type": "CHOICE",
-            "members": [
-              {
-                "type": "FIELD",
-                "name": "end",
-                "content": {
-                  "type": "SYMBOL",
-                  "name": "_expression"
-                }
-              },
-              {
-                "type": "BLANK"
-              }
-            ]
+            "type": "FIELD",
+            "name": "end",
+            "content": {
+              "type": "SYMBOL",
+              "name": "_expression"
+            }
           },
           {
             "type": "STRING",

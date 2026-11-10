@@ -1284,29 +1284,23 @@ impl Parser {
                     let saved = self.no_struct;
                     self.no_struct = false;
                     self.skip_nl();
-                    // `x[i]`, or a slice: `x[a:b]` with either bound optional
-                    let lo = if self.at(&Tok::Colon) {
-                        None
-                    } else {
-                        Some(Box::new(self.expr()?))
-                    };
+                    // `x[i]`, or a slice `x[a:b]` (both bounds are required)
+                    let missing = "a slice needs both bounds: `x[start:end]`";
+                    if self.at(&Tok::Colon) {
+                        return err(self.span(), missing);
+                    }
+                    let lo = Box::new(self.expr()?);
                     self.skip_nl();
                     let kind = if self.eat(&Tok::Colon) {
                         self.skip_nl();
-                        let hi = if self.at(&Tok::RBracket) {
-                            None
-                        } else {
-                            Some(Box::new(self.expr()?))
-                        };
+                        if self.at(&Tok::RBracket) {
+                            return err(self.span(), missing);
+                        }
+                        let hi = Box::new(self.expr()?);
                         self.skip_nl();
                         ExprKind::Slice(Box::new(e), lo, hi)
                     } else {
-                        match lo {
-                            Some(i) => ExprKind::Index(Box::new(e), i),
-                            None => {
-                                return err(self.span(), "expected an index or a slice `[a:b]`");
-                            }
-                        }
+                        ExprKind::Index(Box::new(e), lo)
                     };
                     self.no_struct = saved;
                     self.expect(&Tok::RBracket)?;
