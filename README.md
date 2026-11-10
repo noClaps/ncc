@@ -25,7 +25,13 @@ ncc build -f c main.nc      # produce ./main.c
 ncc build -o out.s main.nc  # format inferred from the extension
 ncc check main.nc           # type-check only
 ncc test main.nc            # run the file's test blocks
+ncc lsp                     # start the language server (LSP over stdio)
 ```
+
+## Editor support
+
+- [`tooling/tree-sitter-nc`](tooling/tree-sitter-nc): tree-sitter grammar and queries
+- [`tooling/zed`](tooling/zed): Zed extension (highlighting, tasks, and the `ncc lsp` language server)
 
 ## Tests
 
@@ -36,4 +42,4 @@ cargo test
 The end-to-end tests in `tests/programs.rs` compile and run the sample programs in
 `tests/programs` (comparing against `.out` files in debug and release mode), check that the
 programs in `tests/fail` are rejected with the expected diagnostics, and check runtime
-panics in `tests/panic`.
+panics in `tests/panic`. `tests/lsp.rs` drives `ncc lsp` over stdio.

@@ -2,6 +2,8 @@
 
 A [Zed](https://zed.dev) extension for the NC programming language. It provides:
 
+- the `ncc lsp` language server: diagnostics (errors and data-race warnings), hover,
+  go-to-definition, document symbols and completion
 - syntax highlighting
 - bracket matching and auto-closing
 - indentation
@@ -10,7 +12,9 @@ A [Zed](https://zed.dev) extension for the NC programming language. It provides:
 - a run button on each `test` block
 
 It uses the grammar in [`tooling/tree-sitter-nc`](../tree-sitter-nc). `ncc` must be on your
-`PATH` for the tasks to work.
+`PATH` for the language server and tasks to work (for example, `cargo install --path .` from
+the repository root). The extension is a small Rust crate (`src/lib.rs`) that Zed compiles to
+WebAssembly and uses to start `ncc lsp`.
 
 ## Installing
 

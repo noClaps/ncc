@@ -24,6 +24,15 @@
    (`src/runtime/nc.h`) embedded, then calls the C compiler. Debug builds use
    `-O0 -g -fno-omit-frame-pointer`; release builds use `-O3 -DNDEBUG`, which also inlines.
 
+## Language server
+
+`ncc lsp` (`src/lsp.rs`) speaks LSP over stdio. Each open document is analysed as an entry file,
+using the in-memory text of all open documents. The checker records a symbol index
+(`src/check/index.rs`) with declarations, references, hover text and members. The index is
+filled even when checking stops at an error, and the server uses it for hover, go-to-definition
+and completion. Document symbols come straight from the parser. Diagnostics include parse and
+type errors, compile-time panics and data-race warnings.
+
 ## Runtime representation
 
 | NC type | C representation |

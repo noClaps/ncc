@@ -10,3 +10,7 @@ repository = "https://github.com/noClaps/ncc"
 repository = "https://github.com/noClaps/ncc"
 rev = "c09e0bce827bc21b6b0d8c24a22681f1a8a6bc85"
 path = "tooling/tree-sitter-nc"
+
+[language_servers.ncc]
+name = "ncc"
+languages = ["NC"]
