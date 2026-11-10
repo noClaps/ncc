@@ -181,7 +181,7 @@ impl Types {
             | TyKind::Float
             | TyKind::Char => false,
             TyKind::Named(_) => self.is_managed(self.base(t)),
-            TyKind::Opt(i) => self.is_managed(*i) || self.opt_boxed(t),
+            TyKind::Opt(i) => self.opt_boxed(t) || self.is_managed(*i),
             TyKind::ErrU(_) => true,
             TyKind::Tuple(ts) => ts.iter().any(|t| self.is_managed(*t)),
             TyKind::Struct(i) => self.structs[*i as usize].fields.iter().any(|(_, t)| self.is_managed(*t)),

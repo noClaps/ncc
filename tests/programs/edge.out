@@ -1,0 +1,9 @@
+3
+Node{.val = 1, .next = Node{.val = 2, .next = none}}
+none 5
+100
+4
+25
+[1, 2, 3] 3
+unknown number: six
+5 -1
