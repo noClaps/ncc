@@ -20,7 +20,11 @@ use types::{TypeGen, c_escape_bytes, c_escape_str, c_ident, field_name};
 
 const ARR_HELPER: TyId = u32::MAX - 1;
 
-pub const RUNTIME: &str = include_str!("../runtime/nc.h");
+/// The public header: NC's types and the runtime functions C code may call. Extern C files
+/// include it as `nc.h`.
+pub const HEADER: &str = include_str!("../runtime/nc.h");
+/// The runtime implementation, pasted into every generated program after [`HEADER`].
+pub const RUNTIME: &str = include_str!("../runtime/nc_impl.h");
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -205,7 +209,7 @@ impl<'p> CGen<'p> {
             }
         };
         let mut out = String::new();
-        out.push_str("#define NC_RUNTIME_IMPL\n");
+        out.push_str(HEADER);
         out.push_str(RUNTIME);
         let types_section = self.tg.all_decls();
         out.push_str(&types_section);

@@ -409,3 +409,40 @@ fn program_arguments() {
     assert_ne!(code, 0, "{stdout}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `src/runtime/nc.h` is usable on its own from C, without warnings.
+#[test]
+fn public_header_is_standalone() {
+    let dir = std::env::temp_dir().join(format!("ncc-header-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let c = dir.join("use.c");
+    std::fs::write(
+        &c,
+        "#include \"nc.h\"\nint main(void) {\n  nc_err_str e = {0};\n  nc_opt_int o = {true, 1};\n  return e.err == NULL && o.has ? 0 : 1;\n}\n",
+    )
+    .unwrap();
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
+    // C23 deprecates `_Noreturn`, which some compilers flag under `-Wpedantic`
+    for (std, pedantic) in [("c11", "-Wpedantic"), ("c23", "-Wall")] {
+        let out = Command::new(&cc)
+            .arg(format!("-std={std}"))
+            .args([
+                "-Wall",
+                "-Wextra",
+                pedantic,
+                "-Werror",
+                "-fsyntax-only",
+                "-I",
+            ])
+            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/runtime"))
+            .arg(&c)
+            .output()
+            .expect("failed to run the C compiler");
+        assert!(
+            out.status.success(),
+            "{std}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}

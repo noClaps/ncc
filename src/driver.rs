@@ -207,7 +207,7 @@ fn compile(
     };
     let main_c = tmp.0.join("main.c");
     let ok = std::fs::write(&main_c, &c_src)
-        .and_then(|_| std::fs::write(tmp.0.join("nc.h"), cgen::RUNTIME))
+        .and_then(|_| std::fs::write(tmp.0.join("nc.h"), cgen::HEADER))
         .and_then(|_| std::fs::write(tmp.0.join("nc_gen.h"), &header));
     if let Err(e) = ok {
         eprintln!("error: cannot write temporary files: {e}");

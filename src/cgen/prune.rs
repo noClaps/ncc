@@ -17,7 +17,7 @@ struct Item {
 #[derive(PartialEq)]
 enum Kind {
     Include(String),
-    /// include guard / `NC_RUNTIME_IMPL` plumbing: dropped from the pruned output
+    /// include guard plumbing: dropped from the pruned output
     Guard,
     Decl(Vec<String>),
 }
@@ -317,7 +317,7 @@ fn directive_kind(line: &str) -> Kind {
             .chars()
             .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
             .collect();
-        if name == "NC_RUNTIME_H" || name == "NC_RUNTIME_IMPL" {
+        if name == "NC_RUNTIME_H" {
             return Kind::Guard;
         }
         return Kind::Decl(vec![name]);

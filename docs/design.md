@@ -21,7 +21,8 @@
    overflows. In release mode it folds constant expressions and pure calls with constant
    arguments into literals, so `@println(fibonacci(10))` becomes `@println(55)`.
 6. **C generation** (`src/cgen/`): emits one readable C23 translation unit with the runtime
-   (`src/runtime/nc.h`) embedded, then calls the C compiler. Debug builds use
+   embedded (the public header `src/runtime/nc.h`, then the implementation
+   `src/runtime/nc_impl.h`), then calls the C compiler. Debug builds use
    `-O0 -g -fno-omit-frame-pointer`; release builds use `-O3 -DNDEBUG`, which also inlines.
 
 ## Error reporting
@@ -130,12 +131,16 @@ print `panic: <reason> (file:line)` and exit with code 101; an uncaught error pr
 ## Extern C ABI
 
 An `extern "file.c" as alias { ... }` block names a C file, relative to the NC file, that is
-compiled and linked with the program. The file should `#include "nc_gen.h"`, a generated
-header that pulls in the runtime types (`nc.h`) and the C definitions of the program's NC
-types. Each extern function is called with plain C arguments, without a closure environment:
+compiled and linked with the program. The file includes `nc.h` (`src/runtime/nc.h`): NC's
+value types, the runtime functions C code may call, and the optionals and error unions of the
+built-in types (`nc_err_int`, `nc_opt_str`, ...). It needs nothing else, so a copy can sit
+next to the C file for editors. For other types (structs, tuples, ...) the file includes
+`nc_gen.h` instead, a header generated during the build that includes `nc.h` and defines
+every type the program's extern signatures use. Each extern function is called with plain C
+arguments, without a closure environment:
 
 ```c
-#include "nc_gen.h"
+#include "nc.h"
 
 int64_t nc_test_add(int64_t a, int64_t b) { return a + b; }
 
