@@ -37,12 +37,13 @@ before being compiled.
 ## CLI
 
 ```
-Usage: ncc [build|run|check] <file>
+Usage: ncc [build|run|check|test] <file>
 
 Commands:
   build       Compiles the given file.
   run         Executes the given file.
   check       Type-checks the given file.
+  test        Run tests in the given file.
 
 Arguments:
   <file>      The file to act upon.
@@ -90,6 +91,18 @@ Options:
 Usage: ncc check <file>
 
 Type-checks the given file.
+
+Arguments:
+  <file>      The file to act upon.
+
+Options:
+  -h, --help  Show this help and exit.
+```
+
+```
+Usage: ncc test <file>
+
+Run tests in the given file.
 
 Arguments:
   <file>      The file to act upon.
