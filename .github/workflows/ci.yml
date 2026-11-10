@@ -12,21 +12,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: macos-latest
-            cc: cc
-          # the generated C needs C23 (`<stdckdint.h>`), which GCC supports from version 14
-          - os: ubuntu-24.04
-            cc: gcc-14
+        os: [macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
-    env:
-      CC: ${{ matrix.cc }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install GCC 14
+      # the generated C needs C23 (`<stdckdint.h>`, GCC 14+), so use the newest GCC the
+      # Ubuntu release packages rather than its default one
+      - name: Install the newest GCC
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y gcc-14
+        run: |
+          sudo apt-get update
+          version=$(apt-cache search --names-only '^gcc-[0-9]+$' | grep -oE '^gcc-[0-9]+' | cut -d- -f2 | sort -n | tail -1)
+          sudo apt-get install -y "gcc-$version"
+          echo "CC=gcc-$version" >> "$GITHUB_ENV"
+          "gcc-$version" --version
 
       - uses: dtolnay/rust-toolchain@stable
         with:
