@@ -494,6 +494,7 @@ impl<'a> Checker<'a> {
 
     fn check_ident(&mut self, name: &str, span: Span) -> Result<Expr> {
         if let Some((v, ty)) = self.resolve_var(name, span)? {
+            self.idx_var_ref(v, span);
             if matches!(self.types.kind(ty), TyKind::Mutex(_)) {
                 return err(span, format!("`{name}` is a mutex; access it inside `lock {name} {{ ... }}`"));
             }
@@ -502,6 +503,7 @@ impl<'a> Checker<'a> {
         let m = self.module();
         match self.mods[m].syms.get(name).map(|e| e.sym.clone()) {
             Some(Sym::Fn { func: Some(f), .. }) => {
+                self.idx_fn_ref(f, name, span);
                 let (ps, r) = self.sigs[f].clone();
                 let ty = self.types.intern(TyKind::Fn(ps, r));
                 Ok(Expr { kind: EK::FnRef(f), ty, span })
@@ -614,10 +616,14 @@ impl<'a> Checker<'a> {
                         return err(span, format!("extern block `{alias}` has no function `{name}`"));
                     };
                     let x = &self.externs[id];
-                    return Ok(Target::Call(Callee::Extern(id), x.params.clone(), x.ret));
+                    let hover = format!("extern fn {}", x.name);
+                    let (ps, r) = (x.params.clone(), x.ret);
+                    self.idx_ref(span, None, hover);
+                    return Ok(Target::Call(Callee::Extern(id), ps, r));
                 }
                 match self.lookup_sym(m, Some(&alias), name, span)? {
                     Some((_, Sym::Fn { func: Some(f), .. })) => {
+                        self.idx_fn_ref(f, name, span);
                         let (ps, r) = self.sigs[f].clone();
                         return Ok(Target::Call(Callee::Direct(f), ps, r));
                     }
@@ -633,10 +639,13 @@ impl<'a> Checker<'a> {
                 let Some(idx) = def.variants.iter().position(|(n, _)| n == name) else {
                     return err(span, format!("enum `{}` has no member `{name}`", def.name));
                 };
+                self.idx_variant_ref(ty, idx, span);
                 return Ok(Target::Variant(ty, idx, def.variants[idx].1.clone()));
             }
         }
         if let Some(f) = self.generic_fn_ref(callee)? {
+            let fname = self.funcs.get(f).and_then(|x| x.as_ref()).map(|x| x.name.clone()).unwrap_or_else(|| "fn".into());
+            self.idx_fn_ref(f, &fname, callee.span);
             let (ps, r) = self.sigs[f].clone();
             return Ok(Target::Call(Callee::Direct(f), ps, r));
         }
@@ -644,6 +653,7 @@ impl<'a> Checker<'a> {
             if self.resolve_var(name, span)?.is_none() {
                 let m = self.module();
                 if let Some(Sym::Fn { func: Some(f), .. }) = self.mods[m].syms.get(name).map(|e| e.sym.clone()) {
+                    self.idx_fn_ref(f, name, span);
                     let (ps, r) = self.sigs[f].clone();
                     return Ok(Target::Call(Callee::Direct(f), ps, r));
                 }
@@ -696,6 +706,7 @@ impl<'a> Checker<'a> {
             return match self.lookup_sym(m, Some(&alias), name, span)? {
                 Some((tm, Sym::Globals(list))) => {
                     let g = list.last().unwrap().0;
+                    self.idx_global_ref(g, span);
                     let ty = self.globals[g].ty;
                     let _ = tm;
                     if matches!(self.types.kind(ty), TyKind::Mutex(_)) {
@@ -704,6 +715,7 @@ impl<'a> Checker<'a> {
                     Ok(Expr { kind: EK::Var(VarRef::Global(g)), ty, span })
                 }
                 Some((_, Sym::Fn { func: Some(f), .. })) => {
+                    self.idx_fn_ref(f, name, span);
                     let (ps, r) = self.sigs[f].clone();
                     let ty = self.types.intern(TyKind::Fn(ps, r));
                     Ok(Expr { kind: EK::FnRef(f), ty, span })
@@ -724,6 +736,7 @@ impl<'a> Checker<'a> {
             if !def.variants[idx].1.is_empty() {
                 return err(span, format!("`{}.{name}` holds a value; construct it with `{}.{name}(...)`", def.name, def.name));
             }
+            self.idx_variant_ref(ty, idx, span);
             return Ok(Expr { kind: EK::Variant(idx, vec![]), ty, span });
         }
         let b = self.check_expr(base, None)?;
@@ -733,6 +746,8 @@ impl<'a> Checker<'a> {
                 match fields.iter().position(|(n, _)| n == name) {
                     Some(idx) => {
                         let ty = fields[idx].1;
+                        let bty = b.ty;
+                        self.idx_field_ref(bty, idx, span);
                         Ok(Expr { kind: EK::Field(Box::new(b), idx), ty, span })
                     }
                     None => err(span, format!("`{}` has no field `{name}`", self.types.show(b.ty))),

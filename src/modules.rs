@@ -33,13 +33,18 @@ fn find_root(start: &Path) -> Option<PathBuf> {
 }
 
 pub fn load(sm: &mut SourceMap, entry: &Path) -> Result<ModuleGraph> {
+    load_with(sm, entry, &HashMap::new())
+}
+
+/// Load the module graph, preferring in-memory contents from `overlay` (keyed by canonical path).
+pub fn load_with(sm: &mut SourceMap, entry: &Path, overlay: &HashMap<PathBuf, String>) -> Result<ModuleGraph> {
     let entry = std::fs::canonicalize(entry)
         .map_err(|e| Diag::new(Span::default(), format!("cannot open `{}`: {e}", entry.display())))?;
     let entry_dir = entry.parent().unwrap().to_path_buf();
     let mut graph = ModuleGraph { modules: vec![], order: vec![] };
     let mut by_path: HashMap<PathBuf, usize> = HashMap::new();
     let mut root: Option<Option<PathBuf>> = None;
-    load_one(sm, &entry, &entry_dir, &mut graph, &mut by_path, &mut root, None)?;
+    load_one(sm, &entry, &entry_dir, &mut graph, &mut by_path, &mut root, None, overlay)?;
     // order: DFS post-order from the entry
     let mut visited = vec![false; graph.modules.len()];
     fn visit(g: &ModuleGraph, i: usize, visited: &mut Vec<bool>, out: &mut Vec<usize>) {
@@ -77,15 +82,21 @@ fn load_one(
     by_path: &mut HashMap<PathBuf, usize>,
     root: &mut Option<Option<PathBuf>>,
     from: Option<Span>,
+    overlay: &HashMap<PathBuf, String>,
 ) -> Result<usize> {
     if let Some(&i) = by_path.get(path) {
         return Ok(i);
     }
-    let text = std::fs::read_to_string(path).map_err(|e| {
+    let text = match overlay.get(path) {
+        Some(t) => Ok(t.clone()),
+        None => std::fs::read_to_string(path),
+    }
+    .map_err(|e| {
         Diag::new(from.unwrap_or_default(), format!("cannot read module `{}`: {e}", path.display()))
     })?;
     let file = sm.add(path.to_path_buf(), text.clone());
     let ast = parse_module(&text, file)?;
+    let ast = ast;
     let idx = graph.modules.len();
     by_path.insert(path.to_path_buf(), idx);
     graph.modules.push(LoadedModule { path: path.to_path_buf(), file, ast, imports: HashMap::new() });
@@ -127,7 +138,7 @@ fn load_one(
         if graph.modules[idx].imports.contains_key(&im.alias) {
             return Err(Diag::new(im.span, format!("duplicate import alias `{}`", im.alias)));
         }
-        let m = load_one(sm, &target, entry_dir, graph, by_path, root, Some(im.span))?;
+        let m = load_one(sm, &target, entry_dir, graph, by_path, root, Some(im.span), overlay)?;
         graph.modules[idx].imports.insert(im.alias.clone(), m);
     }
     Ok(idx)

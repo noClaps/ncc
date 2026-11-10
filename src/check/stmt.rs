@@ -295,6 +295,7 @@ impl<'a> Checker<'a> {
                     Some(x) => x,
                     None => return err(*name_span, format!("unknown variable `{name}`")),
                 };
+                self.idx_var_ref(vr, *name_span);
                 let TyKind::Mutex(inner) = *self.types.kind(ty) else {
                     return err(*name_span, format!("`{name}` is not a mutex"));
                 };
@@ -353,6 +354,7 @@ impl<'a> Checker<'a> {
         let fty = self.types.intern(TyKind::Fn(params.clone(), ret));
         let display = name.map(|s| s.to_string()).unwrap_or_else(|| "fn literal".to_string());
         let fid = self.reserve_fn(display.clone(), params.clone(), ret);
+        self.ix.fn_spans.insert(fid, sig.span);
         if ret == NEVER {
             self.never_funcs.insert(fid);
         }
@@ -411,6 +413,7 @@ impl<'a> Checker<'a> {
                 let Some((v, ty)) = self.resolve_var(name, e.span)? else {
                     return err(e.span, format!("unknown variable `{name}`"));
                 };
+                self.idx_var_ref(v, e.span);
                 if matches!(self.types.kind(ty), TyKind::Mutex(_)) {
                     return err(e.span, format!("`{name}` is a mutex; access it inside `lock {name} {{ ... }}`"));
                 }

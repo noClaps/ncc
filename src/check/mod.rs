@@ -3,6 +3,7 @@
 
 mod expr;
 pub mod flow;
+pub mod index;
 mod pat;
 mod stmt;
 
@@ -102,11 +103,17 @@ pub struct Checker<'a> {
     pub never_funcs: HashSet<FuncId>,
     tests: Vec<Test>,
     order: Vec<usize>,
+    pub ix: index::IndexState,
     _p: std::marker::PhantomData<&'a ()>,
 }
 
 pub fn check(graph: ModuleGraph) -> Result<Program> {
-    let c = Checker {
+    check_indexed(graph).0
+}
+
+/// Check a program, also returning the symbol index (filled even when checking fails).
+pub fn check_indexed(graph: ModuleGraph) -> (Result<Program>, index::Index) {
+    let mut c = Checker {
         mods: graph
             .modules
             .into_iter()
@@ -134,9 +141,11 @@ pub fn check(graph: ModuleGraph) -> Result<Program> {
         never_funcs: HashSet::new(),
         tests: vec![],
         order: graph.order.clone(),
+        ix: Default::default(),
         _p: std::marker::PhantomData,
     };
-    c.run()
+    let r = c.run();
+    (r, std::mem::take(&mut c.ix.index))
 }
 
 impl<'a> Checker<'a> {
@@ -145,7 +154,7 @@ impl<'a> Checker<'a> {
         self.next_jump
     }
 
-    fn run(mut self) -> Result<Program> {
+    fn run(&mut self) -> Result<Program> {
         // Phase A: declare names
         for m in 0..self.mods.len() {
             self.declare_names(m)?;
@@ -200,14 +209,14 @@ impl<'a> Checker<'a> {
         // assemble main
         let main_body = self.assemble_main();
         self.finish_fn(main_ctx, "main".into(), vec![], main_body, Span::default(), None);
-        let funcs = self.funcs.into_iter().map(|f| f.expect("unfinished function")).collect();
+        let funcs = std::mem::take(&mut self.funcs).into_iter().map(|f| f.expect("unfinished function")).collect();
         Ok(Program {
-            types: self.types,
+            types: std::mem::take(&mut self.types),
             funcs,
-            globals: self.globals,
-            externs: self.externs,
+            globals: std::mem::take(&mut self.globals),
+            externs: std::mem::take(&mut self.externs),
             main,
-            tests: self.tests,
+            tests: std::mem::take(&mut self.tests),
         })
     }
 
@@ -276,6 +285,10 @@ impl<'a> Checker<'a> {
                         if let TyKind::Named(n) = self.types.kind(ty).clone() {
                             self.types.named[n as usize].underlying = under;
                         }
+                        self.ix.type_spans.insert(ty, t.span);
+                        let detail = self.type_detail(ty);
+                        let members = self.members_of(ty);
+                        self.idx_decl(&t.name, t.span, index::DeclKind::Type, detail, members);
                         // reject cycles
                         let mut seen = vec![ty];
                         let mut cur = under;
@@ -293,6 +306,8 @@ impl<'a> Checker<'a> {
                             _ => unreachable!(),
                         };
                         self.fill_struct(ty, s, m, &none)?;
+                        let detail = self.type_detail(ty);
+                        self.idx_decl(&s.name, s.span, index::DeclKind::Struct, detail, vec![]);
                     }
                     ast::Item::Enum(e) if e.type_params.is_empty() => {
                         let ty = match self.mods[m].syms[&e.name].sym {
@@ -300,6 +315,9 @@ impl<'a> Checker<'a> {
                             _ => unreachable!(),
                         };
                         self.fill_enum(ty, e, m, &none)?;
+                        let detail = self.type_detail(ty);
+                        let members: Vec<(String, String)> = e.variants.iter().map(|v| (v.0.clone(), format!("{}.{}", e.name, v.0))).collect();
+                        self.idx_decl(&e.name, e.span, index::DeclKind::Enum, detail, members);
                     }
                     _ => {}
                 }
@@ -312,6 +330,9 @@ impl<'a> Checker<'a> {
                         if is_never_ret(&f.sig) {
                             self.never_funcs.insert(id);
                         }
+                        self.ix.fn_spans.insert(id, f.sig.span);
+                        let detail = self.fn_detail(&f.sig.name, id);
+                        self.idx_decl(&f.sig.name, f.sig.span, index::DeclKind::Function, detail, vec![]);
                         if let Some(SymEntry { sym: Sym::Fn { func, .. }, .. }) = self.mods[m].syms.get_mut(&f.sig.name) {
                             *func = Some(id);
                         }
@@ -323,6 +344,9 @@ impl<'a> Checker<'a> {
                         for f in &e.fns {
                             let (params, ret) = self.resolve_sig(&f.sig, m, &none)?;
                             let id = self.externs.len();
+                            let ps: Vec<String> = params.iter().map(|p| self.types.show(*p)).collect();
+                            let detail = format!("fn {}.{}({}) {}", e.alias, f.sig.name, ps.join(", "), if ret == VOID { String::new() } else { self.types.show(ret) });
+                            self.idx_decl(&f.sig.name, f.sig.span, index::DeclKind::Function, detail.trim_end().to_string(), vec![]);
                             self.externs.push(Extern {
                                 name: format!("{}.{}", e.alias, f.sig.name),
                                 symbol: f.symbol.clone(),
@@ -390,8 +414,20 @@ impl<'a> Checker<'a> {
             }
             fields.push((name.clone(), t));
         }
+        self.ix.field_spans.insert(ty, s.fields.iter().map(|f| f.2).collect());
+        self.ix.type_spans.insert(ty, s.span);
         if let TyKind::Struct(i) = *self.types.kind(ty) {
             self.types.structs[i as usize].fields = fields;
+        }
+        for (fty, name, sp) in &s.fields {
+            let _ = fty;
+            let fdetail = self
+                .types
+                .struct_def(ty)
+                .and_then(|d| d.fields.iter().find(|f| &f.0 == name))
+                .map(|f| format!("{} {name}", self.types.show(f.1)))
+                .unwrap_or_default();
+            self.idx_decl(name, *sp, index::DeclKind::Field, fdetail, vec![]);
         }
         Ok(())
     }
@@ -408,6 +444,8 @@ impl<'a> Checker<'a> {
             }
             variants.push((name.clone(), ts));
         }
+        self.ix.variant_spans.insert(ty, e.variants.iter().map(|v| v.2).collect());
+        self.ix.type_spans.insert(ty, e.span);
         if let TyKind::Enum(i) = *self.types.kind(ty) {
             self.types.enums[i as usize].variants = variants;
         }
@@ -556,6 +594,7 @@ impl<'a> Checker<'a> {
         if is_never_ret(&f.sig) {
             self.never_funcs.insert(id);
         }
+        self.ix.fn_spans.insert(id, f.sig.span);
         self.fn_insts.insert(key, id);
         // generic bodies are type-checked at instantiation; check right away so that errors
         // point at the instantiation that caused them.
@@ -665,7 +704,7 @@ impl<'a> Checker<'a> {
                 for a in args {
                     targs.push(self.resolve_type(a, m, tp)?);
                 }
-                match self.lookup_sym(m, module.as_deref(), name, *span)? {
+                let resolved = match self.lookup_sym(m, module.as_deref(), name, *span)? {
                     Some((dm, Sym::Struct { decl, ty })) | Some((dm, Sym::Enum { decl, ty })) => match ty {
                         Some(t) => {
                             if !targs.is_empty() {
@@ -688,7 +727,9 @@ impl<'a> Checker<'a> {
                     }
                     Some(_) => return err(*span, format!("`{name}` is not a type")),
                     None => return err(*span, format!("unknown type `{name}`")),
-                }
+                };
+                self.idx_type_ref(resolved, *span);
+                resolved
             }
             T::Array(e, n, sp) => {
                 let et = self.resolve_type(e, m, tp)?;
@@ -844,13 +885,18 @@ impl<'a> Checker<'a> {
         self.ctx().scopes.pop();
     }
 
-    pub fn declare_local(&mut self, name: &str, ty: TyId, mutable: bool, kind: LocalKind, _span: Span) -> Result<LocalId> {
+    pub fn declare_local(&mut self, name: &str, ty: TyId, mutable: bool, kind: LocalKind, span: Span) -> Result<LocalId> {
         let ctx = self.ctx();
         let id = ctx.locals.len();
         ctx.locals.push(Local { name: name.to_string(), ty, mutable, kind, boxed: false });
         if name != "_" {
             ctx.scopes.last_mut().unwrap().push((name.to_string(), id));
         }
+        let func = ctx.func;
+        self.ix.local_spans.insert((func, id), span);
+        let detail = self.var_detail(name, ty, mutable);
+        let members = self.members_of(ty);
+        self.idx_decl(name, span, index::DeclKind::Variable, detail, members);
         Ok(id)
     }
 
@@ -864,6 +910,10 @@ impl<'a> Checker<'a> {
         let m = self.module();
         let id = self.globals.len();
         self.globals.push(Global { name: name.to_string(), ty, mutable, module: m });
+        self.ix.global_spans.insert(id, span);
+        let detail = self.var_detail(name, ty, mutable);
+        let members = self.members_of(ty);
+        self.idx_decl(name, span, index::DeclKind::Variable, detail, members);
         if name == "_" {
             return Ok(id);
         }
@@ -935,6 +985,10 @@ impl<'a> Checker<'a> {
                 boxed: false,
             });
             inner.cap_map.insert(id, lid);
+            let (of, inf) = (self.fns[k - 1].func, self.fns[k].func);
+            if let Some(sp) = self.ix.local_spans.get(&(of, id)).copied() {
+                self.ix.local_spans.insert((inf, lid), sp);
+            }
             id = lid;
         }
         Ok(Some(id))
