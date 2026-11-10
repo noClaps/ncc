@@ -8,7 +8,7 @@ repository = "https://github.com/noClaps/ncc"
 
 [grammars.nc]
 repository = "https://github.com/noClaps/ncc"
-rev = "a1bb268869b2af0e73afdc787c02a4c53f6afa4b"
+rev = "dc24f4e7694f7810feb4da9239b64d2a433d9cca"
 path = "tooling/tree-sitter-nc"
 
 [language_servers.ncc]
