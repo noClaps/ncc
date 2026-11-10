@@ -118,6 +118,8 @@ fn visible(a: &Analysis, fid: u32, off: usize) -> Vec<&SymDecl> {
         .decls
         .iter()
         .filter(|d| d.span.file == fid && !matches!(d.kind, DeclKind::Field | DeclKind::Variant))
+        // extern functions are only reachable through their block's alias
+        .filter(|d| d.extern_alias.is_none())
         .filter(|d| {
             d.scope
                 .is_none_or(|s| s.start as usize <= off && off <= s.end as usize)
@@ -381,12 +383,29 @@ impl Server {
                     Some("module".into()),
                 ));
             }
-            // modules that are not imported yet: accepting one adds the import
+            // extern blocks
             let (module, _) = crate::parser::parse_module_recover(&text, 0);
+            let externs: Vec<(&str, &str)> = module
+                .items
+                .iter()
+                .filter_map(|it| match it {
+                    ast::Item::Extern(e) => Some((e.alias.as_str(), e.path.as_str())),
+                    _ => None,
+                })
+                .collect();
+            for (alias, file) in &externs {
+                items.push(item(
+                    alias,
+                    CompletionItemKind::MODULE,
+                    Some(format!("extern \"{file}\"")),
+                ));
+            }
+            // modules that are not imported yet: accepting one adds the import
             let taken: HashSet<String> = a
                 .imports
                 .keys()
                 .cloned()
+                .chain(externs.iter().map(|(n, _)| n.to_string()))
                 .chain(visible(a, fid, off).into_iter().map(|d| d.name.clone()))
                 .collect();
             let mut offered = HashSet::new();
@@ -523,8 +542,29 @@ impl Server {
         };
         let mut rest = &chain[1..];
         let mut ty: String;
-        // module alias
-        if let Some(mpath) = a.imports.get(first) {
+        // the functions of an extern block
+        let externs: Vec<&SymDecl> = a
+            .index
+            .decls
+            .iter()
+            .filter(|d| d.span.file == fid && d.extern_alias.as_ref() == Some(first))
+            .collect();
+        if !externs.is_empty() {
+            let Some(Seg::Name(n)) = rest.first() else {
+                return Some(
+                    externs
+                        .into_iter()
+                        .map(|d| self.decl_item(a, d, call_parens))
+                        .collect(),
+                );
+            };
+            let d = externs.into_iter().find(|d| &d.name == n)?;
+            if rest.get(1) != Some(&Seg::Call) {
+                return None;
+            }
+            ty = d.ty.clone()?;
+            rest = &rest[2..];
+        } else if let Some(mpath) = a.imports.get(first) {
             let mfid = a.file_id(mpath)?;
             let public = public_names(&self.text_of(mpath)?);
             if rest.is_empty() {

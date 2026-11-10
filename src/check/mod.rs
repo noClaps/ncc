@@ -498,8 +498,11 @@ impl<'a> Checker<'a> {
                             for f in &e.fns {
                                 let (params, ret) = self.resolve_sig(&f.sig, m, &none)?;
                                 let id = self.externs.len();
-                                let ps: Vec<String> =
-                                    params.iter().map(|p| self.types.show(*p)).collect();
+                                let ps: Vec<String> = params
+                                    .iter()
+                                    .zip(&f.sig.params)
+                                    .map(|(t, p)| format!("{} {}", self.types.show(*t), p.name))
+                                    .collect();
                                 let detail = format!(
                                     "fn {}.{}({}) {}",
                                     e.alias,
@@ -518,6 +521,13 @@ impl<'a> Checker<'a> {
                                     detail.trim_end().to_string(),
                                     vec![],
                                 );
+                                self.idx_last_ty(&f.sig.name, ret);
+                                self.ix
+                                    .extern_decls
+                                    .insert(id, (f.sig.span, detail.trim_end().to_string()));
+                                if let Some(d) = self.ix.index.decls.last_mut() {
+                                    d.extern_alias = Some(e.alias.clone());
+                                }
                                 self.externs.push(Extern {
                                     name: format!("{}.{}", e.alias, f.sig.name),
                                     symbol: f.symbol.clone(),

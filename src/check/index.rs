@@ -34,6 +34,8 @@ pub struct SymDecl {
     pub scope: Option<Span>,
     /// the variable's type, a key into `Index::types`
     pub ty: Option<String>,
+    /// for a function of an `extern` block: the block's alias (`alias.name(...)`)
+    pub extern_alias: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -111,6 +113,8 @@ pub struct IndexState {
     pub field_spans: HashMap<TyId, Vec<Span>>,
     pub variant_spans: HashMap<TyId, Vec<Span>>,
     pub fn_params: HashMap<FuncId, Vec<String>>,
+    /// extern functions: declaration span and hover text
+    pub extern_decls: HashMap<usize, (Span, String)>,
     /// innermost scopes being checked, for the visibility of local variables
     pub scopes: Vec<Span>,
 }
@@ -218,6 +222,7 @@ impl<'a> Checker<'a> {
             param: false,
             scope: None,
             ty: None,
+            extern_alias: None,
         });
         self.ix.index.refs.push(SymRef {
             span,

@@ -839,9 +839,16 @@ impl<'a> Checker<'a> {
                         );
                     };
                     let x = &self.externs[id];
-                    let hover = format!("extern fn {}", x.name);
                     let (ps, r) = (x.params.clone(), x.ret);
-                    self.idx_ref(span, None, hover);
+                    match self.ix.extern_decls.get(&id).cloned() {
+                        Some((def, detail)) => {
+                            self.idx_ref(span, Some(def), format!("extern {detail}"))
+                        }
+                        None => {
+                            let hover = format!("extern fn {}", x.name);
+                            self.idx_ref(span, None, hover)
+                        }
+                    }
                     return Ok(Target::Call(Callee::Extern(id), ps, r));
                 }
                 match self.lookup_sym(m, Some(&alias), name, span)? {

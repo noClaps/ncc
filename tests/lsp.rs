@@ -1677,3 +1677,74 @@ fn ssr_join_lines_and_pulled_diagnostics() {
     assert!(c.child.wait().unwrap().success());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn extern_completion() {
+    let mut s = Session::start("extern");
+    std::fs::write(s.dir.join("lib.c"), "").unwrap();
+    let src = "extern \"./lib.c\" as c_lib {\n  fn input() str = \"input\"\n  fn add(int a, int b) int = \"add\"\n}\n\nstr line = c_lib.input()\n";
+    assert_eq!(s.open(src), Vec::<Value>::new());
+
+    // the alias is offered; its functions are not offered unqualified
+    let text = format!("{src}\n");
+    s.change(&text);
+    let comp = s.req(
+        "textDocument/completion",
+        json!({"position": at(&text, "()\n\n", 0, 3)}),
+    );
+    let ls = labels(&comp);
+    assert!(ls.contains(&"c_lib".into()), "{ls:?}");
+    assert!(
+        !ls.contains(&"input".into()) && !ls.contains(&"add".into()),
+        "{ls:?}"
+    );
+    let c = comp
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["label"] == "c_lib")
+        .unwrap();
+    assert_eq!(c["detail"], "extern \"./lib.c\"");
+
+    // `c_lib.` lists its functions, with argument snippets
+    let text = format!("{src}c_lib.\n");
+    s.change(&text);
+    let comp = s.req(
+        "textDocument/completion",
+        json!({"position": at(&text, "c_lib.\n", 0, 6)}),
+    );
+    assert_eq!(labels(&comp), ["input", "add"], "{comp}");
+    assert_eq!(comp[0]["insertText"], "input()$0");
+    assert_eq!(comp[1]["insertText"], "add(${1:a}, ${2:b})$0");
+    assert_eq!(comp[1]["detail"], "fn c_lib.add(int a, int b) int");
+
+    // members of what an extern function returns
+    let text = format!("{src}uint n = c_lib.input().\n");
+    s.change(&text);
+    let comp = s.req(
+        "textDocument/completion",
+        json!({"position": at(&text, "input().\n", 0, 8)}),
+    );
+    assert_eq!(labels(&comp), ["len"], "{comp}");
+
+    // hover and go to definition on a call
+    s.change(src);
+    let h = s.req(
+        "textDocument/hover",
+        json!({"position": at(src, "c_lib.input()\n", 0, 7)}),
+    );
+    assert!(
+        h["contents"]["value"]
+            .as_str()
+            .unwrap()
+            .contains("extern fn c_lib.input() str"),
+        "{h}"
+    );
+    let d = s.req(
+        "textDocument/definition",
+        json!({"position": at(src, "c_lib.input()\n", 0, 7)}),
+    );
+    assert_eq!(d["range"]["start"]["line"], 1, "{d}");
+
+    s.finish();
+}
