@@ -671,6 +671,7 @@ impl Server {
                 out.push(x);
             }
         }
+        out.extend(self.more_actions(&p, &module, &text));
         Some(out)
     }
 

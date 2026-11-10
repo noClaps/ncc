@@ -12,12 +12,14 @@
 //! - `hints.rs`: inlay hints and semantic tokens
 //! - `nav.rs`: type definition, call hierarchy, selection ranges, document links
 //! - `actions.rs`: code actions and the extra diagnostics they fix (unused variables and imports)
+//! - `refactor.rs`: more code actions, and exit-point highlights
 
 mod actions;
 mod complete;
 mod docs;
 mod hints;
 mod nav;
+mod refactor;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1223,6 +1225,26 @@ impl Server {
 
     fn highlights(&self, p: DocumentHighlightParams) -> Option<Vec<DocumentHighlight>> {
         let pp = p.text_document_position_params;
+        // `fn`/`return`/`throw`/`try`: the function and its exit points
+        if let Some(path) = uri_to_path(&pp.text_document.uri)
+            && let Some(text) = self.text_of(&path)
+            && !in_string_or_comment(&text, pos_to_offset(&text, pp.position))
+        {
+            let (module, _) = crate::parser::parse_module_recover(&text, 0);
+            if let Some(ranges) =
+                refactor::exit_points(&module, &text, pos_to_offset(&text, pp.position))
+            {
+                return Some(
+                    ranges
+                        .into_iter()
+                        .map(|range| DocumentHighlight {
+                            range,
+                            kind: Some(DocumentHighlightKind::TEXT),
+                        })
+                        .collect(),
+                );
+            }
+        }
         if let Some((_, ranges)) = self.alias_at(&pp.text_document.uri, pp.position) {
             return Some(
                 ranges
@@ -1534,6 +1556,15 @@ impl Server {
         let line = |off: u32| offset_to_pos(&text, off as usize).line;
         let mut out = Vec::new();
         let mut stack: Vec<u32> = Vec::new();
+        let mut import_braces = HashSet::new();
+        for (i, t) in toks.iter().enumerate() {
+            if t.tok == crate::lexer::Tok::LBrace
+                && i > 0
+                && matches!(&toks[i - 1].tok, crate::lexer::Tok::Ident(k) if k == "import")
+            {
+                import_braces.insert(t.span.start);
+            }
+        }
         for t in &toks {
             match t.tok {
                 crate::lexer::Tok::LBrace
@@ -1548,6 +1579,9 @@ impl Server {
                             out.push(FoldingRange {
                                 start_line: a,
                                 end_line: b.saturating_sub(1).max(a),
+                                kind: import_braces
+                                    .contains(&open)
+                                    .then_some(FoldingRangeKind::Imports),
                                 ..Default::default()
                             });
                         }

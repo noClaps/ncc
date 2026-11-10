@@ -1252,3 +1252,260 @@ fn workspace_features() {
     assert!(c.child.wait().unwrap().success());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn find_action<'a>(acts: &'a Value, title: &str) -> &'a Value {
+    acts.as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["title"] == title)
+        .unwrap_or_else(|| panic!("no `{title}` in {acts}"))
+}
+
+#[test]
+fn more_code_actions() {
+    let mut s = Session::start("more");
+    let src = PROGRAM;
+    s.open(src);
+    let uri = s.uri.clone();
+    let first_diag = |s: &mut Session, text: &str| -> Value {
+        let d = s.change(text);
+        assert!(!d.is_empty(), "expected a diagnostic for {text}");
+        d[0].clone()
+    };
+    let fix = |s: &mut Session, d: &Value| -> Value {
+        s.actions(
+            (d["range"]["start"].clone(), d["range"]["start"].clone()),
+            std::slice::from_ref(d),
+        )
+    };
+
+    // generate a missing type
+    let text = format!("{src}Foo f = 1\n");
+    let d = first_diag(&mut s, &text);
+    let acts = fix(&mut s, &d);
+    let a = find_action(&acts, "Generate struct `Foo`");
+    assert_eq!(
+        a["edit"]["changes"][&uri][0]["newText"],
+        "\nstruct Foo {\n}\n"
+    );
+
+    // create a missing module
+    let text = src.replace("\"./util\" as util", "\"./nope\" as util");
+    let d = first_diag(&mut s, &text);
+    let acts = fix(&mut s, &d);
+    let a = find_action(&acts, "Create module `./nope`");
+    let op = &a["edit"]["documentChanges"][0];
+    assert_eq!(op["kind"], "create");
+    assert!(op["uri"].as_str().unwrap().ends_with("/nope.nc"), "{op}");
+
+    // make an item of another module public
+    std::fs::write(
+        s.dir.join("util.nc"),
+        "/// Always one\npub fn helper() int {\n  return 1\n}\n\nfn secret() int {\n  return 2\n}\n",
+    )
+    .unwrap();
+    let text = format!("{src}@println(util.secret())\n");
+    let d = first_diag(&mut s, &text);
+    let acts = fix(&mut s, &d);
+    let a = find_action(&acts, "Make `secret` public");
+    let util_uri = format!("file://{}", s.dir.join("util.nc").display());
+    let e = &a["edit"]["changes"][&util_uri][0];
+    assert_eq!(
+        (e["newText"].clone(), e["range"]["start"].clone()),
+        (json!("pub "), pos(5, 0))
+    );
+
+    // fill the fields a struct pattern leaves out
+    let text = format!("{src}if ps[0] {{\n  Point{{.x = 1}} -> {{}}\n  _ -> {{}}\n}}\n");
+    let d = first_diag(&mut s, &text);
+    let acts = fix(&mut s, &d);
+    let a = find_action(&acts, "Fill in the missing fields with `_`");
+    assert_eq!(a["edit"]["changes"][&uri][0]["newText"], ", .y = _");
+
+    s.change(src);
+    let at_cursor = |s: &mut Session, p: Value| s.actions((p.clone(), p), &[]);
+
+    // comments
+    let acts = at_cursor(&mut s, at(src, "/// A point", 0, 4));
+    let a = find_action(&acts, "Convert to a regular comment");
+    assert_eq!(a["edit"]["changes"][&uri][0]["newText"], "//");
+
+    // integer bases
+    let acts = at_cursor(&mut s, at(src, "3)\n", 0, 0));
+    find_action(&acts, "Convert to hexadecimal (`0x3`)");
+    find_action(&acts, "Convert to binary (`0b11`)");
+
+    // extract a constant out of a function
+    let (a0, a1) = (at(src, "3 }", 0, 0), at(src, "3 }", 0, 1));
+    let acts = s.actions((a0, a1), &[]);
+    let a = find_action(&acts, "Extract into a module-level constant");
+    let edits = a["edit"]["changes"][&uri].as_array().unwrap();
+    assert_eq!(edits[0]["newText"], "int CONSTANT = 3\n\n");
+    assert_eq!(edits[0]["range"]["start"], at(src, "fn area", 0, 0));
+    assert_eq!(edits[1]["newText"], "CONSTANT");
+
+    // interpolate a selection into its string
+    let text = format!("{src}str name = \"x\"\n@println(\"hello name\")\n");
+    s.change(&text);
+    let (a0, a1) = (at(&text, "name\")", 0, 0), at(&text, "name\")", 0, 4));
+    let acts = s.actions((a0, a1), &[]);
+    let a = find_action(&acts, "Interpolate `name`");
+    assert_eq!(a["edit"]["changes"][&uri][0]["newText"], "{name}");
+
+    // match on the result of a call
+    let text =
+        format!("{src}fn pick() Shape {{\n  return Shape.Line\n}}\ntest \"t\" {{\n  pick()\n}}\n");
+    s.change(&text);
+    let acts = at_cursor(&mut s, at(&text, "pick()\n}", 0, 1));
+    let a = find_action(&acts, "Match on the result");
+    assert_eq!(
+        a["edit"]["changes"][&uri][0]["newText"],
+        "if pick() {\n    Shape.Circle(_) -> {}\n    Shape.Square -> {}\n    Shape.Line -> {}\n  }"
+    );
+
+    // exit points of a function
+    s.change(src);
+    let hl = s.req(
+        "textDocument/documentHighlight",
+        json!({"position": at(src, "fn area", 0, 1)}),
+    );
+    let lines: Vec<u64> = hl
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["range"]["start"]["line"].as_u64().unwrap())
+        .collect();
+    let l = |n: &str| at(src, n, 0, 0)["line"].as_u64().unwrap();
+    assert_eq!(
+        lines,
+        [l("fn area"), l("return r * r"), l("return 0")],
+        "{hl}"
+    );
+
+    s.finish();
+}
+
+/// Every response deserializes into the `lsp-types` structures a typed client would use.
+#[test]
+fn responses_follow_the_protocol() {
+    use lsp_types::*;
+    fn check<T: serde::de::DeserializeOwned>(method: &str, v: Value) {
+        if let Err(e) = serde_json::from_value::<T>(v.clone()) {
+            panic!("{method}: {e}\n{v}");
+        }
+    }
+    let mut s = Session::start("typed");
+    let src = PROGRAM;
+    s.open(src);
+    let p = at(src, "add(ps", 0, 1);
+    let r = json!({"start": pos(0, 0), "end": pos(40, 0)});
+    check::<Option<Hover>>("hover", s.req("textDocument/hover", json!({"position": p})));
+    check::<Option<GotoDefinitionResponse>>(
+        "definition",
+        s.req("textDocument/definition", json!({"position": p})),
+    );
+    check::<Option<GotoDefinitionResponse>>(
+        "typeDefinition",
+        s.req(
+            "textDocument/typeDefinition",
+            json!({"position": at(src, "ps[0]", 0, 0)}),
+        ),
+    );
+    check::<Option<CompletionResponse>>(
+        "completion",
+        s.req("textDocument/completion", json!({"position": p})),
+    );
+    check::<Option<SignatureHelp>>(
+        "signatureHelp",
+        s.req(
+            "textDocument/signatureHelp",
+            json!({"position": at(src, "3)", 0, 0)}),
+        ),
+    );
+    check::<Option<Vec<Location>>>(
+        "references",
+        s.req(
+            "textDocument/references",
+            json!({"position": p, "context": {"includeDeclaration": true}}),
+        ),
+    );
+    check::<Option<Vec<DocumentHighlight>>>(
+        "documentHighlight",
+        s.req("textDocument/documentHighlight", json!({"position": p})),
+    );
+    check::<Option<PrepareRenameResponse>>(
+        "prepareRename",
+        s.req("textDocument/prepareRename", json!({"position": p})),
+    );
+    check::<Option<WorkspaceEdit>>(
+        "rename",
+        s.req(
+            "textDocument/rename",
+            json!({"position": p, "newName": "plus"}),
+        ),
+    );
+    check::<Option<DocumentSymbolResponse>>(
+        "documentSymbol",
+        s.req("textDocument/documentSymbol", json!({})),
+    );
+    check::<Option<WorkspaceSymbolResponse>>(
+        "workspace/symbol",
+        s.c.request("workspace/symbol", json!({"query": ""})),
+    );
+    check::<Option<Vec<FoldingRange>>>(
+        "foldingRange",
+        s.req("textDocument/foldingRange", json!({})),
+    );
+    check::<Option<Vec<SelectionRange>>>(
+        "selectionRange",
+        s.req("textDocument/selectionRange", json!({"positions": [p]})),
+    );
+    check::<Option<Vec<DocumentLink>>>(
+        "documentLink",
+        s.req("textDocument/documentLink", json!({})),
+    );
+    check::<Option<Vec<InlayHint>>>(
+        "inlayHint",
+        s.req("textDocument/inlayHint", json!({"range": r})),
+    );
+    check::<Option<SemanticTokensResult>>(
+        "semanticTokens",
+        s.req("textDocument/semanticTokens/full", json!({})),
+    );
+    check::<Option<SemanticTokensRangeResult>>(
+        "semanticTokens/range",
+        s.req("textDocument/semanticTokens/range", json!({"range": r})),
+    );
+    check::<Option<Vec<TextEdit>>>(
+        "formatting",
+        s.req(
+            "textDocument/formatting",
+            json!({"options": {"tabSize": 2, "insertSpaces": true}}),
+        ),
+    );
+    check::<Option<Vec<TextEdit>>>(
+        "rangeFormatting",
+        s.req(
+            "textDocument/rangeFormatting",
+            json!({"range": r, "options": {"tabSize": 2, "insertSpaces": true}}),
+        ),
+    );
+    check::<Option<CodeActionResponse>>(
+        "codeAction",
+        s.actions((at(src, "add(ps", 0, 0), at(src, "\nfor i", 0, 0)), &[]),
+    );
+    let items = s.req(
+        "textDocument/prepareCallHierarchy",
+        json!({"position": at(src, "add(int", 0, 0)}),
+    );
+    check::<Option<Vec<CallHierarchyItem>>>("prepareCallHierarchy", items.clone());
+    check::<Option<Vec<CallHierarchyIncomingCall>>>(
+        "incomingCalls",
+        s.c.request("callHierarchy/incomingCalls", json!({"item": items[0]})),
+    );
+    check::<Option<Vec<CallHierarchyOutgoingCall>>>(
+        "outgoingCalls",
+        s.c.request("callHierarchy/outgoingCalls", json!({"item": items[0]})),
+    );
+    s.finish();
+}

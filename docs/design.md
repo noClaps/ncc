@@ -77,15 +77,15 @@ when checking stops at an error. It holds:
 - inlay hints: parameter names at calls and the types of variables bound by patterns and `for`;
 - direct calls between functions (for the call hierarchy).
 
-Features:
+Features (see [lsp.md](lsp.md) for a comparison with Gleam's language server and rust-analyzer):
 
 | Area | Features |
 | --- | --- |
 | Diagnostics | parse and type errors, compile-time panics, data-race warnings; unused variables, parameters and imports (faded) |
-| Navigation | hover (with `///` doc comments, expression types, builtins, keywords), go to definition, declaration and type definition, references, highlights, call hierarchy, selection ranges, document links (imports, externs, `@embed`), document and workspace symbols |
+| Navigation | hover (with `///` doc comments, expression types, builtins, keywords), go to definition, declaration and type definition, references, highlights (including a function's exit points), call hierarchy, selection ranges, document links (imports, externs, `@embed`), document and workspace symbols |
 | Editing | completion (scope- and type-aware, struct literal fields, enum variants, module members, modules that are not imported yet (adding the import), import and `@embed` paths, snippets), signature help, rename (also of import aliases; refused when the new name clashes), import updates when a file is renamed, formatting (whole document or range, as minimal edits), folding |
 | Display | inlay hints (parameter names, bound variable types, `fn name` after long blocks), semantic tokens |
-| Code actions | make a variable mutable, discard a value with `_ =`, rename an unused variable to `_`, remove unused imports, import a module used without an import, fix a misspelt name, generate a missing function, make a function throwing, add missing struct fields, add missing `if` branches or a fallback, match on an enum value, extract an expression into a variable, inline a variable |
+| Code actions | make a variable mutable, discard a value with `_ =`, rename an unused variable to `_`, remove unused imports, import a module used without an import, fix a misspelt name, generate a missing function or type, create a missing module, make an item of another module public, make a function throwing, fill struct pattern fields, convert `//` ↔ `///`, convert an integer's base, interpolate a selection into its string, extract a constant, match on a call's result, add missing struct fields, add missing `if` branches or a fallback, match on an enum value, extract an expression into a variable, inline a variable |
 
 A request that panics is answered with an error; the server keeps running.
 
