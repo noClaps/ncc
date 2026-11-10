@@ -67,7 +67,11 @@ Hello world compiles to `puts("Hello world")` and a binary the same size as the 
 - 2-space indentation, parentheses only where precedence needs them, at most one blank line;
 - comments are put back where they were, using the positions the lexer records;
 - literals are printed as written;
-- multi-line literals stay multi-line.
+- multi-line literals stay multi-line;
+- lines stay within 100 columns where possible. On a longer line, the outermost list printed on
+  one line (call arguments, parameters, array, map or struct literal) gets one entry per line,
+  and printing repeats until every line fits. A call whose only argument is a list breaks the
+  list instead (`f([` ... `])`).
 
 Files with syntax errors are not formatted. The language server uses the same formatter.
 

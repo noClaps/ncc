@@ -8,9 +8,23 @@
 //! - literals are printed exactly as written (`0xFF`, `1_000`, `"""` strings, escapes)
 //! - array, map and struct literals that spanned several lines stay one entry per line;
 //!   one-line `{ ... }` bodies of `if` arms and function literals stay on one line
+//! - lines stay within 100 columns where possible: the outermost bracketed list on a longer
+//!   line (call arguments, array, map and struct literals, parameters) is put one entry per line
+
+use std::collections::HashSet;
 
 use crate::ast::*;
 use crate::diag::Diag;
+
+/// Lines longer than this are wrapped where a bracketed list allows it.
+pub const MAX_WIDTH: usize = 100;
+
+/// Markers around the id of a bracketed list printed on one line (private-use characters,
+/// removed from the final output): `\u{E000}id\u{E001}`.
+const MARK_START: char = '\u{E000}';
+const MARK_END: char = '\u{E001}';
+/// Ids of parameter lists are offset so they never collide with expression ids.
+const SIG_ID: usize = 1 << 40;
 
 /// Format NC source. Fails with the syntax errors if the source does not parse.
 pub fn format(src: &str) -> Result<String, Vec<Diag>> {
@@ -18,15 +32,103 @@ pub fn format(src: &str) -> Result<String, Vec<Diag>> {
     if !errors.is_empty() {
         return Err(errors);
     }
+    let comments = crate::lexer::comments(src);
+    // print, then break the outermost one-line list of each line that is too long, until
+    // every line fits or nothing more can be broken
+    let mut force: HashSet<usize> = HashSet::new();
+    for _ in 0..200 {
+        let mut p = Printer {
+            src,
+            comments: comments.clone(),
+            next: 0,
+            out: String::new(),
+            cursor: 0,
+            force: force.clone(),
+        };
+        p.module(&module);
+        let mut added = false;
+        for line in p.out.lines() {
+            if width(line) <= MAX_WIDTH {
+                continue;
+            }
+            if let Some(id) = marks(line).into_iter().find(|id| !force.contains(id)) {
+                force.insert(id);
+                added = true;
+            }
+        }
+        if !added {
+            return Ok(strip_marks(&p.out));
+        }
+    }
     let mut p = Printer {
         src,
-        comments: crate::lexer::comments(src),
+        comments,
         next: 0,
         out: String::new(),
         cursor: 0,
+        force,
     };
     p.module(&module);
-    Ok(p.out)
+    Ok(strip_marks(&p.out))
+}
+
+/// A single argument that is itself bracketed (`f([...])`, `f(T{...})`, `f(fn() {...})`):
+/// when the line is too long, that argument breaks instead of the call.
+fn hugs(args: &[Expr]) -> bool {
+    matches!(
+        args,
+        [Expr {
+            kind: ExprKind::Array(_)
+                | ExprKind::Map(_)
+                | ExprKind::Struct(..)
+                | ExprKind::FnLit(..),
+            ..
+        }]
+    )
+}
+
+/// Display width of a line, without markers.
+fn width(line: &str) -> usize {
+    let mut n = 0;
+    let mut in_mark = false;
+    for c in line.chars() {
+        match c {
+            MARK_START => in_mark = true,
+            MARK_END => in_mark = false,
+            _ if !in_mark => n += 1,
+            _ => {}
+        }
+    }
+    n
+}
+
+/// Ids of the one-line lists in a line, outermost (leftmost) first.
+fn marks(line: &str) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut rest = line;
+    while let Some(i) = rest.find(MARK_START) {
+        let after = &rest[i + MARK_START.len_utf8()..];
+        let Some(j) = after.find(MARK_END) else { break };
+        if let Ok(id) = after[..j].parse() {
+            out.push(id);
+        }
+        rest = &after[j + MARK_END.len_utf8()..];
+    }
+    out
+}
+
+fn strip_marks(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_mark = false;
+    for c in s.chars() {
+        match c {
+            MARK_START => in_mark = true,
+            MARK_END => in_mark = false,
+            _ if !in_mark => out.push(c),
+            _ => {}
+        }
+    }
+    out
 }
 
 struct Printer<'a> {
@@ -37,6 +139,8 @@ struct Printer<'a> {
     out: String,
     /// end of the last printed source construct (for blank line detection)
     cursor: usize,
+    /// ids of bracketed lists to print one entry per line because a line was too long
+    force: HashSet<usize>,
 }
 
 const INDENT: &str = "  ";
@@ -210,7 +314,7 @@ impl<'a> Printer<'a> {
                     .push_str(&format!("extern {} as {} {{\n", quote(&e.path), e.alias));
                 for f in &e.fns {
                     self.flush_comments(f.sig.span.start as usize, 1, false);
-                    let sig = self.sig(&f.sig, true);
+                    let sig = self.sig(&f.sig, true, 1);
                     self.out
                         .push_str(&format!("{INDENT}{sig} = {}\n", quote(&f.symbol)));
                     let end = self.src[f.sig.span.end as usize..]
@@ -295,27 +399,44 @@ impl<'a> Printer<'a> {
 
     fn fn_decl(&mut self, f: &FnDecl, indent: usize) -> String {
         let vis = if f.public { "pub " } else { "" };
-        let sig = self.sig(&f.sig, true);
+        let sig = self.sig(&f.sig, true, indent);
         let body = self.block(&f.body, indent, false);
         format!("{vis}{sig} {body}")
     }
 
     /// `fn name<type T>(T a) R` (or `fn(T a) R` for literals)
-    fn sig(&mut self, s: &FnSig, named: bool) -> String {
-        let params: Vec<String> = s
+    fn sig(&mut self, s: &FnSig, named: bool, indent: usize) -> String {
+        let entries: Vec<Entry<'_, 'a>> = s
             .params
             .iter()
-            .map(|p| format!("{} {}", self.ty(&p.ty), p.name))
+            .map(|p| {
+                (
+                    p.span.start as usize,
+                    Box::new(move |pr: &mut Self, _: usize| format!("{} {}", pr.ty(&p.ty), p.name))
+                        as EntryFn<'_, 'a>,
+                )
+            })
             .collect();
+        // the parameter list ends at the `)` after the last parameter
+        let end = s
+            .params
+            .last()
+            .map(|p| p.span.end as usize)
+            .and_then(|e| self.src[e..].find(')').map(|i| e + i))
+            .unwrap_or(s.span.end as usize);
+        let params = self.bracketed_id(
+            "(",
+            ")",
+            entries,
+            false,
+            indent,
+            end,
+            SIG_ID + s.span.start as usize,
+        );
         let mut out = if named {
-            format!(
-                "fn {}{}({})",
-                s.name,
-                tparams(&s.type_params),
-                params.join(", ")
-            )
+            format!("fn {}{}{params}", s.name, tparams(&s.type_params))
         } else {
-            format!("fn({})", params.join(", "))
+            format!("fn{params}")
         };
         if let Some(r) = &s.ret {
             out.push(' ');
@@ -530,9 +651,30 @@ impl<'a> Printer<'a> {
         indent: usize,
         end: usize,
     ) -> String {
+        self.bracketed_id(open, close, entries, multi, indent, end, end)
+    }
+
+    /// `bracketed` with an id for line wrapping other than the source end offset.
+    #[allow(clippy::too_many_arguments)]
+    fn bracketed_id(
+        &mut self,
+        open: &str,
+        close: &str,
+        entries: Vec<Entry<'_, 'a>>,
+        multi: bool,
+        indent: usize,
+        end: usize,
+        id: usize,
+    ) -> String {
+        let multi = multi || self.force.contains(&id);
         if !multi || entries.is_empty() {
             let items: Vec<String> = entries.iter().map(|(_, f)| f(self, indent)).collect();
-            return format!("{open}{}{close}", items.join(", "));
+            let mark = if entries.is_empty() {
+                String::new()
+            } else {
+                format!("{MARK_START}{id}{MARK_END}")
+            };
+            return format!("{mark}{open}{}{close}", items.join(", "));
         }
         let saved = std::mem::take(&mut self.out);
         self.out.push_str(open);
@@ -583,7 +725,8 @@ impl<'a> Printer<'a> {
             }
             ExprKind::Call(f, args) => {
                 let callee = self.paren(f, indent, prec(f) < POSTFIX);
-                let multi = self.multiline(e.span) && args.len() > 1 && self.args_multiline(e);
+                let multi = (self.multiline(e.span) && args.len() > 1 && self.args_multiline(e))
+                    || (self.force.contains(&(e.span.end as usize)) && !args.is_empty());
                 if multi {
                     let entries: Vec<Entry<'_, 'a>> = args
                         .iter()
@@ -597,8 +740,14 @@ impl<'a> Printer<'a> {
                         .collect();
                     let list = self.bracketed("(", ")", entries, true, indent, e.span.end as usize);
                     format!("{callee}{list}")
-                } else {
+                } else if args.is_empty() {
+                    format!("{callee}()")
+                } else if hugs(args) {
+                    // `f([...])`: the inner list breaks, not the call
                     format!("{callee}({})", self.list(args, indent).join(", "))
+                } else {
+                    let mark = format!("{MARK_START}{}{MARK_END}", e.span.end);
+                    format!("{callee}{mark}({})", self.list(args, indent).join(", "))
                 }
             }
             ExprKind::Generic(inner, args) => {
@@ -612,12 +761,24 @@ impl<'a> Printer<'a> {
                 )
             }
             ExprKind::Builtin(name, ty, args) => {
-                let mut parts = Vec::new();
+                let mut entries: Vec<Entry<'_, 'a>> = Vec::new();
                 if let Some(t) = ty {
-                    parts.push(self.ty(t));
+                    entries.push((
+                        t.span().start as usize,
+                        Box::new(move |p: &mut Self, _: usize| p.ty(t)) as EntryFn<'_, 'a>,
+                    ));
                 }
-                parts.extend(self.list(args, indent));
-                format!("@{name}({})", parts.join(", "))
+                for a in args {
+                    entries.push((
+                        a.span.start as usize,
+                        Box::new(move |p: &mut Self, i: usize| p.expr(a, i)) as EntryFn<'_, 'a>,
+                    ));
+                }
+                if ty.is_none() && hugs(args) {
+                    return format!("@{name}({})", self.list(args, indent).join(", "));
+                }
+                let list = self.bracketed("(", ")", entries, false, indent, e.span.end as usize);
+                format!("@{name}{list}")
             }
             ExprKind::Field(b, name) => {
                 let base = self.paren(b, indent, prec(b) < POSTFIX);
@@ -674,7 +835,7 @@ impl<'a> Printer<'a> {
                 format!("{t}{body}")
             }
             ExprKind::FnLit(sig, body) => {
-                let s = self.sig(sig, false);
+                let s = self.sig(sig, false, indent);
                 let b = self.block(body, indent, true);
                 format!("{s} {b}")
             }
@@ -838,6 +999,31 @@ mod tests {
             fmt(src),
             "[str]int m = [\n  \"a\": 0xFF,\n  \"b\": 1_000,\n]\nif x {\n  1 -> { break 'a' }\n  _ -> {\n    break 'b'\n  }\n}\n"
         );
+    }
+
+    #[test]
+    fn wraps_long_lines() {
+        let long = "fn combine(int first_argument_name, int second_argument_name, str third_argument, bool fourth_flag) int {\n  return combine(first_argument_name + second_argument_name, second_argument_name * 2, third_argument, fourth_flag)\n}\n";
+        let out = fmt(long);
+        assert_eq!(
+            out,
+            "fn combine(\n  int first_argument_name,\n  int second_argument_name,\n  str third_argument,\n  bool fourth_flag,\n) int {\n  return combine(\n    first_argument_name + second_argument_name,\n    second_argument_name * 2,\n    third_argument,\n    fourth_flag,\n  )\n}\n"
+        );
+        assert_eq!(fmt(&out), out);
+        // a lone list argument breaks instead of the call
+        let src = format!(
+            "@println([{}])\n",
+            (0..30)
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let out = fmt(&src);
+        assert!(out.starts_with("@println([\n  0,\n"), "{out}");
+        assert!(out.ends_with("  29,\n])\n"), "{out}");
+        // short lines are left alone
+        assert_eq!(fmt("int x = f(1, 2)\n"), "int x = f(1, 2)\n");
+        assert!(out.lines().all(|l| l.chars().count() <= super::MAX_WIDTH));
     }
 
     #[test]
