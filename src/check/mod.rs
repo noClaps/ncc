@@ -2,7 +2,7 @@
 //! of the AST into the typed IR.
 
 mod expr;
-mod flow;
+pub mod flow;
 mod pat;
 mod stmt;
 

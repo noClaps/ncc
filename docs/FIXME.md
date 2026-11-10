@@ -240,3 +240,8 @@ A: `.gitignore` contains `.nc/deps/`, and `main.nc` contains `@println("Hello, w
 
 **Q: Where is the project created, and what if files already exist?**
 A: In the current directory. It is an error if `.nc/` already exists. An existing `.gitignore` or `main.nc` is never overwritten; it is skipped.
+
+## `ncc script`
+
+**Q: How should `ncc script` handle hashbangs, build mode and imports?**
+A: The command was dropped and removed from `docs/compiler.md`.
