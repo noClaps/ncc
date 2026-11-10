@@ -102,3 +102,21 @@ A: Make `char` a `uint32` holding a Unicode scalar value, like Go's `rune`. Grap
 
 **Q: For multiline `"""` strings, are the newline after the opening `"""` and the newline before the closing `"""` dropped?**
 A: Both are dropped, so `"""\n  Hello\n  """` is `"Hello"`.
+
+**Q: How is `str` stored, given that indexing and `.len` count chars?**
+A: As UTF-8 bytes. `.len` and indexing walk the bytes (O(n), with a cached char count).
+
+## Arithmetic
+
+**Q: What do `/`, `%`, `**` and shifts do at the edges?**
+A: C-like with panics. `/` truncates toward zero, and `%` takes the dividend's sign. A negative integer exponent to `**` panics. A shift amount outside `0..bitwidth-1` panics. `float ** float` is `pow`. `float % float` also panics, and since that is always known at compile time it is a compile error (per the panic rule above).
+
+## Comparison
+
+**Q: Which types support `==` and which support ordering?**
+A: `==`/`!=` compare structurally on every type except functions and futures. That covers arrays, maps, structs, tuples, enums including payloads, and optionals (`none == none`). Ordering (`<`, `>`, `<=`, `>=`) is only for `byte`, `int`, `uint`, `float` and `char`.
+
+## Conversions
+
+**Q: How do `@as` conversions behave at the edges?**
+A: Checked, little-endian. Conversions that don't fit panic (a negative `int` to `uint`, an out-of-range or NaN `float` to `int`). `float` to `int` truncates toward 0. `int`/`uint`/`float` to `byte[]` gives 8 bytes, little-endian. `char`/`str` to `byte[]` gives UTF-8. `byte` to `char` gives the scalar with that value. `bool` to `int` gives 0/1.
