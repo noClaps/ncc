@@ -72,6 +72,7 @@ function throwing, make an item of another module public.
 | Rename (with conflict check), file rename updates imports | ✅ |
 | Call hierarchy | ✅ incoming and outgoing |
 | Completion: scope-aware, fields through chains, snippets, auto-import, parentheses for calls, postfix (`x.if`) | ✅ postfix: `if`, `not`, `return`, `try`, `await`, `println`, `discard` |
+| Completion: functions taking the value first (`v.add` → `add(v, b)`) | ✅ functions in scope, public functions of imported modules and extern functions whose first parameter accepts the value's type (including an optional of it); generic type arguments are inferred from the value |
 | Signature help | ✅ |
 | Inlay hints: parameter names, types of bindings, closing braces | ✅ (chaining hints n/a: explicit types) |
 | Semantic highlighting with modifiers | ✅ declaration, readonly/mutable, defaultLibrary, documentation |

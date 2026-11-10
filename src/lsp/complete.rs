@@ -1,7 +1,7 @@
 //! Completion: scope-aware names, members of any typed expression (`a.b[0].c.`), struct literal
 //! fields, enum variants, module members, builtins, import and `@embed` paths, and snippets.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use lsp_types::*;
@@ -335,7 +335,13 @@ impl Server {
             } else {
                 vec![]
             };
-            if let Some(mut items) = self.member_items(a, fid, dot, &chain, call_parens) {
+            if let Some((mut items, ty)) = self.member_items(a, fid, dot, &chain, call_parens) {
+                // functions taking the value as their first argument: `v.f` -> `f(v, ...)`
+                if let Some(ty) = ty
+                    && let Some((_, start)) = receiver_chain_at(head)
+                {
+                    items.extend(self.first_arg_items(a, fid, &text, start, dot, off, &ty));
+                }
                 items.extend(postfix);
                 return Some(CompletionResponse::Array(items));
             }
@@ -604,7 +610,7 @@ impl Server {
         off: usize,
         chain: &[Seg],
         call_parens: bool,
-    ) -> Option<Vec<CompletionItem>> {
+    ) -> Option<(Vec<CompletionItem>, Option<String>)> {
         let Seg::Name(first) = &chain[0] else {
             return None;
         };
@@ -619,12 +625,13 @@ impl Server {
             .collect();
         if !externs.is_empty() {
             let Some(Seg::Name(n)) = rest.first() else {
-                return Some(
+                return Some((
                     externs
                         .into_iter()
                         .map(|d| self.decl_item(a, d, call_parens, None))
                         .collect(),
-                );
+                    None,
+                ));
             };
             let d = externs.into_iter().find(|d| &d.name == n)?;
             if rest.get(1) != Some(&Seg::Call) {
@@ -648,7 +655,7 @@ impl Server {
                         out.push(self.decl_item(a, d, call_parens, None));
                     }
                 }
-                return Some(out);
+                return Some((out, None));
             }
             let Seg::Name(n) = &rest[0] else { return None };
             let d = a
@@ -657,7 +664,7 @@ impl Server {
                 .iter()
                 .find(|d| d.span.file == mfid && d.scope.is_none() && &d.name == n)?;
             if matches!(d.kind, DeclKind::Enum) && rest.len() == 1 {
-                return Some(self.variant_items(a, d));
+                return Some((self.variant_items(a, d), None));
             }
             ty = d.ty.clone()?;
             rest = &rest[1..];
@@ -674,7 +681,9 @@ impl Server {
                 .into_iter()
                 .find(|d| &d.name == first)?;
             match d.kind {
-                DeclKind::Enum if rest.is_empty() => return Some(self.variant_items(a, d)),
+                DeclKind::Enum if rest.is_empty() => {
+                    return Some((self.variant_items(a, d), None));
+                }
                 DeclKind::Function => {
                     if rest.first() != Some(&Seg::Call) {
                         return None;
@@ -701,25 +710,160 @@ impl Server {
             };
         }
         let members = a.index.types.get(&ty)?;
-        Some(
-            members
-                .iter()
-                .map(|m| CompletionItem {
-                    label: m.name.clone(),
-                    kind: Some(CompletionItemKind::FIELD),
-                    detail: Some(m.detail.clone()),
-                    documentation: m.def.and_then(|def| {
-                        docs::doc_comment(&a.sm.file(def.file).text, def).map(|value| {
-                            Documentation::MarkupContent(MarkupContent {
-                                kind: MarkupKind::Markdown,
-                                value,
-                            })
+        let fields = members
+            .iter()
+            .map(|m| CompletionItem {
+                label: m.name.clone(),
+                kind: Some(CompletionItemKind::FIELD),
+                sort_text: Some(format!("0{}", m.name)),
+                detail: Some(m.detail.clone()),
+                documentation: m.def.and_then(|def| {
+                    docs::doc_comment(&a.sm.file(def.file).text, def).map(|value| {
+                        Documentation::MarkupContent(MarkupContent {
+                            kind: MarkupKind::Markdown,
+                            value,
                         })
-                    }),
-                    ..Default::default()
+                    })
+                }),
+                ..Default::default()
+            })
+            .collect();
+        Some((fields, Some(ty)))
+    }
+
+    /// Functions whose first parameter accepts a value of type `ty`, offered after `receiver.`
+    /// and inserted as a call with the receiver as the first argument: `v.add` -> `add(v, ...)`.
+    /// Covers functions in scope, public functions of imported modules and extern functions;
+    /// a generic function's type arguments are inferred from the receiver where possible.
+    #[allow(clippy::too_many_arguments)]
+    fn first_arg_items(
+        &self,
+        a: &Analysis,
+        fid: u32,
+        text: &str,
+        start: usize,
+        dot: usize,
+        off: usize,
+        ty: &str,
+    ) -> Vec<CompletionItem> {
+        let receiver = &text[start..dot];
+        if receiver.contains('\n') {
+            return vec![];
+        }
+        // (declaration, qualifier)
+        let mut cands: Vec<(&SymDecl, Option<String>)> = visible(a, fid, dot)
+            .into_iter()
+            .filter(|d| d.kind == DeclKind::Function)
+            .map(|d| (d, None))
+            .collect();
+        for d in &a.index.decls {
+            if d.span.file == fid
+                && let Some(alias) = &d.extern_alias
+            {
+                cands.push((d, Some(alias.clone())));
+            }
+        }
+        let mut aliases: Vec<(&String, &std::path::PathBuf)> = a.imports.iter().collect();
+        aliases.sort();
+        for (alias, mpath) in aliases {
+            let (Some(mfid), Some(mtext)) = (a.file_id(mpath), self.text_of(mpath)) else {
+                continue;
+            };
+            let public = public_names(&mtext);
+            let mut seen = HashSet::new();
+            for d in &a.index.decls {
+                if d.span.file == mfid
+                    && d.scope.is_none()
+                    && d.kind == DeclKind::Function
+                    && d.extern_alias.is_none()
+                    && public.contains(&d.name)
+                    && seen.insert(d.name.clone())
+                {
+                    cands.push((d, Some(alias.clone())));
+                }
+            }
+        }
+        let escaped = receiver
+            .replace('\\', "\\\\")
+            .replace('$', "\\$")
+            .replace('}', "\\}");
+        let range = Range::new(
+            super::offset_to_pos(text, start),
+            super::offset_to_pos(text, off),
+        );
+        let mut out = Vec::new();
+        for (d, qual) in cands {
+            let ps = super::calls::params(&d.detail);
+            let Some((first, _)) = ps.first() else {
+                continue;
+            };
+            let tps = super::calls::type_params(&d.detail);
+            let Some(binds) = accepts(first, ty, &tps) else {
+                continue;
+            };
+            let full = match &qual {
+                Some(q) => format!("{q}.{}", d.name),
+                None => d.name.clone(),
+            };
+            let mut k = 0;
+            let mut slot = |name: &str| {
+                k += 1;
+                format!("${{{k}:{name}}}")
+            };
+            let targs: Vec<String> = tps
+                .iter()
+                .map(|t| match binds.get(t) {
+                    Some(b) => b.clone(),
+                    None => slot(t),
                 })
-                .collect(),
-        )
+                .collect();
+            let generics = if targs.is_empty() {
+                String::new()
+            } else {
+                format!("<{}>", targs.join(", "))
+            };
+            let mut args = vec![escaped.clone()];
+            args.extend(ps[1..].iter().map(|(_, n)| slot(n)));
+            let (new_text, format) = if self.snippets {
+                (
+                    format!("{full}{generics}({})$0", args.join(", ")),
+                    InsertTextFormat::SNIPPET,
+                )
+            } else {
+                let plain: Vec<String> = tps
+                    .iter()
+                    .map(|t| binds.get(t).cloned().unwrap_or_else(|| t.clone()))
+                    .collect();
+                let generics = if plain.is_empty() {
+                    String::new()
+                } else {
+                    format!("<{}>", plain.join(", "))
+                };
+                (
+                    format!("{full}{generics}({receiver})"),
+                    InsertTextFormat::PLAIN_TEXT,
+                )
+            };
+            out.push(CompletionItem {
+                label: full,
+                kind: Some(CompletionItemKind::FUNCTION),
+                detail: Some(d.detail.clone()),
+                documentation: self.doc_of(a, d),
+                filter_text: Some(format!("{receiver}.{}", d.name)),
+                sort_text: Some(format!("5{}", d.name)),
+                insert_text_format: Some(format),
+                text_edit: Some(CompletionTextEdit::Edit(TextEdit::new(range, new_text))),
+                command: (ps.len() > 1 && self.snippets).then(|| {
+                    Command::new(
+                        "Trigger parameter hints".into(),
+                        "editor.action.triggerParameterHints".into(),
+                        None,
+                    )
+                }),
+                ..Default::default()
+            });
+        }
+        out
     }
 
     fn variant_items(&self, a: &Analysis, d: &SymDecl) -> Vec<CompletionItem> {
@@ -903,8 +1047,106 @@ fn is_slice(inner: &[u8]) -> bool {
     false
 }
 
+/// Can a value of type `ty` be passed for a parameter of type `param`? Returns the generic
+/// parameters (`tps`) bound by the match. Besides an exact match, a value is accepted for an
+/// optional of its type (it is wrapped implicitly). A fixed-size array is not accepted for a
+/// dynamic one: that needs `@as`.
+fn accepts(param: &str, ty: &str, tps: &[String]) -> Option<HashMap<String, String>> {
+    let try_match = |p: &str, t: &str| {
+        let mut binds = HashMap::new();
+        unify(p, t, tps, &mut binds).then_some(binds)
+    };
+    if let Some(b) = try_match(param, ty) {
+        return Some(b);
+    }
+    param
+        .strip_suffix('?')
+        .and_then(|inner| try_match(inner, ty))
+}
+
+/// Match a type pattern (`T[]`, `(fn(I) O)`) against a concrete type (`int[]`), binding the
+/// generic parameters `tps` to the text they stand for.
+fn unify(p: &str, c: &str, tps: &[String], binds: &mut HashMap<String, String>) -> bool {
+    if p.is_empty() {
+        return c.is_empty();
+    }
+    let word = |s: &str| {
+        s.bytes()
+            .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_')
+            .count()
+    };
+    let w = word(p);
+    if w > 0 {
+        let name = &p[..w];
+        if tps.iter().any(|t| t == name) {
+            if let Some(bound) = binds.get(name).cloned() {
+                return c.starts_with(&bound) && unify(&p[w..], &c[bound.len()..], tps, binds);
+            }
+            // try every balanced prefix of `c`
+            let mut depth = 0i32;
+            for (k, ch) in c.char_indices() {
+                match ch {
+                    '(' | '[' | '<' => depth += 1,
+                    ')' | ']' | '>' => depth -= 1,
+                    _ => {}
+                }
+                if depth < 0 {
+                    return false;
+                }
+                let end = k + ch.len_utf8();
+                if depth == 0 && !c[..end].ends_with(' ') {
+                    binds.insert(name.to_string(), c[..end].to_string());
+                    if unify(&p[w..], &c[end..], tps, binds) {
+                        return true;
+                    }
+                    binds.remove(name);
+                }
+            }
+            return false;
+        }
+        return c.starts_with(name) && word(&c[w..]) == 0 && unify(&p[w..], &c[w..], tps, binds);
+    }
+    let ch = p.chars().next().unwrap();
+    c.starts_with(ch) && unify(&p[ch.len_utf8()..], &c[ch.len_utf8()..], tps, binds)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn first_argument_types() {
+        let t = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        let b = |p: &str, ty: &str, tps: &[&str]| {
+            super::accepts(p, ty, &t(tps)).map(|m| {
+                let mut v: Vec<(String, String)> = m.into_iter().collect();
+                v.sort();
+                v
+            })
+        };
+        let pair = |k: &str, v: &str| (k.to_string(), v.to_string());
+        assert_eq!(b("int", "int", &[]), Some(vec![]));
+        assert_eq!(b("int", "uint", &[]), None);
+        assert_eq!(b("int", "int[]", &[]), None);
+        assert_eq!(b("T[]", "str[]", &["T"]), Some(vec![pair("T", "str")]));
+        assert_eq!(
+            b("T[]", "(int, str)[]", &["T"]),
+            Some(vec![pair("T", "(int, str)")])
+        );
+        assert_eq!(b("T[]", "int", &["T"]), None);
+        assert_eq!(
+            b("T[N]", "int[3]", &["T", "N"]),
+            Some(vec![pair("N", "3"), pair("T", "int")])
+        );
+        // a value for an optional, but not a fixed-size array for a dynamic one
+        assert_eq!(b("str?", "str", &[]), Some(vec![]));
+        assert_eq!(b("int[]", "int[3]", &[]), None);
+        assert_eq!(
+            b("[K]V", "[str]int[]", &["K", "V"]),
+            Some(vec![pair("K", "str"), pair("V", "int[]")])
+        );
+        assert_eq!(b("Pair<T, T>", "Pair<int, str>", &["T"]), None);
+        assert_eq!(b("Vec", "Vec2", &[]), None);
+    }
+
     use super::*;
 
     #[test]

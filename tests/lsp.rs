@@ -1953,3 +1953,69 @@ fn literal_tokens() {
     assert_eq!(tok("if").2, 9);
     s.finish();
 }
+
+#[test]
+fn first_argument_completion() {
+    let mut s = Session::start("firstarg");
+    std::fs::write(s.dir.join("lib.c"), "").unwrap();
+    std::fs::write(
+        s.dir.join("seq.nc"),
+        "pub fn first<type T>(T[] arr) T {\n  return arr[0]\n}\n\nfn hidden(int[] _arr) {}\n",
+    )
+    .unwrap();
+    let src = "import { \"./seq\" as seq }\nextern \"./lib.c\" as lib {\n  fn c_abs(int x) int = \"c_abs\"\n}\n\n/// Adds two numbers.\nfn add(int a, int b) int {\n  return a + b\n}\n\nfn shout(str s) str {\n  return s\n}\n\nint n = add(1, 2)\nint[] xs = [n, 2, 3]\nint[3] fixed = [1, 2, 3]\n@println(shout(\"x\"), lib.c_abs(n), seq.first<int>(xs), fixed)\n";
+    let diags = s.open(src);
+    assert!(diags.iter().all(|d| d["severity"] != 1), "{diags:?}");
+    let find = |comp: &Value, label: &str| -> Option<Value> {
+        comp.as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["label"] == label)
+            .cloned()
+    };
+
+    // `n.` offers functions taking an `int` first, rewritten as calls
+    let text = format!("{src}n.\n");
+    s.change(&text);
+    let comp = s.req(
+        "textDocument/completion",
+        json!({"position": at(&text, "n.\n", 0, 2)}),
+    );
+    let add = find(&comp, "add").unwrap_or_else(|| panic!("no add in {comp}"));
+    assert_eq!(add["textEdit"]["newText"], "add(n, ${1:b})$0");
+    assert_eq!(add["filterText"], "n.add");
+    assert_eq!(add["textEdit"]["range"]["start"], at(&text, "n.\n", 0, 0));
+    assert!(
+        add["documentation"]
+            .to_string()
+            .contains("Adds two numbers")
+    );
+    let abs = find(&comp, "lib.c_abs").unwrap_or_else(|| panic!("no lib.c_abs in {comp}"));
+    assert_eq!(abs["textEdit"]["newText"], "lib.c_abs(n)$0");
+    assert!(find(&comp, "shout").is_none(), "{comp}");
+    assert!(find(&comp, "seq.first").is_none(), "{comp}");
+
+    // generic functions get their type arguments from the receiver; private functions of
+    // other modules are left out
+    let text = format!("{src}xs.\n");
+    s.change(&text);
+    let comp = s.req(
+        "textDocument/completion",
+        json!({"position": at(&text, "xs.\n", 0, 3)}),
+    );
+    let first = find(&comp, "seq.first").unwrap_or_else(|| panic!("no seq.first in {comp}"));
+    assert_eq!(first["textEdit"]["newText"], "seq.first<int>(xs)$0");
+    assert!(find(&comp, "seq.hidden").is_none(), "{comp}");
+    assert!(find(&comp, "len").is_some(), "{comp}");
+    assert!(find(&comp, "add").is_none(), "{comp}");
+
+    // a fixed-size array doesn't convert to a dynamic one implicitly
+    let text = format!("{src}fixed.\n");
+    s.change(&text);
+    let comp = s.req(
+        "textDocument/completion",
+        json!({"position": at(&text, "fixed.\n", 0, 6)}),
+    );
+    assert!(find(&comp, "seq.first").is_none(), "{comp}");
+    s.finish();
+}
