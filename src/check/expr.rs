@@ -182,6 +182,19 @@ impl<'a> Checker<'a> {
         expected: Option<TyId>,
         value_needed: bool,
     ) -> Result<Expr> {
+        let r = self.check_expr_raw(e, expected, value_needed);
+        if let Ok(x) = &r {
+            self.idx_expr(e.span, x.ty);
+        }
+        r
+    }
+
+    fn check_expr_raw(
+        &mut self,
+        e: &ast::Expr,
+        expected: Option<TyId>,
+        value_needed: bool,
+    ) -> Result<Expr> {
         let span = e.span;
         let mk = |kind, ty| Ok(Expr { kind, ty, span });
         // named types can be created with the literal syntax of their underlying type
@@ -569,7 +582,10 @@ impl<'a> Checker<'a> {
                 let local = if name == "_" {
                     None
                 } else {
-                    Some(self.declare_local(name, ERROR, false, LocalKind::Normal, span)?)
+                    self.ix.scopes.push(b.span);
+                    let l = self.declare_local(name, ERROR, false, LocalKind::Normal, span);
+                    self.ix.scopes.pop();
+                    Some(l?)
                 };
                 if inner != VOID {
                     self.ctx().jumps.push(JumpCtx {
@@ -907,6 +923,9 @@ impl<'a> Checker<'a> {
                     args.len()
                 ),
             );
+        }
+        if let Target::Call(Callee::Direct(f), ..) = &target {
+            self.idx_call(*f, callee, args);
         }
         let mut xs = Vec::new();
         for (a, p) in args.iter().zip(&params) {
@@ -1457,6 +1476,7 @@ impl<'a> Checker<'a> {
             let mut arms = Vec::new();
             for arm in &ife.arms {
                 self.push_scope();
+                self.ix.scopes.push(arm.span);
                 let res = (|| {
                     let mut pats = Vec::new();
                     for p in &arm.patterns {
@@ -1484,6 +1504,7 @@ impl<'a> Checker<'a> {
                         body,
                     })
                 })();
+                self.ix.scopes.pop();
                 self.pop_scope();
                 arms.push(res?);
             }

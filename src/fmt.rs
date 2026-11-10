@@ -230,8 +230,8 @@ impl<'a> Printer<'a> {
                     s.name,
                     tparams(&s.type_params)
                 ));
-                for (ty, name, sp) in &s.fields {
-                    self.flush_comments(sp.start as usize, 1, false);
+                for (i, (ty, name, sp)) in s.fields.iter().enumerate() {
+                    self.flush_comments(sp.start as usize, 1, i == 0);
                     let t = self.ty(ty);
                     self.out.push_str(&format!("{INDENT}{t} {name}\n"));
                     self.cursor = sp.end as usize;
@@ -247,8 +247,8 @@ impl<'a> Printer<'a> {
                     e.name,
                     tparams(&e.type_params)
                 ));
-                for (name, tys, sp) in &e.variants {
-                    self.flush_comments(sp.start as usize, 1, false);
+                for (i, (name, tys, sp)) in e.variants.iter().enumerate() {
+                    self.flush_comments(sp.start as usize, 1, i == 0);
                     let payload = if tys.is_empty() {
                         String::new()
                     } else {
@@ -838,6 +838,12 @@ mod tests {
             fmt(src),
             "[str]int m = [\n  \"a\": 0xFF,\n  \"b\": 1_000,\n]\nif x {\n  1 -> { break 'a' }\n  _ -> {\n    break 'b'\n  }\n}\n"
         );
+    }
+
+    #[test]
+    fn comment_on_first_member() {
+        let src = "int a = 1\n\nstruct P {\n  /// x\n  int x\n}\n\nenum E {\n  // c\n  A\n}\n";
+        assert_eq!(fmt(src), src);
     }
 
     #[test]

@@ -397,6 +397,7 @@ impl<'a> Checker<'a> {
                             let detail = self.type_detail(ty);
                             let members = self.members_of(ty);
                             self.idx_decl(&t.name, t.span, index::DeclKind::Type, detail, members);
+                            self.idx_last_ty(&t.name, ty);
                             // reject cycles
                             let mut seen = vec![ty];
                             let mut cur = under;
@@ -419,6 +420,7 @@ impl<'a> Checker<'a> {
                             self.fill_struct(ty, s, m, &none)?;
                             let detail = self.type_detail(ty);
                             self.idx_decl(&s.name, s.span, index::DeclKind::Struct, detail, vec![]);
+                            self.idx_last_ty(&s.name, ty);
                         }
                         ast::Item::Enum(e) if e.type_params.is_empty() => {
                             let ty = match self.mods[m].syms[&e.name].sym {
@@ -430,9 +432,20 @@ impl<'a> Checker<'a> {
                             let members: Vec<(String, String)> = e
                                 .variants
                                 .iter()
-                                .map(|v| (v.0.clone(), format!("{}.{}", e.name, v.0)))
+                                .map(|v| {
+                                    let ps = self.types.enum_def(ty).map(|d| {
+                                        d.variants
+                                            .iter()
+                                            .find(|x| x.0 == v.0)
+                                            .map(|x| x.1.clone())
+                                            .unwrap_or_default()
+                                    });
+                                    let text = self.variant_text(&v.0, &ps.unwrap_or_default());
+                                    (v.0.clone(), format!("{}.{text}", e.name))
+                                })
                                 .collect();
                             self.idx_decl(&e.name, e.span, index::DeclKind::Enum, detail, members);
+                            self.idx_last_ty(&e.name, ty);
                         }
                         _ => {}
                     }
@@ -454,6 +467,7 @@ impl<'a> Checker<'a> {
                             self.ix.fn_spans.insert(id, f.sig.span);
                             let names: Vec<String> =
                                 f.sig.params.iter().map(|p| p.name.clone()).collect();
+                            self.ix.fn_params.insert(id, names.clone());
                             let detail = self.fn_detail_named(&f.sig.name, id, &names);
                             self.idx_decl(
                                 &f.sig.name,
@@ -462,6 +476,8 @@ impl<'a> Checker<'a> {
                                 detail,
                                 vec![],
                             );
+                            let ret = self.sigs[id].1;
+                            self.idx_last_ty(&f.sig.name, ret);
                             if let Some(SymEntry {
                                 sym: Sym::Fn { func, .. },
                                 ..
@@ -758,10 +774,18 @@ impl<'a> Checker<'a> {
         ctx.is_never = ret == NEVER;
         self.fns.push(ctx);
         let mut pids = Vec::new();
+        self.ix.scopes.push(p.decl.body.span);
         for (i, prm) in p.decl.sig.params.iter().enumerate() {
-            let id = self.declare_local(&prm.name, params[i], false, LocalKind::Param, prm.span)?;
-            pids.push(id);
+            let id = self.declare_local(&prm.name, params[i], false, LocalKind::Param, prm.span);
+            match id {
+                Ok(id) => pids.push(id),
+                Err(e) => {
+                    self.ix.scopes.pop();
+                    return Err(e);
+                }
+            }
         }
+        self.ix.scopes.pop();
         let before = self.errors.len();
         let body = self.check_block(&p.decl.body)?;
         // a missing-return error would only be noise when statements failed to check
@@ -852,6 +876,9 @@ impl<'a> Checker<'a> {
             self.never_funcs.insert(id);
         }
         self.ix.fn_spans.insert(id, f.sig.span);
+        self.ix
+            .fn_params
+            .insert(id, f.sig.params.iter().map(|p| p.name.clone()).collect());
         self.fn_insts.insert(key, id);
         // generic bodies are type-checked at instantiation; check right away so that errors
         // point at the instantiation that caused them.
@@ -1262,9 +1289,9 @@ impl<'a> Checker<'a> {
         }
         let func = ctx.func;
         self.ix.local_spans.insert((func, id), span);
-        let detail = self.var_detail(name, ty, mutable);
-        let members = self.members_of(ty);
-        self.idx_decl(name, span, index::DeclKind::Variable, detail, members);
+        let scope = self.ix.scopes.last().copied();
+        let param = kind == LocalKind::Param;
+        self.idx_var_decl(name, span, ty, mutable, param, scope);
         Ok(id)
     }
 
@@ -1290,9 +1317,7 @@ impl<'a> Checker<'a> {
             module: m,
         });
         self.ix.global_spans.insert(id, span);
-        let detail = self.var_detail(name, ty, mutable);
-        let members = self.members_of(ty);
-        self.idx_decl(name, span, index::DeclKind::Variable, detail, members);
+        self.idx_var_decl(name, span, ty, mutable, false, None);
         if name == "_" {
             return Ok(id);
         }

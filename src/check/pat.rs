@@ -21,6 +21,8 @@ impl<'a> Checker<'a> {
                     );
                 }
                 let l = self.declare_local(name, ty, false, LocalKind::Normal, span)?;
+                let label = format!("{} ", self.types.show(ty));
+                self.idx_hint(span.start, span.file, label, super::index::HintKind::Type);
                 Ok(Pat::Bind(l))
             }
             E::Tuple(items) => {

@@ -30,16 +30,6 @@ pub struct Parser {
     recovered: bool,
 }
 
-/// Parse a module, failing with the first error.
-pub fn parse_module(src: &str, file: u32) -> Result<Module> {
-    let (m, mut errors) = parse_module_recover(src, file);
-    if errors.is_empty() {
-        Ok(m)
-    } else {
-        Err(errors.remove(0))
-    }
-}
-
 /// Parse a module, recovering from errors at statement boundaries. Returns the items that
 /// parsed and every error found.
 pub fn parse_module_recover(src: &str, file: u32) -> (Module, Vec<Diag>) {

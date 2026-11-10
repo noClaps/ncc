@@ -4,6 +4,13 @@ use super::*;
 
 impl<'a> Checker<'a> {
     pub fn check_block(&mut self, b: &ast::Block) -> Result<Block> {
+        self.ix.scopes.push(b.span);
+        let r = self.check_block_inner(b);
+        self.ix.scopes.pop();
+        r
+    }
+
+    fn check_block_inner(&mut self, b: &ast::Block) -> Result<Block> {
         self.push_scope();
         let mut out = Vec::new();
         for s in &b.stmts {
@@ -392,7 +399,13 @@ impl<'a> Checker<'a> {
                 };
                 let id = self.new_jump();
                 self.push_scope();
-                let v = self.declare_local(var, vty, false, LocalKind::Normal, *var_span)?;
+                self.ix.scopes.push(body.span);
+                let v = self.declare_local(var, vty, false, LocalKind::Normal, *var_span);
+                self.ix.scopes.pop();
+                let v = v?;
+                let file = var_span.file;
+                let hint = format!("{} ", self.types.show(vty));
+                self.idx_hint(var_span.start, file, hint, index::HintKind::Type);
                 self.ctx().jumps.push(JumpCtx {
                     id,
                     kind: JumpKind::Loop,
@@ -519,6 +532,9 @@ impl<'a> Checker<'a> {
             .unwrap_or_else(|| "fn literal".to_string());
         let fid = self.reserve_fn(display.clone(), params.clone(), ret);
         self.ix.fn_spans.insert(fid, sig.span);
+        self.ix
+            .fn_params
+            .insert(fid, sig.params.iter().map(|p| p.name.clone()).collect());
         if ret == NEVER {
             self.never_funcs.insert(fid);
         }
@@ -532,15 +548,18 @@ impl<'a> Checker<'a> {
                 self.ctx().self_local = Some(sl);
             }
             let mut pids = Vec::new();
+            self.ix.scopes.push(body.span);
             for (i, p) in sig.params.iter().enumerate() {
-                pids.push(self.declare_local(
-                    &p.name,
-                    params[i],
-                    false,
-                    LocalKind::Param,
-                    p.span,
-                )?);
+                let l = self.declare_local(&p.name, params[i], false, LocalKind::Param, p.span);
+                match l {
+                    Ok(l) => pids.push(l),
+                    Err(e) => {
+                        self.ix.scopes.pop();
+                        return Err(e);
+                    }
+                }
             }
+            self.ix.scopes.pop();
             let before = self.errors.len();
             let b = self.check_block(body)?;
             if self.errors.len() == before {

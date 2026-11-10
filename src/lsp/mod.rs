@@ -1,8 +1,23 @@
 //! `ncc lsp`: a language server over stdio.
 //!
-//! Features: diagnostics (errors and warnings), hover, go-to-definition, document symbols
-//! and completion. Every open document is analysed as an entry file, using the in-memory
-//! contents of all open documents.
+//! Every open document is analysed as an entry file, using the in-memory contents of all open
+//! documents; the other `.nc` files of the workspace are analysed on demand for workspace-wide
+//! requests (symbols, references, rename, call hierarchy).
+//!
+//! The features are split by area:
+//! - `mod.rs`: document sync, diagnostics, hover, definition, symbols, references, rename,
+//!   signature help, folding, formatting
+//! - `complete.rs`: completion
+//! - `docs.rs`: doc comments (`///`) and builtin documentation
+//! - `hints.rs`: inlay hints and semantic tokens
+//! - `nav.rs`: type definition, call hierarchy, selection ranges, document links
+//! - `actions.rs`: code actions and the extra diagnostics they fix (unused variables and imports)
+
+mod actions;
+mod complete;
+mod docs;
+mod hints;
+mod nav;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -30,16 +45,53 @@ const KEYWORDS: &[&str] = &[
 const TYPES: &[&str] = &[
     "int", "uint", "byte", "float", "bool", "char", "str", "void", "error", "never",
 ];
-const BUILTINS: &[(&str, &str)] = &[
-    ("print", "fn @print(...)"),
-    ("println", "fn @println(...)"),
-    ("eprint", "fn @eprint(...)"),
-    ("eprintln", "fn @eprintln(...)"),
-    ("as", "fn @as(type T, value) T"),
-    ("args", "fn @args() str[]"),
-    ("env", "fn @env() [str]str"),
-    ("target", "fn @target() (str, str)"),
-    ("embed", "fn @embed(path) byte[]"),
+/// Builtin functions: name, signature and documentation.
+const BUILTINS: &[(&str, &str, &str)] = &[
+    (
+        "print",
+        "fn @print(...)",
+        "Prints its arguments to standard output, without a trailing newline.",
+    ),
+    (
+        "println",
+        "fn @println(...)",
+        "Prints its arguments to standard output, followed by a newline.",
+    ),
+    (
+        "eprint",
+        "fn @eprint(...)",
+        "Prints its arguments to standard error, without a trailing newline.",
+    ),
+    (
+        "eprintln",
+        "fn @eprintln(...)",
+        "Prints its arguments to standard error, followed by a newline.",
+    ),
+    (
+        "as",
+        "fn @as(type T, value) T",
+        "Converts `value` to the type `T`. Conversions that can lose information throw at runtime.",
+    ),
+    (
+        "args",
+        "fn @args() str[]",
+        "The command-line arguments of the program, starting with the program name.",
+    ),
+    (
+        "env",
+        "fn @env() [str]str",
+        "The environment variables of the process.",
+    ),
+    (
+        "target",
+        "fn @target() (str, str)",
+        "The `(os, arch)` the program was compiled for, with Rust-style names such as `(\"macos\", \"aarch64\")`. Decided at compile time.",
+    ),
+    (
+        "embed",
+        "fn @embed(path) byte[]",
+        "The contents of a file, read at compile time. The path is resolved like a relative import: `./`, `../` or `.../` (the project root).",
+    ),
 ];
 
 /// Result of analysing one entry document.
@@ -48,6 +100,22 @@ struct Analysis {
     index: Index,
     /// import alias -> module path, from the last successful load
     imports: HashMap<String, PathBuf>,
+    /// declaration index by span
+    decl_at: HashMap<Span, usize>,
+}
+
+impl Analysis {
+    fn decl(&self, span: Span) -> Option<&crate::check::index::SymDecl> {
+        self.decl_at.get(&span).map(|&i| &self.index.decls[i])
+    }
+
+    fn file_id(&self, path: &Path) -> Option<u32> {
+        self.sm
+            .files
+            .iter()
+            .position(|f| f.path == path)
+            .map(|i| i as u32)
+    }
 }
 
 #[derive(Default)]
@@ -56,6 +124,12 @@ struct Server {
     analyses: HashMap<PathBuf, Analysis>,
     /// files that received diagnostics from each entry, to clear them later
     published: HashMap<PathBuf, HashSet<PathBuf>>,
+    /// workspace folders, searched for `.nc` files on workspace-wide requests
+    roots: Vec<PathBuf>,
+    /// whether the workspace's files that are not open have been analysed
+    workspace_indexed: bool,
+    /// the client accepts snippets in completions
+    snippets: bool,
 }
 
 pub fn run() -> ExitCode {
@@ -64,18 +138,37 @@ pub fn run() -> ExitCode {
         text_document_sync: Some(TextDocumentSyncCapability::Options(
             TextDocumentSyncOptions {
                 open_close: Some(true),
-                change: Some(TextDocumentSyncKind::FULL),
+                change: Some(TextDocumentSyncKind::INCREMENTAL),
                 save: Some(TextDocumentSyncSaveOptions::Supported(true)),
                 ..Default::default()
             },
         )),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         definition_provider: Some(OneOf::Left(true)),
+        declaration_provider: Some(DeclarationCapability::Simple(true)),
+        type_definition_provider: Some(TypeDefinitionProviderCapability::Simple(true)),
         document_symbol_provider: Some(OneOf::Left(true)),
         completion_provider: Some(CompletionOptions {
-            trigger_characters: Some(vec![".".into(), "@".into()]),
+            trigger_characters: Some(vec![".".into(), "@".into(), "\"".into(), "/".into()]),
             ..Default::default()
         }),
+        inlay_hint_provider: Some(OneOf::Left(true)),
+        semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
+            SemanticTokensOptions {
+                legend: hints::legend(),
+                full: Some(SemanticTokensFullOptions::Bool(true)),
+                range: Some(true),
+                ..Default::default()
+            },
+        )),
+        call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true)),
+        selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
+        document_link_provider: Some(DocumentLinkOptions {
+            resolve_provider: Some(false),
+            work_done_progress_options: Default::default(),
+        }),
+        document_range_formatting_provider: Some(OneOf::Left(true)),
+        linked_editing_range_provider: None,
         references_provider: Some(OneOf::Left(true)),
         document_highlight_provider: Some(OneOf::Left(true)),
         rename_provider: Some(OneOf::Right(RenameOptions {
@@ -89,7 +182,17 @@ pub fn run() -> ExitCode {
         }),
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
         workspace_symbol_provider: Some(OneOf::Left(true)),
-        code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+        code_action_provider: Some(CodeActionProviderCapability::Options(CodeActionOptions {
+            code_action_kinds: Some(vec![
+                CodeActionKind::QUICKFIX,
+                CodeActionKind::REFACTOR_EXTRACT,
+                CodeActionKind::REFACTOR_INLINE,
+                CodeActionKind::REFACTOR_REWRITE,
+                CodeActionKind::SOURCE_ORGANIZE_IMPORTS,
+            ]),
+            work_done_progress_options: Default::default(),
+            resolve_provider: Some(false),
+        })),
         document_formatting_provider: Some(OneOf::Left(true)),
         ..Default::default()
     };
@@ -98,9 +201,12 @@ pub fn run() -> ExitCode {
         "serverInfo": { "name": "ncc", "version": env!("CARGO_PKG_VERSION") },
     });
     let r = (|| -> Result<(), Box<dyn std::error::Error + Sync + Send>> {
-        let (id, _params) = connection.initialize_start()?;
+        let (id, params) = connection.initialize_start()?;
         connection.initialize_finish(id, init)?;
         let mut server = Server::default();
+        if let Ok(p) = serde_json::from_value::<InitializeParams>(params) {
+            server.init(p);
+        }
         for msg in &connection.receiver {
             match msg {
                 Message::Request(req) => {
@@ -205,6 +311,47 @@ fn span_range(text: &str, span: Span) -> Range {
 }
 
 impl Server {
+    #[allow(deprecated)]
+    fn init(&mut self, p: InitializeParams) {
+        self.snippets = p
+            .capabilities
+            .text_document
+            .as_ref()
+            .and_then(|t| t.completion.as_ref())
+            .and_then(|c| c.completion_item.as_ref())
+            .and_then(|c| c.snippet_support)
+            .unwrap_or(false);
+        for f in p.workspace_folders.unwrap_or_default() {
+            if let Some(path) = uri_to_path(&f.uri) {
+                self.roots.push(path);
+            }
+        }
+        if self.roots.is_empty()
+            && let Some(path) = p.root_uri.as_ref().and_then(uri_to_path)
+        {
+            self.roots.push(path);
+        }
+    }
+
+    /// Analyse every `.nc` file of the workspace that is not analysed yet (once), so that
+    /// workspace-wide requests see the files that are not open.
+    fn index_workspace(&mut self) {
+        if self.workspace_indexed {
+            return;
+        }
+        self.workspace_indexed = true;
+        let mut files = Vec::new();
+        for root in self.roots.clone() {
+            collect_nc_files(&root, &mut files, 0);
+        }
+        for f in files.into_iter().take(1000) {
+            let f = std::fs::canonicalize(&f).unwrap_or(f);
+            if !self.analyses.contains_key(&f) {
+                self.analyze(&f);
+            }
+        }
+    }
+
     fn text_of(&self, path: &Path) -> Option<String> {
         self.docs
             .get(path)
@@ -233,9 +380,18 @@ impl Server {
                 let Some(path) = uri_to_path(&p.text_document.uri) else {
                     return vec![];
                 };
-                if let Some(change) = p.content_changes.into_iter().last() {
-                    self.docs.insert(path.clone(), change.text);
+                let mut text = self.docs.remove(&path).unwrap_or_default();
+                for change in p.content_changes {
+                    match change.range {
+                        Some(r) => {
+                            let (s, e) =
+                                (pos_to_offset(&text, r.start), pos_to_offset(&text, r.end));
+                            text.replace_range(s.min(e)..e, &change.text);
+                        }
+                        None => text = change.text,
+                    }
                 }
+                self.docs.insert(path.clone(), text);
                 path
             }
             DidSaveTextDocument::METHOD => {
@@ -247,6 +403,13 @@ impl Server {
                 };
                 path
             }
+            "workspace/didChangeWatchedFiles" => {
+                // files changed outside the editor: analyse them again when next needed
+                self.workspace_indexed = false;
+                let open: HashSet<PathBuf> = self.docs.keys().cloned().collect();
+                self.analyses.retain(|p, _| open.contains(p));
+                return vec![];
+            }
             DidCloseTextDocument::METHOD => {
                 let Ok(p) = serde_json::from_value::<DidCloseTextDocumentParams>(n.params) else {
                     return vec![];
@@ -255,7 +418,12 @@ impl Server {
                     return vec![];
                 };
                 self.docs.remove(&path);
-                self.analyses.remove(&path);
+                // keep the file's analysis for workspace-wide requests when it is on disk
+                if path.is_file() {
+                    self.analyze(&path);
+                } else {
+                    self.analyses.remove(&path);
+                }
                 // clear diagnostics owned by this entry
                 let mut out = Vec::new();
                 for f in self.published.remove(&path).unwrap_or_default() {
@@ -317,7 +485,6 @@ impl Server {
                 }
                 imports = Some(im);
                 let (mut p, errs, ix) = crate::check::check_partial(graph);
-                index = Some(ix);
                 let clean = errs.is_empty();
                 diags.extend(errs.into_iter().map(|d| (d, DiagnosticSeverity::ERROR)));
                 if let Err(errs) = crate::eval::Evaluator::run(&mut p, &sm, false) {
@@ -328,6 +495,7 @@ impl Server {
                         diags.push((w, DiagnosticSeverity::WARNING));
                     }
                 }
+                index = Some(ix);
             }
         }
         let mut out = Vec::new();
@@ -347,18 +515,23 @@ impl Server {
                 },
             ));
         }
-        // keep the previous index when the file did not parse
-        match (index, self.analyses.get_mut(entry)) {
-            (Some(index), _) => {
-                let imports = imports.unwrap_or_default();
-                self.analyses
-                    .insert(entry.to_path_buf(), Analysis { sm, index, imports });
-            }
-            (None, Some(a)) => {
-                // refresh the text used for position mapping of the current file
-                let _ = a;
-            }
-            (None, None) => {}
+        // keep the previous index when the file did not load
+        if let Some(index) = index {
+            let imports = imports.unwrap_or_default();
+            let decl_at = index
+                .decls
+                .iter()
+                .enumerate()
+                .map(|(i, d)| (d.span, i))
+                .collect();
+            let a = Analysis {
+                sm,
+                index,
+                imports,
+                decl_at,
+            };
+            out.extend(actions::warnings(&a, entry));
+            self.analyses.insert(entry.to_path_buf(), a);
         }
         out
     }
@@ -367,6 +540,15 @@ impl Server {
 
     fn request(&mut self, req: Request) -> Response {
         let id = req.id.clone();
+        if matches!(
+            req.method.as_str(),
+            "workspace/symbol"
+                | "textDocument/references"
+                | "textDocument/rename"
+                | "callHierarchy/incomingCalls"
+        ) {
+            self.index_workspace();
+        }
         let result = match req.method.as_str() {
             HoverRequest::METHOD => serde_json::from_value::<HoverParams>(req.params)
                 .ok()
@@ -427,6 +609,63 @@ impl Server {
             "textDocument/codeAction" => serde_json::from_value::<CodeActionParams>(req.params)
                 .ok()
                 .map(|p| serde_json::to_value(self.code_actions(p)).unwrap()),
+            "textDocument/declaration" => {
+                serde_json::from_value::<GotoDefinitionParams>(req.params)
+                    .ok()
+                    .map(|p| serde_json::to_value(self.definition(p)).unwrap())
+            }
+            "textDocument/typeDefinition" => {
+                serde_json::from_value::<GotoDefinitionParams>(req.params)
+                    .ok()
+                    .map(|p| serde_json::to_value(self.type_definition(p)).unwrap())
+            }
+            "textDocument/inlayHint" => serde_json::from_value::<InlayHintParams>(req.params)
+                .ok()
+                .map(|p| serde_json::to_value(self.inlay_hints(p)).unwrap()),
+            "textDocument/semanticTokens/full" => {
+                serde_json::from_value::<SemanticTokensParams>(req.params)
+                    .ok()
+                    .map(|p| {
+                        serde_json::to_value(self.semantic_tokens(&p.text_document.uri, None))
+                            .unwrap()
+                    })
+            }
+            "textDocument/semanticTokens/range" => serde_json::from_value::<
+                SemanticTokensRangeParams,
+            >(req.params)
+            .ok()
+            .map(|p| {
+                serde_json::to_value(self.semantic_tokens(&p.text_document.uri, Some(p.range)))
+                    .unwrap()
+            }),
+            "textDocument/prepareCallHierarchy" => {
+                serde_json::from_value::<CallHierarchyPrepareParams>(req.params)
+                    .ok()
+                    .map(|p| serde_json::to_value(self.prepare_call_hierarchy(p)).unwrap())
+            }
+            "callHierarchy/incomingCalls" => {
+                serde_json::from_value::<CallHierarchyIncomingCallsParams>(req.params)
+                    .ok()
+                    .map(|p| serde_json::to_value(self.incoming_calls(p)).unwrap())
+            }
+            "callHierarchy/outgoingCalls" => {
+                serde_json::from_value::<CallHierarchyOutgoingCallsParams>(req.params)
+                    .ok()
+                    .map(|p| serde_json::to_value(self.outgoing_calls(p)).unwrap())
+            }
+            "textDocument/selectionRange" => {
+                serde_json::from_value::<SelectionRangeParams>(req.params)
+                    .ok()
+                    .map(|p| serde_json::to_value(self.selection_ranges(p)).unwrap())
+            }
+            "textDocument/documentLink" => serde_json::from_value::<DocumentLinkParams>(req.params)
+                .ok()
+                .map(|p| serde_json::to_value(self.document_links(p)).unwrap()),
+            "textDocument/rangeFormatting" => {
+                serde_json::from_value::<DocumentRangeFormattingParams>(req.params)
+                    .ok()
+                    .map(|p| serde_json::to_value(self.range_formatting(p)).unwrap())
+            }
             _ => return method_not_found(id, &req.method),
         };
         match result {
@@ -468,15 +707,59 @@ impl Server {
         if let Some(h) = self.builtin_hover(&pp) {
             return Some(h);
         }
-        let (a, r) = self.lookup(&pp.text_document.uri, pp.position)?;
-        let text = &a.sm.file(r.span.file).text;
+        if let Some((a, r)) = self.lookup(&pp.text_document.uri, pp.position) {
+            let text = &a.sm.file(r.span.file).text;
+            let mut value = format!("```nc\n{}\n```", r.hover);
+            if let Some(def) = r.def {
+                let f = a.sm.file(def.file);
+                if let Some(doc) = docs::doc_comment(&f.text, def) {
+                    value.push_str("\n\n---\n\n");
+                    value.push_str(&doc);
+                }
+                if def.file != r.span.file {
+                    let name = f.path.file_name().unwrap_or_default().to_string_lossy();
+                    value.push_str(&format!("\n\n*Defined in `{name}`*"));
+                }
+            }
+            return Some(Hover {
+                contents: HoverContents::Markup(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value,
+                }),
+                range: Some(span_range(text, r.span)),
+            });
+        }
+        // the type of the innermost expression under the cursor
+        let (a, fid, text) = self.fresh(&pp.text_document.uri)?;
+        let off = pos_to_offset(text, pp.position) as u32;
+        let e = a
+            .index
+            .exprs
+            .iter()
+            .filter(|e| e.span.file == fid && e.span.start <= off && off < e.span.end)
+            .min_by_key(|e| e.span.end - e.span.start)?;
         Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
-                value: format!("```nc\n{}\n```", r.hover),
+                value: format!("```nc\n{}\n```", e.ty),
             }),
-            range: Some(span_range(text, r.span)),
+            range: Some(span_range(text, e.span)),
         })
+    }
+
+    /// The analysis of a document, when it was made from the document's current text: its
+    /// file id and that text.
+    fn fresh(&self, uri: &Uri) -> Option<(&Analysis, u32, &str)> {
+        let path = uri_to_path(uri)?;
+        let a = self.analyses.get(&path)?;
+        let fid = a.file_id(&path)?;
+        let text = &a.sm.file(fid).text;
+        if let Some(cur) = self.docs.get(&path)
+            && cur != text
+        {
+            return None;
+        }
+        Some((a, fid, text))
     }
 
     fn definition(&self, p: GotoDefinitionParams) -> Option<GotoDefinitionResponse> {
@@ -601,162 +884,6 @@ impl Server {
             }
         }
         Some(DocumentSymbolResponse::Nested(out))
-    }
-
-    fn completion(&self, p: CompletionParams) -> Option<CompletionResponse> {
-        let pp = p.text_document_position;
-        let path = uri_to_path(&pp.text_document.uri)?;
-        let text = self.text_of(&path)?;
-        let off = pos_to_offset(&text, pp.position);
-        let line_start = text[..off].rfind('\n').map(|i| i + 1).unwrap_or(0);
-        let before = &text[line_start..off];
-        let item = |label: &str, kind: CompletionItemKind, detail: Option<String>| CompletionItem {
-            label: label.to_string(),
-            kind: Some(kind),
-            detail,
-            ..Default::default()
-        };
-        let mut items = Vec::new();
-        let analysis = self.analyses.get(&path);
-        let fid = analysis
-            .and_then(|a| a.sm.files.iter().position(|f| f.path == path))
-            .map(|i| i as u32);
-
-        // `@builtin`
-        let word_start = before
-            .char_indices()
-            .rev()
-            .find(|(_, c)| !(c.is_alphanumeric() || *c == '_'))
-            .map(|(i, c)| i + c.len_utf8())
-            .unwrap_or(0);
-        let prefix_char = before[..word_start].chars().last();
-        if prefix_char == Some('@') {
-            for (n, d) in BUILTINS {
-                items.push(item(n, CompletionItemKind::FUNCTION, Some(d.to_string())));
-            }
-            return Some(CompletionResponse::Array(items));
-        }
-
-        // `name.` member completion
-        if prefix_char == Some('.') {
-            let head = &before[..word_start - 1];
-            let name_start = head
-                .char_indices()
-                .rev()
-                .find(|(_, c)| !(c.is_alphanumeric() || *c == '_'))
-                .map(|(i, c)| i + c.len_utf8())
-                .unwrap_or(0);
-            let name = &head[name_start..];
-            if let Some(a) = analysis {
-                if let Some(mpath) = a.imports.get(name) {
-                    if let Some(mtext) = self.text_of(mpath)
-                        && let Ok(m) = crate::parser::parse_module(&mtext, 0)
-                    {
-                        for it in &m.items {
-                            match it {
-                                ast::Item::Fn(f) if f.public => items.push(item(
-                                    &f.sig.name,
-                                    CompletionItemKind::FUNCTION,
-                                    None,
-                                )),
-                                ast::Item::Struct(s) if s.public => {
-                                    items.push(item(&s.name, CompletionItemKind::STRUCT, None))
-                                }
-                                ast::Item::Enum(e) if e.public => {
-                                    items.push(item(&e.name, CompletionItemKind::ENUM, None))
-                                }
-                                ast::Item::Type(t) if t.public => items.push(item(
-                                    &t.name,
-                                    CompletionItemKind::TYPE_PARAMETER,
-                                    None,
-                                )),
-                                ast::Item::Stmt(ast::Stmt {
-                                    kind:
-                                        ast::StmtKind::VarDecl {
-                                            public: true,
-                                            targets,
-                                            ..
-                                        },
-                                    ..
-                                }) => {
-                                    for t in targets {
-                                        items.push(item(
-                                            &t.name,
-                                            CompletionItemKind::VARIABLE,
-                                            None,
-                                        ));
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    return Some(CompletionResponse::Array(items));
-                }
-                // most recent declaration of `name` before the cursor in this file
-                let decl = a
-                    .index
-                    .decls
-                    .iter()
-                    .filter(|d| d.name == name && Some(d.span.file) == fid)
-                    .filter(|d| {
-                        (d.span.start as usize) <= off
-                            || matches!(d.kind, DeclKind::Enum | DeclKind::Struct)
-                    })
-                    .max_by_key(|d| d.span.start);
-                if let Some(d) = decl {
-                    for (m, detail) in &d.members {
-                        let kind = if d.kind == DeclKind::Enum {
-                            CompletionItemKind::ENUM_MEMBER
-                        } else {
-                            CompletionItemKind::FIELD
-                        };
-                        items.push(item(m, kind, Some(detail.clone())));
-                    }
-                }
-            }
-            return Some(CompletionResponse::Array(items));
-        }
-
-        // general completion
-        for k in KEYWORDS {
-            items.push(item(k, CompletionItemKind::KEYWORD, None));
-        }
-        for t in TYPES {
-            items.push(item(
-                t,
-                CompletionItemKind::KEYWORD,
-                Some("builtin type".into()),
-            ));
-        }
-        if let Some(a) = analysis {
-            let mut seen = HashSet::new();
-            for d in a.index.decls.iter().rev() {
-                if Some(d.span.file) != fid || matches!(d.kind, DeclKind::Field | DeclKind::Variant)
-                {
-                    continue;
-                }
-                let visible = matches!(
-                    d.kind,
-                    DeclKind::Function | DeclKind::Struct | DeclKind::Enum | DeclKind::Type
-                ) || (d.span.start as usize) <= off;
-                if !visible || !seen.insert(d.name.clone()) {
-                    continue;
-                }
-                let kind = match d.kind {
-                    DeclKind::Function => CompletionItemKind::FUNCTION,
-                    DeclKind::Struct => CompletionItemKind::STRUCT,
-                    DeclKind::Enum => CompletionItemKind::ENUM,
-                    DeclKind::Type => CompletionItemKind::TYPE_PARAMETER,
-                    _ => CompletionItemKind::VARIABLE,
-                };
-                items.push(item(&d.name, kind, Some(d.detail.clone())));
-            }
-            for alias in a.imports.keys() {
-                items.push(item(alias, CompletionItemKind::MODULE, None));
-            }
-        }
-        Some(CompletionResponse::Array(items))
     }
 }
 
@@ -951,11 +1078,11 @@ impl Server {
         let off = pos_to_offset(&text, pp.position);
         let (s, e) = word_at(&text, off)?;
         let word = text[s..e].strip_prefix('@')?;
-        let (_, sig) = BUILTINS.iter().find(|(n, _)| *n == word)?;
+        let (_, sig, doc) = BUILTINS.iter().find(|(n, ..)| *n == word)?;
         Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
-                value: format!("```nc\n{sig}\n```"),
+                value: format!("```nc\n{sig}\n```\n\n---\n\n{doc}"),
             }),
             range: Some(Range::new(offset_to_pos(&text, s), offset_to_pos(&text, e))),
         })
@@ -1006,26 +1133,46 @@ impl Server {
             }
         }
         let mut s = e;
-        while s > 0 && (is_ident_byte(b[s - 1]) || b[s - 1] == b'@') {
+        while s > 0 && (is_ident_byte(b[s - 1]) || b[s - 1] == b'@' || b[s - 1] == b'.') {
             s -= 1;
         }
-        let name = &text[s..e];
-        let label = if let Some(bi) = name.strip_prefix('@') {
-            BUILTINS.iter().find(|(n, _)| *n == bi)?.1.to_string()
+        let is_builtin = text[s..e].starts_with('@');
+        let name = text[s..e].trim_start_matches('@');
+        // a module function: `math.sqrt(`
+        let (module, name) = match name.rsplit_once('.') {
+            Some((m, n)) => (Some(m), n),
+            None => (None, name),
+        };
+        let mut documentation = None;
+        let mut param_docs: Vec<String> = Vec::new();
+        let label = if is_builtin {
+            let b = BUILTINS.iter().find(|(n, ..)| *n == name)?;
+            documentation = Some(b.2.to_string());
+            b.1.to_string()
         } else {
             let a = self.analyses.get(&path)?;
-            let fid =
-                a.sm.files
-                    .iter()
-                    .position(|f| f.path == path)
-                    .map(|i| i as u32);
-            a.index
+            let fid = a.file_id(&path);
+            let target_file = module
+                .and_then(|m| a.imports.get(m))
+                .and_then(|mp| a.file_id(mp));
+            let d = a
+                .index
                 .decls
                 .iter()
                 .filter(|d| d.name == name && d.kind == DeclKind::Function)
-                .max_by_key(|d| Some(d.span.file) == fid)?
-                .detail
-                .clone()
+                .filter(|d| target_file.is_none() || Some(d.span.file) == target_file)
+                .filter(|d| {
+                    d.scope.is_none_or(|sc| {
+                        Some(sc.file) != fid || (sc.start as usize <= off && off <= sc.end as usize)
+                    })
+                })
+                .max_by_key(|d| (Some(d.span.file) == fid, d.span.start as usize <= off))?;
+            let ftext = &a.sm.file(d.span.file).text;
+            if let Some(doc) = docs::doc_comment(ftext, d.span) {
+                param_docs = docs::param_docs(&doc);
+                documentation = Some(doc);
+            }
+            d.detail.clone()
         };
         // parameter label offsets within `fn name(a, b) ret`
         let lp = label.find('(')?;
@@ -1050,18 +1197,29 @@ impl Server {
         }
         let parameters = params
             .iter()
-            .map(|(s, e)| ParameterInformation {
+            .enumerate()
+            .map(|(i, (s, e))| ParameterInformation {
                 label: ParameterLabel::LabelOffsets([
                     label[..*s].encode_utf16().count() as u32,
                     label[..*e].encode_utf16().count() as u32,
                 ]),
-                documentation: None,
+                documentation: param_docs.get(i).map(|d| {
+                    Documentation::MarkupContent(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value: d.clone(),
+                    })
+                }),
             })
             .collect();
         Some(SignatureHelp {
             signatures: vec![SignatureInformation {
                 label,
-                documentation: None,
+                documentation: documentation.map(|d| {
+                    Documentation::MarkupContent(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value: d,
+                    })
+                }),
                 parameters: Some(parameters),
                 active_parameter: Some(commas),
             }],
@@ -1168,53 +1326,6 @@ impl Server {
         out.sort_by(|a, b| a.name.cmp(&b.name));
         Some(WorkspaceSymbolResponse::Flat(out))
     }
-
-    // `WorkspaceEdit::changes` is keyed by `Uri`, as defined by lsp-types
-    #[allow(clippy::mutable_key_type)]
-    fn code_actions(&self, p: CodeActionParams) -> Option<CodeActionResponse> {
-        let path = uri_to_path(&p.text_document.uri)?;
-        let text = self.text_of(&path)?;
-        let mut out = Vec::new();
-        for d in &p.context.diagnostics {
-            let fix = |title: String, at: Position, insert: &str| {
-                let mut changes = HashMap::new();
-                changes.insert(
-                    p.text_document.uri.clone(),
-                    vec![TextEdit::new(Range::new(at, at), insert.to_string())],
-                );
-                CodeActionOrCommand::CodeAction(CodeAction {
-                    title,
-                    kind: Some(CodeActionKind::QUICKFIX),
-                    diagnostics: Some(vec![d.clone()]),
-                    edit: Some(WorkspaceEdit {
-                        changes: Some(changes),
-                        ..Default::default()
-                    }),
-                    is_preferred: Some(true),
-                    ..Default::default()
-                })
-            };
-            if d.message.contains("declare it with `mut`")
-                && d.message.contains("immutable variable")
-            {
-                // insert `mut` at the variable's declaration
-                if let Some((a, r)) = self.lookup(&p.text_document.uri, d.range.start)
-                    && let Some(def) = r.def
-                    && a.sm.file(def.file).path == path
-                {
-                    let at = offset_to_pos(&text, def.start as usize);
-                    out.push(fix("Make the variable mutable".into(), at, "mut "));
-                }
-            } else if d.message.contains("not used") || d.message.starts_with("unused value") {
-                out.push(fix(
-                    "Discard the value with `_ =`".into(),
-                    d.range.start,
-                    "_ = ",
-                ));
-            }
-        }
-        Some(out)
-    }
 }
 
 impl Server {
@@ -1223,14 +1334,103 @@ impl Server {
         let path = uri_to_path(&p.text_document.uri)?;
         let text = self.text_of(&path)?;
         let formatted = crate::fmt::format(&text).ok()?;
-        if formatted == text {
-            return Some(vec![]);
-        }
-        let end = offset_to_pos(&text, text.len());
-        Some(vec![TextEdit::new(
+        Some(minimal_edits(&text, &formatted, None))
+    }
+
+    /// Formats the whole document, keeping only the changes to the lines in the range.
+    fn range_formatting(&self, p: DocumentRangeFormattingParams) -> Option<Vec<TextEdit>> {
+        let path = uri_to_path(&p.text_document.uri)?;
+        let text = self.text_of(&path)?;
+        let formatted = crate::fmt::format(&text).ok()?;
+        Some(minimal_edits(&text, &formatted, Some(p.range)))
+    }
+}
+
+/// Line-based edits turning `old` into `new`: the changed region between the common prefix and
+/// suffix of lines, split at lines that match. With a range, only edits touching it are kept.
+fn minimal_edits(old: &str, new: &str, range: Option<Range>) -> Vec<TextEdit> {
+    if old == new {
+        return vec![];
+    }
+    let a: Vec<&str> = old.split_inclusive('\n').collect();
+    let b: Vec<&str> = new.split_inclusive('\n').collect();
+    // longest common subsequence of lines (the files are small enough for O(n*m))
+    let (n, m) = (a.len(), b.len());
+    if n * m > 4_000_000 {
+        let end = offset_to_pos(old, old.len());
+        return vec![TextEdit::new(
             Range::new(Position::new(0, 0), end),
-            formatted,
-        )])
+            new.to_string(),
+        )];
+    }
+    let mut dp = vec![0u32; (n + 1) * (m + 1)];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            dp[i * (m + 1) + j] = if a[i] == b[j] {
+                dp[(i + 1) * (m + 1) + j + 1] + 1
+            } else {
+                dp[(i + 1) * (m + 1) + j].max(dp[i * (m + 1) + j + 1])
+            };
+        }
+    }
+    let mut edits = Vec::new();
+    let (mut i, mut j) = (0, 0);
+    let mut pending: Option<(usize, usize, usize)> = None; // (old line start, old end, new start)
+    let mut new_end = 0;
+    let flush =
+        |pending: &mut Option<(usize, usize, usize)>, new_end: usize, edits: &mut Vec<TextEdit>| {
+            if let Some((os, oe, ns)) = pending.take() {
+                edits.push(TextEdit::new(
+                    Range::new(Position::new(os as u32, 0), Position::new(oe as u32, 0)),
+                    b[ns..new_end].concat(),
+                ));
+            }
+        };
+    while i < n || j < m {
+        if i < n && j < m && a[i] == b[j] {
+            flush(&mut pending, new_end, &mut edits);
+            i += 1;
+            j += 1;
+        } else if j < m && (i == n || dp[i * (m + 1) + j + 1] >= dp[(i + 1) * (m + 1) + j]) {
+            let p = pending.get_or_insert((i, i, j));
+            p.1 = i;
+            j += 1;
+            new_end = j;
+        } else {
+            let p = pending.get_or_insert((i, i, j));
+            i += 1;
+            p.1 = i;
+            new_end = j;
+        }
+    }
+    flush(&mut pending, new_end, &mut edits);
+    // an old text without a final newline: positions past its last line are clamped by clients
+    if let Some(r) = range {
+        edits.retain(|e| e.range.start.line <= r.end.line && e.range.end.line >= r.start.line);
+    }
+    edits
+}
+
+/// `.nc` files under a directory (skipping hidden directories and build output).
+fn collect_nc_files(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
+    if depth > 12 {
+        return;
+    }
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') || name == "target" || name == "node_modules" {
+            continue;
+        }
+        match e.file_type() {
+            Ok(t) if t.is_dir() => collect_nc_files(&p, out, depth + 1),
+            Ok(t) if t.is_file() && name.ends_with(".nc") => out.push(p),
+            _ => {}
+        }
     }
 }
 
