@@ -81,6 +81,24 @@ A: Integer literals take the expected integer type (`byte`/`int`/`uint`) from co
 **Q: Does top-level code in imported modules run? Are declarations hoisted?**
 A: Top-level code in imported modules does not run unless the imported symbols depend on it. Functions and types are hoisted.
 
+**Q: Does a top-level statement that mutates a global count as a dependency? Do side-effect-only statements run?**
+A: Mutations count. Every global initialiser and top-level statement that writes to a global reachable from used symbols runs, in source order. Side-effect-only statements such as `@println("loaded")` in imported modules never run.
+
 **Q: Are these doc examples typos?**
 A: Yes, except the array pattern case. The typos are `Person(.name = ..)` (struct patterns use `{}`), `fn get_len_of_first<T>` (missing `type`), `uint len == ...`, and `int?[] = none` (missing name).
 Matching an `int[]` against `[1, _]` is intended: a dynamic array's size may not be known at compile time, so patterns of different lengths are allowed. Each pattern only matches arrays of exactly its length. In the docs example the `[1, a, b, c, d]` branch is chosen, and this may be resolved at compile time when the contents are known.
+
+## Async
+
+**Q: Should `async`/`mutex`/`lock` use OS threads per future or a thread pool?**
+A: Whichever is more performant. Implementation choice: a fixed worker pool (one thread per core) with a task queue. `await` on a task that has not started yet runs it inline on the awaiting thread, which avoids pool deadlock. `mutex` is a pthread mutex.
+
+## Characters
+
+**Q: `char` is an extended grapheme cluster, which needs Unicode tables. How do we get them?**
+A: Make `char` a `uint32` holding a Unicode scalar value, like Go's `rune`. Grapheme clustering is dropped. (`docs/syntax/types/character.md` still describes grapheme clusters.)
+
+## Strings
+
+**Q: For multiline `"""` strings, are the newline after the opening `"""` and the newline before the closing `"""` dropped?**
+A: Both are dropped, so `"""\n  Hello\n  """` is `"Hello"`.
