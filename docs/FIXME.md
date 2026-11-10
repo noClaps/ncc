@@ -203,3 +203,8 @@ A: No. A nested function is usable after its declaration (and recursively within
 
 **Q: What happens when code inside an `async` future panics?**
 A: The whole process panics: message to stderr, exit 101. Under `ncc test` the whole test run aborts.
+
+## Patterns
+
+**Q: Is a bare identifier in an `if` pattern a new binding or a comparison?**
+A: If the identifier names a variable already in scope it is compared with `==`; otherwise it binds a new variable. This applies at any depth.
