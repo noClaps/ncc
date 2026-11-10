@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            cc: cc
+          # the generated C needs C23 (`<stdckdint.h>`), which GCC supports from version 14
+          - os: ubuntu-24.04
+            cc: gcc-14
+    runs-on: ${{ matrix.os }}
+    env:
+      CC: ${{ matrix.cc }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install GCC 14
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y gcc-14
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Clippy (Zed extension)
+        run: cargo clippy --manifest-path tooling/zed/Cargo.toml -- -D warnings
+
+      - name: Test
+        run: cargo test
