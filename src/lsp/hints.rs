@@ -26,6 +26,8 @@ const TOKEN_TYPES: &[SemanticTokenType] = &[
     SemanticTokenType::COMMENT,
     SemanticTokenType::STRING,
     SemanticTokenType::NUMBER,
+    // not in the LSP's predefined set; rust-analyzer uses the same name
+    SemanticTokenType::new("boolean"),
 ];
 
 const NAMESPACE: u32 = 0;
@@ -41,6 +43,7 @@ const KEYWORD: u32 = 9;
 const COMMENT: u32 = 10;
 const STRING: u32 = 11;
 const NUMBER: u32 = 12;
+const BOOLEAN: u32 = 13;
 
 const MODIFIERS: &[&str] = &[
     "declaration",
@@ -275,6 +278,11 @@ fn classify(
             Tok::Ident(name) => {
                 if let Some(&(ty, mods)) = resolved.get(&t.span.start) {
                     out.push((s, e, ty, mods));
+                } else if name == "true" || name == "false" {
+                    out.push((s, e, BOOLEAN, 0));
+                } else if name == "none" {
+                    // like Rust's `None`: a built-in variant
+                    out.push((s, e, ENUM_MEMBER, M_DEFAULT_LIBRARY));
                 } else if KEYWORDS.contains(&name.as_str()) {
                     out.push((s, e, KEYWORD, 0));
                 } else if TYPES.contains(&name.as_str()) {

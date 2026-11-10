@@ -1911,3 +1911,45 @@ fn generic_constants() {
     );
     s.finish();
 }
+
+#[test]
+fn literal_tokens() {
+    let mut s = Session::start("literals");
+    let src = "bool b = true\nint? x = none\nif b {\n  @println(x, false)\n}\n";
+    s.open(src);
+    let t = s.req("textDocument/semanticTokens/full", json!({}));
+    let data: Vec<u64> = t["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_u64().unwrap())
+        .collect();
+    let (mut line, mut col) = (0, 0);
+    let mut toks = Vec::new();
+    for c in data.chunks(5) {
+        if c[0] > 0 {
+            line += c[0];
+            col = c[1];
+        } else {
+            col += c[1];
+        }
+        toks.push((line, col, c[3], c[4]));
+    }
+    let tok = |needle: &str| {
+        let p = at(src, needle, 0, 0);
+        let (l, c) = (
+            p["line"].as_u64().unwrap(),
+            p["character"].as_u64().unwrap(),
+        );
+        *toks
+            .iter()
+            .find(|t| t.0 == l && t.1 == c)
+            .unwrap_or_else(|| panic!("no token for {needle} in {toks:?}"))
+    };
+    // token type indexes: 4 enumMember, 9 keyword, 13 boolean; modifier 4 defaultLibrary
+    assert_eq!(tok("true").2, 13);
+    assert_eq!(tok("false").2, 13);
+    assert_eq!((tok("none").2, tok("none").3), (4, 4));
+    assert_eq!(tok("if").2, 9);
+    s.finish();
+}

@@ -489,7 +489,11 @@ impl Server {
             items.extend(self.fn_literal_items(&pp.text_document.uri, off));
         }
         for k in KEYWORDS {
-            let mut it = item(k, CompletionItemKind::KEYWORD, None);
+            let kind = match *k {
+                "true" | "false" | "none" => CompletionItemKind::CONSTANT,
+                _ => CompletionItemKind::KEYWORD,
+            };
+            let mut it = item(k, kind, None);
             it.sort_text = Some(format!("3{k}"));
             items.push(it);
         }
