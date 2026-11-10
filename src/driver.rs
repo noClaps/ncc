@@ -385,3 +385,57 @@ pub fn init(name: Option<String>) -> ExitCode {
         }
     }
 }
+
+pub fn fmt(file: &Path, check: bool, output: Option<Option<String>>) -> ExitCode {
+    let src = match std::fs::read_to_string(file) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: cannot read `{}`: {e}", file.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    let formatted = match crate::fmt::format(&src) {
+        Ok(f) => f,
+        Err(errors) => {
+            let mut sm = SourceMap::default();
+            sm.add(file.to_path_buf(), src);
+            for d in &errors {
+                eprintln!("{}\n", d.render(&sm));
+            }
+            eprintln!(
+                "error: cannot format `{}` because it has syntax errors",
+                file.display()
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    if check {
+        if formatted == src {
+            return ExitCode::SUCCESS;
+        }
+        eprintln!("`{}` is not formatted", file.display());
+        return ExitCode::FAILURE;
+    }
+    let r = match output {
+        None => {
+            if formatted == src {
+                return ExitCode::SUCCESS;
+            }
+            std::fs::write(file, &formatted).map_err(|e| (file.display().to_string(), e))
+        }
+        Some(None) => {
+            use std::io::Write;
+            std::io::stdout()
+                .write_all(formatted.as_bytes())
+                .map_err(|e| ("stdout".into(), e))
+        }
+        Some(Some(out)) => std::fs::write(&out, &formatted).map_err(|e| (out, e)),
+    };
+    match r {
+        Ok(()) => ExitCode::SUCCESS,
+        Err((what, e)) => {
+            eprintln!("error: cannot write `{what}`: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}

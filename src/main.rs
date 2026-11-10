@@ -4,6 +4,7 @@ mod check;
 mod diag;
 mod driver;
 mod eval;
+mod fmt;
 mod lexer;
 mod lint;
 mod lsp;
@@ -14,7 +15,7 @@ mod types;
 
 use std::process::ExitCode;
 
-const HELP: &str = "Usage: ncc [init|build|run|check|test|lsp]
+const HELP: &str = "Usage: ncc [init|build|run|check|test|lsp|fmt]
 
 Commands:
   init        Initialises a project.
@@ -23,9 +24,26 @@ Commands:
   check       Type-checks the given file.
   test        Run tests in the given file.
   lsp         Starts the language server.
+  fmt         Formats the given file.
 
 Options:
   -h, --help  Show this help and exit.";
+
+const HELP_FMT: &str = "Usage: ncc fmt <file>
+
+Formats the given file.
+
+The file is edited in place.
+
+Arguments:
+  <file>              The file to act upon.
+
+Options:
+  --check             Checks if the file is formatted. Exits with code 1 if not
+                      formatted.
+  -o, --output [out]  Write the formatted source to the out file. Writes to
+                      stdout if out is - or omitted.
+  -h, --help          Show this help and exit.";
 
 const HELP_LSP: &str = "Usage: ncc lsp
 
@@ -109,6 +127,57 @@ fn main() -> ExitCode {
         "-h" | "--help" => {
             println!("{HELP}");
             ExitCode::SUCCESS
+        }
+        "fmt" => {
+            let mut file: Option<String> = None;
+            let mut check = false;
+            // None: edit in place; Some(None): stdout; Some(Some(path)): that file
+            let mut output: Option<Option<String>> = None;
+            let mut i = 0;
+            while i < rest.len() {
+                match rest[i].as_str() {
+                    "-h" | "--help" => {
+                        println!("{HELP_FMT}");
+                        return ExitCode::SUCCESS;
+                    }
+                    "--check" => check = true,
+                    "-o" | "--output" => {
+                        // the value is optional: take the next argument only when it is not the
+                        // input file (the file is already known, or another argument follows)
+                        let next = rest.get(i + 1).map(|s| s.as_str());
+                        let takes = match next {
+                            Some("-") => true,
+                            Some(n) if n.starts_with('-') => false,
+                            Some(_) => {
+                                file.is_some()
+                                    || rest.get(i + 2).is_some_and(|s| !s.starts_with('-'))
+                            }
+                            None => false,
+                        };
+                        if takes {
+                            let v = rest[i + 1].clone();
+                            output = Some(if v == "-" { None } else { Some(v) });
+                            i += 1;
+                        } else {
+                            output = Some(None);
+                        }
+                    }
+                    a if a.starts_with('-') && a.len() > 1 => {
+                        return usage_error(&format!("unknown option `{a}`"), HELP_FMT);
+                    }
+                    a => {
+                        if file.is_some() {
+                            return usage_error(&format!("unexpected argument `{a}`"), HELP_FMT);
+                        }
+                        file = Some(a.to_string());
+                    }
+                }
+                i += 1;
+            }
+            let Some(file) = file else {
+                return usage_error("missing <file>", HELP_FMT);
+            };
+            driver::fmt(std::path::Path::new(&file), check, output)
         }
         "lsp" => match rest.first().map(|s| s.as_str()) {
             Some("-h" | "--help") => {

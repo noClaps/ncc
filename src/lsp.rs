@@ -90,6 +90,7 @@ pub fn run() -> ExitCode {
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
         workspace_symbol_provider: Some(OneOf::Left(true)),
         code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+        document_formatting_provider: Some(OneOf::Left(true)),
         ..Default::default()
     };
     let init = serde_json::json!({
@@ -418,6 +419,11 @@ impl Server {
             "workspace/symbol" => serde_json::from_value::<WorkspaceSymbolParams>(req.params)
                 .ok()
                 .map(|p| serde_json::to_value(self.workspace_symbols(p)).unwrap()),
+            "textDocument/formatting" => {
+                serde_json::from_value::<DocumentFormattingParams>(req.params)
+                    .ok()
+                    .map(|p| serde_json::to_value(self.formatting(p)).unwrap())
+            }
             "textDocument/codeAction" => serde_json::from_value::<CodeActionParams>(req.params)
                 .ok()
                 .map(|p| serde_json::to_value(self.code_actions(p)).unwrap()),
@@ -1208,6 +1214,23 @@ impl Server {
             }
         }
         Some(out)
+    }
+}
+
+impl Server {
+    /// Whole-document formatting with `ncc fmt`'s rules (nothing when it has syntax errors).
+    fn formatting(&self, p: DocumentFormattingParams) -> Option<Vec<TextEdit>> {
+        let path = uri_to_path(&p.text_document.uri)?;
+        let text = self.text_of(&path)?;
+        let formatted = crate::fmt::format(&text).ok()?;
+        if formatted == text {
+            return Some(vec![]);
+        }
+        let end = offset_to_pos(&text, text.len());
+        Some(vec![TextEdit::new(
+            Range::new(Position::new(0, 0), end),
+            formatted,
+        )])
     }
 }
 

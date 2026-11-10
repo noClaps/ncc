@@ -259,6 +259,13 @@ fn language_server() {
         "{actions}"
     );
 
+    // formatting the (already formatted) document changes nothing
+    let fmt = c.request(
+        "textDocument/formatting",
+        json!({"textDocument": doc, "options": {"tabSize": 2, "insertSpaces": true}}),
+    );
+    assert_eq!(fmt, json!([]), "{fmt}");
+
     // member completion after `p.`
     let edited = format!("{src}int z = p.\n");
     c.notify(

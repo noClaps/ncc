@@ -33,6 +33,31 @@ Every phase recovers and keeps going, so a single run reports all errors in sour
 - the checker drops failing statements but still declares their variables;
 - the evaluator reports each expression that always panics.
 
+## Lean output
+
+After generating C, a dead-code pass (`src/cgen/prune.rs`) splits the translation unit
+(runtime included) into top-level items. It keeps only the items reachable from `main` and the
+standard headers they use. When a program has `extern` C files, the runtime's public functions
+are kept too.
+
+Code generation also avoids cost the program doesn't need:
+- A `main` that can't throw is a `void` function.
+- Functions never used as values take no closure environment.
+- Test-mode failure handling sits behind a hook that only `ncc test` installs.
+- Printing literal values writes text computed at compile time with a single `puts`/`fwrite`.
+
+Hello world compiles to `puts("Hello world")` and a binary the same size as the C equivalent.
+
+## Formatter
+
+`ncc fmt` (`src/fmt.rs`) prints the parsed module in a canonical style:
+- 2-space indentation, parentheses only where precedence needs them, at most one blank line;
+- comments are put back where they were, using the positions the lexer records;
+- literals are printed as written;
+- multi-line literals stay multi-line.
+
+Files with syntax errors are not formatted. The language server uses the same formatter.
+
 ## Language server
 
 `ncc lsp` (`src/lsp.rs`) speaks LSP over stdio. Each open document is analysed as an entry file,

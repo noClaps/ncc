@@ -26,6 +26,7 @@ ncc build -o out.s main.nc  # format inferred from the extension
 ncc check main.nc           # type-check only
 ncc test main.nc            # run the file's test blocks
 ncc lsp                     # start the language server (LSP over stdio)
+ncc fmt main.nc             # format in place (--check, -o [out])
 ```
 
 ## Editor support

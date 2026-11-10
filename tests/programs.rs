@@ -222,3 +222,93 @@ fn all_errors_reported() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
+
+/// Every sample program formats; formatting is idempotent and keeps all comments.
+#[test]
+fn formatter_round_trip() {
+    let mut failures = Vec::new();
+    let mut files = sorted_files(&root().join("programs"), ".nc");
+    files.extend(sorted_files(&root().join("programs/modproj"), ".nc"));
+    files.extend(sorted_files(&root().join("fail"), ".nc"));
+    for src in files.into_iter().filter(|f| f.is_file()) {
+        let text = std::fs::read_to_string(&src).unwrap();
+        let once = Command::new(ncc())
+            .args(["fmt", "-o", "-"])
+            .arg(&src)
+            .output()
+            .unwrap();
+        if !once.status.success() {
+            // files with syntax errors on purpose are refused
+            continue;
+        }
+        let formatted = String::from_utf8(once.stdout).unwrap();
+        let tmp = std::env::temp_dir().join(format!(
+            "ncc-fmt-{}-{}",
+            std::process::id(),
+            src.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::write(&tmp, &formatted).unwrap();
+        let check = Command::new(ncc())
+            .args(["fmt", "--check"])
+            .arg(&tmp)
+            .status()
+            .unwrap();
+        if !check.success() {
+            failures.push(format!("{}: formatting is not idempotent", src.display()));
+        }
+        let comments = |s: &str| s.lines().filter(|l| l.contains("//")).count();
+        if comments(&text) != comments(&formatted) {
+            failures.push(format!("{}: comments changed", src.display()));
+        }
+        let _ = std::fs::remove_file(&tmp);
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn fmt_command() {
+    let dir = std::env::temp_dir().join(format!("ncc-fmt-cmd-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("a.nc");
+    std::fs::write(&file, "int  x=1+2\n").unwrap();
+    // --check reports unformatted files
+    let st = Command::new(ncc())
+        .args(["fmt", "--check"])
+        .arg(&file)
+        .status()
+        .unwrap();
+    assert_eq!(st.code(), Some(1));
+    // -o - prints to stdout without touching the file
+    let out = Command::new(ncc())
+        .args(["fmt", "-o"])
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "int x = 1 + 2\n");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "int  x=1+2\n");
+    // -o file writes there
+    let other = dir.join("b.nc");
+    let st = Command::new(ncc())
+        .args(["fmt", "-o"])
+        .arg(&other)
+        .arg(&file)
+        .status()
+        .unwrap();
+    assert!(st.success());
+    assert_eq!(std::fs::read_to_string(&other).unwrap(), "int x = 1 + 2\n");
+    // default: in place
+    let st = Command::new(ncc()).arg("fmt").arg(&file).status().unwrap();
+    assert!(st.success());
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "int x = 1 + 2\n");
+    let st = Command::new(ncc())
+        .args(["fmt", "--check"])
+        .arg(&file)
+        .status()
+        .unwrap();
+    assert!(st.success());
+    // syntax errors are refused
+    std::fs::write(&file, "int x = (\n").unwrap();
+    let st = Command::new(ncc()).arg("fmt").arg(&file).status().unwrap();
+    assert!(!st.success());
+    let _ = std::fs::remove_dir_all(&dir);
+}

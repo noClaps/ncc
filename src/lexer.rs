@@ -122,6 +122,8 @@ pub struct Lexer<'a> {
     /// Offset added to all spans (for interpolated sub-expressions).
     base: usize,
     file: u32,
+    /// byte ranges of `//` comments seen so far
+    comments: Vec<(usize, usize)>,
 }
 
 pub fn lex(src: &str, file: u32, base: usize) -> Result<Vec<Token>> {
@@ -133,6 +135,36 @@ pub fn lex(src: &str, file: u32, base: usize) -> Result<Vec<Token>> {
     }
 }
 
+/// Byte ranges of all `//` comments in the source (for the formatter).
+pub fn comments(src: &str) -> Vec<(usize, usize)> {
+    let mut lx = Lexer {
+        src,
+        bytes: src.as_bytes(),
+        pos: 0,
+        base: 0,
+        file: 0,
+        comments: vec![],
+    };
+    loop {
+        let start = lx.pos;
+        match lx.next() {
+            Ok(t) if t.tok == Tok::Eof => break,
+            Ok(_) => {}
+            Err(_) => {
+                if lx.pos <= start {
+                    lx.pos = start
+                        + src[start..]
+                            .chars()
+                            .next()
+                            .map(|c| c.len_utf8())
+                            .unwrap_or(1);
+                }
+            }
+        }
+    }
+    lx.comments
+}
+
 /// Tokenize everything, recovering from errors by skipping the offending character.
 pub fn lex_all(src: &str, file: u32, base: usize) -> (Vec<Token>, Vec<crate::diag::Diag>) {
     let mut lx = Lexer {
@@ -141,6 +173,7 @@ pub fn lex_all(src: &str, file: u32, base: usize) -> (Vec<Token>, Vec<crate::dia
         pos: 0,
         base,
         file,
+        comments: vec![],
     };
     let mut out = Vec::new();
     let mut errors = Vec::new();
@@ -190,9 +223,12 @@ impl<'a> Lexer<'a> {
             if c == b' ' || c == b'\t' || c == b'\r' {
                 self.pos += 1;
             } else if c == b'/' && self.peek_at(1) == b'/' {
+                let start = self.pos;
                 while self.pos < self.bytes.len() && self.peek() != b'\n' {
                     self.pos += 1;
                 }
+                self.comments
+                    .push((self.base + start, self.base + self.pos));
             } else {
                 break;
             }
@@ -610,6 +646,7 @@ impl<'a> Lexer<'a> {
                 pos: content_off,
                 base: self.base,
                 file: self.file,
+                comments: vec![],
             };
             let end = content_off + content.len();
             while sub.pos < end {
