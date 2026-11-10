@@ -103,6 +103,10 @@ pub struct Index {
     pub calls: Vec<Call>,
     /// per module, for the unused-code lint
     pub modules: Vec<ModFacts>,
+    /// Bodies of generic functions that are never instantiated, checked only for the editor
+    /// with placeholder types. Their declarations are left out of the unused-code lint, since
+    /// statements that need a real type are skipped there.
+    pub editor_only: Vec<Span>,
 }
 
 /// What the unused-code lint needs to know about a module.

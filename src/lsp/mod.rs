@@ -21,7 +21,7 @@ mod calls;
 mod complete;
 mod docs;
 mod hints;
-mod nav;
+pub(crate) mod nav;
 mod refactor;
 mod ssr;
 
@@ -611,7 +611,7 @@ impl Server {
                     im.insert(alias.clone(), graph.modules[m].path.clone());
                 }
                 imports = Some(im);
-                let (mut p, errs, ix) = crate::check::check_partial(graph);
+                let (mut p, errs, ix) = crate::check::check_for_editor(graph);
                 clean = loaded && errs.is_empty();
                 diags.extend(errs.into_iter().map(|d| (d, DiagnosticSeverity::ERROR)));
                 if let Err(errs) = crate::eval::Evaluator::run(&mut p, &sm, false) {

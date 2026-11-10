@@ -58,6 +58,15 @@ pub struct Types {
     pub structs: Vec<StructDef>,
     pub enums: Vec<EnumDef>,
     pub named: Vec<NamedDef>,
+    /// While a generic body is checked for the editor (see `Checker::index_generic_bodies`),
+    /// the names of its constant parameters; their placeholder values are shown as names.
+    pub sym_consts: Vec<String>,
+}
+
+/// The placeholder value of the `k`-th constant parameter of a generic body checked for the
+/// editor: far apart powers of two, so sizes such as `N + M - 1` can be shown symbolically.
+pub fn sym_const(k: usize) -> Option<i128> {
+    (k < 3).then(|| 1i128 << (20 + 5 * k))
 }
 
 pub const VOID: TyId = 0;
@@ -255,6 +264,37 @@ impl Types {
         r
     }
 
+    /// An array size, written in terms of the placeholder constants when there are any.
+    fn show_size(&self, n: u64) -> String {
+        let k = self.sym_consts.len().min(3);
+        if k == 0 || (n as i128) < sym_const(0).unwrap() / 2 {
+            return n.to_string();
+        }
+        let mut rest = n as i128;
+        let mut terms = Vec::new();
+        for i in (0..k).rev() {
+            let unit = sym_const(i).unwrap();
+            let c = (rest + unit / 2).div_euclid(unit);
+            if !(0..32).contains(&c) {
+                return n.to_string();
+            }
+            rest -= c * unit;
+            match c {
+                0 => {}
+                1 => terms.push(self.sym_consts[i].clone()),
+                _ => terms.push(format!("{c} * {}", self.sym_consts[i])),
+            }
+        }
+        terms.reverse();
+        let mut s = terms.join(" + ");
+        match rest {
+            0 => {}
+            r if r > 0 => s.push_str(&format!(" + {r}")),
+            r => s.push_str(&format!(" - {}", -r)),
+        }
+        s
+    }
+
     pub fn show(&self, t: TyId) -> String {
         match self.kind(t) {
             TyKind::Void => "void".into(),
@@ -268,7 +308,7 @@ impl Types {
             TyKind::Str => "str".into(),
             TyKind::Error => "error".into(),
             TyKind::Array(e) => format!("{}[]", self.show(*e)),
-            TyKind::Fixed(e, n) => format!("{}[{n}]", self.show(*e)),
+            TyKind::Fixed(e, n) => format!("{}[{}]", self.show(*e), self.show_size(*n)),
             TyKind::Map(k, v) => format!("[{}]{}", self.show(*k), self.show(*v)),
             TyKind::Opt(i) => format!("{}?", self.show(*i)),
             TyKind::ErrU(i) => {

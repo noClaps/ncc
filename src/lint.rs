@@ -225,6 +225,10 @@ pub fn unused(ix: &crate::check::index::Index, sm: &crate::diag::SourceMap) -> V
             continue;
         };
         if !f.project
+            || ix
+                .editor_only
+                .iter()
+                .any(|b| b.file == d.span.file && b.start <= d.span.start && d.span.end <= b.end)
             || d.name.is_empty()
             || d.name.starts_with('_')
             || matches!(d.kind, DeclKind::Field | DeclKind::Variant)

@@ -16,10 +16,38 @@ impl<'a> Checker<'a> {
         for s in &b.stmts {
             // report the error and keep checking the following statements
             let r = self.check_stmt(s, &mut out);
+            if r.is_err() && self.editor {
+                self.index_failed_stmt(s);
+            }
             self.report(r);
         }
         self.pop_scope();
         Ok(Block { stmts: out })
+    }
+
+    /// For the editor: link the variable names in a statement that failed to check to their
+    /// declarations, so hover and navigation still work in it. Common in generic bodies checked
+    /// with placeholder types, where `value.x` on a `T` fails.
+    fn index_failed_stmt(&mut self, s: &ast::Stmt) {
+        let mut names: Vec<(String, Span)> = Vec::new();
+        crate::lsp::nav::stmt_spans(s, &mut |n| {
+            if let crate::lsp::nav::Node::Expr(e) = n
+                && let ast::ExprKind::Ident(name) = &e.kind
+            {
+                names.push((name.clone(), e.span));
+            }
+        });
+        for (name, span) in names {
+            if let Ok(Some((v, _))) = self.resolve_var(&name, span) {
+                self.idx_var_ref(v, span);
+            } else if let Some(&def) = self.ctx_ref().tspans.get(&name)
+                && let Some(&t) = self.ctx_ref().tparams.get(&name)
+                && let TyKind::Const(ty, _) = *self.types.kind(t)
+            {
+                let hover = format!("{} {name}", self.types.show(ty));
+                self.idx_ref(span, Some(def), hover);
+            }
+        }
     }
 
     pub fn tparams(&self) -> HashMap<String, TyId> {

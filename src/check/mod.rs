@@ -116,17 +116,27 @@ pub struct Checker<'a> {
     order: Vec<usize>,
     pub ix: index::IndexState,
     pub errors: Vec<Diag>,
+    /// Checking for the language server: also index generic bodies that are never instantiated
+    pub editor: bool,
     _p: std::marker::PhantomData<&'a ()>,
 }
 
 /// Check a program, returning the (possibly partial) program, every error found and the
 /// symbol index. Statements that failed to check are left out of the program.
 pub fn check_partial(graph: ModuleGraph) -> (Program, Vec<Diag>, index::Index) {
-    let (r, ix, errors) = check_inner(graph);
+    let (r, ix, errors) = check_inner(graph, false);
     (r, errors, ix)
 }
 
-fn check_inner(graph: ModuleGraph) -> (Program, index::Index, Vec<Diag>) {
+/// Like [`check_partial`], for the language server: generic functions that are never
+/// instantiated are also checked with placeholder types, so their bodies are indexed. The
+/// returned program must not be compiled.
+pub fn check_for_editor(graph: ModuleGraph) -> (Program, Vec<Diag>, index::Index) {
+    let (r, ix, errors) = check_inner(graph, true);
+    (r, errors, ix)
+}
+
+fn check_inner(graph: ModuleGraph, editor: bool) -> (Program, index::Index, Vec<Diag>) {
     let mut c = Checker {
         mods: graph
             .modules
@@ -157,6 +167,7 @@ fn check_inner(graph: ModuleGraph) -> (Program, index::Index, Vec<Diag>) {
         order: graph.order.clone(),
         ix: Default::default(),
         errors: vec![],
+        editor,
         _p: std::marker::PhantomData,
     };
     let p = c.run();
@@ -303,6 +314,9 @@ impl<'a> Checker<'a> {
         while let Some(p) = self.pending.pop() {
             let r = self.check_fn_body(p);
             self.report(r);
+        }
+        if self.editor {
+            self.index_generic_bodies();
         }
 
         // assemble main
@@ -1155,6 +1169,70 @@ impl<'a> Checker<'a> {
             );
         }
         d
+    }
+
+    /// For the editor: check each generic function that was never instantiated once, with
+    /// its type parameters as opaque types named after them and its constants as placeholder
+    /// values, so that hover, completion and navigation work inside the body. Errors are
+    /// discarded: operations that need a real type (`value.x` on a `T`) just aren't indexed.
+    fn index_generic_bodies(&mut self) {
+        for m in 0..self.mods.len() {
+            for decl in 0..self.mods[m].ast.items.len() {
+                let f = match &self.mods[m].ast.items[decl] {
+                    ast::Item::Fn(f) if !f.sig.type_params.is_empty() => f.clone(),
+                    _ => continue,
+                };
+                if self
+                    .fn_insts
+                    .keys()
+                    .any(|(mm, d, _)| *mm == m && *d == decl)
+                {
+                    continue;
+                }
+                let mut tp = HashMap::new();
+                let mut consts = Vec::new();
+                for p in &f.sig.type_params {
+                    let t = match p.konst.as_deref() {
+                        None => self.types.new_struct(p.name.clone()),
+                        Some(k) => {
+                            let ty = match k {
+                                "byte" => BYTE,
+                                "int" => INT,
+                                _ => UINT,
+                            };
+                            let v = match sym_const(consts.len()) {
+                                Some(v) if ty != BYTE => v,
+                                _ => 64,
+                            };
+                            consts.push(p.name.clone());
+                            self.types.intern(TyKind::Const(ty, v))
+                        }
+                    };
+                    tp.insert(p.name.clone(), t);
+                }
+                self.types.sym_consts = consts;
+                let before = self.errors.len();
+                if let Ok((params, ret)) = self.resolve_sig(&f.sig, m, &tp) {
+                    let id = self.reserve_fn(f.sig.name.clone(), params, ret);
+                    self.ix.fn_spans.insert(id, f.sig.span);
+                    self.ix
+                        .fn_params
+                        .insert(id, f.sig.params.iter().map(|p| p.name.clone()).collect());
+                    let saved = std::mem::take(&mut self.fns);
+                    let r = self.check_fn_body(PendingFn {
+                        func: id,
+                        module: m,
+                        decl: f.clone(),
+                        tparams: tp,
+                    });
+                    self.fns = saved;
+                    self.report(r);
+                }
+                self.errors.truncate(before);
+                self.types.sym_consts.clear();
+                self.ix.index.editor_only.push(f.body.span);
+            }
+        }
     }
 
     fn types_name(&self, base: &str, args: &[TyId]) -> String {

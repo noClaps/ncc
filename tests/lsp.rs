@@ -2019,3 +2019,60 @@ fn first_argument_completion() {
     assert!(find(&comp, "seq.first").is_none(), "{comp}");
     s.finish();
 }
+
+#[test]
+fn generic_bodies() {
+    let mut s = Session::start("genericbody");
+    let src = "fn get_x<type T>(T val, int offset) int {\n  int base = offset * 2\n  return val.x + base\n}\n\nfn rest<type T, uint N>(T[N] arr) T[N - 1] {\n  T first = arr[0]\n  T[N - 1] tail = arr[1:$]\n  return tail\n}\n";
+    let diags = s.open(src);
+    // only the unused-function warnings: nothing from checking the bodies with placeholders
+    assert!(
+        diags.iter().all(|d| d["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("unused function")),
+        "{diags:?}"
+    );
+    let hover = |s: &mut Session, needle: &str, nth: usize| {
+        s.req(
+            "textDocument/hover",
+            json!({"position": at(src, needle, nth, 0)}),
+        )["contents"]["value"]
+            .as_str()
+            .unwrap_or("")
+            .to_string()
+    };
+    // locals and parameters of a generic function that is never called
+    assert!(hover(&mut s, "base\n}", 0).contains("int base"));
+    assert!(hover(&mut s, "first = ", 0).contains("T first"));
+    assert!(hover(&mut s, "tail\n}", 0).contains("T[N - 1] tail"));
+    let d = s.req(
+        "textDocument/definition",
+        json!({"position": at(src, "offset * 2", 0, 0)}),
+    );
+    assert_eq!(d["range"]["start"], at(src, "offset) int", 0, 0), "{d}");
+
+    // completion inside the body, including members of values whose type is known
+    let text = src.replace("  return tail\n", "  return tail\n  ta\n  arr.\n");
+    s.change(&text);
+    let labels = |s: &mut Session, needle: &str, delta: usize| -> Vec<String> {
+        let comp = s.req(
+            "textDocument/completion",
+            json!({"position": at(&text, needle, 0, delta)}),
+        );
+        comp.as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["label"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let l = labels(&mut s, "ta\n", 2);
+    assert!(
+        ["tail", "first", "arr"]
+            .iter()
+            .all(|n| l.contains(&n.to_string())),
+        "{l:?}"
+    );
+    assert!(labels(&mut s, "arr.\n", 4).contains(&"len".to_string()));
+    s.finish();
+}
