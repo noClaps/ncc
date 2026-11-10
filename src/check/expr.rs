@@ -767,15 +767,16 @@ impl<'a> Checker<'a> {
                 );
             }
         };
-        let lo = self.seq_index(lo, b.ty)?;
-        let hi = self.seq_index(hi, b.ty)?;
+        let mut lo = self.seq_index(lo, b.ty)?;
+        let mut hi = self.seq_index(hi, b.ty)?;
         let mut ty = result;
         if let Some((el, n)) = fixed {
             let dollar = n as i128 - 1;
             let l = const_index(&lo, dollar);
             let h = const_index(&hi, dollar);
             if let (Some(l), Some(h)) = (l, h) {
-                if l < 0 || l > h || h > n as i128 {
+                // inclusive bounds; `[a:a - 1]` is empty
+                if l < 0 || l > h + 1 || h >= n as i128 {
                     return err(
                         span,
                         format!(
@@ -784,7 +785,20 @@ impl<'a> Checker<'a> {
                         ),
                     );
                 }
-                ty = self.types.intern(TyKind::Fixed(el, (h - l) as u64));
+                ty = self.types.intern(TyKind::Fixed(el, (h - l + 1) as u64));
+                // the bounds are known: use their values, so that an empty slice's end of -1
+                // (`arr[0:N - 1]` with `N` = 0) is not computed as `uint` arithmetic. The end
+                // wraps to `u64::MAX`; the runtime reads the bounds as `lo` up to `hi + 1`.
+                lo = Expr {
+                    kind: EK::Lit(Lit::UInt(l as u64)),
+                    ty: UINT,
+                    span: lo.span,
+                };
+                hi = Expr {
+                    kind: EK::Lit(Lit::UInt(h as i64 as u64)),
+                    ty: UINT,
+                    span: hi.span,
+                };
             }
         }
         Ok(Expr {

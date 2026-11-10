@@ -1050,14 +1050,15 @@ impl<'p> Evaluator<'p> {
                     Val::Str(s) => s.chars().count(),
                     _ => return Err(Stop::Unknown),
                 };
-                let h = idx_checked(&h?, hi.span)? as usize;
-                if l > h || h > len {
+                // inclusive bounds; `[a:a - 1]` is empty (an end of `u64::MAX` is -1)
+                let end = idx_checked(&h?, hi.span)?.wrapping_add(1) as usize;
+                if end > len || l > end {
                     return self.panic("slice out of bounds", span);
                 }
                 match base {
-                    Val::Arr(a) => Val::Arr(Rc::new(a[l..h].to_vec())),
+                    Val::Arr(a) => Val::Arr(Rc::new(a[l..end].to_vec())),
                     Val::Str(s) => {
-                        Val::Str(s.chars().skip(l).take(h - l).collect::<String>().into())
+                        Val::Str(s.chars().skip(l).take(end - l).collect::<String>().into())
                     }
                     _ => unreachable!(),
                 }

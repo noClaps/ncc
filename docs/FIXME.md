@@ -338,11 +338,11 @@ A: Yes, the same way: `struct Grid<type T, uint W, uint H> { T[W * H] cells }`, 
 
 **Request:** Add constant slicing for fixed-size arrays, and normal slicing for dynamic arrays and strings, written `arr[a:b]`.
 
-**Q: Is the end bound inclusive?**
-A: No. `x[a:b]` holds the elements from index `a` up to but not including `b`, so its length is `b - a`. Both bounds are required (`x[a:]` and `x[:b]` are syntax errors); `$` (the last index) works inside the bounds.
+**Q: Are the bounds inclusive?**
+A: Yes, both, matching `$` being the last index (`len - 1`): `x[a:b]` holds the elements at indexes `a` through `b`, so its length is `b - a + 1`, and `x[a:$]` runs to the end. `x[a:a - 1]` is empty. Both bounds are required (`x[a:]` and `x[:b]` are syntax errors).
 
 **Q: When is a slice of a fixed-size array itself fixed-size?**
-A: When both bounds are known at compile time: integer literals, generic constants, `$`, or `+ - * / %` on these. On a `T[N]`, `arr[1:N]` is a `T[N - 1]`. Out-of-range constant bounds are a compile error. Bounds only known at run time give a dynamic `T[]`.
+A: When both bounds are known at compile time: integer literals, generic constants, `$`, or `+ - * / %` on these. On a `T[N]`, `arr[1:$]` is a `T[N - 1]`. Constant bounds are used as values, so `arr[0:N - 1]` with `N` = 0 is an empty slice rather than a `uint` underflow. Out-of-range constant bounds are a compile error. Bounds only known at run time give a dynamic `T[]`.
 
 **Q: Does a slice share memory with the original?**
 A: No, it is a copy, so arrays keep their value semantics.
@@ -351,7 +351,7 @@ A: No, it is a copy, so arrays keep their value semantics.
 A: By character, like string indexing, and the result is a `str`.
 
 **Q: What happens with bad bounds at run time?**
-A: The program panics with `slice out of bounds` (start greater than end, or end past the length). A negative `int` bound panics like a negative index.
+A: The program panics with `slice out of bounds` (end past the last index, or start more than one past end). A negative `int` bound panics like a negative index.
 
 **Q: Can a slice be assigned to (`xs[1:3] = ...`)?**
 A: No, slices are values only.
