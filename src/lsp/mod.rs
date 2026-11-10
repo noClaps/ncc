@@ -824,6 +824,21 @@ impl Server {
                 range: Some(span_range(text, r.span)),
             });
         }
+        // keywords
+        if let Some(path) = uri_to_path(&pp.text_document.uri)
+            && let Some(text) = self.text_of(&path)
+            && let Some((s, e)) = word_at(&text, pos_to_offset(&text, pp.position))
+            && let Some((_, doc)) = docs::KEYWORD_DOCS.iter().find(|(k, _)| *k == &text[s..e])
+            && !in_string_or_comment(&text, s)
+        {
+            return Some(Hover {
+                contents: HoverContents::Markup(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: format!("```nc\n{}\n```\n\n---\n\n{doc}", &text[s..e]),
+                }),
+                range: Some(Range::new(offset_to_pos(&text, s), offset_to_pos(&text, e))),
+            });
+        }
         // the type of the innermost expression under the cursor
         let (a, fid, text) = self.fresh(&pp.text_document.uri)?;
         let off = pos_to_offset(text, pp.position) as u32;
@@ -1534,10 +1549,12 @@ impl Server {
         for a in self.analyses.values() {
             for d in &a.index.decls {
                 let kind = match d.kind {
-                    DeclKind::Function => SymbolKind::FUNCTION,
+                    DeclKind::Function if d.scope.is_none() => SymbolKind::FUNCTION,
                     DeclKind::Struct => SymbolKind::STRUCT,
                     DeclKind::Enum => SymbolKind::ENUM,
                     DeclKind::Type => SymbolKind::TYPE_PARAMETER,
+                    DeclKind::Variable if d.scope.is_none() && d.mutable => SymbolKind::VARIABLE,
+                    DeclKind::Variable if d.scope.is_none() => SymbolKind::CONSTANT,
                     _ => continue,
                 };
                 if !d.name.to_lowercase().contains(&q) {
@@ -1547,7 +1564,10 @@ impl Server {
                 if !seen.insert((f.path.clone(), d.span.start)) {
                     continue;
                 }
-                let first = matches!(d.kind, DeclKind::Struct | DeclKind::Enum | DeclKind::Type);
+                let first = matches!(
+                    d.kind,
+                    DeclKind::Struct | DeclKind::Enum | DeclKind::Type | DeclKind::Function
+                );
                 let span = name_span(&f.text, d.span, &d.name, first).unwrap_or(d.span);
                 out.push(SymbolInformation {
                     name: d.name.clone(),
@@ -1580,6 +1600,24 @@ impl Server {
         let formatted = crate::fmt::format(&text).ok()?;
         Some(minimal_edits(&text, &formatted, Some(p.range)))
     }
+}
+
+/// Whether an offset is inside a string literal or a comment.
+fn in_string_or_comment(text: &str, off: usize) -> bool {
+    if crate::lexer::comments(text)
+        .iter()
+        .any(|&(s, e)| s <= off && off < e)
+    {
+        return true;
+    }
+    let (toks, _) = crate::lexer::lex_all(text, 0, 0);
+    toks.iter().any(|t| {
+        matches!(
+            t.tok,
+            crate::lexer::Tok::Str(_) | crate::lexer::Tok::Char(_)
+        ) && (t.span.start as usize) <= off
+            && off < t.span.end as usize
+    })
 }
 
 /// Line-based edits turning `old` into `new`: the changed region between the common prefix and

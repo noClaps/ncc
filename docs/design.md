@@ -60,12 +60,34 @@ Files with syntax errors are not formatted. The language server uses the same fo
 
 ## Language server
 
-`ncc lsp` (`src/lsp.rs`) speaks LSP over stdio. Each open document is analysed as an entry file,
-using the in-memory text of all open documents. The checker records a symbol index
-(`src/check/index.rs`) with declarations, references, hover text and members. The index is
-filled even when checking stops at an error, and the server uses it for hover, go-to-definition
-and completion. Document symbols come straight from the parser. Diagnostics include parse and
-type errors, compile-time panics and data-race warnings.
+`ncc lsp` (`src/lsp/`) speaks LSP over stdio. Each open document is analysed as an entry file,
+using the in-memory text of all open documents. At startup every `.nc` file of the workspace is
+analysed too, so that diagnostics, references, rename, workspace symbols and the call hierarchy
+cover files that are not open. When a file changes, it is analysed again along with the files
+that import it and the open documents. A file shows the union of the diagnostics its analyses
+found. Each diagnostic carries the document version it was computed for.
+
+The checker records an index (`src/check/index.rs`) while it checks. The index is filled even
+when checking stops at an error. It holds:
+
+- declarations, with their scope (for completion), type and mutability;
+- references, with their definition and the definition of their type;
+- the type of every checked expression, and the members, element type and return type of each
+  type (for completion on `a.b[0].c.` chains and hover on expressions);
+- inlay hints: parameter names at calls and the types of variables bound by patterns and `for`;
+- direct calls between functions (for the call hierarchy).
+
+Features:
+
+| Area | Features |
+| --- | --- |
+| Diagnostics | parse and type errors, compile-time panics, data-race warnings; unused variables, parameters and imports (faded) |
+| Navigation | hover (with `///` doc comments, expression types, builtins, keywords), go to definition, declaration and type definition, references, highlights, call hierarchy, selection ranges, document links (imports, externs, `@embed`), document and workspace symbols |
+| Editing | completion (scope- and type-aware, struct literal fields, enum variants, module members, import and `@embed` paths, snippets), signature help, rename (also of import aliases), import updates when a file is renamed, formatting (whole document or range, as minimal edits), folding |
+| Display | inlay hints (parameter names, bound variable types, `fn name` after long blocks), semantic tokens |
+| Code actions | make a variable mutable, discard a value with `_ =`, rename an unused variable to `_`, remove unused imports, import a module used without an import, fix a misspelt name, make a function throwing, add missing struct fields, add missing `if` branches or a fallback, extract an expression into a variable, inline a variable |
+
+A request that panics is answered with an error; the server keeps running.
 
 ## Runtime representation
 

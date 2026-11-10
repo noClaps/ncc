@@ -11,6 +11,112 @@
 
 use crate::diag::Span;
 
+/// Short documentation for keywords, shown on hover.
+pub const KEYWORD_DOCS: &[(&str, &str)] = &[
+    (
+        "fn",
+        "Declares a function: `fn name(int a) int { ... }`. Functions are also values.",
+    ),
+    (
+        "return",
+        "Returns from the enclosing function, with a value unless it returns `void`.",
+    ),
+    (
+        "if",
+        "Branches on conditions (`if { cond -> {...} _ -> {...} }`) or matches a value against patterns (`if value { pattern -> {...} }`). The branches must be exhaustive.",
+    ),
+    (
+        "else",
+        "`value else fallback` unwraps an optional, using the fallback (a value or a block) when it is `none`.",
+    ),
+    ("while", "Loops while a condition holds."),
+    (
+        "for",
+        "`for i in items { ... }` loops over the indices of an array or string (`uint`), or the keys of a map.",
+    ),
+    (
+        "in",
+        "Separates the variable from the collection in `for`; as an operator, tests membership.",
+    ),
+    (
+        "break",
+        "Leaves the innermost loop or `if`, optionally with a value (`break value`) or to a label (`break :label`).",
+    ),
+    (
+        "continue",
+        "Starts the next iteration of the innermost loop (or the labelled one).",
+    ),
+    (
+        "mut",
+        "Declares a mutable variable: `mut int n = 0`. Variables are immutable by default.",
+    ),
+    (
+        "mutex",
+        "Declares a variable shared between futures; it can only be used inside `lock`.",
+    ),
+    (
+        "lock",
+        "`lock name { ... }` locks a `mutex` variable for the block, where it can be read and changed.",
+    ),
+    (
+        "struct",
+        "Declares a struct type with named fields: `struct Point { int x int y }`.",
+    ),
+    (
+        "enum",
+        "Declares an enum type; its variants can hold values: `enum Shape { Circle(float) Square }`.",
+    ),
+    ("type", "Declares a named type: `type Meters = float`."),
+    (
+        "import",
+        "Imports modules: `import { \"./path\" as alias }`. Their public items are used as `alias.name`.",
+    ),
+    ("as", "Names an import or extern block."),
+    (
+        "extern",
+        "Declares functions implemented in a C file: `extern \"file.c\" as c { fn f(int a) int = \"c_f\" }`.",
+    ),
+    (
+        "pub",
+        "Makes a module-level declaration visible to modules that import this one.",
+    ),
+    (
+        "test",
+        "Declares a test: `test \"name\" { ... }`, run with `ncc test`.",
+    ),
+    (
+        "assert",
+        "Fails the current test when the condition is false. Only allowed in `test` blocks.",
+    ),
+    ("true", "The `bool` value true."),
+    ("false", "The `bool` value false."),
+    ("none", "The empty value of an optional type (`T?`)."),
+    ("and", "Logical and, evaluated lazily."),
+    ("or", "Logical or, evaluated lazily."),
+    ("not", "Logical negation."),
+    (
+        "try",
+        "`try value` unwraps an error union, returning the error from the enclosing throwing function.",
+    ),
+    (
+        "catch",
+        "`value catch err { ... }` handles the error of an error union; the block can `break` with a fallback value.",
+    ),
+    (
+        "throw",
+        "Throws an error from a throwing function (one whose return type ends with `!`).",
+    ),
+    (
+        "async",
+        "`async f()` starts a function call in the background and gives a `fut` value.",
+    ),
+    ("await", "Waits for a future and gives its value."),
+    (
+        "fut",
+        "The type of a value computed in the background: `fut int`.",
+    ),
+];
+
 /// The raw doc comment lines (without `///`) above the line that contains `span.start`.
 fn doc_lines(text: &str, span: Span) -> Vec<&str> {
     let start = (span.start as usize).min(text.len());

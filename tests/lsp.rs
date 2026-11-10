@@ -562,6 +562,19 @@ fn hover_hints_and_navigation() {
     );
     assert_eq!(h["contents"]["value"], "```nc\nPoint[]\n```", "{h}");
 
+    // keywords are documented
+    let h = s.req(
+        "textDocument/hover",
+        json!({"position": at(src, "for i", 0, 1)}),
+    );
+    assert!(
+        h["contents"]["value"]
+            .as_str()
+            .unwrap()
+            .contains("loops over the indices"),
+        "{h}"
+    );
+
     // inlay hints: parameter names at calls, types of bound variables
     let hints = s.req(
         "textDocument/inlayHint",

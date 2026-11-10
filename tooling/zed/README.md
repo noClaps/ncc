@@ -2,8 +2,11 @@
 
 A [Zed](https://zed.dev) extension for the NC programming language. It provides:
 
-- the `ncc lsp` language server: diagnostics (errors and data-race warnings), hover,
-  go-to-definition, document symbols and completion
+- the `ncc lsp` language server: diagnostics across the workspace (errors, data-race warnings,
+  unused variables and imports), hover with doc comments, go to definition and type
+  definition, references, rename, completion, signature help, inlay hints, semantic tokens,
+  call hierarchy, code actions (quick fixes, extract and inline variable) and formatting.
+  Inlay hints show once enabled in Zed's settings (`"inlay_hints": { "enabled": true }`).
 - syntax highlighting
 - bracket matching and auto-closing
 - indentation
