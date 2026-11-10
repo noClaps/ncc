@@ -255,3 +255,11 @@ A: Exponent literals are supported (`e` or `E`, with an optional `+`/`-` sign on
 
 **Request:** If the checker can detect a race condition, it should emit a warning but still compile.
 Implementation: a function run with `async` that (directly or through the functions it calls) reads or writes a mutable global or a captured `mut` variable outside a mutex gets a "possible data race" warning at the `async` call. Compilation continues.
+
+## Language server
+
+**Q: Which features should `ncc lsp` support?**
+A: Diagnostics (errors and warnings), hover, go-to-definition, document symbols, and completion (keywords, builtins, names in scope, and module members after `alias.`). It speaks LSP over stdio.
+
+**Q: Should the Zed extension launch `ncc lsp`?**
+A: Yes. The extension gets a small Rust crate (compiled to wasm) that runs `ncc lsp` from `PATH` for `.nc` files.

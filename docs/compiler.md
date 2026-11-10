@@ -37,7 +37,7 @@ before being compiled.
 ## CLI
 
 ```
-Usage: ncc [init|build|run|check|test]
+Usage: ncc [init|build|run|check|test|lsp]
 
 Commands:
   init        Initialises a project.
@@ -45,6 +45,7 @@ Commands:
   run         Executes the given file.
   check       Type-checks the given file.
   test        Run tests in the given file.
+  lsp         Starts the language server.
 
 Options:
   -h, --help  Show this help and exit.
@@ -117,6 +118,15 @@ Options:
   --name <name>  Initialises the project with the given name.
                  (default: directory name)
   -h, --help     Show this help and exit.
+```
+
+```
+Usage: ncc lsp
+
+Starts the language server.
+
+Options:
+  -h, --help  Show this help and exit.
 ```
 
 ## Project layout
