@@ -203,7 +203,7 @@ impl Server {
         &self,
         a: &Analysis,
         d: &SymDecl,
-        call_parens: bool,
+        ins: Insert,
         qualifier: Option<&str>,
     ) -> CompletionItem {
         let full = match qualifier {
@@ -239,21 +239,39 @@ impl Server {
             )),
             ..Default::default()
         };
-        if d.kind == DeclKind::Function && call_parens && self.snippets {
-            let has_args = !param_names(&d.detail).is_empty();
-            // a generic function takes its type arguments first: `map<${1:I}, ${2:O}>($0)`
-            let targs: Vec<String> = super::calls::type_params(&d.detail)
-                .iter()
-                .enumerate()
-                .map(|(k, t)| format!("${{{}:{t}}}", k + 1))
-                .collect();
+        // a struct literal with a placeholder for each field: `P{.x = $1, .y = $2}`
+        if d.kind == DeclKind::Struct && ins.literal && self.snippets {
+            let fields: Vec<String> =
+                d.ty.as_ref()
+                    .and_then(|t| a.index.types.get(t))
+                    .into_iter()
+                    .flatten()
+                    .enumerate()
+                    .map(|(k, m)| format!(".{} = ${}", m.name, k + 1))
+                    .collect();
+            if !fields.is_empty() {
+                item.insert_text = Some(format!("{full}{{{}}}$0", fields.join(", ")));
+                item.insert_text_format = Some(InsertTextFormat::SNIPPET);
+            }
+        }
+        if d.kind == DeclKind::Function && ins.call_parens && self.snippets {
+            let ps = param_names(&d.detail);
+            // a generic function takes its type arguments first: `map<${1:I}, ${2:O}>(...)`
+            let tps = super::calls::type_params(&d.detail);
+            let mut k = 0;
+            let mut slot = |name: &str| {
+                k += 1;
+                format!("${{{k}:{name}}}")
+            };
+            let targs: Vec<String> = tps.iter().map(|t| slot(t)).collect();
+            let args: Vec<String> = ps.iter().map(|p| slot(p)).collect();
             item.insert_text = Some(format!(
-                "{full}{}{}",
+                "{full}{}({})$0",
                 generic_args(&targs),
-                call_snippet(has_args)
+                args.join(", ")
             ));
             item.insert_text_format = Some(InsertTextFormat::SNIPPET);
-            item.command = has_args.then(param_hints);
+            item.command = (!ps.is_empty()).then(param_hints);
         }
         item
     }
@@ -267,9 +285,15 @@ impl Server {
         let before = &text[line_start..off];
         let analysis = self.analyses.get(&path);
         let fid = analysis.and_then(|a| a.file_id(&path));
+        let slot = self.slot_at(&pp.text_document.uri, &text, analysis, fid, off);
+        let after = &text[off..];
         // no `()` where a function value is expected (`apply(f|`) or already follows
-        let call_parens = !text[off..].starts_with('(')
-            && !self.fn_value_expected(&pp.text_document.uri, &text, analysis, fid, off);
+        let call_parens =
+            !after.starts_with('(') && !matches!(&slot, Slot::Value(Some(t)) if is_fn_ty(t));
+        let ins = Insert {
+            call_parens,
+            literal: matches!(slot, Slot::Value(_)) && !after.starts_with('{'),
+        };
         let item = |label: &str, kind: CompletionItemKind, detail: Option<String>| CompletionItem {
             label: label.to_string(),
             kind: Some(kind),
@@ -349,7 +373,7 @@ impl Server {
             } else {
                 vec![]
             };
-            if let Some((mut items, ty)) = self.member_items(a, fid, dot, &chain, call_parens) {
+            if let Some((mut items, ty)) = self.member_items(a, fid, dot, &chain, ins) {
                 // functions taking the value as their first argument: `v.f` -> `f(v, ...)`
                 if let Some(ty) = ty {
                     items.extend(self.first_arg_items(a, fid, &text, start, dot, off, &ty));
@@ -391,7 +415,7 @@ impl Server {
         // names, keywords and types
         if let (Some(a), Some(fid)) = (analysis, fid) {
             for d in visible(a, fid, off) {
-                items.push(self.decl_item(a, d, call_parens, None));
+                items.push(self.decl_item(a, d, ins, None));
             }
             for alias in a.imports.keys() {
                 items.push(item(
@@ -424,12 +448,12 @@ impl Server {
                     && d.scope.is_none()
                     && let Some(q) = &d.extern_alias
                 {
-                    items.push(self.decl_item(a, d, call_parens, Some(q)));
+                    items.push(self.decl_item(a, d, ins, Some(q)));
                 }
             }
             for (alias, mpath) in &a.imports {
                 for d in public_decls(a, mpath) {
-                    items.push(self.decl_item(a, d, call_parens, Some(alias)));
+                    items.push(self.decl_item(a, d, ins, Some(alias)));
                 }
             }
             // modules that are not imported yet: accepting one adds the import
@@ -512,18 +536,19 @@ impl Server {
         Some(items)
     }
 
-    /// Whether the expression being typed at `off` is where a function value is expected: an
-    /// argument for a function-typed parameter (`apply(f|`), the value of a function-typed
-    /// declaration or variable (`(fn() int) g = f|`, `g = f|`), or the value returned from a
-    /// function that returns a function (`return f|`).
-    fn fn_value_expected(
+    /// What the expression being typed at `off` is: a value (with the type it is expected to
+    /// have, when known) or something else (a statement, a type, a field name, ...). Values are
+    /// call arguments (`apply(f|`), declarations' and assignments' values (`(fn() int) g = f|`,
+    /// `p.cb = f|`), struct literal fields (`S{.cb = f|`), returned values (`return f|`) and
+    /// array elements.
+    fn slot_at(
         &self,
         uri: &Uri,
         text: &str,
         a: Option<&Analysis>,
         fid: Option<u32>,
         off: usize,
-    ) -> bool {
+    ) -> Slot {
         let b = text.as_bytes();
         // the start of the expression: the word, a qualifier (`util.f`) and a builtin's `@`
         let mut s = off;
@@ -545,15 +570,22 @@ impl Server {
             .take_while(|t| (t.span.end as usize) <= s)
             .collect();
         use crate::lexer::Tok;
-        let is_fn_ty = |t: &str| t.trim().starts_with("(fn");
         match toks.last().map(|t| &t.tok) {
-            // a call's argument
-            Some(Tok::LParen | Tok::Comma) => self.call_at(uri, s).is_some_and(|c| {
-                super::calls::params(&c.label)
-                    .get(c.arg as usize)
-                    .is_some_and(|(t, _)| is_fn_ty(t))
-            }),
-            // a declaration's or assignment's value
+            // a call's argument, not a parameter of a declaration (`fn f(int a, |`)
+            Some(Tok::LParen | Tok::Comma) => {
+                if in_fn_header(&toks) {
+                    return Slot::Other;
+                }
+                match self.call_at(uri, s) {
+                    Some(c) => Slot::Value(
+                        super::calls::params(&c.label)
+                            .get(c.arg as usize)
+                            .map(|(t, _)| t.clone()),
+                    ),
+                    None => Slot::Other,
+                }
+            }
+            // a declaration's, assignment's or struct literal field's value
             Some(Tok::Assign) => {
                 let eq = toks.len() - 1;
                 let mut depth = 0i32;
@@ -577,31 +609,51 @@ impl Server {
                     i -= 1;
                 }
                 if i == eq {
-                    return false;
+                    return Slot::Other;
                 }
-                let lhs = text[toks[i].span.start as usize..toks[eq].span.start as usize].trim();
+                let lstart = toks[i].span.start as usize;
+                let lhs = text[lstart..toks[eq].span.start as usize].trim();
                 let lhs = ["pub ", "mut "]
                     .iter()
                     .fold(lhs, |l, p| l.strip_prefix(p).unwrap_or(l).trim_start());
-                if is_fn_ty(lhs) {
-                    return true;
+                // `Type name = `
+                if let Some((ty, name)) = lhs.rsplit_once(' ')
+                    && name.bytes().all(is_ident_byte)
+                {
+                    return Slot::Value(Some(ty.trim().to_string()));
                 }
-                // assigning to a variable of a function type
                 let (Some(a), Some(fid)) = (a, fid) else {
-                    return false;
+                    return Slot::Value(None);
                 };
-                lhs.bytes().all(is_ident_byte)
-                    && visible(a, fid, s).iter().any(|d| {
-                        d.name == lhs
-                            && d.kind == DeclKind::Variable
-                            && d.ty.as_deref().is_some_and(is_fn_ty)
-                    })
+                // `S{.field = `
+                if let Some(field) = lhs.strip_prefix('.') {
+                    let ty = literal_struct(a, text, lstart).and_then(|(d, _)| {
+                        let members = a.index.types.get(d.ty.as_ref()?)?;
+                        Some(members.iter().find(|m| m.name == field)?.ty.clone())
+                    });
+                    return Slot::Value(ty);
+                }
+                // `name = `, `p.field = `, `ps[0].field = `
+                Slot::Value(
+                    receiver_chain(lhs)
+                        .filter(|(_, start)| *start == 0)
+                        .and_then(|(chain, _)| chain_ty(a, fid, s, &chain)),
+                )
             }
             // the enclosing function's return value
             Some(Tok::Ident(k)) if k == "return" => {
-                enclosing_fn_return(text, &toks).is_some_and(is_fn_ty)
+                Slot::Value(enclosing_fn_return(text, &toks).map(str::to_string))
             }
-            _ => false,
+            // an array element (not a map type: `[str]int m`)
+            Some(Tok::LBracket)
+                if !matches!(
+                    toks.iter().rev().nth(1).map(|t| &t.tok),
+                    None | Some(Tok::Newline | Tok::LBrace | Tok::RBrace)
+                ) =>
+            {
+                Slot::Value(None)
+            }
+            _ => Slot::Other,
         }
     }
 
@@ -613,13 +665,13 @@ impl Server {
         fid: u32,
         off: usize,
         chain: &[Seg],
-        call_parens: bool,
+        ins: Insert,
     ) -> Option<(Vec<CompletionItem>, Option<String>)> {
         let Seg::Name(first) = &chain[0] else {
             return None;
         };
         let mut rest = &chain[1..];
-        let mut ty: String;
+        let ty: String;
         // the functions of an extern block
         let externs: Vec<&SymDecl> = a
             .index
@@ -632,7 +684,7 @@ impl Server {
                 return Some((
                     externs
                         .into_iter()
-                        .map(|d| self.decl_item(a, d, call_parens, None))
+                        .map(|d| self.decl_item(a, d, ins, None))
                         .collect(),
                     None,
                 ));
@@ -648,7 +700,7 @@ impl Server {
             if rest.is_empty() {
                 let items = public_decls(a, mpath)
                     .into_iter()
-                    .map(|d| self.decl_item(a, d, call_parens, None))
+                    .map(|d| self.decl_item(a, d, ins, None))
                     .collect();
                 return Some((items, None));
             }
@@ -689,21 +741,7 @@ impl Server {
             }
             ty = d.ty.clone()?;
         }
-        for s in rest {
-            ty = match s {
-                Seg::Name(n) => a
-                    .index
-                    .types
-                    .get(&ty)?
-                    .iter()
-                    .find(|m| &m.name == n)?
-                    .ty
-                    .clone(),
-                Seg::Index => a.index.elems.get(&ty)?.clone(),
-                Seg::Slice => ty,
-                Seg::Call => a.index.returns.get(&ty)?.clone(),
-            };
-        }
+        let ty = follow(a, ty, rest)?;
         let members = a.index.types.get(&ty)?;
         let fields = members
             .iter()
@@ -878,6 +916,113 @@ fn generic_args(args: &[String]) -> String {
     } else {
         format!("<{}>", args.join(", "))
     }
+}
+
+/// How names are inserted where the completion is.
+#[derive(Clone, Copy)]
+struct Insert {
+    /// functions as calls: `f(...)`
+    call_parens: bool,
+    /// structs as literals: `S{.x = ...}`
+    literal: bool,
+}
+
+/// Where the expression being completed goes.
+#[derive(Debug, PartialEq)]
+enum Slot {
+    /// a value, with its expected type when known
+    Value(Option<String>),
+    /// a statement, a type, a field name, ...
+    Other,
+}
+
+/// Whether a type is a function type (`(fn(int) str)`).
+fn is_fn_ty(t: &str) -> bool {
+    t.trim().starts_with("(fn")
+}
+
+/// Whether the innermost unclosed `(` at the end of `toks` opens the parameters of a function
+/// declaration (`fn name<T>(`) or function type (`(fn(`).
+fn in_fn_header(toks: &[&crate::lexer::Token]) -> bool {
+    use crate::lexer::Tok;
+    let mut depth = 0;
+    let mut i = toks.len();
+    let open = loop {
+        if i == 0 {
+            return false;
+        }
+        i -= 1;
+        match toks[i].tok {
+            Tok::RParen | Tok::RBracket | Tok::RBrace => depth += 1,
+            Tok::LParen | Tok::LBracket | Tok::LBrace if depth > 0 => depth -= 1,
+            Tok::LParen => break i,
+            Tok::LBracket | Tok::LBrace => return false,
+            _ => {}
+        }
+    };
+    let mut j = open;
+    // generic parameters
+    if j > 0 && toks[j - 1].tok == Tok::Gt {
+        let mut d = 0;
+        while j > 0 {
+            j -= 1;
+            match toks[j].tok {
+                Tok::Gt => d += 1,
+                Tok::Lt => {
+                    d -= 1;
+                    if d == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let ident = |k: usize| match &toks[k].tok {
+        Tok::Ident(n) => Some(n.as_str()),
+        _ => None,
+    };
+    if j > 0 && ident(j - 1).is_some_and(|n| n != "fn") {
+        j -= 1;
+    }
+    j > 0 && ident(j - 1) == Some("fn")
+}
+
+/// The type reached by following `segs` from a value of type `ty` (`.field`, `[i]`, `()`).
+fn follow(a: &Analysis, mut ty: String, segs: &[Seg]) -> Option<String> {
+    for s in segs {
+        ty = match s {
+            Seg::Name(n) => a
+                .index
+                .types
+                .get(&ty)?
+                .iter()
+                .find(|m| &m.name == n)?
+                .ty
+                .clone(),
+            Seg::Index => a.index.elems.get(&ty)?.clone(),
+            Seg::Slice => ty,
+            Seg::Call => a.index.returns.get(&ty)?.clone(),
+        };
+    }
+    Some(ty)
+}
+
+/// The type of a chain starting at a variable or function in scope (`p.cb`, `ps[0].x`, `f().y`).
+fn chain_ty(a: &Analysis, fid: u32, off: usize, chain: &[Seg]) -> Option<String> {
+    let Seg::Name(first) = chain.first()? else {
+        return None;
+    };
+    let d = visible(a, fid, off)
+        .into_iter()
+        .find(|d| &d.name == first)?;
+    let rest = match d.kind {
+        DeclKind::Variable => &chain[1..],
+        // the decl's type is its return type: skip the call
+        DeclKind::Function if chain.get(1) == Some(&Seg::Call) => &chain[2..],
+        _ => return None,
+    };
+    follow(a, d.ty.clone()?, rest)
 }
 
 /// The return type of the innermost function (declaration or literal) whose body is open at
@@ -1159,7 +1304,9 @@ fn doc_at(a: &Analysis, span: Span) -> Option<Documentation> {
 }
 
 /// Fields of the struct literal or pattern around a `.` that starts a field (`Point{.x = 1, .`).
-fn struct_literal_fields(a: &Analysis, text: &str, dot: usize) -> Option<Vec<CompletionItem>> {
+/// The struct of the literal whose field starts with the `.` at `dot` (`Name{.x = 1, .`), with
+/// the offset of the literal's `{`.
+fn literal_struct<'a>(a: &'a Analysis, text: &str, dot: usize) -> Option<(&'a SymDecl, usize)> {
     let prev = text[..dot].trim_end();
     if !(prev.ends_with('{') || prev.ends_with(',')) {
         return None;
@@ -1198,6 +1345,12 @@ fn struct_literal_fields(a: &Analysis, text: &str, dot: usize) -> Option<Vec<Com
         .decls
         .iter()
         .find(|d| d.name == name && d.kind == DeclKind::Struct)?;
+    Some((d, open))
+}
+
+/// Fields not set yet in the struct literal around the `.` at `dot`.
+fn struct_literal_fields(a: &Analysis, text: &str, dot: usize) -> Option<Vec<CompletionItem>> {
+    let (d, open) = literal_struct(a, text, dot)?;
     let members = a.index.types.get(d.ty.as_ref()?)?;
     let present: HashSet<&str> = text[open..dot]
         .split('.')
