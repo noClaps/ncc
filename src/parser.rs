@@ -395,20 +395,11 @@ impl Parser {
             return Ok(());
         }
         if self.at_kw("struct") {
-            self.bump();
-            let (name, _) = self.ident()?;
-            let type_params = self.type_params()?;
-            self.expect(&Tok::LBrace)?;
-            self.skip_nl();
-            let mut fields = Vec::new();
-            while !self.at(&Tok::RBrace) {
-                let ty = self.parse_type()?;
-                let (fname, fsp) = self.ident()?;
-                fields.push((ty, fname, fsp));
-                self.eat(&Tok::Comma);
-                self.end_stmt()?;
-            }
-            let end = self.bump().span;
+            let (name, type_params, fields, end) = self.type_body(|p| {
+                let ty = p.parse_type()?;
+                let (fname, fsp) = p.ident()?;
+                Ok((ty, fname, fsp))
+            })?;
             items.push(Item::Struct(StructDecl {
                 name,
                 type_params,
@@ -419,24 +410,15 @@ impl Parser {
             return Ok(());
         }
         if self.at_kw("enum") {
-            self.bump();
-            let (name, _) = self.ident()?;
-            let type_params = self.type_params()?;
-            self.expect(&Tok::LBrace)?;
-            self.skip_nl();
-            let mut variants = Vec::new();
-            while !self.at(&Tok::RBrace) {
-                let (vname, vsp) = self.ident()?;
-                let tys = if self.eat(&Tok::LParen) {
-                    self.list(&Tok::RParen, Self::parse_type)?
+            let (name, type_params, variants, end) = self.type_body(|p| {
+                let (vname, vsp) = p.ident()?;
+                let tys = if p.eat(&Tok::LParen) {
+                    p.list(&Tok::RParen, Self::parse_type)?
                 } else {
                     vec![]
                 };
-                variants.push((vname, tys, vsp));
-                self.eat(&Tok::Comma);
-                self.end_stmt()?;
-            }
-            let end = self.bump().span;
+                Ok((vname, tys, vsp))
+            })?;
             items.push(Item::Enum(EnumDecl {
                 name,
                 type_params,
@@ -485,6 +467,26 @@ impl Parser {
         }
         items.push(Item::Stmt(stmt));
         Ok(())
+    }
+
+    /// `struct` or `enum` (at the keyword) `Name<params> { member, ... }`: the name, type
+    /// parameters, members and the closing brace's span.
+    fn type_body<T>(
+        &mut self,
+        mut member: impl FnMut(&mut Self) -> Result<T>,
+    ) -> Result<(String, Vec<GenericParam>, Vec<T>, Span)> {
+        self.bump();
+        let (name, _) = self.ident()?;
+        let type_params = self.type_params()?;
+        self.expect(&Tok::LBrace)?;
+        self.skip_nl();
+        let mut members = Vec::new();
+        while !self.at(&Tok::RBrace) {
+            members.push(member(self)?);
+            self.eat(&Tok::Comma);
+            self.end_stmt()?;
+        }
+        Ok((name, type_params, members, self.bump().span))
     }
 
     fn plain_string(&mut self, what: &str) -> Result<String> {
@@ -1309,14 +1311,19 @@ impl Parser {
     }
 
     /// The expressions of a list after its first one (`, b, c)`), up to `close` (consumed).
-    fn rest_of_list(&mut self, first: Expr, close: &Tok) -> Result<Vec<Expr>> {
+    fn rest_of_list<T>(
+        &mut self,
+        first: T,
+        close: &Tok,
+        mut item: impl FnMut(&mut Self) -> Result<T>,
+    ) -> Result<Vec<T>> {
         let mut items = vec![first];
         while self.eat(&Tok::Comma) {
             self.skip_nl();
             if self.at(close) {
                 break;
             }
-            items.push(self.expr()?);
+            items.push(item(self)?);
             self.skip_nl();
         }
         self.expect(close)?;
@@ -1384,62 +1391,50 @@ impl Parser {
             }
             Tok::LParen => {
                 self.bump();
-                let saved = self.no_struct;
-                self.no_struct = false;
-                self.skip_nl();
-                let first = self.expr()?;
-                self.skip_nl();
-                let kind = if self.at(&Tok::Comma) {
-                    ExprKind::Tuple(self.rest_of_list(first, &Tok::RParen)?)
-                } else {
-                    self.expect(&Tok::RParen)?;
-                    self.no_struct = saved;
-                    // keep the inner node but widen the span
-                    return Ok(Expr {
-                        kind: first.kind,
-                        span: start.to(self.prev_span()),
-                    });
-                };
-                self.no_struct = saved;
-                kind
+                self.with_no_struct(false, |p| {
+                    p.skip_nl();
+                    let first = p.expr()?;
+                    p.skip_nl();
+                    if p.at(&Tok::Comma) {
+                        return Ok(ExprKind::Tuple(p.rest_of_list(
+                            first,
+                            &Tok::RParen,
+                            Self::expr,
+                        )?));
+                    }
+                    p.expect(&Tok::RParen)?;
+                    // keep the inner node, with the span widened to the parentheses
+                    Ok(first.kind)
+                })?
             }
             Tok::LBracket => {
                 self.bump();
-                let saved = self.no_struct;
-                self.no_struct = false;
-                self.skip_nl();
-                let kind = if self.at(&Tok::RBracket) {
-                    self.bump();
-                    ExprKind::Array(vec![])
-                } else {
-                    let first = self.expr()?;
-                    self.skip_nl();
-                    if self.eat(&Tok::Colon) {
-                        self.skip_nl();
-                        let v = self.expr()?;
-                        let mut entries = vec![(first, v)];
-                        self.skip_nl();
-                        while self.eat(&Tok::Comma) {
-                            self.skip_nl();
-                            if self.at(&Tok::RBracket) {
-                                break;
-                            }
-                            let k = self.expr()?;
-                            self.skip_nl();
-                            self.expect(&Tok::Colon)?;
-                            self.skip_nl();
-                            let v = self.expr()?;
-                            entries.push((k, v));
-                            self.skip_nl();
-                        }
-                        self.expect(&Tok::RBracket)?;
-                        ExprKind::Map(entries)
-                    } else {
-                        ExprKind::Array(self.rest_of_list(first, &Tok::RBracket)?)
+                self.with_no_struct(false, |p| {
+                    p.skip_nl();
+                    if p.eat(&Tok::RBracket) {
+                        return Ok(ExprKind::Array(vec![]));
                     }
-                };
-                self.no_struct = saved;
-                kind
+                    let first = p.expr()?;
+                    p.skip_nl();
+                    if !p.eat(&Tok::Colon) {
+                        return Ok(ExprKind::Array(p.rest_of_list(
+                            first,
+                            &Tok::RBracket,
+                            Self::expr,
+                        )?));
+                    }
+                    p.skip_nl();
+                    let v = p.expr()?;
+                    p.skip_nl();
+                    let entries = p.rest_of_list((first, v), &Tok::RBracket, |p| {
+                        let k = p.expr()?;
+                        p.skip_nl();
+                        p.expect(&Tok::Colon)?;
+                        p.skip_nl();
+                        Ok((k, p.expr()?))
+                    })?;
+                    Ok(ExprKind::Map(entries))
+                })?
             }
             Tok::Ident(k) => match k.as_str() {
                 "true" => {
@@ -1479,29 +1474,29 @@ impl Parser {
                         Some(self.no_struct_expr()?)
                     };
                     self.expect(&Tok::LBrace)?;
-                    let saved = self.no_struct;
-                    self.no_struct = false;
-                    self.skip_nl();
-                    let mut arms = Vec::new();
-                    while !self.at(&Tok::RBrace) {
-                        let asp = self.span();
-                        let mut patterns = vec![self.expr()?];
-                        while self.eat(&Tok::Comma) {
-                            self.skip_nl();
-                            patterns.push(self.expr()?);
+                    let arms = self.with_no_struct(false, |p| {
+                        p.skip_nl();
+                        let mut arms = Vec::new();
+                        while !p.at(&Tok::RBrace) {
+                            let asp = p.span();
+                            let mut patterns = vec![p.expr()?];
+                            while p.eat(&Tok::Comma) {
+                                p.skip_nl();
+                                patterns.push(p.expr()?);
+                            }
+                            p.expect(&Tok::Arrow)?;
+                            let body = p.block()?;
+                            arms.push(Arm {
+                                patterns,
+                                body,
+                                span: asp.to(p.prev_span()),
+                            });
+                            p.eat(&Tok::Comma);
+                            p.skip_nl();
                         }
-                        self.expect(&Tok::Arrow)?;
-                        let body = self.block()?;
-                        arms.push(Arm {
-                            patterns,
-                            body,
-                            span: asp.to(self.prev_span()),
-                        });
-                        self.eat(&Tok::Comma);
-                        self.skip_nl();
-                    }
-                    self.bump();
-                    self.no_struct = saved;
+                        p.bump();
+                        Ok(arms)
+                    })?;
                     ExprKind::If(Box::new(IfExpr {
                         label: None,
                         scrutinee,
