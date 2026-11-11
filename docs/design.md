@@ -53,11 +53,11 @@ them as errors and stop. The language server shows the same diagnostics, faded, 
 
 After generating C, a dead-code pass (`src/cgen/prune.rs`) splits the translation unit
 (runtime included) into top-level items. It keeps only the items reachable from `main` and the
-standard headers they use. When a program has `extern` C files, the runtime's public functions
-are kept too.
+standard headers they use. Extern C files are pasted in after pruning, and the runtime items
+they name are kept for them.
 
 Code generation also avoids cost the program doesn't need:
-- A `main` that can't throw is a `void` function.
+- The program's top-level code is the body of C `main` itself.
 - Functions never used as values take no closure environment.
 - Test-mode failure handling sits behind a hook that only `ncc test` installs.
 - Printing literal values writes text computed at compile time with a single `puts`/`fwrite`.
@@ -133,7 +133,11 @@ print `panic: <reason> (file:line)` and exit with code 101; an uncaught error pr
 ## Extern C ABI
 
 An `extern "file.c" as alias { ... }` block names a C file, relative to the NC file, that is
-compiled and linked with the program. The file includes `nc.h` (`src/runtime/nc.h`): NC's
+pasted into the program's generated C (after a `#line` directive, so C diagnostics point at the
+file), letting the C compiler inline its functions. It shares the translation unit with the
+generated code, so its file-scope names must not clash with the runtime's `nc_` names or
+generated names. Headers it includes from its own directory are found when building. The file
+includes `nc.h` (`src/runtime/nc.h`): NC's
 value types, the runtime functions C code may call, and the optionals and error unions of the
 built-in types (`nc_err_int`, `nc_opt_str`, ...). It needs nothing else, so a copy can sit
 next to the C file for editors. For other types (structs, tuples, ...) the file includes

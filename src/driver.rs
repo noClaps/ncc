@@ -170,6 +170,19 @@ impl Drop for TempDir {
     }
 }
 
+/// `p` for messages and `#line`: relative to the working directory when inside it, without
+/// `.` components.
+fn display_path(p: &Path) -> String {
+    let clean: PathBuf = p
+        .components()
+        .filter(|c| !matches!(c, std::path::Component::CurDir))
+        .collect();
+    let rel = std::env::current_dir()
+        .ok()
+        .and_then(|d| clean.strip_prefix(d).ok().map(Path::to_path_buf));
+    rel.unwrap_or(clean).display().to_string()
+}
+
 /// Compile a program to the given format at `out`. Returns false on failure (already reported).
 fn compile(
     p: &Program,
@@ -179,7 +192,27 @@ fn compile(
     format: Format,
     out: &Path,
 ) -> bool {
-    let (c_src, header) = cgen::generate(p, sm, mode);
+    // extern C files go into the generated translation unit
+    let mut files: Vec<&Path> = Vec::new();
+    for x in &p.externs {
+        if !files.contains(&x.file.as_path()) {
+            files.push(&x.file);
+        }
+    }
+    let mut externs = Vec::new();
+    for f in &files {
+        match std::fs::read_to_string(f) {
+            Ok(text) => externs.push(cgen::ExternSource {
+                path: display_path(f),
+                text,
+            }),
+            Err(_) => {
+                eprintln!("error: extern implementation `{}` not found", f.display());
+                return false;
+            }
+        }
+    }
+    let (c_src, header) = cgen::generate(p, sm, mode, &externs);
     if format == Format::C {
         if let Err(e) = std::fs::write(out, c_src) {
             eprintln!("error: cannot write `{}`: {e}", out.display());
@@ -207,25 +240,16 @@ fn compile(
     }
     args.push("-w".into());
     args.push(format!("-I{}", tmp.0.display()));
-    if format == Format::Asm {
-        args.push("-S".into());
-        args.push(main_c.display().to_string());
-    } else {
-        args.push(main_c.display().to_string());
-        let mut seen = Vec::new();
-        for x in &p.externs {
-            if !seen.contains(&x.file) {
-                seen.push(x.file.clone());
-            }
-        }
-        for f in seen {
-            if !f.is_file() {
-                eprintln!("error: extern implementation `{}` not found", f.display());
-                return false;
-            }
-            args.push(f.display().to_string());
+    // headers the extern files include from their own directories
+    for f in &files {
+        if let Some(d) = f.parent().filter(|d| !d.as_os_str().is_empty()) {
+            args.push(format!("-I{}", d.display()));
         }
     }
+    if format == Format::Asm {
+        args.push("-S".into());
+    }
+    args.push(main_c.display().to_string());
     args.push("-o".into());
     args.push(out.display().to_string());
     if format == Format::Exe {

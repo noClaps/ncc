@@ -110,6 +110,13 @@ static void *nc_alloc(size_t n) { return nc_check_alloc(malloc(n ? n : 1)); }
 static void *nc_zalloc(size_t n) { return nc_check_alloc(calloc(1, n ? n : 1)); }
 static void *nc_dup(const void *p, size_t n) { return memcpy(nc_alloc(n), p, n); }
 
+/* a heap copy of the `n`-byte object at `p`, whose first member is its reference count, set to 1 */
+static void *nc_obj(const void *p, size_t n) {
+  void *o = nc_dup(p, n);
+  atomic_init((_Atomic int64_t *)o, 1);
+  return o;
+}
+
 static inline void nc_inc(_Atomic int64_t *rc) {
   if (atomic_load_explicit(rc, memory_order_relaxed) >= 0) atomic_fetch_add_explicit(rc, 1, memory_order_relaxed);
 }
@@ -580,6 +587,13 @@ static inline void *nc_arr_at(const nc_arr *a, uint64_t i, const char *loc) {
 static inline uint64_t nc_dollar(int64_t len, const char *loc) {
   if (len == 0) nc_panic("`$` used on an empty sequence", loc);
   return (uint64_t)(len - 1);
+}
+/* a new array of the `n` elements at `data`, taking over their ownership */
+static nc_arr *nc_arr_of(const nc_ti *ti, int64_t n, const void *data) {
+  nc_arr *a = nc_arr_new(ti, n);
+  memcpy(a->data, data, (size_t)n * ti->size);
+  a->len = n;
+  return a;
 }
 /* append retained copies of `n` elements at `data`; the capacity must suffice */
 static void nc_arr_append(nc_arr *a, const void *data, int64_t n) {

@@ -285,18 +285,16 @@ impl<'t> TypeGen<'t> {
         let b = &mut self.bodies;
         writeln!(b, "/* {} */", self.t.show(t).replace("*/", "* /")).unwrap();
         writeln!(b, "static {ct} rt_{h}({ct} x) {{ {rt} return x; }}").unwrap();
-        writeln!(b, "static void rl_{h}({ct} x) {{ (void)x; {rl} }}").unwrap();
-        writeln!(
-            b,
-            "static bool eq_{h}({ct} a, {ct} b) {{ (void)a; (void)b; {eq} }}"
-        )
-        .unwrap();
-        writeln!(b, "static uint64_t hs_{h}({ct} x) {{ (void)x; {hs} }}").unwrap();
-        writeln!(
-            b,
-            "static void st_{h}(nc_sb *sb, {ct} x) {{ (void)sb; (void)x; {st} }}"
-        )
-        .unwrap();
+        let (vx, vab, vsx) = (
+            unused(&rl, &["x"]),
+            unused(&eq, &["a", "b"]),
+            unused(&st, &["sb", "x"]),
+        );
+        writeln!(b, "static void rl_{h}({ct} x) {{ {vx}{rl} }}").unwrap();
+        writeln!(b, "static bool eq_{h}({ct} a, {ct} b) {{ {vab}{eq} }}").unwrap();
+        let vx = unused(&hs, &["x"]);
+        writeln!(b, "static uint64_t hs_{h}({ct} x) {{ {vx}{hs} }}").unwrap();
+        writeln!(b, "static void st_{h}(nc_sb *sb, {ct} x) {{ {vsx}{st} }}").unwrap();
         if managed {
             writeln!(
                 b,
@@ -602,4 +600,15 @@ fn in_header(kind: &TyKind, inner: TyId, name: &str) -> bool {
         TyKind::Opt(_) => inner != VOID && name == format!("opt_{prim}"),
         _ => name == format!("err_{prim}"),
     }
+}
+
+/// `(void)p; ` for each parameter `p` the body never mentions, to keep C compilers quiet.
+fn unused(body: &str, params: &[&str]) -> String {
+    let words: std::collections::HashSet<&str> = body
+        .split(|c: char| !(c == '_' || c.is_ascii_alphanumeric()))
+        .collect();
+    (params.iter())
+        .filter(|p| !words.contains(**p))
+        .map(|p| format!("(void){p}; "))
+        .collect()
 }
