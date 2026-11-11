@@ -346,9 +346,11 @@ impl Server {
         let path = uri_to_path(&uri)?;
         let text = self.text_of(&path)?;
         let mut out = Vec::new();
-        let action = |title, kind, diag, edits: Vec<TextEdit>, preferred: bool| {
-            let changes = edits.into_iter().map(|e| (uri.clone(), e)).collect();
-            let mut a = edit_action(title, kind, changes, diag);
+        let edits_here =
+            |edits: Vec<TextEdit>| edits.into_iter().map(|e| (uri.clone(), e)).collect();
+        // a quick fix for the diagnostic `d`
+        let fix = |title, d, edits, preferred: bool| {
+            let mut a = edit_action(title, CodeActionKind::QUICKFIX, edits_here(edits), Some(d));
             if let CodeActionOrCommand::CodeAction(c) = &mut a {
                 c.is_preferred = preferred.then_some(true);
             }
@@ -370,19 +372,17 @@ impl Server {
                     && a.sm.file(def.file).path == path
                 {
                     let at = offset_to_pos(&text, def.start as usize);
-                    out.push(action(
+                    out.push(fix(
                         "Make the variable mutable".into(),
-                        CodeActionKind::QUICKFIX,
-                        Some(d),
+                        d,
                         vec![insert(at, "mut ")],
                         true,
                     ));
                 }
             } else if msg.contains("not used") || msg.starts_with("unused value") {
-                out.push(action(
+                out.push(fix(
                     "Discard the value with `_ =`".into(),
-                    CodeActionKind::QUICKFIX,
-                    Some(d),
+                    d,
                     vec![insert(d.range.start, "_ = ")],
                     true,
                 ));
@@ -390,18 +390,16 @@ impl Server {
                 code,
                 "unused-variable" | "unused-parameter" | "unused-function" | "unused-type"
             ) {
-                out.push(action(
+                out.push(fix(
                     "Prefix the name with `_`".into(),
-                    CodeActionKind::QUICKFIX,
-                    Some(d),
+                    d,
                     vec![insert(d.range.start, "_")],
                     true,
                 ));
                 if matches!(code, "unused-variable" | "unused-parameter") {
-                    out.push(action(
+                    out.push(fix(
                         "Rename to `_`".into(),
-                        CodeActionKind::QUICKFIX,
-                        Some(d),
+                        d,
                         vec![TextEdit::new(d.range, "_".into())],
                         false,
                     ));
@@ -415,10 +413,9 @@ impl Server {
                 let (ls, le) = (line_start(&text, s), line_end(&text, e));
                 let alone = text[ls..s].trim().is_empty() && text[e..le].trim().is_empty();
                 let (s, e) = if alone { (ls, le) } else { (s, e) };
-                out.push(action(
+                out.push(fix(
                     "Remove the unreachable branch".into(),
-                    CodeActionKind::QUICKFIX,
-                    Some(d),
+                    d,
                     vec![TextEdit::new(range(&text, s, e), String::new())],
                     true,
                 ));
@@ -428,10 +425,9 @@ impl Server {
                     .into_iter()
                     .find(|(s, ..)| s.start <= off && off <= s.end)
                 {
-                    out.push(action(
+                    out.push(fix(
                         "Remove unused import".into(),
-                        CodeActionKind::QUICKFIX,
-                        Some(d),
+                        d,
                         vec![remove_import(&text, span)],
                         true,
                     ));
@@ -466,10 +462,9 @@ impl Server {
                         let used_as_module = text[s + i + name.len()..].starts_with('.');
                         if used_as_module {
                             for m in find_modules(&path, name).into_iter().take(3) {
-                                out.push(action(
+                                out.push(fix(
                                     format!("Import `{m}` as `{name}`"),
-                                    CodeActionKind::QUICKFIX,
-                                    Some(d),
+                                    d,
                                     vec![add_import(&text, &module, &m, name)],
                                     true,
                                 ));
@@ -486,10 +481,9 @@ impl Server {
                             out.push(x);
                         }
                         for (k, (_, c)) in cands.into_iter().take(3).enumerate() {
-                            out.push(action(
+                            out.push(fix(
                                 format!("Change to `{c}`"),
-                                CodeActionKind::QUICKFIX,
-                                Some(d),
+                                d,
                                 vec![TextEdit::new(r, c)],
                                 k == 0 && !used_as_module,
                             ));
@@ -522,10 +516,9 @@ impl Server {
                         }
                     };
                     if !ins.is_empty() {
-                        out.push(action(
+                        out.push(fix(
                             format!("Make `{}` throwing", sig.name),
-                            CodeActionKind::QUICKFIX,
-                            Some(d),
+                            d,
                             vec![insert(offset_to_pos(&text, at), &ins)],
                             true,
                         ));
@@ -541,13 +534,7 @@ impl Server {
                         default_value,
                     )
                 {
-                    out.push(action(
-                        "Add missing fields".into(),
-                        CodeActionKind::QUICKFIX,
-                        Some(d),
-                        vec![edit],
-                        true,
-                    ));
+                    out.push(fix("Add missing fields".into(), d, vec![edit], true));
                 }
             } else if msg.starts_with("`if` branches are not exhaustive") {
                 let off = pos_to_offset(&text, d.range.start) as u32;
@@ -583,18 +570,16 @@ impl Server {
                             .iter()
                             .map(|v| format!("{lead}{arm_indent}{v} -> {{}}\n"))
                             .collect();
-                        out.push(action(
+                        out.push(fix(
                             "Add missing branches".into(),
-                            CodeActionKind::QUICKFIX,
-                            Some(d),
+                            d,
                             vec![insert(offset_to_pos(&text, at), &arms)],
                             true,
                         ));
                     }
-                    out.push(action(
+                    out.push(fix(
                         "Add a fallback `_` branch".into(),
-                        CodeActionKind::QUICKFIX,
-                        Some(d),
+                        d,
                         vec![insert(
                             offset_to_pos(&text, at),
                             &format!("{lead}{arm_indent}_ -> {{}}\n"),
@@ -631,12 +616,11 @@ impl Server {
                 })
             });
             if edits.len() == 1 || unused.len() > 1 {
-                out.push(action(
+                out.push(edit_action(
                     "Remove unused imports".into(),
                     CodeActionKind::SOURCE_ORGANIZE_IMPORTS,
+                    edits_here(edits),
                     None,
-                    edits,
-                    false,
                 ));
             }
         }
