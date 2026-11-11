@@ -1306,12 +1306,7 @@ impl Checker {
                 let kt = self.resolve_type(k, m, tp)?;
                 let vt = self.resolve_type(v, m, tp)?;
                 self.check_elem_type(vt, *sp)?;
-                if !self.plain(kt) {
-                    return err(
-                        *sp,
-                        format!("`{}` cannot be used as a map key", self.types.show(kt)),
-                    );
-                }
+                self.require_plain(kt, *sp, "cannot be used as a map key")?;
                 self.types.intern(TyKind::Map(kt, vt))
             }
             T::Optional(i, sp) => {
@@ -1396,6 +1391,14 @@ impl Checker {
     /// functions, futures, mutexes, `void` or `never` (except as the value of `!void`).
     pub fn plain(&self, t: TyId) -> bool {
         self.plain_in(t, &mut vec![])
+    }
+
+    /// An error saying "`t` <what>" unless `t` is plain.
+    pub fn require_plain(&self, t: TyId, span: Span, what: &str) -> Result<()> {
+        if self.plain(t) {
+            return Ok(());
+        }
+        err(span, format!("`{}` {what}", self.types.show(t)))
     }
 
     fn plain_in(&self, t: TyId, seen: &mut Vec<TyId>) -> bool {

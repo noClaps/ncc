@@ -107,43 +107,17 @@ impl Checker {
                 let Some(sty) = self.type_path(path)? else {
                     return err(path.span, "expected a struct type");
                 };
-                if sty != ty {
-                    return err(
-                        span,
-                        format!(
-                            "expected `{}`, found `{}`",
-                            self.types.show(ty),
-                            self.types.show(sty)
-                        ),
-                    );
-                }
-                let def = self.types.struct_def(sty).cloned().unwrap();
-                let mut pats: Vec<Option<Pat>> = vec![None; def.fields.len()];
-                for (name, v, fsp) in fields {
-                    let Some(i) = def.fields.iter().position(|(n, _)| n == name) else {
-                        return err(*fsp, format!("`{}` has no field `{name}`", def.name));
-                    };
-                    // `.name`: the field reference covers the dot and the name
-                    let name_span = Span {
-                        end: fsp.end + 1 + name.len() as u32,
-                        ..*fsp
-                    };
-                    self.idx_field_ref(sty, i, name_span);
-                    if pats[i].is_some() {
-                        return err(*fsp, format!("field `{name}` appears more than once"));
-                    }
-                    pats[i] = Some(self.check_pattern(v, def.fields[i].1, multi)?);
-                }
-                let out = (pats.into_iter().zip(&def.fields))
-                    .map(|(p, (name, _))| {
-                        p.ok_or_else(|| {
-                            Diag::new(
-                                span,
-                                format!("missing field `{name}` in pattern; use `.{name} = _` to ignore it"),
-                            )
-                        })
-                    })
-                    .collect::<Result<_>>()?;
+                self.same_type(ty, sty, span)?;
+                let out = self.struct_fields(
+                    sty,
+                    fields,
+                    "appears more than once",
+                    |name| {
+                        format!("missing field `{name}` in pattern; use `.{name} = _` to ignore it")
+                    },
+                    span,
+                    |c, v, t| c.check_pattern(v, t, multi),
+                )?;
                 Ok(Pat::Struct(out))
             }
             _ => {
@@ -173,17 +147,17 @@ impl Checker {
         )
     }
 
-    fn variant_of(&self, ety: TyId, ty: TyId, vname: &str, span: Span) -> Result<usize> {
-        if ety != ty {
-            return err(
-                span,
-                format!(
-                    "expected `{}`, found `{}`",
-                    self.types.show(ty),
-                    self.types.show(ety)
-                ),
-            );
+    /// An error unless a pattern of type `found` matches values of type `expected`.
+    fn same_type(&self, expected: TyId, found: TyId, span: Span) -> Result<()> {
+        if expected == found {
+            return Ok(());
         }
+        let (e, f) = (self.types.show(expected), self.types.show(found));
+        err(span, format!("expected `{e}`, found `{f}`"))
+    }
+
+    fn variant_of(&self, ety: TyId, ty: TyId, vname: &str, span: Span) -> Result<usize> {
+        self.same_type(ty, ety, span)?;
         let Some(def) = self.types.enum_def(ety) else {
             return err(span, format!("`{}` is not an enum", self.types.show(ety)));
         };
@@ -194,12 +168,7 @@ impl Checker {
     }
 
     fn value_pat(&self, v: Expr, ty: TyId, span: Span) -> Result<Pat> {
-        if !self.plain(ty) {
-            return err(
-                span,
-                format!("`{}` values cannot be compared", self.types.show(ty)),
-            );
-        }
+        self.require_plain(ty, span, "values cannot be compared")?;
         Ok(Pat::Value(v))
     }
 

@@ -299,14 +299,7 @@ impl Checker {
                     UnOp::Not => x.ty == BOOL,
                 };
                 if !ok {
-                    return err(
-                        span,
-                        format!(
-                            "operator `{}` cannot be applied to `{}`",
-                            op.symbol(),
-                            self.types.show(x.ty)
-                        ),
-                    );
+                    return self.op_error(span, op.symbol(), x.ty);
                 }
                 let ty = x.ty;
                 mk(EK::Unary(*op, Box::new(x)), ty)
@@ -441,12 +434,7 @@ impl Checker {
                     xs.push((self.check_as(k, &mut kt)?, self.check_as(v, &mut vt)?));
                 }
                 let (kt, vt) = (kt.unwrap(), vt.unwrap());
-                if !self.plain(kt) {
-                    return err(
-                        span,
-                        format!("`{}` cannot be used as a map key", self.types.show(kt)),
-                    );
-                }
+                self.require_plain(kt, span, "cannot be used as a map key")?;
                 let ty = self.types.intern(TyKind::Map(kt, vt));
                 mk(EK::Map(xs), ty)
             }
@@ -460,29 +448,14 @@ impl Checker {
                         format!("`{}` is not a struct", self.types.show(ty)),
                     );
                 };
-                let mut vals: Vec<Option<Expr>> = vec![None; def.fields.len()];
-                for (name, v, fsp) in fields {
-                    let Some(i) = def.fields.iter().position(|(n, _)| n == name) else {
-                        return err(*fsp, format!("`{}` has no field `{name}`", def.name));
-                    };
-                    // `.name`: the field reference covers the dot and the name
-                    let name_span = Span {
-                        end: fsp.end + 1 + name.len() as u32,
-                        ..*fsp
-                    };
-                    self.idx_field_ref(ty, i, name_span);
-                    if vals[i].is_some() {
-                        return err(*fsp, format!("field `{name}` is set more than once"));
-                    }
-                    vals[i] = Some(self.expect_expr(v, def.fields[i].1)?);
-                }
-                let out = (vals.into_iter().zip(&def.fields))
-                    .map(|(v, (name, _))| {
-                        v.ok_or_else(|| {
-                            Diag::new(span, format!("missing field `{name}` in `{}`", def.name))
-                        })
-                    })
-                    .collect::<Result<_>>()?;
+                let out = self.struct_fields(
+                    ty,
+                    fields,
+                    "is set more than once",
+                    |name| format!("missing field `{name}` in `{}`", def.name),
+                    span,
+                    |c, v, t| c.expect_expr(v, t),
+                )?;
                 mk(EK::Struct(out), ty)
             }
             E::FnLit(sig, body) => {
@@ -616,16 +589,9 @@ impl Checker {
         let span = v.span;
         let kind = if v.ty == STR || v.ty == ERROR {
             EK::Retype(Box::new(v))
-        } else if self.plain(v.ty) {
-            EK::ToStr(Box::new(v))
         } else {
-            return err(
-                span,
-                format!(
-                    "`{}` cannot be converted to a string",
-                    self.types.show(v.ty)
-                ),
-            );
+            self.require_plain(v.ty, span, "cannot be converted to a string")?;
+            EK::ToStr(Box::new(v))
         };
         Ok(Expr {
             kind,
@@ -1193,12 +1159,7 @@ impl Checker {
                         );
                     }
                 };
-                if !self.plain(a.ty) {
-                    return err(
-                        l.span,
-                        format!("`{}` values cannot be compared", self.types.show(a.ty)),
-                    );
-                }
+                self.require_plain(a.ty, l.span, "values cannot be compared")?;
                 mk(EK::Binary(op, Box::new(a), Box::new(b)), BOOL)
             }
             Eq | Ne | Lt | Gt | Le | Ge => {
@@ -1219,14 +1180,7 @@ impl Checker {
                     is_numeric(a.ty) || a.ty == CHAR
                 };
                 if !ok {
-                    return err(
-                        span,
-                        format!(
-                            "operator `{}` cannot be applied to `{}`",
-                            op.symbol(),
-                            self.types.show(a.ty)
-                        ),
-                    );
+                    return self.op_error(span, op.symbol(), a.ty);
                 }
                 mk(EK::Binary(op, Box::new(a), Box::new(b)), BOOL)
             }
@@ -1256,18 +1210,49 @@ impl Checker {
                     _ => unreachable!(),
                 };
                 if !ok {
-                    return err(
-                        span,
-                        format!(
-                            "operator `{}` cannot be applied to `{}`",
-                            op.symbol(),
-                            self.types.show(t)
-                        ),
-                    );
+                    return self.op_error(span, op.symbol(), t);
                 }
                 mk(EK::Binary(op, Box::new(a), Box::new(b)), t)
             }
         }
+    }
+
+    /// Check the fields of a struct literal or pattern (of struct type `sty`) against its
+    /// definition, in definition order, with `check` for each value.
+    pub fn struct_fields<T>(
+        &mut self,
+        sty: TyId,
+        fields: &[(String, ast::Expr, Span)],
+        repeated: &str,
+        missing: impl Fn(&str) -> String,
+        span: Span,
+        mut check: impl FnMut(&mut Self, &ast::Expr, TyId) -> Result<T>,
+    ) -> Result<Vec<T>> {
+        let def = self.types.struct_def(sty).cloned().unwrap();
+        let mut vals: Vec<Option<T>> = def.fields.iter().map(|_| None).collect();
+        for (name, v, fsp) in fields {
+            let Some(i) = def.fields.iter().position(|(n, _)| n == name) else {
+                return err(*fsp, format!("`{}` has no field `{name}`", def.name));
+            };
+            // `.name`: the field reference covers the dot and the name
+            let name_span = Span {
+                end: fsp.end + 1 + name.len() as u32,
+                ..*fsp
+            };
+            self.idx_field_ref(sty, i, name_span);
+            if vals[i].is_some() {
+                return err(*fsp, format!("field `{name}` {repeated}"));
+            }
+            vals[i] = Some(check(self, v, def.fields[i].1)?);
+        }
+        (vals.into_iter().zip(&def.fields))
+            .map(|(v, (name, _))| v.ok_or_else(|| Diag::new(span, missing(name))))
+            .collect()
+    }
+
+    fn op_error<T>(&self, span: Span, op: &str, ty: TyId) -> Result<T> {
+        let ty = self.types.show(ty);
+        err(span, format!("operator `{op}` cannot be applied to `{ty}`"))
     }
 
     fn check_builtin(
@@ -1282,12 +1267,7 @@ impl Checker {
                 let mut xs = Vec::new();
                 for a in args {
                     let x = self.check_expr(a, None)?;
-                    if !self.plain(x.ty) {
-                        return err(
-                            a.span,
-                            format!("`{}` cannot be printed", self.types.show(x.ty)),
-                        );
-                    }
+                    self.require_plain(x.ty, a.span, "cannot be printed")?;
                     xs.push(x);
                 }
                 let to = if name.starts_with('e') {
@@ -1444,14 +1424,8 @@ impl Checker {
                 ),
             );
         }
-        if to == TyKind::Str && !self.plain(x.ty) {
-            return err(
-                span,
-                format!(
-                    "`{}` cannot be converted to a string",
-                    self.types.show(x.ty)
-                ),
-            );
+        if to == TyKind::Str {
+            self.require_plain(x.ty, span, "cannot be converted to a string")?;
         }
         Ok(Expr {
             kind: EK::Cast(Box::new(x)),
