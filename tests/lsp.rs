@@ -861,7 +861,7 @@ fn completion_features() {
         .iter()
         .find(|c| c["label"] == "add")
         .unwrap();
-    assert_eq!(add["insertText"], "add(${1:a}, ${2:b})$0", "{add}");
+    assert_eq!(add["insertText"], "add($0)", "{add}");
     // inside `twice`, its parameter is visible
     let comp = s.req(
         "textDocument/completion",
@@ -1751,7 +1751,7 @@ fn extern_completion() {
     );
     assert_eq!(labels(&comp), ["input", "add"], "{comp}");
     assert_eq!(comp[0]["insertText"], "input()$0");
-    assert_eq!(comp[1]["insertText"], "add(${1:a}, ${2:b})$0");
+    assert_eq!(comp[1]["insertText"], "add($0)");
     assert_eq!(comp[1]["detail"], "fn c_lib.add(int a, int b) int");
 
     // members of what an extern function returns
@@ -1813,7 +1813,7 @@ fn qualified_and_generic_completion() {
     let comp = s.req("textDocument/completion", json!({"position": end}));
     let e = item(&comp, "libc.c_exit");
     assert_eq!(e["filterText"], "c_exit");
-    assert_eq!(e["insertText"], "libc.c_exit(${1:code})$0");
+    assert_eq!(e["insertText"], "libc.c_exit($0)");
     item(&comp, "libc.c_read");
     let r = item(&comp, "rational.Rational");
     assert_eq!(
@@ -1829,14 +1829,11 @@ fn qualified_and_generic_completion() {
     );
 
     // a function returning a tuple completes with its parameters
-    assert_eq!(item(&comp, "pair")["insertText"], "pair(${1:a})$0");
+    assert_eq!(item(&comp, "pair")["insertText"], "pair($0)");
 
     // generic functions fill in their type parameters first
     let g = item(&comp, "rational.map");
-    assert_eq!(
-        g["insertText"],
-        "rational.map<${1:I}, ${2:O}>(${3:arr}, ${4:f})$0"
-    );
+    assert_eq!(g["insertText"], "rational.map<${1:I}, ${2:O}>($0)");
     assert_eq!(
         g["detail"],
         "fn map<type I, type O>(I[] arr, (fn(I) O) f) O[]"
@@ -1920,10 +1917,7 @@ fn generic_constants() {
         .iter()
         .find(|c| c["label"] == "join")
         .unwrap_or_else(|| panic!("no join in {comp}"));
-    assert_eq!(
-        j["insertText"],
-        "join<${1:T}, ${2:N}, ${3:M}>(${4:a}, ${5:b})$0"
-    );
+    assert_eq!(j["insertText"], "join<${1:T}, ${2:N}, ${3:M}>($0)");
 
     // signature help substitutes the constants
     let text = format!("{src}_ = join<int, 2, 3>(\n");
@@ -2101,5 +2095,59 @@ fn generic_bodies() {
         "{l:?}"
     );
     assert!(labels(&mut s, "arr.\n", 4).contains(&"len".to_string()));
+    s.finish();
+}
+
+#[test]
+fn function_value_completion() {
+    let mut s = Session::start("fnvalue");
+    let src = "fn func() int {\n  return 1\n}\n\nfn other_func((fn() int) f) int {\n  return f()\n}\n\nmut (fn() int) g = func\nint v = other_func(func)\n@println(v, g())\n";
+    let diags = s.open(src);
+    assert!(diags.iter().all(|d| d["severity"] != 1), "{diags:?}");
+    // the insert text of `label` when completing at the end of `line` appended to `src`
+    let mut insert = |line: &str, label: &str| -> Value {
+        let text = format!("{src}{line}\n");
+        s.change(&text);
+        let comp = s.req(
+            "textDocument/completion",
+            json!({"position": at(&text, &format!("{line}\n"), 0, line.len())}),
+        );
+        comp.as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["label"] == label)
+            .unwrap_or_else(|| panic!("no `{label}` in {comp}"))["insertText"]
+            .clone()
+    };
+
+    // a call where a value is expected: the cursor goes inside the parentheses only when
+    // there are arguments
+    assert_eq!(insert("int x = f", "func"), "func()$0");
+    assert_eq!(insert("int x = o", "other_func"), "other_func($0)");
+    assert_eq!(insert("int x = e", "@eprintln"), "@eprintln($0)");
+    assert_eq!(insert("str[] a = a", "@args"), "@args()$0");
+    assert_eq!(insert("str[] a = @a", "args"), "args()$0");
+    assert_eq!(
+        insert("int x = 1 + other_func(func) + f", "func"),
+        "func()$0"
+    );
+    assert_eq!(insert("@println(f", "func"), "func()$0");
+
+    // the bare function where a function value is expected
+    assert_eq!(insert("int x = other_func(f", "func"), Value::Null);
+    assert_eq!(insert("int x = other_func(a", "@args"), "@args");
+    assert_eq!(insert("(fn() int) h = f", "func"), Value::Null);
+    assert_eq!(insert("mut (fn() int) h = f", "func"), Value::Null);
+    assert_eq!(insert("g = f", "func"), Value::Null);
+    assert_eq!(
+        insert("fn make() (fn() int) {\n  return f", "func"),
+        Value::Null
+    );
+    assert_eq!(insert("fn make() int {\n  return f", "func"), "func()$0");
+    assert_eq!(
+        insert("fn make() (fn() int) {\n  if true {\n    return f", "func"),
+        Value::Null
+    );
+
     s.finish();
 }

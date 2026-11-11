@@ -71,7 +71,7 @@ function throwing, make an item of another module public.
 | Find all references, highlight related (including exit points) | ✅ `fn`/`return`/`throw`/`try` highlight the function's exits |
 | Rename (with conflict check), file rename updates imports | ✅ |
 | Call hierarchy | ✅ incoming and outgoing |
-| Completion: scope-aware, fields through chains, snippets, auto-import, parentheses for calls, postfix (`x.if`) | ✅ postfix: `if`, `not`, `return`, `try`, `await`, `println`, `discard` |
+| Completion: scope-aware, fields through chains, snippets, auto-import, parentheses for calls (none where a function value is expected), postfix (`x.if`) | ✅ postfix: `if`, `not`, `return`, `try`, `await`, `println`, `discard` |
 | Completion: functions taking the value first (`v.add` → `add(v, b)`) | ✅ functions in scope, public functions of imported modules and extern functions whose first parameter accepts the value's type (including an optional of it); generic type arguments are inferred from the value |
 | Features inside generic functions | ✅ generic functions that are never called are checked for the editor with each type parameter as an opaque type (`T first`) and constants shown by name (`T[N - 1]`); errors from that pass aren't reported. In any statement that fails to check (such as `val.x` on a `T`), variables still link to their declarations |
 | Signature help | ✅ |

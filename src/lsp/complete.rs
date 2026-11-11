@@ -240,23 +240,20 @@ impl Server {
             ..Default::default()
         };
         if d.kind == DeclKind::Function && call_parens && self.snippets {
-            let ps = param_names(&d.detail);
-            // a generic function takes its type arguments first: `map<${1:I}, ${2:O}>(...)`
-            let tps = super::calls::type_params(&d.detail);
-            let mut k = 0;
-            let mut slot = |name: &str| {
-                k += 1;
-                format!("${{{k}:{name}}}")
-            };
-            let targs: Vec<String> = tps.iter().map(|t| slot(t)).collect();
-            let args: Vec<String> = ps.iter().map(|p| slot(p)).collect();
+            let has_args = !param_names(&d.detail).is_empty();
+            // a generic function takes its type arguments first: `map<${1:I}, ${2:O}>($0)`
+            let targs: Vec<String> = super::calls::type_params(&d.detail)
+                .iter()
+                .enumerate()
+                .map(|(k, t)| format!("${{{}:{t}}}", k + 1))
+                .collect();
             item.insert_text = Some(format!(
-                "{full}{}({})$0",
+                "{full}{}{}",
                 generic_args(&targs),
-                args.join(", ")
+                call_snippet(has_args)
             ));
             item.insert_text_format = Some(InsertTextFormat::SNIPPET);
-            item.command = (!ps.is_empty()).then(param_hints);
+            item.command = has_args.then(param_hints);
         }
         item
     }
@@ -270,7 +267,9 @@ impl Server {
         let before = &text[line_start..off];
         let analysis = self.analyses.get(&path);
         let fid = analysis.and_then(|a| a.file_id(&path));
-        let call_parens = !text[off..].starts_with('(');
+        // no `()` where a function value is expected (`apply(f|`) or already follows
+        let call_parens = !text[off..].starts_with('(')
+            && !self.fn_value_expected(&pp.text_document.uri, &text, analysis, fid, off);
         let item = |label: &str, kind: CompletionItemKind, detail: Option<String>| CompletionItem {
             label: label.to_string(),
             kind: Some(kind),
@@ -309,6 +308,12 @@ impl Server {
             for (n, sig, doc) in BUILTINS {
                 let mut it = item(n, CompletionItemKind::FUNCTION, Some(sig.to_string()));
                 it.documentation = Some(Documentation::String(doc.to_string()));
+                if self.snippets && call_parens {
+                    let has_args = builtin_has_args(sig);
+                    it.insert_text = Some(format!("{n}{}", call_snippet(has_args)));
+                    it.insert_text_format = Some(InsertTextFormat::SNIPPET);
+                    it.command = has_args.then(param_hints);
+                }
                 items.push(it);
             }
             return Some(items);
@@ -454,6 +459,7 @@ impl Server {
         // builtins, found without typing `@`
         for (n, sig, doc) in BUILTINS {
             let snippet = self.snippets && call_parens;
+            let has_args = builtin_has_args(sig);
             items.push(CompletionItem {
                 label: format!("@{n}"),
                 kind: Some(CompletionItemKind::FUNCTION),
@@ -461,11 +467,12 @@ impl Server {
                 documentation: Some(Documentation::String(doc.to_string())),
                 filter_text: Some(n.to_string()),
                 insert_text: Some(if snippet {
-                    format!("@{n}($0)")
+                    format!("@{n}{}", call_snippet(has_args))
                 } else {
                     format!("@{n}")
                 }),
                 insert_text_format: snippet.then_some(InsertTextFormat::SNIPPET),
+                command: (snippet && has_args).then(param_hints),
                 sort_text: Some(format!("7{n}")),
                 ..Default::default()
             });
@@ -503,6 +510,99 @@ impl Server {
             }
         }
         Some(items)
+    }
+
+    /// Whether the expression being typed at `off` is where a function value is expected: an
+    /// argument for a function-typed parameter (`apply(f|`), the value of a function-typed
+    /// declaration or variable (`(fn() int) g = f|`, `g = f|`), or the value returned from a
+    /// function that returns a function (`return f|`).
+    fn fn_value_expected(
+        &self,
+        uri: &Uri,
+        text: &str,
+        a: Option<&Analysis>,
+        fid: Option<u32>,
+        off: usize,
+    ) -> bool {
+        let b = text.as_bytes();
+        // the start of the expression: the word, a qualifier (`util.f`) and a builtin's `@`
+        let mut s = off;
+        while s > 0 && is_ident_byte(b[s - 1]) {
+            s -= 1;
+        }
+        while s > 1 && b[s - 1] == b'.' && is_ident_byte(b[s - 2]) {
+            s -= 1;
+            while s > 0 && is_ident_byte(b[s - 1]) {
+                s -= 1;
+            }
+        }
+        if s > 0 && b[s - 1] == b'@' {
+            s -= 1;
+        }
+        let (toks, _) = crate::lexer::lex_all(text, 0, 0);
+        let toks: Vec<&crate::lexer::Token> = toks
+            .iter()
+            .take_while(|t| (t.span.end as usize) <= s)
+            .collect();
+        use crate::lexer::Tok;
+        let is_fn_ty = |t: &str| t.trim().starts_with("(fn");
+        match toks.last().map(|t| &t.tok) {
+            // a call's argument
+            Some(Tok::LParen | Tok::Comma) => self.call_at(uri, s).is_some_and(|c| {
+                super::calls::params(&c.label)
+                    .get(c.arg as usize)
+                    .is_some_and(|(t, _)| is_fn_ty(t))
+            }),
+            // a declaration's or assignment's value
+            Some(Tok::Assign) => {
+                let eq = toks.len() - 1;
+                let mut depth = 0i32;
+                let mut i = eq;
+                while i > 0 {
+                    match toks[i - 1].tok {
+                        Tok::RParen | Tok::RBracket => depth += 1,
+                        Tok::LParen | Tok::LBracket if depth > 0 => depth -= 1,
+                        Tok::Newline
+                        | Tok::LBrace
+                        | Tok::RBrace
+                        | Tok::LParen
+                        | Tok::LBracket
+                        | Tok::Comma
+                            if depth == 0 =>
+                        {
+                            break;
+                        }
+                        _ => {}
+                    }
+                    i -= 1;
+                }
+                if i == eq {
+                    return false;
+                }
+                let lhs = text[toks[i].span.start as usize..toks[eq].span.start as usize].trim();
+                let lhs = ["pub ", "mut "]
+                    .iter()
+                    .fold(lhs, |l, p| l.strip_prefix(p).unwrap_or(l).trim_start());
+                if is_fn_ty(lhs) {
+                    return true;
+                }
+                // assigning to a variable of a function type
+                let (Some(a), Some(fid)) = (a, fid) else {
+                    return false;
+                };
+                lhs.bytes().all(is_ident_byte)
+                    && visible(a, fid, s).iter().any(|d| {
+                        d.name == lhs
+                            && d.kind == DeclKind::Variable
+                            && d.ty.as_deref().is_some_and(is_fn_ty)
+                    })
+            }
+            // the enclosing function's return value
+            Some(Tok::Ident(k)) if k == "return" => {
+                enclosing_fn_return(text, &toks).is_some_and(is_fn_ty)
+            }
+            _ => false,
+        }
     }
 
     /// Members after a receiver chain: module members, enum variants or the members of the
@@ -778,6 +878,60 @@ fn generic_args(args: &[String]) -> String {
     } else {
         format!("<{}>", args.join(", "))
     }
+}
+
+/// The return type of the innermost function (declaration or literal) whose body is open at
+/// the end of `toks`; `""` when it returns nothing.
+fn enclosing_fn_return<'a>(text: &'a str, toks: &[&crate::lexer::Token]) -> Option<&'a str> {
+    use crate::lexer::Tok;
+    // the unclosed `{`s, innermost last
+    let mut open = Vec::new();
+    for (i, t) in toks.iter().enumerate() {
+        match t.tok {
+            Tok::LBrace => open.push(i),
+            Tok::RBrace => _ = open.pop(),
+            _ => {}
+        }
+    }
+    for &brace in open.iter().rev() {
+        // back from the `{` to a `fn` at the same nesting level: `fn name<...>(...) ret {`
+        let mut depth = 0i32;
+        let mut i = brace;
+        while i > 0 {
+            i -= 1;
+            match &toks[i].tok {
+                Tok::RParen | Tok::RBracket => depth += 1,
+                Tok::LParen | Tok::LBracket => depth -= 1,
+                Tok::Ident(k) if k == "fn" && depth == 0 => {
+                    let header =
+                        &text[toks[i].span.start as usize..toks[brace].span.start as usize];
+                    let (_, r) = super::calls::params_range(header)?;
+                    return Some(header[r + 1..].trim());
+                }
+                Tok::Newline | Tok::LBrace | Tok::RBrace | Tok::Comma | Tok::Assign
+                    if depth == 0 =>
+                {
+                    break;
+                }
+                _ => {}
+            }
+            if depth < 0 {
+                break;
+            }
+        }
+    }
+    None
+}
+
+/// The parentheses of a call snippet: the cursor goes inside them when the function takes
+/// arguments, after them otherwise.
+fn call_snippet(has_args: bool) -> &'static str {
+    if has_args { "($0)" } else { "()$0" }
+}
+
+/// Whether a builtin's signature (`fn @args() str[]`) has parameters.
+fn builtin_has_args(sig: &str) -> bool {
+    super::calls::params_range(sig).is_some_and(|(l, r)| !sig[l..r].trim().is_empty())
 }
 
 fn param_hints() -> Command {
