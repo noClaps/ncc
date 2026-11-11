@@ -225,7 +225,7 @@ impl Server {
         item
     }
 
-    pub(super) fn completion(&self, p: CompletionParams) -> Option<CompletionResponse> {
+    pub(super) fn completion(&self, p: CompletionParams) -> Option<Vec<CompletionItem>> {
         let pp = p.text_document_position;
         let path = uri_to_path(&pp.text_document.uri)?;
         let text = self.text_of(&path)?;
@@ -254,12 +254,12 @@ impl Server {
                 (Some(_), None) => true,
                 _ => false,
             };
-            if in_embed || in_import {
-                return Some(CompletionResponse::Array(path_items(
-                    &path, typed, in_import,
-                )));
-            }
-            return Some(CompletionResponse::Array(vec![]));
+            let in_path = in_embed || in_import;
+            return Some(if in_path {
+                path_items(&path, typed, in_import)
+            } else {
+                vec![]
+            });
         }
 
         let word_start = before
@@ -276,21 +276,21 @@ impl Server {
                 it.documentation = Some(Documentation::String(doc.to_string()));
                 items.push(it);
             }
-            return Some(CompletionResponse::Array(items));
+            return Some(items);
         }
 
         // after `.`
         if prefix_char == Some('.') {
             let Some(a) = analysis else {
-                return Some(CompletionResponse::Array(items));
+                return Some(vec![]);
             };
             let dot = line_start + word_start - 1;
             if let Some(fields) = struct_literal_fields(a, &text, dot) {
-                return Some(CompletionResponse::Array(fields));
+                return Some(fields);
             }
             let head = &text[..dot];
             let Some((chain, start)) = receiver_chain(head) else {
-                return Some(CompletionResponse::Array(items));
+                return Some(vec![]);
             };
             let fid = fid?;
             // postfix snippets for values (not modules or types)
@@ -315,10 +315,10 @@ impl Server {
                     items.extend(self.first_arg_items(a, fid, &text, start, dot, off, &ty));
                 }
                 items.extend(postfix);
-                return Some(CompletionResponse::Array(items));
+                return Some(items);
             }
             if !postfix.is_empty() {
-                return Some(CompletionResponse::Array(postfix));
+                return Some(postfix);
             }
             // `name.` where `name` is a module that is not imported: its public items, adding
             // the import
@@ -337,19 +337,15 @@ impl Server {
                     .into_iter()
                     .collect();
                 names.sort();
-                return Some(CompletionResponse::Array(
-                    names
-                        .into_iter()
-                        .map(|n| CompletionItem {
-                            label: n,
-                            detail: Some(format!("import \"{ipath}\"")),
-                            additional_text_edits: Some(vec![edit.clone()]),
-                            ..Default::default()
-                        })
-                        .collect(),
-                ));
+                let item = |label| CompletionItem {
+                    label,
+                    detail: Some(format!("import \"{ipath}\"")),
+                    additional_text_edits: Some(vec![edit.clone()]),
+                    ..Default::default()
+                };
+                return Some(names.into_iter().map(item).collect());
             }
-            return Some(CompletionResponse::Array(vec![]));
+            return Some(vec![]);
         }
 
         // names, keywords and types
@@ -471,7 +467,7 @@ impl Server {
                 });
             }
         }
-        Some(CompletionResponse::Array(items))
+        Some(items)
     }
 
     /// Members after a receiver chain: module members, enum variants or the members of the
