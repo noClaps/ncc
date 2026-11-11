@@ -55,6 +55,23 @@ enum Flow {
 
 type R<T> = Result<T, Stop>;
 
+/// The value of an `expr_flow` result, returning any control transfer it carries: as the
+/// statement's `Flow`, or (with `expr`) as the enclosing expression's.
+macro_rules! value {
+    ($r:expr) => {
+        match $r? {
+            Ok(v) => v,
+            Err(f) => return Ok(f),
+        }
+    };
+    (expr $r:expr) => {
+        match $r? {
+            Ok(v) => v,
+            Err(f) => return Ok(Err(f)),
+        }
+    };
+}
+
 pub struct Evaluator<'p> {
     p: &'p Program,
     sm: &'p SourceMap,
@@ -150,22 +167,13 @@ impl<'p> Evaluator<'p> {
 
     /// Check (and in release mode fold) the whole program.
     pub fn run(p: &mut Program, sm: &SourceMap, fold: bool) -> Results<()> {
-        let snapshot = Program {
-            types: std::mem::take(&mut p.types),
-            funcs: p.funcs.clone(),
-            globals: p.globals.clone(),
-            externs: p.externs.clone(),
-            main: p.main,
-            tests: p.tests.clone(),
-            target: p.target.clone(),
-        };
         let (funcs, mut errs) = {
-            let mut ev = Evaluator::new(&snapshot, sm);
+            let mut ev = Evaluator::new(p, sm);
             // constants for immutable globals with constant initialisers (in main, in order)
-            let main = &snapshot.funcs[snapshot.main];
+            let main = &p.funcs[p.main];
             for s in &main.body.stmts {
                 if let SK::Let(Some(VarRef::Global(g)), e) = &s.kind
-                    && !snapshot.globals[*g].mutable
+                    && !p.globals[*g].mutable
                 {
                     // panics are reported when the statement itself is folded below
                     if let Ok(Some(v)) = ev.try_const(e) {
@@ -178,7 +186,7 @@ impl<'p> Evaluator<'p> {
                 {
                     for (t, start, count) in targets {
                         if let Some(VarRef::Global(g)) = t
-                            && !snapshot.globals[*g].mutable
+                            && !p.globals[*g].mutable
                         {
                             ev.gconst
                                 .insert(*g, destructure_part(&items, *start, *count));
@@ -186,13 +194,12 @@ impl<'p> Evaluator<'p> {
                     }
                 }
             }
-            let mut funcs = snapshot.funcs.clone();
+            let mut funcs = p.funcs.clone();
             for f in &mut funcs {
                 ev.fold_block(&mut f.body, &f.locals, &mut HashMap::new());
             }
             (funcs, ev.errs)
         };
-        p.types = snapshot.types;
         if !errs.is_empty() {
             errs.sort_by_key(|d| (d.span.file, d.span.start));
             errs.dedup_by(|a, b| a.span == b.span && a.msg == b.msg);
@@ -485,77 +492,41 @@ impl<'p> Evaluator<'p> {
         self.tick()?;
         match &s.kind {
             SK::Let(v, e) => {
-                let x = self.expr_flow(e, env)?;
-                let x = match x {
-                    Ok(x) => x,
-                    Err(f) => return Ok(f),
-                };
-                match v {
-                    Some(VarRef::Local(l)) => env.set(*l, x),
-                    Some(VarRef::Global(_)) => return Err(Stop::Unknown),
-                    None => {}
-                }
+                let x = value!(self.expr_flow(e, env));
+                env.declare(*v, x)?;
                 Ok(Flow::Normal)
             }
             SK::Destructure(ts, e) => {
-                let x = match self.expr_flow(e, env)? {
-                    Ok(x) => x,
-                    Err(f) => return Ok(f),
-                };
-                let Val::Tuple(items) = x else {
+                let Val::Tuple(items) = value!(self.expr_flow(e, env)) else {
                     return Err(Stop::Unknown);
                 };
                 for (v, start, count) in ts {
-                    let part = destructure_part(&items, *start, *count);
-                    match v {
-                        Some(VarRef::Local(l)) => env.set(*l, part),
-                        Some(VarRef::Global(_)) => return Err(Stop::Unknown),
-                        None => {}
-                    }
+                    env.declare(*v, destructure_part(&items, *start, *count))?;
                 }
                 Ok(Flow::Normal)
             }
             SK::Assign(p, e) => {
-                let x = match self.expr_flow(e, env)? {
-                    Ok(x) => x,
-                    Err(f) => return Ok(f),
-                };
+                let x = value!(self.expr_flow(e, env));
                 self.assign(p, x, env)?;
                 Ok(Flow::Normal)
             }
-            SK::Expr(e) => match self.expr_flow(e, env)? {
-                Ok(_) => Ok(Flow::Normal),
-                Err(f) => Ok(f),
-            },
-            SK::Return(e) => match e {
-                Some(e) => match self.expr_flow(e, env)? {
-                    Ok(v) => Ok(Flow::Return(v)),
-                    Err(f) => Ok(f),
-                },
-                None => Ok(Flow::Return(Val::Void)),
-            },
-            SK::Throw(e) => match self.expr_flow(e, env)? {
-                Ok(Val::Str(s)) => Ok(Flow::Throw(s)),
-                Ok(_) => Err(Stop::Unknown),
-                Err(f) => Ok(f),
-            },
-            SK::Break(id, v) => {
-                let val = match v {
-                    Some(e) => match self.expr_flow(e, env)? {
-                        Ok(v) => Some(v),
-                        Err(f) => return Ok(f),
-                    },
-                    None => None,
-                };
-                Ok(Flow::Break(*id, val))
+            SK::Expr(e) => {
+                value!(self.expr_flow(e, env));
+                Ok(Flow::Normal)
             }
+            SK::Return(Some(e)) => Ok(Flow::Return(value!(self.expr_flow(e, env)))),
+            SK::Return(None) => Ok(Flow::Return(Val::Void)),
+            SK::Throw(e) => match value!(self.expr_flow(e, env)) {
+                Val::Str(s) => Ok(Flow::Throw(s)),
+                _ => Err(Stop::Unknown),
+            },
+            SK::Break(id, Some(e)) => Ok(Flow::Break(*id, Some(value!(self.expr_flow(e, env))))),
+            SK::Break(id, None) => Ok(Flow::Break(*id, None)),
             SK::Continue(id) => Ok(Flow::Continue(*id)),
             SK::While { id, cond, body } => loop {
                 self.tick()?;
-                let c = match self.expr_flow(cond, env)? {
-                    Ok(Val::Bool(b)) => b,
-                    Ok(_) => return Err(Stop::Unknown),
-                    Err(f) => return Ok(f),
+                let Val::Bool(c) = value!(self.expr_flow(cond, env)) else {
+                    return Err(Stop::Unknown);
                 };
                 if !c {
                     return Ok(Flow::Normal);
@@ -571,16 +542,10 @@ impl<'p> Evaluator<'p> {
                 iter,
                 body,
             } => {
-                let it = match self.expr_flow(iter, env)? {
-                    Ok(v) => v,
-                    Err(f) => return Ok(f),
-                };
+                let it = value!(self.expr_flow(iter, env));
                 let keys: Vec<Val> = match (kind, &it) {
-                    (ForKind::Index, Val::Arr(a)) => (0..a.len() as u64).map(Val::UInt).collect(),
-                    (ForKind::Index, Val::Str(s)) => {
-                        (0..s.chars().count() as u64).map(Val::UInt).collect()
-                    }
                     (ForKind::Keys, Val::Map(m)) => m.iter().map(|(k, _)| k.clone()).collect(),
+                    (ForKind::Index, _) => (0..seq_len(&it)? as u64).map(Val::UInt).collect(),
                     _ => return Err(Stop::Unknown),
                 };
                 for k in keys {
@@ -647,41 +612,28 @@ impl<'p> Evaluator<'p> {
     fn expr_flow(&mut self, e: &Expr, env: &mut Env) -> R<Result<Val, Flow>> {
         match &e.kind {
             EK::If(i) => self.if_expr(i, env),
-            EK::Catch(x, local, b, id) => {
-                let v = match self.expr_flow(x, env)? {
-                    Ok(v) => v,
-                    Err(f) => return Ok(Err(f)),
-                };
-                match v {
-                    Val::Ok(v) => Ok(Ok(*v)),
-                    Val::Err(msg) => {
-                        if let Some(l) = local {
-                            env.set(*l, Val::Str(msg));
-                        }
-                        self.block_value(b, *id, env)
+            EK::Catch(x, local, b, id) => match value!(expr self.expr_flow(x, env)) {
+                Val::Ok(v) => Ok(Ok(*v)),
+                Val::Err(msg) => {
+                    if let Some(l) = local {
+                        env.set(*l, Val::Str(msg));
                     }
-                    _ => Err(Stop::Unknown),
+                    self.block_value(b, *id, env)
                 }
-            }
-            EK::Else(o, fb) => {
-                let v = match self.expr_flow(o, env)? {
-                    Ok(v) => v,
-                    Err(f) => return Ok(Err(f)),
-                };
-                match v {
-                    Val::Some(v) => Ok(Ok(*v)),
-                    Val::None => match fb {
-                        Fallback::Expr(x) => self.expr_flow(x, env),
-                        Fallback::Block(b, id) => self.block_value(b, *id, env),
-                    },
-                    _ => Err(Stop::Unknown),
-                }
-            }
-            EK::Try(x) => match self.expr_flow(x, env)? {
-                Ok(Val::Ok(v)) => Ok(Ok(*v)),
-                Ok(Val::Err(m)) => Ok(Err(Flow::Throw(m))),
-                Ok(_) => Err(Stop::Unknown),
-                Err(f) => Ok(Err(f)),
+                _ => Err(Stop::Unknown),
+            },
+            EK::Else(o, fb) => match value!(expr self.expr_flow(o, env)) {
+                Val::Some(v) => Ok(Ok(*v)),
+                Val::None => match fb {
+                    Fallback::Expr(x) => self.expr_flow(x, env),
+                    Fallback::Block(b, id) => self.block_value(b, *id, env),
+                },
+                _ => Err(Stop::Unknown),
+            },
+            EK::Try(x) => match value!(expr self.expr_flow(x, env)) {
+                Val::Ok(v) => Ok(Ok(*v)),
+                Val::Err(m) => Ok(Err(Flow::Throw(m))),
+                _ => Err(Stop::Unknown),
             },
             _ => {
                 // expressions containing control flow in sub-expressions
@@ -695,10 +647,7 @@ impl<'p> Evaluator<'p> {
 
     fn if_expr(&mut self, i: &If, env: &mut Env) -> R<Result<Val, Flow>> {
         let scrut = match &i.scrutinee {
-            Some(s) => match self.expr_flow(s, env)? {
-                Ok(v) => Some(v),
-                Err(f) => return Ok(Err(f)),
-            },
+            Some(s) => Some(value!(expr self.expr_flow(s, env))),
             None => None,
         };
         for arm in &i.arms {
@@ -776,10 +725,7 @@ impl<'p> Evaluator<'p> {
                 if const_only {
                     return Err(Stop::Unknown);
                 }
-                env.locals
-                    .get(*l)
-                    .and_then(Clone::clone)
-                    .ok_or(Stop::Unknown)?
+                env.get(*l)?
             }
             EK::Var(VarRef::Global(g)) => self.gconst.get(g).cloned().ok_or(Stop::Unknown)?,
             EK::FnRef(f) => Val::Fn(*f, Rc::new(vec![])),
@@ -793,12 +739,7 @@ impl<'p> Evaluator<'p> {
                     if const_only {
                         return Err(Stop::Unknown);
                     }
-                    caps.push(
-                        env.locals
-                            .get(c.outer)
-                            .and_then(Clone::clone)
-                            .ok_or(Stop::Unknown)?,
-                    );
+                    caps.push(env.get(c.outer)?);
                 }
                 Val::Fn(*f, Rc::new(caps))
             }
@@ -903,11 +844,7 @@ impl<'p> Evaluator<'p> {
                 let h = self.expr(hi, env, const_only);
                 env.dollar.pop();
                 let l = idx_checked(&l?, lo.span)? as usize;
-                let len = match &base {
-                    Val::Arr(a) => a.len(),
-                    Val::Str(s) => s.chars().count(),
-                    _ => return Err(Stop::Unknown),
-                };
+                let len = seq_len(&base)?;
                 // inclusive bounds: `l <= h < len`
                 let h = idx_checked(&h?, hi.span)? as usize;
                 if l > h || h >= len {
@@ -923,21 +860,15 @@ impl<'p> Evaluator<'p> {
                 }
             }
             EK::Dollar => {
-                let len = match env.dollar.last() {
-                    Some(Val::Arr(a)) => a.len(),
-                    Some(Val::Str(s)) => s.chars().count(),
-                    _ => return Err(Stop::Unknown),
-                };
+                let len = seq_len(env.dollar.last().ok_or(Stop::Unknown)?)?;
                 if len == 0 {
                     return panic("`$` used on an empty sequence", span);
                 }
                 Val::UInt(len as u64 - 1)
             }
             EK::Len(b) => match self.expr(b, env, const_only)? {
-                Val::Arr(a) => Val::UInt(a.len() as u64),
-                Val::Str(s) => Val::UInt(s.chars().count() as u64),
                 Val::Map(m) => Val::UInt(m.len() as u64),
-                _ => return Err(Stop::Unknown),
+                v => Val::UInt(seq_len(&v)? as u64),
             },
             EK::Tuple(xs) => Val::Tuple(Rc::new(self.exprs(xs, env, const_only)?)),
             EK::Struct(xs) => Val::Struct(Rc::new(self.exprs(xs, env, const_only)?)),
@@ -1123,17 +1054,40 @@ impl<'p> Evaluator<'p> {
     }
 }
 
+/// The length of an array or (in characters) a string.
+fn seq_len(v: &Val) -> R<usize> {
+    match v {
+        Val::Arr(a) => Ok(a.len()),
+        Val::Str(s) => Ok(s.chars().count()),
+        _ => Err(Stop::Unknown),
+    }
+}
+
 struct Env {
     locals: Vec<Option<Val>>,
     dollar: Vec<Val>,
 }
 
 impl Env {
+    fn get(&self, l: LocalId) -> R<Val> {
+        self.locals.get(l).cloned().flatten().ok_or(Stop::Unknown)
+    }
+
     fn set(&mut self, l: LocalId, v: Val) {
         if l >= self.locals.len() {
             self.locals.resize(l + 1, None);
         }
         self.locals[l] = Some(v);
+    }
+
+    /// Bind a declaration target: globals are only known through `gconst`.
+    fn declare(&mut self, target: Option<VarRef>, v: Val) -> R<()> {
+        match target {
+            Some(VarRef::Local(l)) => self.set(l, v),
+            Some(VarRef::Global(_)) => return Err(Stop::Unknown),
+            None => {}
+        }
+        Ok(())
     }
 }
 
@@ -1191,7 +1145,7 @@ fn idx_checked(v: &Val, span: Span) -> R<u64> {
     match v {
         Val::UInt(u) => Ok(*u),
         Val::Int(i) if *i >= 0 => Ok(*i as u64),
-        Val::Int(_) => Err(Stop::Panic("negative index".into(), span)),
+        Val::Int(_) => panic("negative index", span),
         _ => Err(Stop::Unknown),
     }
 }
@@ -1284,12 +1238,10 @@ fn all_children_lit(e: &Expr) -> bool {
 fn contains_control(e: &Expr) -> bool {
     let mut found = false;
     flow::visit_expr(e, &mut |x: &Expr| {
-        if matches!(
+        found |= matches!(
             x.kind,
             EK::If(_) | EK::Catch(..) | EK::Else(..) | EK::Try(_)
-        ) {
-            found = true;
-        }
+        );
     });
     found
 }
@@ -1456,11 +1408,7 @@ fn read_path(r: VarRef, path: &[PathStep], env: &Env) -> R<Val> {
     let VarRef::Local(l) = r else {
         return Err(Stop::Unknown);
     };
-    let mut cur = env
-        .locals
-        .get(l)
-        .and_then(Clone::clone)
-        .ok_or(Stop::Unknown)?;
+    let mut cur = env.get(l)?;
     for st in path {
         cur = match (st, &cur) {
             (PathStep::Elem(i), Val::Tuple(xs) | Val::Struct(xs)) => xs[*i].clone(),
