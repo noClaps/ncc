@@ -54,6 +54,42 @@ enum Seg {
 
 /// Parse the receiver chain at the end of `head` (`a.b(x)[0].c`), outermost last, with the
 /// offset where the receiver starts.
+/// The offset of the opening quote when `line` (a line up to the cursor) ends in a string's
+/// literal text; `None` when it ends in code, including an interpolation `{...}`.
+fn open_string(line: &str) -> Option<usize> {
+    let b = line.as_bytes();
+    // open strings, innermost last: the quote's offset, and the brace depth inside the
+    // interpolation the scan is in (`None` in the string's literal text)
+    let mut open: Vec<(usize, Option<usize>)> = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        match (open.last_mut(), b[i]) {
+            (Some((_, None)), b'\\') => i += 1,
+            (Some((_, None)), b'"') => _ = open.pop(),
+            (Some((_, d @ None)), b'{') => *d = Some(0),
+            (Some((_, None)), _) => {}
+            (Some((_, Some(d))), b'{') => *d += 1,
+            (Some((_, d @ Some(0))), b'}') => *d = None,
+            (Some((_, Some(d))), b'}') => *d -= 1,
+            // code: a comment, a char literal or a string
+            (_, b'/') if b.get(i + 1) == Some(&b'/') => break,
+            (_, b'\'') => {
+                i += 1;
+                while i < b.len() && b[i] != b'\'' {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+            }
+            (_, b'"') => open.push((i, None)),
+            _ => {}
+        }
+        i += 1;
+    }
+    match open.last() {
+        Some(&(q, None)) => Some(q),
+        _ => None,
+    }
+}
+
 fn receiver_chain(head: &str) -> Option<(Vec<Seg>, usize)> {
     let b = head.as_bytes();
     let mut i = head.trim_end().len();
@@ -244,8 +280,7 @@ impl Server {
         let mut items = Vec::new();
 
         // paths inside `import { "..." }` and `@embed("...")`
-        if before.matches('"').count() % 2 == 1 {
-            let q = before.rfind('"').unwrap();
+        if let Some(q) = open_string(before) {
             let typed = &before[q + 1..];
             let pre = &text[..line_start + q];
             let in_embed = pre.trim_end().ends_with("@embed(");
@@ -1071,6 +1106,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn finds_open_strings() {
+        assert_eq!(open_string("x = \"ab"), Some(4));
+        assert_eq!(open_string("x = \"ab\" + y"), None);
+        // interpolations are code, and may hold strings of their own
+        assert_eq!(open_string("x = \"a {p."), None);
+        assert_eq!(open_string("x = \"a {m[\"k"), Some(10));
+        assert_eq!(open_string("x = \"a {m[\"k\"]."), None);
+        assert_eq!(open_string("x = \"a {f({1})} b"), Some(4));
+        assert_eq!(open_string("x = \"a \\{ b"), Some(4));
+        assert_eq!(open_string("x = \"a\\\" {b"), None);
+        // char literals and comments
+        assert_eq!(open_string("c = '\"' + "), None);
+        assert_eq!(open_string("x // \"a"), None);
+    }
+
+    #[test]
     fn parses_receiver_chains() {
         assert_eq!(
             receiver_chain("x = a.b(1, f(2))[i].c"),
@@ -1086,6 +1137,10 @@ mod tests {
             ))
         );
         assert_eq!(receiver_chain("1 + "), None);
+        assert_eq!(
+            receiver_chain("@println(\"{p"),
+            Some((vec![Seg::Name("p".into())], 11))
+        );
         assert_eq!(
             param_names("fn add(int a, (int, int) b) int"),
             vec!["a".to_string(), "b".to_string()]

@@ -907,6 +907,28 @@ fn completion_features() {
     assert_eq!(labels(&comp), ["pi"], "{comp}");
     assert!(comp[0]["additionalTextEdits"].is_array());
 
+    // inside string interpolations: members and names
+    let text = format!("{src}@println(\"w = {{ps[0].}}\")\n");
+    s.change(&text);
+    let comp = s.req(
+        "textDocument/completion",
+        json!({"position": at(&text, "ps[0].}", 0, 6)}),
+    );
+    assert_eq!(labels(&comp), ["x", "y"], "{comp}");
+    let text = format!("{src}@println(\"t = {{tot}}\")\n");
+    s.change(&text);
+    let comp = s.req(
+        "textDocument/completion",
+        json!({"position": at(&text, "tot}", 0, 3)}),
+    );
+    assert!(labels(&comp).contains(&"total".into()), "{comp}");
+    // but not in the string's own text
+    let comp = s.req(
+        "textDocument/completion",
+        json!({"position": at(&text, "t = ", 0, 2)}),
+    );
+    assert_eq!(labels(&comp), Vec::<String>::new(), "{comp}");
+
     // builtins with documentation
     let text = format!("{src}@\n");
     s.change(&text);
