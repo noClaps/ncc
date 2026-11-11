@@ -1116,9 +1116,7 @@ impl Server {
 /// A symbol's identity across analyses: its definition's file and offset.
 type SymKey = (PathBuf, u32);
 
-fn is_ident_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_'
-}
+use crate::lexer::is_ident_byte;
 
 fn word_at(text: &str, off: usize) -> Option<(usize, usize)> {
     let b = text.as_bytes();
@@ -1274,7 +1272,7 @@ impl Server {
             .chars()
             .next()
             .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-            && new.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            && new.bytes().all(is_ident_byte)
             && new != "_";
         if !valid || crate::parser::is_keyword(new) {
             return Err(format!("`{new}` is not a valid name"));

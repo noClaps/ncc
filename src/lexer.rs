@@ -196,6 +196,15 @@ impl<'a> Lexer<'a> {
         *self.bytes.get(self.pos + n).unwrap_or(&0)
     }
 
+    /// Advance past the bytes matching `f`; returns where they start.
+    fn skip_while(&mut self, f: impl Fn(u8) -> bool) -> usize {
+        let start = self.pos;
+        while self.pos < self.bytes.len() && f(self.bytes[self.pos]) {
+            self.pos += 1;
+        }
+        start
+    }
+
     fn next(&mut self) -> Result<Token> {
         // skip spaces and comments
         loop {
@@ -203,10 +212,7 @@ impl<'a> Lexer<'a> {
             if c == b' ' || c == b'\t' || c == b'\r' {
                 self.pos += 1;
             } else if c == b'/' && self.peek_at(1) == b'/' {
-                let start = self.pos;
-                while self.pos < self.bytes.len() && self.peek() != b'\n' {
-                    self.pos += 1;
-                }
+                let start = self.skip_while(|c| c != b'\n');
                 self.comments
                     .push((self.base + start, self.base + self.pos));
             } else {
@@ -228,17 +234,12 @@ impl<'a> Lexer<'a> {
             }
             b'0'..=b'9' => self.number(start)?,
             b'a'..=b'z' | b'A'..=b'Z' | b'_' => {
-                while matches!(self.peek(), b'a'..=b'z' | b'A'..=b'Z' | b'_' | b'0'..=b'9') {
-                    self.pos += 1;
-                }
+                self.skip_while(is_ident_byte);
                 Tok::Ident(self.src[start..self.pos].to_string())
             }
             b'@' => {
                 self.pos += 1;
-                let s = self.pos;
-                while matches!(self.peek(), b'a'..=b'z' | b'A'..=b'Z' | b'_' | b'0'..=b'9') {
-                    self.pos += 1;
-                }
+                let s = self.skip_while(is_ident_byte);
                 if s == self.pos {
                     return err(self.span(start), "expected builtin name after `@`");
                 }
@@ -318,10 +319,7 @@ impl<'a> Lexer<'a> {
         };
         if radix != 10 {
             self.pos += 2;
-            let s = self.pos;
-            while self.peek().is_ascii_alphanumeric() || self.peek() == b'_' {
-                self.pos += 1;
-            }
+            let s = self.skip_while(is_ident_byte);
             let mut digits: String = self.src[s..self.pos].replace('_', "");
             // a trailing `u` suffix (`u` is never a digit in any of these radixes)
             let unsigned = digits.ends_with('u');
@@ -335,16 +333,11 @@ impl<'a> Lexer<'a> {
                 .map_err(|_| Diag::new(self.span(start), "invalid number literal"))?;
             return Ok(Tok::Int(v, unsigned));
         }
-        while self.peek().is_ascii_digit() || self.peek() == b'_' {
+        self.skip_while(digit_char);
+        let is_float = self.peek() == b'.' && self.peek_at(1).is_ascii_digit();
+        if is_float {
             self.pos += 1;
-        }
-        let mut is_float = false;
-        if self.peek() == b'.' && self.peek_at(1).is_ascii_digit() {
-            is_float = true;
-            self.pos += 1;
-            while self.peek().is_ascii_digit() || self.peek() == b'_' {
-                self.pos += 1;
-            }
+            self.skip_while(digit_char);
         }
         let mant_end = self.pos;
         let mut exp: Option<i64> = None;
@@ -357,9 +350,7 @@ impl<'a> Lexer<'a> {
             if self.peek_at(k).is_ascii_digit() {
                 let es = self.pos + 1;
                 self.pos += k;
-                while self.peek().is_ascii_digit() || self.peek() == b'_' {
-                    self.pos += 1;
-                }
+                self.skip_while(digit_char);
                 let etext = self.src[es..self.pos].replace('_', "");
                 exp = Some(
                     etext
@@ -411,10 +402,7 @@ impl<'a> Lexer<'a> {
                     return err(self.span(start), "expected `{` after `\\u`");
                 }
                 self.pos += 1;
-                let s = self.pos;
-                while self.peek().is_ascii_hexdigit() {
-                    self.pos += 1;
-                }
+                let s = self.skip_while(|c| c.is_ascii_hexdigit());
                 let digits = &self.src[s..self.pos];
                 if self.peek() != b'}' || digits.is_empty() || digits.len() > 6 {
                     return err(
@@ -617,4 +605,14 @@ fn str_tok(cur: String, mut parts: Vec<StrPart>) -> Tok {
         parts.push(StrPart::Lit(cur));
     }
     Tok::Str(parts)
+}
+
+/// A byte of an identifier: an ASCII letter, digit or `_`.
+pub fn is_ident_byte(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || c == b'_'
+}
+
+/// A decimal digit or `_` separator.
+fn digit_char(c: u8) -> bool {
+    c.is_ascii_digit() || c == b'_'
 }

@@ -18,6 +18,7 @@ use super::{
 use crate::ast::{self, ExprKind as E, StmtKind as S};
 use crate::check::index::{DeclKind, SymDecl};
 use crate::lexer::Tok;
+use crate::lexer::is_ident_byte;
 
 /// The extent (start, end) of the top-level item containing `off`.
 pub(super) fn item_extent(module: &ast::Module, off: u32) -> Option<(u32, u32)> {
@@ -93,7 +94,7 @@ impl Server {
         if let Some(name) = msg
             .strip_prefix("unknown type `")
             .and_then(|r| r.strip_suffix('`'))
-            .filter(|n| n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+            .filter(|n| n.bytes().all(is_ident_byte))
         {
             // after the top-level item that uses it
             let at =

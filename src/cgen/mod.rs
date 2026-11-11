@@ -1945,7 +1945,7 @@ impl CGen<'_> {
 }
 
 fn is_simple(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    !s.is_empty() && s.bytes().all(crate::lexer::is_ident_byte)
 }
 
 fn c_float(f: f64) -> String {

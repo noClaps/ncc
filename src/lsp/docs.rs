@@ -10,6 +10,7 @@
 //! ```
 
 use crate::diag::Span;
+use crate::lexer::is_ident_byte;
 
 /// Short documentation for keywords, shown on hover.
 pub const KEYWORD_DOCS: &[(&str, &str)] = &[
@@ -182,7 +183,7 @@ pub fn doc_comment(text: &str, span: Span) -> Option<String> {
 fn render_param(p: &str) -> String {
     match p.split_once(' ') {
         Some((name, rest))
-            if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            if name.bytes().all(is_ident_byte)
                 && name
                     .chars()
                     .next()

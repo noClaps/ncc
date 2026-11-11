@@ -5,6 +5,7 @@
 //! whose names are transitively referenced are kept, and a standard header is only included
 //! when kept code uses something it declares. Comments travel with the item that follows them.
 
+use crate::lexer::is_ident_byte;
 use std::collections::{HashMap, HashSet};
 
 struct Item {
@@ -337,14 +338,13 @@ fn identifiers(code: &str) -> Vec<String> {
             b'"' | b'\'' => i = skip_literal(b, i),
             c if c.is_ascii_alphabetic() || c == b'_' => {
                 let s = i;
-                while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
+                while i < b.len() && is_ident_byte(b[i]) {
                     i += 1;
                 }
                 out.push(code[s..i].to_string());
             }
             c if c.is_ascii_digit() => {
-                while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] == b'.')
-                {
+                while i < b.len() && (is_ident_byte(b[i]) || b[i] == b'.') {
                     i += 1;
                 }
             }
@@ -395,7 +395,7 @@ fn decl_names(code: &str) -> Vec<String> {
             b'=' if depth == 0 => break,
             c if (c.is_ascii_alphabetic() || c == b'_') && depth == 0 => {
                 let s = i;
-                while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
+                while i < b.len() && is_ident_byte(b[i]) {
                     i += 1;
                 }
                 tokens.push(code[s..i].to_string());

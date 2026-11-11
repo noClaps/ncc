@@ -21,6 +21,7 @@ use super::{
 use crate::ast::{self, ExprKind as E, StmtKind as S};
 use crate::check::index::DeclKind;
 use crate::diag::Span;
+use crate::lexer::is_ident_byte;
 
 const UNUSED_IMPORT: &str = "unused-import";
 const UNREACHABLE_BRANCH: &str = "unreachable-branch";
@@ -263,7 +264,7 @@ pub(super) fn importable_modules(file: &Path) -> Vec<(String, String)> {
         n.chars()
             .next()
             .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-            && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            && n.bytes().all(is_ident_byte)
             && !crate::parser::is_keyword(n)
     });
     out

@@ -10,6 +10,7 @@ use super::{Analysis, BUILTINS, KEYWORDS, Server, docs, pos_to_offset, uri_to_pa
 use crate::ast;
 use crate::check::index::{DeclKind, SymDecl};
 use crate::diag::Span;
+use crate::lexer::is_ident_byte;
 
 /// Keyword snippets: label, snippet body, description.
 const SNIPPETS: &[(&str, &str, &str)] = &[
@@ -88,7 +89,7 @@ fn receiver_chain(head: &str) -> Option<(Vec<Seg>, usize)> {
             i = j;
         }
         let end = i;
-        while i > 0 && (b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_') {
+        while i > 0 && is_ident_byte(b[i - 1]) {
             i -= 1;
         }
         if i == end {
@@ -930,11 +931,7 @@ fn unify(p: &str, c: &str, tps: &[String], binds: &mut HashMap<String, String>) 
     if p.is_empty() {
         return c.is_empty();
     }
-    let word = |s: &str| {
-        s.bytes()
-            .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_')
-            .count()
-    };
+    let word = |s: &str| s.bytes().take_while(|b| is_ident_byte(*b)).count();
     let w = word(p);
     if w > 0 {
         let name = &p[..w];
