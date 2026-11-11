@@ -252,7 +252,8 @@ impl<'a> Printer<'a> {
         let mut i = 0;
         let mut first = true;
         while i < m.items.len() {
-            let (start, end) = item_range(&m.items[i]);
+            let (start, end) = m.items[i].range();
+            let (start, end) = (start as usize, end as usize);
             self.entry_start(start, 0, first);
             first = false;
             if let Item::Import(_) = &m.items[i] {
@@ -818,21 +819,6 @@ impl<'a> Printer<'a> {
         out.push('}');
         out
     }
-}
-
-/// Source range of an item (for comments and blank lines).
-fn item_range(it: &Item) -> (usize, usize) {
-    let (s, e) = match it {
-        Item::Import(i) => (i.span.start, i.span.end),
-        Item::Extern(e) => (e.span.start, e.span.end),
-        Item::Struct(s) => (s.span.start, s.span.end),
-        Item::Enum(e) => (e.span.start, e.span.end),
-        Item::Type(t) => (t.span.start, t.span.end),
-        Item::Fn(f) => (f.sig.span.start, f.body.span.end),
-        Item::Test(_, b, sp) => (sp.start, b.span.end.max(sp.end)),
-        Item::Stmt(s) => (s.span.start, s.span.end),
-    };
-    (s as usize, e as usize)
 }
 
 // precedence levels around the binary operators' (`BinOp::prec`; higher binds tighter)

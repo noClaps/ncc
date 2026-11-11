@@ -156,19 +156,9 @@ impl Server {
                 && let Some(mtext) = self.text_of(mpath)
             {
                 let (m, _) = crate::parser::parse_module_recover(&mtext, 0);
-                let start = m.items.iter().find_map(|it| match it {
-                    ast::Item::Fn(f) if f.sig.name == name => Some(f.sig.span.start),
-                    ast::Item::Struct(s) if s.name == name => Some(s.span.start),
-                    ast::Item::Enum(e) if e.name == name => Some(e.span.start),
-                    ast::Item::Type(t) if t.name == name => Some(t.span.start),
-                    ast::Item::Stmt(st) => match &st.kind {
-                        S::VarDecl { targets, .. } if targets.iter().any(|t| t.name == name) => {
-                            Some(st.span.start)
-                        }
-                        _ => None,
-                    },
-                    _ => None,
-                });
+                let start = (m.items.iter())
+                    .find(|it| it.declared().0.iter().any(|n| *n == name))
+                    .map(|it| it.range().0);
                 if let Some(start) = start {
                     // the declaration's line, after its indentation
                     let ls = line_start(&mtext, start as usize);

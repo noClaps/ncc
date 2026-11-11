@@ -204,36 +204,10 @@ impl Checker {
                 ..Default::default()
             };
             for it in &info.ast.items {
-                match it {
-                    ast::Item::Fn(x) if x.public => {
-                        f.public.insert(x.sig.name.clone());
-                    }
-                    ast::Item::Struct(x) if x.public => {
-                        f.public.insert(x.name.clone());
-                    }
-                    ast::Item::Enum(x) if x.public => {
-                        f.public.insert(x.name.clone());
-                    }
-                    ast::Item::Type(x) if x.public => {
-                        f.public.insert(x.name.clone());
-                    }
-                    ast::Item::Stmt(ast::Stmt {
-                        kind:
-                            ast::StmtKind::VarDecl {
-                                public: true,
-                                targets,
-                                ..
-                            },
-                        ..
-                    }) => {
-                        f.public.extend(targets.iter().map(|t| t.name.clone()));
-                    }
-                    ast::Item::Import(im) => f.imports.push((
-                        im.alias.clone(),
-                        im.span,
-                        used.contains(&(m, im.alias.clone())),
-                    )),
-                    _ => {}
+                f.public.extend(it.public_names().into_iter().cloned());
+                if let ast::Item::Import(im) = it {
+                    let used = used.contains(&(m, im.alias.clone()));
+                    f.imports.push((im.alias.clone(), im.span, used));
                 }
             }
             facts.push(f);
@@ -419,6 +393,21 @@ impl Checker {
         }
     }
 
+    /// Index a generic declaration (checked only when instantiated) and its type parameters.
+    fn idx_generic_decl(
+        &mut self,
+        name: &str,
+        span: Span,
+        kind: index::DeclKind,
+        tps: &[ast::GenericParam],
+        detail: String,
+    ) {
+        for t in tps {
+            self.idx_ref(t.span, Some(t.span), t.show());
+        }
+        self.idx_decl(name, span, kind, detail, vec![]);
+    }
+
     fn resolve_decls(&mut self, m: usize) {
         let items = self.mods[m].ast.items.clone();
         let none = HashMap::new();
@@ -453,9 +442,9 @@ impl Checker {
                         }
                     }
                     ast::Item::Struct(s) if s.type_params.is_empty() => {
-                        let ty = match self.mods[m].syms[&s.name].sym {
-                            Sym::Struct { ty, .. } => ty.unwrap(),
-                            _ => unreachable!(),
+                        let Sym::Struct { ty: Some(ty), .. } = self.mods[m].syms[&s.name].sym
+                        else {
+                            unreachable!()
                         };
                         self.fill_struct(ty, s, m, &none)?;
                         let detail = self.type_detail(ty);
@@ -463,9 +452,8 @@ impl Checker {
                         self.idx_last_ty(&s.name, ty);
                     }
                     ast::Item::Enum(e) if e.type_params.is_empty() => {
-                        let ty = match self.mods[m].syms[&e.name].sym {
-                            Sym::Enum { ty, .. } => ty.unwrap(),
-                            _ => unreachable!(),
+                        let Sym::Enum { ty: Some(ty), .. } = self.mods[m].syms[&e.name].sym else {
+                            unreachable!()
                         };
                         self.fill_enum(ty, e, m, &none)?;
                         let detail = self.type_detail(ty);
@@ -534,9 +522,6 @@ impl Checker {
                             .iter()
                             .map(ast::GenericParam::show)
                             .collect();
-                        for t in &f.sig.type_params {
-                            self.idx_ref(t.span, Some(t.span), t.show());
-                        }
                         let ps: Vec<String> = f
                             .sig
                             .params
@@ -551,35 +536,20 @@ impl Checker {
                             ps.join(", "),
                             ret.unwrap_or_default()
                         );
-                        self.idx_decl(
-                            &f.sig.name,
-                            f.sig.span,
-                            index::DeclKind::Function,
-                            detail,
-                            vec![],
-                        );
+                        let (name, kind) = (&f.sig.name, index::DeclKind::Function);
+                        self.idx_generic_decl(name, f.sig.span, kind, &f.sig.type_params, detail);
                     }
                     ast::Item::Struct(st) if !st.type_params.is_empty() => {
-                        for t in &st.type_params {
-                            self.idx_ref(t.span, Some(t.span), t.show());
-                        }
-                        let detail = format!(
-                            "struct {}{}",
-                            st.name,
-                            ast::GenericParam::list(&st.type_params)
-                        );
-                        self.idx_decl(&st.name, st.span, index::DeclKind::Struct, detail, vec![]);
+                        let tps = ast::GenericParam::list(&st.type_params);
+                        let detail = format!("struct {}{tps}", st.name);
+                        let kind = index::DeclKind::Struct;
+                        self.idx_generic_decl(&st.name, st.span, kind, &st.type_params, detail);
                     }
                     ast::Item::Enum(en) if !en.type_params.is_empty() => {
-                        for t in &en.type_params {
-                            self.idx_ref(t.span, Some(t.span), t.show());
-                        }
-                        let detail = format!(
-                            "enum {}{}",
-                            en.name,
-                            ast::GenericParam::list(&en.type_params)
-                        );
-                        self.idx_decl(&en.name, en.span, index::DeclKind::Enum, detail, vec![]);
+                        let tps = ast::GenericParam::list(&en.type_params);
+                        let detail = format!("enum {}{tps}", en.name);
+                        let kind = index::DeclKind::Enum;
+                        self.idx_generic_decl(&en.name, en.span, kind, &en.type_params, detail);
                     }
                     ast::Item::Extern(e) => {
                         let dir = self.mods[m].path.parent().unwrap().to_path_buf();

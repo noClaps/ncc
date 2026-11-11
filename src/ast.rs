@@ -449,6 +449,47 @@ pub enum Item {
     Stmt(Stmt),
 }
 
+impl Item {
+    /// The names this item declares in its module, and whether they are public.
+    pub fn declared(&self) -> (Vec<&String>, bool) {
+        match self {
+            Self::Fn(f) => (vec![&f.sig.name], f.public),
+            Self::Struct(s) => (vec![&s.name], s.public),
+            Self::Enum(e) => (vec![&e.name], e.public),
+            Self::Type(t) => (vec![&t.name], t.public),
+            Self::Stmt(Stmt {
+                kind: StmtKind::VarDecl {
+                    public, targets, ..
+                },
+                ..
+            }) => (targets.iter().map(|t| &t.name).collect(), *public),
+            _ => (vec![], false),
+        }
+    }
+
+    /// The names this item exports (`pub`).
+    pub fn public_names(&self) -> Vec<&String> {
+        match self.declared() {
+            (names, true) => names,
+            _ => vec![],
+        }
+    }
+
+    /// The source range of the whole item.
+    pub fn range(&self) -> (u32, u32) {
+        match self {
+            Self::Import(i) => (i.span.start, i.span.end),
+            Self::Extern(e) => (e.span.start, e.span.end),
+            Self::Struct(s) => (s.span.start, s.span.end),
+            Self::Enum(e) => (e.span.start, e.span.end),
+            Self::Type(t) => (t.span.start, t.span.end),
+            Self::Fn(f) => (f.sig.span.start, f.body.span.end),
+            Self::Test(_, b, sp) => (sp.start, b.span.end.max(sp.end)),
+            Self::Stmt(s) => (s.span.start, s.span.end),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Module {
     pub items: Vec<Item>,

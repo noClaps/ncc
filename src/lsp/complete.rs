@@ -797,38 +797,11 @@ fn postfix_items(text: &str, start: usize, dot: usize, off: usize) -> Vec<Comple
 /// Names a module exports.
 fn public_names(text: &str) -> HashSet<String> {
     let (m, _) = crate::parser::parse_module_recover(text, 0);
-    let mut out = HashSet::new();
-    for it in &m.items {
-        match it {
-            ast::Item::Fn(f) if f.public => {
-                out.insert(f.sig.name.clone());
-            }
-            ast::Item::Struct(s) if s.public => {
-                out.insert(s.name.clone());
-            }
-            ast::Item::Enum(e) if e.public => {
-                out.insert(e.name.clone());
-            }
-            ast::Item::Type(t) if t.public => {
-                out.insert(t.name.clone());
-            }
-            ast::Item::Stmt(ast::Stmt {
-                kind:
-                    ast::StmtKind::VarDecl {
-                        public: true,
-                        targets,
-                        ..
-                    },
-                ..
-            }) => {
-                for t in targets {
-                    out.insert(t.name.clone());
-                }
-            }
-            _ => {}
-        }
-    }
-    out
+    m.items
+        .iter()
+        .flat_map(ast::Item::public_names)
+        .cloned()
+        .collect()
 }
 
 /// Completions for a path being typed in an import (modules, without `.nc`) or `@embed` (files).
