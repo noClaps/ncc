@@ -6,7 +6,7 @@ struct NcExtension;
 
 impl zed::Extension for NcExtension {
     fn new() -> Self {
-        NcExtension
+        Self
     }
 
     fn language_server_command(
