@@ -2132,7 +2132,7 @@ fn generic_bodies() {
 #[test]
 fn function_value_completion() {
     let mut s = Session::start("fnvalue");
-    let src = "fn func() int {\n  return 1\n}\n\nfn other_func((fn() int) f) int {\n  return f()\n}\n\nstruct Handler {\n  (fn() int) cb\n  int n\n}\n\nmut (fn() int) g = func\nint v = other_func(func)\nmut Handler h = Handler{.cb = func, .n = 1}\nHandler[] hs = [h]\n@println(v, g(), h.n, hs.len)\n";
+    let src = "fn func() int {\n  return 1\n}\n\nfn other_func((fn() int) f) int {\n  return f()\n}\n\nstruct Handler {\n  (fn() int) cb\n  int n\n}\n\nstruct Box<type T> {\n  T value\n  (fn() int) cb\n}\n\nmut (fn() int) g = func\nint v = other_func(func)\nmut Handler h = Handler{.cb = func, .n = 1}\nHandler[] hs = [h]\n@println(v, g(), h.n, hs.len)\n";
     let diags = s.open(src);
     assert!(diags.iter().all(|d| d["severity"] != 1), "{diags:?}");
     // the insert text of `label` when completing at the end of `line` appended to `src`
@@ -2197,6 +2197,26 @@ fn function_value_completion() {
     assert_eq!(insert("@println(H", "Handler"), literal);
     assert_eq!(insert("Handler[] ks = [H", "Handler"), literal);
     assert_eq!(insert("fn mk() Handler {\n  return H", "Handler"), literal);
+
+    // generic structs take their type arguments from the expected type, or placeholders
+    assert_eq!(
+        insert("Box<int> b = B", "Box"),
+        "Box<int>{.value = $1, .cb = $2}$0"
+    );
+    assert_eq!(
+        insert("@println(B", "Box"),
+        "Box<${1:T}>{.value = $2, .cb = $3}$0"
+    );
+    assert_eq!(insert("Box<int> b = Box<int>{.cb = f", "func"), Value::Null);
+    assert_eq!(insert("Box<int> b = Box<int>{.", "value"), "value = ");
+
+    // tuple elements
+    assert_eq!(insert("(int, Handler) t = (1, H", "Handler"), literal);
+    assert_eq!(insert("(int, (fn() int)) t = (1, f", "func"), Value::Null);
+    assert_eq!(insert("(int, (fn() int)) t = (f", "func"), "func()$0");
+    assert_eq!(insert("int x = other_func((f", "func"), Value::Null);
+    assert_eq!(insert("(int, H", "Handler"), Value::Null);
+
     // but not where a type is expected
     assert_eq!(insert("H", "Handler"), Value::Null);
     assert_eq!(insert("fn take(int a, H", "Handler"), Value::Null);

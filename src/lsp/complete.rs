@@ -203,7 +203,7 @@ impl Server {
         &self,
         a: &Analysis,
         d: &SymDecl,
-        ins: Insert,
+        ins: Insert<'_>,
         qualifier: Option<&str>,
     ) -> CompletionItem {
         let full = match qualifier {
@@ -240,17 +240,34 @@ impl Server {
             ..Default::default()
         };
         // a struct literal with a placeholder for each field: `P{.x = $1, .y = $2}`
-        if d.kind == DeclKind::Struct && ins.literal && self.snippets {
-            let fields: Vec<String> =
-                d.ty.as_ref()
-                    .and_then(|t| a.index.types.get(t))
-                    .into_iter()
-                    .flatten()
-                    .enumerate()
-                    .map(|(k, m)| format!(".{} = ${}", m.name, k + 1))
-                    .collect();
+        if d.kind == DeclKind::Struct
+            && let Some(expected) = ins.literal
+            && self.snippets
+        {
+            let names: Vec<String> = struct_fields(a, d).into_iter().map(|f| f.0).collect();
+            // its type arguments come from the expected type (`Box<int> b = B`) or are
+            // placeholders: `Box<${1:T}>{.value = $2}`
+            let tps = super::calls::type_params(&format!("{}(", d.detail));
+            let mut k = 0;
+            let mut slot = |name: Option<&str>| {
+                k += 1;
+                match name {
+                    Some(n) => format!("${{{k}:{n}}}"),
+                    None => format!("${k}"),
+                }
+            };
+            let targs = match expected.and_then(|t| t.trim().strip_prefix(full.as_str())) {
+                Some(args) if args.starts_with('<') && args.ends_with('>') && !tps.is_empty() => {
+                    args.to_string()
+                }
+                _ => generic_args(&tps.iter().map(|t| slot(Some(t))).collect::<Vec<_>>()),
+            };
+            let fields: Vec<String> = names
+                .iter()
+                .map(|n| format!(".{n} = {}", slot(None)))
+                .collect();
             if !fields.is_empty() {
-                item.insert_text = Some(format!("{full}{{{}}}$0", fields.join(", ")));
+                item.insert_text = Some(format!("{full}{targs}{{{}}}$0", fields.join(", ")));
                 item.insert_text_format = Some(InsertTextFormat::SNIPPET);
             }
         }
@@ -292,7 +309,10 @@ impl Server {
             !after.starts_with('(') && !matches!(&slot, Slot::Value(Some(t)) if is_fn_ty(t));
         let ins = Insert {
             call_parens,
-            literal: matches!(slot, Slot::Value(_)) && !after.starts_with('{'),
+            literal: match &slot {
+                Slot::Value(t) if !after.starts_with('{') => Some(t.as_deref()),
+                _ => None,
+            },
         };
         let item = |label: &str, kind: CompletionItemKind, detail: Option<String>| CompletionItem {
             label: label.to_string(),
@@ -576,13 +596,30 @@ impl Server {
                 if in_fn_header(&toks) {
                     return Slot::Other;
                 }
-                match self.call_at(uri, s) {
-                    Some(c) => Slot::Value(
-                        super::calls::params(&c.label)
-                            .get(c.arg as usize)
-                            .map(|(t, _)| t.clone()),
-                    ),
-                    None => Slot::Other,
+                if let Some(c) = self.call_at(uri, s) {
+                    let ty = super::calls::params(&c.label)
+                        .get(c.arg as usize)
+                        .map(|(t, _)| t.clone());
+                    // a type naming the callee's own generic parameters only says whether it
+                    // is a function
+                    return Slot::Value(ty.filter(|t| is_fn_ty(t) || !open_generics(&c.label, t)));
+                }
+                // a tuple's element or a parenthesized value: where the `(` is
+                let Some((open, commas)) = unclosed_paren(&toks) else {
+                    return Slot::Other;
+                };
+                match self.slot_at(uri, text, a, fid, toks[open].span.start as usize) {
+                    Slot::Value(Some(t)) if !is_fn_ty(&t) && t.starts_with('(') => {
+                        let inner = &t[1..t.len() - 1];
+                        let elems = super::calls::split_top(inner);
+                        Slot::Value(match elems.len() {
+                            0 | 1 if commas == 0 => Some(inner.trim().to_string()),
+                            _ => elems.get(commas).map(|&(x, y)| inner[x..y].to_string()),
+                        })
+                    }
+                    Slot::Value(t) if commas == 0 => Slot::Value(t),
+                    Slot::Value(_) => Slot::Value(None),
+                    Slot::Other => Slot::Other,
                 }
             }
             // a declaration's, assignment's or struct literal field's value
@@ -628,8 +665,8 @@ impl Server {
                 // `S{.field = `
                 if let Some(field) = lhs.strip_prefix('.') {
                     let ty = literal_struct(a, text, lstart).and_then(|(d, _)| {
-                        let members = a.index.types.get(d.ty.as_ref()?)?;
-                        Some(members.iter().find(|m| m.name == field)?.ty.clone())
+                        let fields = struct_fields(a, d);
+                        Some(fields.into_iter().find(|(n, ..)| n == field)?.1)
                     });
                     return Slot::Value(ty);
                 }
@@ -665,7 +702,7 @@ impl Server {
         fid: u32,
         off: usize,
         chain: &[Seg],
-        ins: Insert,
+        ins: Insert<'_>,
     ) -> Option<(Vec<CompletionItem>, Option<String>)> {
         let Seg::Name(first) = &chain[0] else {
             return None;
@@ -920,11 +957,11 @@ fn generic_args(args: &[String]) -> String {
 
 /// How names are inserted where the completion is.
 #[derive(Clone, Copy)]
-struct Insert {
+struct Insert<'a> {
     /// functions as calls: `f(...)`
     call_parens: bool,
-    /// structs as literals: `S{.x = ...}`
-    literal: bool,
+    /// structs as literals (`S{.x = ...}`), with the type expected there when known
+    literal: Option<Option<&'a str>>,
 }
 
 /// Where the expression being completed goes.
@@ -941,24 +978,54 @@ fn is_fn_ty(t: &str) -> bool {
     t.trim().starts_with("(fn")
 }
 
-/// Whether the innermost unclosed `(` at the end of `toks` opens the parameters of a function
-/// declaration (`fn name<T>(`) or function type (`(fn(`).
-fn in_fn_header(toks: &[&crate::lexer::Token]) -> bool {
+/// The innermost unclosed `(` at the end of `toks` (not inside `[...]` or `{...}`), with the
+/// number of commas after it at its level.
+fn unclosed_paren(toks: &[&crate::lexer::Token]) -> Option<(usize, usize)> {
     use crate::lexer::Tok;
-    let mut depth = 0;
+    let (mut depth, mut commas) = (0, 0);
     let mut i = toks.len();
-    let open = loop {
+    loop {
         if i == 0 {
-            return false;
+            return None;
         }
         i -= 1;
         match toks[i].tok {
             Tok::RParen | Tok::RBracket | Tok::RBrace => depth += 1,
             Tok::LParen | Tok::LBracket | Tok::LBrace if depth > 0 => depth -= 1,
-            Tok::LParen => break i,
-            Tok::LBracket | Tok::LBrace => return false,
+            Tok::LParen => return Some((i, commas)),
+            Tok::LBracket | Tok::LBrace => return None,
+            Tok::Comma if depth == 0 => commas += 1,
             _ => {}
         }
+    }
+}
+
+/// Whether `ty` names a generic parameter of the signature `label` that the call did not
+/// give explicitly (`fn map<type I, type O>(...)`, not `fn map<int, str>(...)`).
+fn open_generics(label: &str, ty: &str) -> bool {
+    let head = &label[..label.find('(').unwrap_or(label.len())];
+    let (Some(l), Some(r)) = (head.find('<'), head.rfind('>')) else {
+        return false;
+    };
+    let list = &head[l + 1..r];
+    // declared parameters are `kind name`; given arguments are types (`int`, `(fn() int)`)
+    let declared: Vec<&str> = super::calls::split_top(list)
+        .into_iter()
+        .filter_map(|(x, y)| {
+            let (kind, name) = list[x..y].split_once(' ')?;
+            (kind.bytes().all(is_ident_byte) && name.bytes().all(is_ident_byte)).then_some(name)
+        })
+        .collect();
+    ty.split(|c: char| !is_ident_byte(c as u8) || !c.is_ascii())
+        .any(|w| declared.contains(&w))
+}
+
+/// Whether the innermost unclosed `(` at the end of `toks` opens the parameters of a function
+/// declaration (`fn name<T>(`) or function type (`(fn(`).
+fn in_fn_header(toks: &[&crate::lexer::Token]) -> bool {
+    use crate::lexer::Tok;
+    let Some((open, _)) = unclosed_paren(toks) else {
+        return false;
     };
     let mut j = open;
     // generic parameters
@@ -1349,9 +1416,28 @@ fn literal_struct<'a>(a: &'a Analysis, text: &str, dot: usize) -> Option<(&'a Sy
 }
 
 /// Fields not set yet in the struct literal around the `.` at `dot`.
+/// A struct's fields: (name, type, detail, definition). A generic struct's come from its
+/// declaration, with its type parameters unresolved.
+fn struct_fields(a: &Analysis, d: &SymDecl) -> Vec<(String, String, String, Option<Span>)> {
+    match d.ty.as_ref().and_then(|t| a.index.types.get(t)) {
+        Some(ms) => ms
+            .iter()
+            .map(|m| (m.name.clone(), m.ty.clone(), m.detail.clone(), m.def))
+            .collect(),
+        None => d
+            .members
+            .iter()
+            .map(|(n, detail)| {
+                let ty = detail.rsplit_once(' ').map_or("", |(t, _)| t);
+                (n.clone(), ty.to_string(), detail.clone(), None)
+            })
+            .collect(),
+    }
+}
+
 fn struct_literal_fields(a: &Analysis, text: &str, dot: usize) -> Option<Vec<CompletionItem>> {
     let (d, open) = literal_struct(a, text, dot)?;
-    let members = a.index.types.get(d.ty.as_ref()?)?;
+    let members = struct_fields(a, d);
     let present: HashSet<&str> = text[open..dot]
         .split('.')
         .skip(1)
@@ -1359,14 +1445,14 @@ fn struct_literal_fields(a: &Analysis, text: &str, dot: usize) -> Option<Vec<Com
         .collect();
     Some(
         members
-            .iter()
-            .filter(|m| !present.contains(m.name.as_str()))
-            .map(|m| CompletionItem {
-                label: m.name.clone(),
+            .into_iter()
+            .filter(|(n, ..)| !present.contains(n.as_str()))
+            .map(|(name, _, detail, def)| CompletionItem {
+                insert_text: Some(format!("{name} = ")),
+                label: name,
                 kind: Some(CompletionItemKind::FIELD),
-                detail: Some(m.detail.clone()),
-                insert_text: Some(format!("{} = ", m.name)),
-                documentation: m.def.and_then(|def| doc_at(a, def)),
+                detail: Some(detail),
+                documentation: def.and_then(|def| doc_at(a, def)),
                 ..Default::default()
             })
             .collect(),
@@ -1375,6 +1461,16 @@ fn struct_literal_fields(a: &Analysis, text: &str, dot: usize) -> Option<Vec<Com
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn open_generic_parameters() {
+        let g = "fn map<type I, type O>(I[] arr, (fn(I) O) f) O[]";
+        assert!(super::open_generics(g, "I[]"));
+        assert!(!super::open_generics(g, "int[]"));
+        let given = "fn map<int, (fn() str)>(int[] arr, (fn(int) (fn() str)) f) (fn() str)[]";
+        assert!(!super::open_generics(given, "int[]"));
+        assert!(!super::open_generics("fn add(int a, int b) int", "int"));
+    }
+
     #[test]
     fn first_argument_types() {
         let t = |names: &[&str]| names.iter().map(ToString::to_string).collect::<Vec<_>>();

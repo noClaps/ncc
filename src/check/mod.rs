@@ -401,11 +401,12 @@ impl Checker {
         kind: index::DeclKind,
         tps: &[ast::GenericParam],
         detail: String,
+        members: Vec<(String, String)>,
     ) {
         for t in tps {
             self.idx_ref(t.span, Some(t.span), t.show());
         }
-        self.idx_decl(name, span, kind, detail, vec![]);
+        self.idx_decl(name, span, kind, detail, members);
     }
 
     fn resolve_decls(&mut self, m: usize) {
@@ -537,19 +538,38 @@ impl Checker {
                             ret.unwrap_or_default()
                         );
                         let (name, kind) = (&f.sig.name, index::DeclKind::Function);
-                        self.idx_generic_decl(name, f.sig.span, kind, &f.sig.type_params, detail);
+                        self.idx_generic_decl(
+                            name,
+                            f.sig.span,
+                            kind,
+                            &f.sig.type_params,
+                            detail,
+                            vec![],
+                        );
                     }
                     ast::Item::Struct(st) if !st.type_params.is_empty() => {
                         let tps = ast::GenericParam::list(&st.type_params);
                         let detail = format!("struct {}{tps}", st.name);
                         let kind = index::DeclKind::Struct;
-                        self.idx_generic_decl(&st.name, st.span, kind, &st.type_params, detail);
+                        // the fields, for struct literal completions
+                        let fields = (st.fields.iter())
+                            .map(|(t, n, _)| (n.clone(), format!("{} {n}", t.show())))
+                            .collect();
+                        let tps = &st.type_params;
+                        self.idx_generic_decl(&st.name, st.span, kind, tps, detail, fields);
                     }
                     ast::Item::Enum(en) if !en.type_params.is_empty() => {
                         let tps = ast::GenericParam::list(&en.type_params);
                         let detail = format!("enum {}{tps}", en.name);
                         let kind = index::DeclKind::Enum;
-                        self.idx_generic_decl(&en.name, en.span, kind, &en.type_params, detail);
+                        self.idx_generic_decl(
+                            &en.name,
+                            en.span,
+                            kind,
+                            &en.type_params,
+                            detail,
+                            vec![],
+                        );
                     }
                     ast::Item::Extern(e) => {
                         let dir = self.mods[m].path.parent().unwrap().to_path_buf();
