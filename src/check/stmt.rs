@@ -134,9 +134,9 @@ impl Checker {
                                 "a future can only be declared for an `async` function call",
                             );
                         }
-                    }
-                    if *mutex && matches!(self.types.kind(ty), TyKind::Fut(_)) {
-                        return err(span, "futures cannot be placed in a mutex");
+                        if *mutex {
+                            return err(span, "futures cannot be placed in a mutex");
+                        }
                     }
                     let v = self.expect_expr(value, ty);
                     let vty = if *mutex {
@@ -191,16 +191,13 @@ impl Checker {
                     let mut parts = Vec::new();
                     let mut i = 0;
                     for (t, ty) in targets.iter().zip(&tys) {
-                        let count = if i < elems.len() && elems[i] == *ty {
-                            1
-                        } else if let TyKind::Tuple(sub) = self.types.kind(*ty).clone() {
-                            if i + sub.len() <= elems.len() && elems[i..i + sub.len()] == sub[..] {
+                        // one element, or a run of elements matching a tuple type
+                        let count = match self.types.kind(*ty) {
+                            _ if elems.get(i) == Some(ty) => 1,
+                            TyKind::Tuple(sub) if elems.get(i..i + sub.len()) == Some(sub) => {
                                 sub.len()
-                            } else {
-                                return err(t.span, self.destructure_msg(*ty, &elems, i));
                             }
-                        } else {
-                            return err(t.span, self.destructure_msg(*ty, &elems, i));
+                            _ => return err(t.span, self.destructure_msg(*ty, &elems, i)),
                         };
                         parts.push((t, *ty, i, count));
                         i += count;
@@ -607,19 +604,13 @@ impl Checker {
             }
             E::Field(base, name) => {
                 let (p, ty) = self.check_place(base)?;
-                match self.types.kind(ty).clone() {
-                    TyKind::Struct(i) => {
-                        let fields = &self.types.structs[i as usize].fields;
-                        match fields.iter().position(|(n, _)| n == name) {
-                            Some(idx) => Ok((Place::Field(Box::new(p), idx), fields[idx].1)),
-                            None => err(
-                                e.span,
-                                format!("`{}` has no field `{name}`", self.types.show(ty)),
-                            ),
-                        }
+                let def = self.types.struct_def(ty);
+                match def.and_then(|d| d.fields.iter().position(|(n, _)| n == name)) {
+                    Some(i) => Ok((Place::Field(Box::new(p), i), def.unwrap().fields[i].1)),
+                    None if name == "len" && def.is_none() => {
+                        err(e.span, "`.len` cannot be assigned")
                     }
-                    _ if name == "len" => err(e.span, "`.len` cannot be assigned"),
-                    _ => err(
+                    None => err(
                         e.span,
                         format!("`{}` has no field `{name}`", self.types.show(ty)),
                     ),
