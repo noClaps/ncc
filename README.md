@@ -14,6 +14,19 @@ the system C compiler (`$CC`, falling back to `cc`).
 cargo build --release
 ```
 
+## Installing
+
+```bash
+./install.sh
+```
+
+This builds ncc and installs it into the NC home, `~/.nc` (set `$NC_HOME` to use a
+different directory, both when installing and when running ncc):
+
+- `~/.nc/bin/ncc`: the compiler (add `~/.nc/bin` to your `PATH`)
+- `~/.nc/std/`: the standard library, from [`std/`](std/), imported as `"std/..."`
+- `~/.nc/libc/`: the libc bindings, from [`libc/`](libc/), imported as `"libc/..."`
+
 ## Usage
 
 ```bash

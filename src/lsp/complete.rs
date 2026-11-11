@@ -834,6 +834,7 @@ fn public_names(text: &str) -> HashSet<String> {
 /// Completions for a path being typed in an import (modules, without `.nc`) or `@embed` (files).
 fn path_items(file: &Path, typed: &str, modules: bool) -> Vec<CompletionItem> {
     let dir = file.parent().unwrap_or(Path::new("."));
+    let mut system = Vec::new();
     let (base, shown) = if let Some(rel) = typed.strip_prefix(".../") {
         match crate::modules::find_root(dir) {
             Some(r) => (r, rel),
@@ -841,10 +842,29 @@ fn path_items(file: &Path, typed: &str, modules: bool) -> Vec<CompletionItem> {
         }
     } else if typed.starts_with("./") || typed.starts_with("../") {
         (dir.to_path_buf(), typed)
+    } else if modules && crate::modules::is_system_import(typed) {
+        match crate::modules::nc_home() {
+            Some(h) => (h, typed),
+            None => return vec![],
+        }
     } else if modules {
+        // nothing typed past the first segment yet: offer the system libraries too
+        if !typed.contains('/')
+            && let Some(home) = crate::modules::nc_home()
+        {
+            system = crate::modules::SYSTEM_LIBS
+                .iter()
+                .filter(|lib| home.join(lib).is_dir())
+                .map(|lib| CompletionItem {
+                    label: format!("{lib}/"),
+                    kind: Some(CompletionItemKind::FOLDER),
+                    ..Default::default()
+                })
+                .collect();
+        }
         match crate::modules::find_root(dir) {
             Some(r) => (r.join(".nc").join("deps"), typed),
-            None => return vec![],
+            None => return system,
         }
     } else {
         return vec![];
@@ -855,9 +875,9 @@ fn path_items(file: &Path, typed: &str, modules: bool) -> Vec<CompletionItem> {
         None => "",
     };
     let Ok(rd) = std::fs::read_dir(base.join(sub)) else {
-        return vec![];
+        return system;
     };
-    let mut out = Vec::new();
+    let mut out = system;
     for e in rd.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
         if name.starts_with('.') {
@@ -865,6 +885,9 @@ fn path_items(file: &Path, typed: &str, modules: bool) -> Vec<CompletionItem> {
         }
         let is_dir = e.file_type().is_ok_and(|t| t.is_dir());
         if is_dir {
+            if out.iter().any(|o| o.label == format!("{name}/")) {
+                continue;
+            }
             out.push(CompletionItem {
                 label: format!("{name}/"),
                 kind: Some(CompletionItemKind::FOLDER),

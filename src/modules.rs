@@ -32,15 +32,50 @@ pub fn find_root(start: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Top-level import directories installed in the NC home (`~/.nc`) rather than a project.
+pub const SYSTEM_LIBS: [&str; 2] = ["std", "libc"];
+
+/// The NC home directory, holding `std/`, `libc/` and `bin/ncc`: `$NC_HOME` when set,
+/// otherwise `~/.nc`.
+pub fn nc_home() -> Option<PathBuf> {
+    let var = |k| std::env::var_os(k).filter(|v| !v.is_empty());
+    var("NC_HOME")
+        .map(PathBuf::from)
+        .or_else(|| var("HOME").map(|h| PathBuf::from(h).join(".nc")))
+}
+
+/// Whether an import path names a module of a system library (`std/x`, `libc/x`).
+pub fn is_system_import(path: &str) -> bool {
+    path.split_once('/')
+        .is_some_and(|(top, _)| SYSTEM_LIBS.contains(&top))
+}
+
+/// Whether `path` is a dependency module rather than part of the project: under a project's
+/// `.nc/deps` or one of the system libraries in the NC home.
+pub fn is_dependency(path: &Path) -> bool {
+    let parts: Vec<_> = path.components().map(|c| c.as_os_str()).collect();
+    if parts.windows(2).any(|w| w[0] == ".nc" && w[1] == "deps") {
+        return true;
+    }
+    nc_home().is_some_and(|home| {
+        SYSTEM_LIBS
+            .iter()
+            .any(|lib| path.starts_with(home.join(lib)))
+    })
+}
+
 /// The file an import path names, from the importing file's directory: `./x` and `../x` are
-/// relative, `.../x` is from the project root and anything else is a dependency. `None` when
-/// the path needs the project root (given lazily by `root`) and there is none.
+/// relative, `.../x` is from the project root, `std/x` and `libc/x` are from the NC home
+/// (see `nc_home`) and anything else is a dependency. `None` when the path needs the project root
+/// (given lazily by `root`) or the NC home and there is none.
 pub fn import_file(
     dir: &Path,
     path: &str,
     root: impl FnOnce() -> Option<PathBuf>,
 ) -> Option<PathBuf> {
-    Some(if let Some(rel) = path.strip_prefix(".../") {
+    Some(if is_system_import(path) {
+        nc_home()?.join(format!("{path}.nc"))
+    } else if let Some(rel) = path.strip_prefix(".../") {
         root()?.join(format!("{rel}.nc"))
     } else if path.starts_with("./") || path.starts_with("../") {
         dir.join(format!("{}.nc", path.strip_prefix("./").unwrap_or(path)))
@@ -168,14 +203,19 @@ impl Loader<'_> {
                 root.get_or_insert_with(|| find_root(entry_dir)).clone()
             });
             let Some(target) = target else {
-                self.errors.push(Diag::new(
-                    im.span,
+                let msg = if is_system_import(&im.path) {
+                    format!(
+                        "cannot resolve import `{}`: neither `$NC_HOME` nor `$HOME` is set, so the NC home cannot be found",
+                        im.path
+                    )
+                } else {
                     format!(
                         "cannot resolve import `{}`: no `.nc/config.toml` found in `{}` or any parent directory",
                         im.path,
                         self.entry_dir.display()
-                    ),
-                ));
+                    )
+                };
+                self.errors.push(Diag::new(im.span, msg));
                 continue;
             };
             let Ok(target) = std::fs::canonicalize(&target) else {

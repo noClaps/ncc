@@ -197,12 +197,7 @@ impl Checker {
         let used = self.ix.used_aliases.borrow().clone();
         let mut facts = Vec::new();
         for (m, info) in self.mods.iter().enumerate() {
-            let parts: Vec<String> = info
-                .path
-                .components()
-                .map(|c| c.as_os_str().to_string_lossy().into_owned())
-                .collect();
-            let dependency = parts.windows(2).any(|w| w[0] == ".nc" && w[1] == "deps");
+            let dependency = crate::modules::is_dependency(&info.path);
             let mut f = index::ModFacts {
                 file: info.file,
                 project: !dependency,

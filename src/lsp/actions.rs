@@ -219,32 +219,37 @@ pub(super) fn importable_modules(file: &Path) -> Vec<(String, String)> {
             }
         }
     }
-    let Some(root) = crate::modules::find_root(dir) else {
-        out.sort();
-        return out;
-    };
-    let mut files = Vec::new();
-    super::collect_nc_files(&root, false, &mut files, 0);
-    for f in files {
-        if f.parent() != Some(dir)
-            && let Ok(rel) = f.with_extension("").strip_prefix(&root)
-        {
-            out.push((
-                stem(&f).unwrap_or_default(),
-                format!(".../{}", rel.to_string_lossy()),
-            ));
+    // dependency modules in `scan`, imported by their path from `base`
+    fn add_deps(scan: &Path, base: &Path, out: &mut Vec<(String, String)>) {
+        let mut files = Vec::new();
+        super::collect_nc_files(scan, true, &mut files, 0);
+        for f in files {
+            if let Ok(rel) = f.with_extension("").strip_prefix(base) {
+                let name = f.file_stem().unwrap_or_default().to_string_lossy();
+                out.push((name.into_owned(), rel.to_string_lossy().into_owned()));
+            }
         }
     }
-    let deps = root.join(".nc").join("deps");
-    let mut files = Vec::new();
-    super::collect_nc_files(&deps, true, &mut files, 0);
-    for f in files {
-        if let Ok(rel) = f.with_extension("").strip_prefix(&deps) {
-            out.push((
-                stem(&f).unwrap_or_default(),
-                rel.to_string_lossy().into_owned(),
-            ));
+    if let Some(home) = crate::modules::nc_home() {
+        for lib in crate::modules::SYSTEM_LIBS {
+            add_deps(&home.join(lib), &home, &mut out);
         }
+    }
+    if let Some(root) = crate::modules::find_root(dir) {
+        let mut files = Vec::new();
+        super::collect_nc_files(&root, false, &mut files, 0);
+        for f in files {
+            if f.parent() != Some(dir)
+                && let Ok(rel) = f.with_extension("").strip_prefix(&root)
+            {
+                out.push((
+                    stem(&f).unwrap_or_default(),
+                    format!(".../{}", rel.to_string_lossy()),
+                ));
+            }
+        }
+        let deps = root.join(".nc").join("deps");
+        add_deps(&deps, &deps, &mut out);
     }
     out.sort_by_key(|(n, p)| {
         (

@@ -52,6 +52,8 @@ A: Relative imports start with `./` or `../` and resolve against the importing f
 
 **Update:** The config file moved to `.nc/config.toml`. `$ROOT` is the directory containing the `.nc` directory. Everything else is unchanged.
 
+**Update:** Imports starting with `std/` or `libc/` resolve in the NC home instead of `$ROOT/.nc/deps/`: `std/math` is `~/.nc/std/math.nc` and `libc/stdio` is `~/.nc/libc/stdio.nc`. The NC home is `$NC_HOME`, or `~/.nc` when that is unset. These imports don't need a project root. `install.sh` installs the repo's `std/` and `libc/` there, along with the compiler at `bin/ncc` in the NC home.
+
 **Q: Is `.nc` appended to import paths, and how is the config file found?**
 A: `.nc` is appended, so `./x` resolves to `<importing file's dir>/x.nc`. `.nc/config.toml` (originally `nc.toml`) is searched for upward from the entry file's directory. It is only required (missing is an error) when an import is neither `./` nor `../`. Its contents are ignored for now.
 

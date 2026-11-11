@@ -8,6 +8,8 @@
 2. **Module loading** (`src/modules.rs`): resolves imports.
    - `./` and `../` paths are relative to the importing file.
    - `.../` paths are relative to `$ROOT`.
+   - `std/` and `libc/` paths resolve in the NC home, `$NC_HOME` or `~/.nc/` when it is
+     unset (so `std/math` is `~/.nc/std/math.nc`).
    - All other paths resolve in `$ROOT/.nc/deps/`.
    - `$ROOT` is the nearest directory that contains `.nc/config.toml`.
 3. **Checking** (`src/check/`): name resolution, type checking and generic
@@ -41,7 +43,7 @@ variables (including pattern and `for` bindings), parameters, private (non-`pub`
 structs, enums, type aliases, module-level variables and extern functions, and imports. A
 declaration is used when the checker's index has a reference to it from anywhere else, tests
 included. The checker records which import aliases it resolved, and each module's `pub` names.
-Names starting with `_` and dependency modules (under `.nc/deps`) are skipped. Generic
+Names starting with `_` and dependency modules (under `.nc/deps` or the NC home's `std/` and `libc/`) are skipped. Generic
 declarations are indexed when declared, so an uninstantiated generic is reported too.
 
 Debug builds, `ncc check` and `ncc test` print these as warnings; release builds (`-r`) report
