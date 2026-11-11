@@ -134,13 +134,7 @@ impl Checker {
         }
     }
 
-    fn int_lit(
-        &mut self,
-        v: i128,
-        unsigned: bool,
-        expected: Option<TyId>,
-        span: Span,
-    ) -> Result<Expr> {
+    fn int_lit(&self, v: i128, unsigned: bool, expected: Option<TyId>, span: Span) -> Result<Expr> {
         let ty = if unsigned {
             UINT
         } else {
@@ -618,7 +612,7 @@ impl Checker {
         }
     }
 
-    pub fn stringify(&mut self, v: Expr) -> Result<Expr> {
+    pub fn stringify(&self, v: Expr) -> Result<Expr> {
         let span = v.span;
         let kind = if v.ty == STR || v.ty == ERROR {
             EK::Retype(Box::new(v))
@@ -642,13 +636,12 @@ impl Checker {
 
     /// Check `e` as the type in `ty`, or, when it is not known yet, infer it from `e`.
     fn check_as(&mut self, e: &ast::Expr, ty: &mut Option<TyId>) -> Result<Expr> {
-        match *ty {
-            Some(t) => self.expect_expr(e, t),
-            None => {
-                let x = self.check_expr(e, None)?;
-                *ty = Some(x.ty);
-                Ok(x)
-            }
+        if let Some(t) = *ty {
+            self.expect_expr(e, t)
+        } else {
+            let x = self.check_expr(e, None)?;
+            *ty = Some(x.ty);
+            Ok(x)
         }
     }
 
@@ -1432,11 +1425,10 @@ impl Checker {
                 | TyKind::Tuple(_),
                 TyKind::Str,
             ) => true,
-            (TyKind::Bool, TyKind::Int | TyKind::UInt)
+            (TyKind::Bool | TyKind::Float, TyKind::Int | TyKind::UInt)
             | (TyKind::Byte, TyKind::Char | TyKind::Int | TyKind::UInt)
             | (TyKind::Int, TyKind::UInt | TyKind::Float)
-            | (TyKind::UInt, TyKind::Int | TyKind::Float)
-            | (TyKind::Float, TyKind::Int | TyKind::UInt) => true,
+            | (TyKind::UInt, TyKind::Int | TyKind::Float) => true,
             // to bytes (and a string to chars)
             (TyKind::Char | TyKind::Int | TyKind::UInt | TyKind::Float, _) => t == bytes,
             (TyKind::Str, _) => t == bytes || t == chars,

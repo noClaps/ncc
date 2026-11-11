@@ -778,7 +778,7 @@ fn postfix_items(text: &str, start: usize, dot: usize, off: usize) -> Vec<Comple
             kind: Some(CompletionItemKind::SNIPPET),
             detail: Some(
                 tmpl.replace("{r}", receiver)
-                    .replace("\t", "  ")
+                    .replace('\t', "  ")
                     .replace("$0", ""),
             ),
             documentation: Some(Documentation::String(format!("postfix: {desc}"))),
@@ -871,7 +871,7 @@ fn path_items(file: &Path, typed: &str, modules: bool) -> Vec<CompletionItem> {
     };
     // the directory part already typed
     let sub = match shown.rfind('/') {
-        Some(i) => &shown[..i + 1],
+        Some(i) => &shown[..=i],
         None => "",
     };
     let Ok(rd) = std::fs::read_dir(base.join(sub)) else {

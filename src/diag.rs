@@ -10,15 +10,15 @@ pub struct Span {
 }
 
 impl Span {
-    pub fn new(file: u32, start: usize, end: usize) -> Span {
-        Span {
+    pub fn new(file: u32, start: usize, end: usize) -> Self {
+        Self {
             file,
             start: start as u32,
             end: end as u32,
         }
     }
-    pub fn to(self, other: Span) -> Span {
-        Span {
+    pub fn to(self, other: Self) -> Self {
+        Self {
             file: self.file,
             start: self.start.min(other.start),
             end: self.end.max(other.end),
@@ -33,14 +33,14 @@ pub struct SourceFile {
 }
 
 impl SourceFile {
-    pub fn new(path: PathBuf, text: String) -> SourceFile {
+    pub fn new(path: PathBuf, text: String) -> Self {
         let mut line_starts = vec![0];
         for (i, b) in text.bytes().enumerate() {
             if b == b'\n' {
                 line_starts.push(i + 1);
             }
         }
-        SourceFile {
+        Self {
             path,
             text,
             line_starts,
@@ -103,8 +103,8 @@ pub struct Diag {
 }
 
 impl Diag {
-    pub fn new(span: Span, msg: impl Into<String>) -> Diag {
-        Diag {
+    pub fn new(span: Span, msg: impl Into<String>) -> Self {
+        Self {
             span,
             msg: msg.into(),
         }

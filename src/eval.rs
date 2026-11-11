@@ -23,18 +23,18 @@ pub enum Val {
     Float(f64),
     Char(u32),
     Str(Rc<str>),
-    Arr(Rc<Vec<Val>>),
+    Arr(Rc<Vec<Self>>),
     /// insertion-ordered association list
-    Map(Rc<Vec<(Val, Val)>>),
-    Tuple(Rc<Vec<Val>>),
-    Struct(Rc<Vec<Val>>),
-    Variant(usize, Rc<Vec<Val>>),
+    Map(Rc<Vec<(Self, Self)>>),
+    Tuple(Rc<Vec<Self>>),
+    Struct(Rc<Vec<Self>>),
+    Variant(usize, Rc<Vec<Self>>),
     None,
-    Some(Box<Val>),
-    Ok(Box<Val>),
+    Some(Box<Self>),
+    Ok(Box<Self>),
     Err(Rc<str>),
     /// function value: function id and captured values (by value only)
-    Fn(FuncId, Rc<Vec<Val>>),
+    Fn(FuncId, Rc<Vec<Self>>),
 }
 
 /// Why evaluation stopped.
@@ -126,7 +126,7 @@ fn stmt_pure(s: &Stmt) -> bool {
 }
 
 impl<'p> Evaluator<'p> {
-    pub fn new(p: &'p Program, sm: &'p SourceMap) -> Evaluator<'p> {
+    pub fn new(p: &'p Program, sm: &'p SourceMap) -> Self {
         Evaluator {
             p,
             sm,
@@ -981,7 +981,7 @@ impl<'p> Evaluator<'p> {
         xs.iter().map(|x| self.expr(x, env, const_only)).collect()
     }
 
-    fn cast(&mut self, v: Val, from: TyId, to: TyId, span: Span) -> R<Val> {
+    fn cast(&self, v: Val, from: TyId, to: TyId, span: Span) -> R<Val> {
         let t = &self.p.types;
         if t.base(to) == STR {
             return Ok(Val::Str(self.to_str(&v, from)?.into()));

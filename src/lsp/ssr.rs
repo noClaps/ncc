@@ -231,8 +231,6 @@ fn ssr_file(text: &str, pat: &[PTok], tmpl: &str) -> Vec<(usize, usize, String)>
 }
 
 impl Server {
-    // `WorkspaceEdit::changes` is keyed by `Uri`, as defined by lsp-types
-    #[allow(clippy::mutable_key_type)]
     pub(super) fn ssr(&self, p: SsrParams) -> Result<WorkspaceEdit, String> {
         let (pat, tmpl) = parse_rule(&p.query)?;
         let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();

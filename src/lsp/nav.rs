@@ -79,8 +79,6 @@ impl Server {
     }
 
     /// Import paths to update when `.nc` files are renamed.
-    // `WorkspaceEdit::changes` is keyed by `Uri`, as defined by lsp-types
-    #[allow(clippy::mutable_key_type)]
     pub(super) fn will_rename_files(&self, p: RenameFilesParams) -> Option<WorkspaceEdit> {
         let mut changes: std::collections::HashMap<Uri, Vec<TextEdit>> = Default::default();
         for f in &p.files {

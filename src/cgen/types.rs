@@ -34,7 +34,7 @@ fn ident(s: &str) -> String {
 }
 
 impl<'t> TypeGen<'t> {
-    pub fn new(t: &'t Types) -> TypeGen<'t> {
+    pub fn new(t: &'t Types) -> Self {
         TypeGen {
             t,
             decls: String::new(),
@@ -508,7 +508,7 @@ impl<'t> TypeGen<'t> {
     }
 
     fn product_bodies(
-        &mut self,
+        &self,
         fields: &[(String, TyId)],
         open: &str,
         close: &str,

@@ -90,8 +90,8 @@ pub struct FnCtx {
 }
 
 impl FnCtx {
-    pub fn new(func: FuncId, module: usize, ret: TyId, tparams: HashMap<String, TyId>) -> FnCtx {
-        FnCtx {
+    pub fn new(func: FuncId, module: usize, ret: TyId, tparams: HashMap<String, TyId>) -> Self {
+        Self {
             func,
             locals: vec![],
             scopes: vec![vec![]],
@@ -426,9 +426,8 @@ impl Checker {
             let item_r: Result<()> = (|| {
                 match it {
                     ast::Item::Type(t) => {
-                        let ty = match self.mods[m].syms[&t.name].sym {
-                            Sym::Type(ty) => ty,
-                            _ => unreachable!(),
+                        let Sym::Type(ty) = self.mods[m].syms[&t.name].sym else {
+                            unreachable!()
                         };
                         let under = self.resolve_type(&t.ty, m, &none)?;
                         if let TyKind::Named(n) = self.types.kind(ty).clone() {

@@ -428,9 +428,8 @@ impl Checker {
                 name_span,
                 body,
             } => {
-                let (vr, ty) = match self.resolve_var(name, *name_span)? {
-                    Some(x) => x,
-                    None => return err(*name_span, format!("unknown variable `{name}`")),
+                let Some((vr, ty)) = self.resolve_var(name, *name_span)? else {
+                    return err(*name_span, format!("unknown variable `{name}`"));
                 };
                 self.idx_var_ref(vr, *name_span);
                 let TyKind::Mutex(inner) = *self.types.kind(ty) else {

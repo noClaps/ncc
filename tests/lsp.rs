@@ -13,7 +13,7 @@ struct Client {
 }
 
 impl Client {
-    fn start() -> Client {
+    fn start() -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_ncc"))
             .arg("lsp")
             .stdin(Stdio::piped())
@@ -22,7 +22,7 @@ impl Client {
             .expect("failed to start ncc lsp");
         let stdin = child.stdin.take().unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap());
-        Client {
+        Self {
             child,
             stdin,
             stdout,
@@ -218,7 +218,7 @@ fn language_server() {
             )
         })
         .collect();
-    at.sort();
+    at.sort_unstable();
     assert_eq!(at, [(1, 6), (9, 17), (10, 18)], "{edit}");
     assert!(edits.iter().all(|e| e["newText"] == "horizontal"));
 
@@ -442,7 +442,7 @@ struct Session {
 }
 
 impl Session {
-    fn start(name: &str) -> Session {
+    fn start(name: &str) -> Self {
         let dir = std::env::temp_dir().join(format!("ncc-lsp-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let dir = std::fs::canonicalize(&dir).unwrap();
@@ -463,7 +463,7 @@ impl Session {
             }}),
         );
         c.notify("initialized", json!({}));
-        Session {
+        Self {
             c,
             uri,
             dir,
@@ -932,7 +932,7 @@ fn diagnostics_and_code_actions() {
         .iter()
         .map(|d| d["message"].as_str().unwrap())
         .collect();
-    msgs.sort();
+    msgs.sort_unstable();
     assert_eq!(
         msgs,
         [

@@ -36,8 +36,8 @@ struct CVal {
 }
 
 impl CVal {
-    fn b(code: impl Into<String>) -> CVal {
-        CVal {
+    fn b(code: impl Into<String>) -> Self {
+        Self {
             code: code.into(),
             owned: false,
         }
@@ -129,7 +129,7 @@ pub fn generate(p: &Program, sm: &SourceMap, mode: Mode) -> (String, String) {
     g.run(mode)
 }
 
-impl<'p> CGen<'p> {
+impl CGen<'_> {
     fn run(&mut self, mode: Mode) -> (String, String) {
         self.main_void = mode == Mode::Run && !block_throws(&self.p.funcs[self.p.main].body);
         for f in &self.p.funcs {
@@ -138,7 +138,7 @@ impl<'p> CGen<'p> {
                     if let EK::FnRef(g) | EK::Closure(g) = e.kind {
                         self.value_fns.insert(g);
                     }
-                    if let EK::Args = e.kind {
+                    if matches!(e.kind, EK::Args) {
                         self.uses_args = true;
                     }
                 });

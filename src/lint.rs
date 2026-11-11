@@ -147,11 +147,11 @@ impl UnusedKind {
     /// The diagnostic code the language server attaches (and its quick fixes look for).
     pub fn code(self) -> &'static str {
         match self {
-            UnusedKind::Variable => "unused-variable",
-            UnusedKind::Parameter => "unused-parameter",
-            UnusedKind::Function => "unused-function",
-            UnusedKind::Type => "unused-type",
-            UnusedKind::Import => "unused-import",
+            Self::Variable => "unused-variable",
+            Self::Parameter => "unused-parameter",
+            Self::Function => "unused-function",
+            Self::Type => "unused-type",
+            Self::Import => "unused-import",
         }
     }
 }

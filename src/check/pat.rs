@@ -193,7 +193,7 @@ impl Checker {
             .ok_or_else(|| Diag::new(span, format!("enum `{}` has no member `{vname}`", def.name)))
     }
 
-    fn value_pat(&mut self, v: Expr, ty: TyId, span: Span) -> Result<Pat> {
+    fn value_pat(&self, v: Expr, ty: TyId, span: Span) -> Result<Pat> {
         if !self.plain(ty) {
             return err(
                 span,

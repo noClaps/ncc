@@ -58,14 +58,14 @@ pub enum Tok {
 impl Tok {
     pub fn describe(&self) -> String {
         match self {
-            Tok::Ident(s) => format!("`{s}`"),
-            Tok::Int(..) => "integer literal".into(),
-            Tok::Float(_) => "float literal".into(),
-            Tok::Char(_) => "char literal".into(),
-            Tok::Str(_) => "string literal".into(),
-            Tok::Builtin(s) => format!("`@{s}`"),
-            Tok::Newline => "newline".into(),
-            Tok::Eof => "end of file".into(),
+            Self::Ident(s) => format!("`{s}`"),
+            Self::Int(..) => "integer literal".into(),
+            Self::Float(_) => "float literal".into(),
+            Self::Char(_) => "char literal".into(),
+            Self::Str(_) => "string literal".into(),
+            Self::Builtin(s) => format!("`@{s}`"),
+            Self::Newline => "newline".into(),
+            Self::Eof => "end of file".into(),
             t => format!("`{}`", punct(t)),
         }
     }
@@ -174,7 +174,7 @@ fn run(src: &str, file: u32, base: usize) -> (Vec<Token>, Vec<Diag>, Vec<(usize,
 }
 
 impl<'a> Lexer<'a> {
-    fn new(src: &'a str, file: u32, base: usize, pos: usize) -> Lexer<'a> {
+    fn new(src: &'a str, file: u32, base: usize, pos: usize) -> Self {
         Lexer {
             src,
             bytes: src.as_bytes(),
@@ -559,9 +559,8 @@ impl<'a> Lexer<'a> {
     fn multiline(&mut self, start: usize) -> Result<Tok> {
         self.pos += 3;
         let body_start = self.pos;
-        let rel_end = match self.src[self.pos..].find("\"\"\"") {
-            Some(i) => i,
-            None => return err(self.span(start), "unterminated multiline string"),
+        let Some(rel_end) = self.src[self.pos..].find("\"\"\"") else {
+            return err(self.span(start), "unterminated multiline string");
         };
         let raw = &self.src[body_start..body_start + rel_end];
         self.pos = body_start + rel_end + 3;

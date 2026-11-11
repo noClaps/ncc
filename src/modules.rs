@@ -53,7 +53,10 @@ pub fn is_system_import(path: &str) -> bool {
 /// Whether `path` is a dependency module rather than part of the project: under a project's
 /// `.nc/deps` or one of the system libraries in the NC home.
 pub fn is_dependency(path: &Path) -> bool {
-    let parts: Vec<_> = path.components().map(|c| c.as_os_str()).collect();
+    let parts: Vec<_> = path
+        .components()
+        .map(std::path::Component::as_os_str)
+        .collect();
     if parts.windows(2).any(|w| w[0] == ".nc" && w[1] == "deps") {
         return true;
     }

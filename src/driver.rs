@@ -145,7 +145,7 @@ fn cc_command() -> (String, Vec<String>) {
 
 struct TempDir(PathBuf);
 impl TempDir {
-    fn new() -> std::io::Result<TempDir> {
+    fn new() -> std::io::Result<Self> {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static N: AtomicUsize = AtomicUsize::new(0);
         let base = std::env::temp_dir();
@@ -153,8 +153,8 @@ impl TempDir {
             let n = N.fetch_add(1, Ordering::Relaxed);
             let p = base.join(format!("ncc-{}-{n}", std::process::id()));
             match std::fs::create_dir(&p) {
-                Ok(()) => return Ok(TempDir(p)),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Ok(()) => return Ok(Self(p)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(e) => return Err(e),
             }
         }

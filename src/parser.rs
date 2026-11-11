@@ -43,8 +43,8 @@ pub fn parse_module_recover(src: &str, file: u32) -> (Module, Vec<Diag>) {
 }
 
 impl Parser {
-    fn new(toks: Vec<Token>, file: u32, src: String) -> Parser {
-        Parser {
+    fn new(toks: Vec<Token>, file: u32, src: String) -> Self {
+        Self {
             toks,
             pos: 0,
             file,
@@ -1347,7 +1347,7 @@ impl Parser {
                         StrPart::Lit(s) => segs.push(StrSeg::Lit(s)),
                         StrPart::Expr(text, off) => {
                             let toks = lex(&text, self.file, off)?;
-                            let mut sub = Parser::new(toks, self.file, String::new());
+                            let mut sub = Self::new(toks, self.file, String::new());
                             sub.skip_nl();
                             let e = sub.expr()?;
                             sub.skip_nl();

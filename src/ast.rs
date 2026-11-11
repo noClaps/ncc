@@ -8,19 +8,19 @@ pub enum TypeExpr {
     Named {
         module: Option<String>,
         name: String,
-        args: Vec<TypeExpr>,
+        args: Vec<Self>,
         span: Span,
     },
     /// `T[]` (None) or `T[N]`, `T[N - 1]`
-    Array(Box<TypeExpr>, Option<ConstExpr>, Span),
+    Array(Box<Self>, Option<ConstExpr>, Span),
     /// `[K]V`
-    Map(Box<TypeExpr>, Box<TypeExpr>, Span),
-    Optional(Box<TypeExpr>, Span),
-    ErrorUnion(Box<TypeExpr>, Span),
-    Tuple(Vec<TypeExpr>, Span),
+    Map(Box<Self>, Box<Self>, Span),
+    Optional(Box<Self>, Span),
+    ErrorUnion(Box<Self>, Span),
+    Tuple(Vec<Self>, Span),
     /// `(fn(int, int) int)`
-    Fn(Vec<TypeExpr>, Option<Box<TypeExpr>>, Span),
-    Fut(Box<TypeExpr>, Span),
+    Fn(Vec<Self>, Option<Box<Self>>, Span),
+    Fut(Box<Self>, Span),
     /// A compile-time constant given as a generic argument: `3`, `N + 1`
     Const(ConstExpr),
 }
@@ -31,31 +31,28 @@ pub enum ConstExpr {
     Int(u128, Span),
     /// A generic constant parameter
     Name(String, Span),
-    Neg(Box<ConstExpr>, Span),
+    Neg(Box<Self>, Span),
     /// `+ - * / %`
-    Bin(BinOp, Box<ConstExpr>, Box<ConstExpr>),
-    Paren(Box<ConstExpr>, Span),
+    Bin(BinOp, Box<Self>, Box<Self>),
+    Paren(Box<Self>, Span),
 }
 
 impl ConstExpr {
     /// The constant as NC source (`N - 1`, `(N + M) * 2`).
     pub fn show(&self) -> String {
         match self {
-            ConstExpr::Int(n, _) => n.to_string(),
-            ConstExpr::Name(n, _) => n.clone(),
-            ConstExpr::Neg(e, _) => format!("-{}", e.show()),
-            ConstExpr::Bin(op, a, b) => format!("{} {} {}", a.show(), op.symbol(), b.show()),
-            ConstExpr::Paren(e, _) => format!("({})", e.show()),
+            Self::Int(n, _) => n.to_string(),
+            Self::Name(n, _) => n.clone(),
+            Self::Neg(e, _) => format!("-{}", e.show()),
+            Self::Bin(op, a, b) => format!("{} {} {}", a.show(), op.symbol(), b.show()),
+            Self::Paren(e, _) => format!("({})", e.show()),
         }
     }
 
     pub fn span(&self) -> Span {
         match self {
-            ConstExpr::Int(_, s)
-            | ConstExpr::Name(_, s)
-            | ConstExpr::Neg(_, s)
-            | ConstExpr::Paren(_, s) => *s,
-            ConstExpr::Bin(_, a, b) => a.span().to(b.span()),
+            Self::Int(_, s) | Self::Name(_, s) | Self::Neg(_, s) | Self::Paren(_, s) => *s,
+            Self::Bin(_, a, b) => a.span().to(b.span()),
         }
     }
 }
@@ -80,16 +77,13 @@ impl GenericParam {
     }
 
     /// `<type T, uint N>` (empty for no parameters)
-    pub fn list(ps: &[GenericParam]) -> String {
+    pub fn list(ps: &[Self]) -> String {
         if ps.is_empty() {
             return String::new();
         }
         format!(
             "<{}>",
-            ps.iter()
-                .map(GenericParam::show)
-                .collect::<Vec<_>>()
-                .join(", ")
+            ps.iter().map(Self::show).collect::<Vec<_>>().join(", ")
         )
     }
 }
@@ -97,9 +91,9 @@ impl GenericParam {
 impl TypeExpr {
     /// The type as NC source (`int[]`, `[str]int`, `(fn(int) str)`, `Matrix<T>`).
     pub fn show(&self) -> String {
-        let list = |ts: &[TypeExpr]| ts.iter().map(TypeExpr::show).collect::<Vec<_>>().join(", ");
+        let list = |ts: &[Self]| ts.iter().map(Self::show).collect::<Vec<_>>().join(", ");
         match self {
-            TypeExpr::Named {
+            Self::Named {
                 module, name, args, ..
             } => {
                 let m = module.as_ref().map(|m| format!("{m}.")).unwrap_or_default();
@@ -109,32 +103,32 @@ impl TypeExpr {
                     format!("{m}{name}<{}>", list(args))
                 }
             }
-            TypeExpr::Array(e, Some(n), _) => format!("{}[{}]", e.show(), n.show()),
-            TypeExpr::Array(e, None, _) => format!("{}[]", e.show()),
-            TypeExpr::Map(k, v, _) => format!("[{}]{}", k.show(), v.show()),
-            TypeExpr::Optional(i, _) => format!("{}?", i.show()),
+            Self::Array(e, Some(n), _) => format!("{}[{}]", e.show(), n.show()),
+            Self::Array(e, None, _) => format!("{}[]", e.show()),
+            Self::Map(k, v, _) => format!("[{}]{}", k.show(), v.show()),
+            Self::Optional(i, _) => format!("{}?", i.show()),
             // a bare `!` return type (parsed with the span of the `!` for its `void`)
-            TypeExpr::ErrorUnion(i, sp) if i.span() == *sp => "!".into(),
-            TypeExpr::ErrorUnion(i, _) => format!("{}!", i.show()),
-            TypeExpr::Tuple(ts, _) => format!("({})", list(ts)),
-            TypeExpr::Fn(ps, Some(r), _) => format!("(fn({}) {})", list(ps), r.show()),
-            TypeExpr::Fn(ps, None, _) => format!("(fn({}))", list(ps)),
-            TypeExpr::Fut(i, _) => format!("fut {}", i.show()),
-            TypeExpr::Const(c) => c.show(),
+            Self::ErrorUnion(i, sp) if i.span() == *sp => "!".into(),
+            Self::ErrorUnion(i, _) => format!("{}!", i.show()),
+            Self::Tuple(ts, _) => format!("({})", list(ts)),
+            Self::Fn(ps, Some(r), _) => format!("(fn({}) {})", list(ps), r.show()),
+            Self::Fn(ps, None, _) => format!("(fn({}))", list(ps)),
+            Self::Fut(i, _) => format!("fut {}", i.show()),
+            Self::Const(c) => c.show(),
         }
     }
 
     pub fn span(&self) -> Span {
         match self {
-            TypeExpr::Named { span, .. } => *span,
-            TypeExpr::Array(_, _, s)
-            | TypeExpr::Map(_, _, s)
-            | TypeExpr::Optional(_, s)
-            | TypeExpr::ErrorUnion(_, s)
-            | TypeExpr::Tuple(_, s)
-            | TypeExpr::Fn(_, _, s)
-            | TypeExpr::Fut(_, s) => *s,
-            TypeExpr::Const(c) => c.span(),
+            Self::Named { span, .. } => *span,
+            Self::Array(_, _, s)
+            | Self::Map(_, _, s)
+            | Self::Optional(_, s)
+            | Self::ErrorUnion(_, s)
+            | Self::Tuple(_, s)
+            | Self::Fn(_, _, s)
+            | Self::Fut(_, s) => *s,
+            Self::Const(c) => c.span(),
         }
     }
 }
@@ -221,9 +215,9 @@ pub enum UnOp {
 impl UnOp {
     pub fn symbol(self) -> &'static str {
         match self {
-            UnOp::Neg => "-",
-            UnOp::BitNot => "!",
-            UnOp::Not => "not",
+            Self::Neg => "-",
+            Self::BitNot => "!",
+            Self::Not => "not",
         }
     }
 }

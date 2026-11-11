@@ -102,8 +102,8 @@ pub fn builtin_type(name: &str) -> Option<TyId> {
 }
 
 impl Types {
-    pub fn new() -> Types {
-        let mut t = Types::default();
+    pub fn new() -> Self {
+        let mut t = Self::default();
         for k in [
             TyKind::Void,
             TyKind::Never,

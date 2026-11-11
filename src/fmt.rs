@@ -135,7 +135,7 @@ fn entry<'e, 'a>(
 }
 
 /// One entry per expression.
-fn expr_entries<'e, 'a>(xs: &'e [Expr]) -> Vec<Entry<'e, 'a>> {
+fn expr_entries<'a>(xs: &[Expr]) -> Vec<Entry<'_, 'a>> {
     xs.iter()
         .map(|x| entry(x.span.start as usize, move |p, i| p.expr(x, i)))
         .collect()
@@ -350,7 +350,10 @@ impl<'a> Printer<'a> {
                     } else {
                         format!(
                             "({})",
-                            tys.iter().map(|t| t.show()).collect::<Vec<_>>().join(", ")
+                            tys.iter()
+                                .map(super::ast::TypeExpr::show)
+                                .collect::<Vec<_>>()
+                                .join(", ")
                         )
                     };
                     self.out.push_str(&format!("{INDENT}{name}{payload}\n"));
@@ -677,7 +680,10 @@ impl<'a> Printer<'a> {
                 let base = self.paren(inner, indent, prec(inner) < POSTFIX);
                 format!(
                     "{base}<{}>",
-                    args.iter().map(|t| t.show()).collect::<Vec<_>>().join(", ")
+                    args.iter()
+                        .map(super::ast::TypeExpr::show)
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 )
             }
             ExprKind::Builtin(name, ty, args) => {

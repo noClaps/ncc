@@ -133,11 +133,11 @@ pub enum Pat {
     Value(Expr),
     /// Bare `if` arm: a boolean condition
     Cond(Expr),
-    Tuple(Vec<Pat>),
-    Struct(Vec<Pat>),
+    Tuple(Vec<Self>),
+    Struct(Vec<Self>),
     /// Array pattern: matches arrays of exactly this many elements
-    Array(Vec<Pat>),
-    Variant(usize, Vec<Pat>),
+    Array(Vec<Self>),
+    Variant(usize, Vec<Self>),
 }
 
 #[derive(Clone, Debug)]
@@ -148,9 +148,9 @@ pub struct Block {
 #[derive(Clone, Debug)]
 pub enum Place {
     Var(VarRef),
-    Field(Box<Place>, usize),
-    TupleIndex(Box<Place>, usize),
-    Index(Box<Place>, Box<Expr>),
+    Field(Box<Self>, usize),
+    TupleIndex(Box<Self>, usize),
+    Index(Box<Self>, Box<Expr>),
 }
 
 #[derive(Clone, Debug)]

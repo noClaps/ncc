@@ -340,8 +340,6 @@ fn default_value(ty: &str) -> String {
 // ------------------------------------------------------------------ code actions
 
 impl Server {
-    // `WorkspaceEdit::changes` is keyed by `Uri`, as defined by lsp-types
-    #[allow(clippy::mutable_key_type)]
     pub(super) fn code_actions(&self, p: CodeActionParams) -> Option<CodeActionResponse> {
         let uri = p.text_document.uri.clone();
         let path = uri_to_path(&uri)?;
@@ -697,9 +695,8 @@ pub(super) fn add_missing_fields(
     if let E::Generic(inner, _) = &t.kind {
         t = inner;
     }
-    let name = match &t.kind {
-        E::Ident(n) | E::Field(_, n) => n,
-        _ => return None,
+    let (E::Ident(name) | E::Field(_, name)) = &t.kind else {
+        return None;
     };
     let decl = a
         .index
@@ -795,7 +792,7 @@ fn missing_variants(a: &Analysis, fid: u32, ife: &ast::IfExpr, text: &str) -> Op
 }
 
 /// "Extract into a variable" for a selection that is exactly a typed expression.
-#[allow(clippy::too_many_arguments, clippy::mutable_key_type)]
+#[allow(clippy::too_many_arguments)]
 fn extract_variable(
     a: &Analysis,
     fid: u32,
@@ -849,7 +846,7 @@ fn extract_variable(
 
 /// "Generate function" for a call to an unknown name: a function after the current item,
 /// with parameters typed from the arguments and the return type from the context.
-#[allow(clippy::too_many_arguments, clippy::mutable_key_type)]
+#[allow(clippy::too_many_arguments)]
 fn generate_function(
     a: &Analysis,
     fid: u32,
@@ -964,7 +961,6 @@ fn generate_function(
 
 /// "Match on `x`" for a variable of an enum type: an `if` with a branch per variant after the
 /// statement at the cursor.
-#[allow(clippy::mutable_key_type)]
 fn match_on_value(
     a: &Analysis,
     fid: u32,
@@ -1000,7 +996,6 @@ fn match_on_value(
 }
 
 /// "Inline variable" on an immutable variable declared with a single name.
-#[allow(clippy::mutable_key_type)]
 fn inline_variable(
     a: &Analysis,
     fid: u32,

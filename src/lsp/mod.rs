@@ -16,12 +16,15 @@
 //! - `refactor.rs`: more code actions, and exit-point highlights
 //! - `ssr.rs`: structural search and replace, join lines and pulled diagnostics
 
+// `WorkspaceEdit::changes` is keyed by `Uri`, as defined by lsp-types
+#![allow(clippy::mutable_key_type)]
+
 mod actions;
 mod calls;
 mod complete;
 mod docs;
 mod hints;
-pub(crate) mod nav;
+pub mod nav;
 mod refactor;
 mod ssr;
 
@@ -109,7 +112,7 @@ struct DocSymbol {
     range: Range,
     selection_range: Range,
     #[serde(skip_serializing_if = "Option::is_none")]
-    children: Option<Vec<DocSymbol>>,
+    children: Option<Vec<Self>>,
 }
 
 /// Result of analysing one entry document.
@@ -441,8 +444,6 @@ fn span_range(text: &str, span: Span) -> Range {
     range(text, span.start as usize, span.end as usize)
 }
 
-// `WorkspaceEdit::changes` is keyed by `Uri`, as defined by lsp-types
-#[allow(clippy::mutable_key_type)]
 fn edit_action(
     title: String,
     kind: CodeActionKind,
@@ -740,11 +741,11 @@ impl Server {
                 .map(|(i, d)| (d.span, i))
                 .collect();
             let a = Analysis {
-                clean,
                 sm,
                 index,
                 imports,
                 decl_at,
+                clean,
             };
             out.extend(actions::warnings(&a, entry));
             self.analyses.insert(entry.to_path_buf(), a);
@@ -1260,16 +1261,15 @@ impl Server {
 
     fn prepare_rename(&self, p: TextDocumentPositionParams) -> Option<PrepareRenameResponse> {
         let path = uri_to_path(&p.text_document.uri)?;
-        let (name, ranges) = match self.alias_at(&p.text_document.uri, p.position) {
-            Some(alias) => alias,
-            None => {
-                let (key, name, first) = self.symbol_at(&p.text_document.uri, p.position)?;
-                let ranges = (self.occurrences(&key, &name, first).into_iter())
-                    .filter(|(p, _)| *p == path)
-                    .map(|(_, r)| r)
-                    .collect();
-                (name, ranges)
-            }
+        let (name, ranges) = if let Some(alias) = self.alias_at(&p.text_document.uri, p.position) {
+            alias
+        } else {
+            let (key, name, first) = self.symbol_at(&p.text_document.uri, p.position)?;
+            let ranges = (self.occurrences(&key, &name, first).into_iter())
+                .filter(|(p, _)| *p == path)
+                .map(|(_, r)| r)
+                .collect();
+            (name, ranges)
         };
         let text = self.text_of(&path)?;
         let off = pos_to_offset(&text, p.position);
@@ -1283,8 +1283,6 @@ impl Server {
             })
     }
 
-    // `WorkspaceEdit::changes` is keyed by `Uri`, as defined by lsp-types
-    #[allow(clippy::mutable_key_type)]
     fn rename(&self, p: RenameParams) -> Result<Option<WorkspaceEdit>, String> {
         let pp = p.text_document_position;
         let new = p.new_name.trim();
