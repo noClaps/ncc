@@ -10,7 +10,7 @@ use super::{
     uri_to_path,
 };
 use crate::ast::{self, ExprKind as E, StmtKind as S};
-use crate::check::index::DeclKind;
+use crate::check::index::{Call, DeclKind};
 use crate::diag::Span;
 
 impl Server {
@@ -153,9 +153,7 @@ impl Server {
     /// client's `editor.action.showReferences` command (as rust-analyzer does).
     pub(super) fn code_lenses(&self, p: CodeLensParams) -> Option<Vec<CodeLens>> {
         let path = uri_to_path(&p.text_document.uri)?;
-        let a = self.analyses.get(&path)?;
-        let fid = a.file_id(&path)?;
-        let text = &a.sm.file(fid).text;
+        let (a, fid, text) = self.analysis(&p.text_document.uri)?;
         let mut out = Vec::new();
         for d in &a.index.decls {
             if d.span.file != fid
@@ -246,59 +244,35 @@ impl Server {
         p: CallHierarchyIncomingCallsParams,
     ) -> Option<Vec<CallHierarchyIncomingCall>> {
         let key = Self::item_key(&p.item)?;
-        // caller (file, start) -> (item, call ranges)
-        let mut by_caller: BTreeMap<(PathBuf, u32), (CallHierarchyItem, Vec<Range>)> =
-            BTreeMap::new();
-        let mut seen = std::collections::HashSet::new();
-        for a in self.analyses.values() {
-            for c in &a.index.calls {
-                let cf = a.sm.file(c.callee.file);
-                if (cf.path.clone(), c.callee.start) != key {
-                    continue;
-                }
-                let at_file = a.sm.file(c.at.file);
-                if !seen.insert((at_file.path.clone(), c.at.start)) {
-                    continue;
-                }
-                let (ck, item) = if let Some((s, item)) = c
-                    .caller
-                    .and_then(|s| Some((s, Self::hierarchy_item(a, s)?)))
-                {
-                    ((a.sm.file(s.file).path.clone(), s.start), item)
-                } else {
-                    // the top level of a file (or a test)
-                    let path = at_file.path.clone();
-                    let name = path
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned();
-                    let whole = Range::new(
-                        Position::new(0, 0),
-                        offset_to_pos(&at_file.text, at_file.text.len()),
-                    );
-                    let item = CallHierarchyItem {
-                        name,
-                        kind: SymbolKind::FILE,
-                        tags: None,
-                        detail: Some("top level".into()),
-                        uri: path_to_uri(&path),
-                        range: whole,
-                        selection_range: Range::new(Position::new(0, 0), Position::new(0, 0)),
-                        data: None,
-                    };
-                    ((path, u32::MAX), item)
-                };
-                by_caller
-                    .entry(ck)
-                    .or_insert_with(|| (item, vec![]))
-                    .1
-                    .push(span_range(&at_file.text, c.at));
+        let calls = self.grouped_calls(|a, c| {
+            if (a.sm.file(c.callee.file).path.clone(), c.callee.start) != key {
+                return None;
             }
-        }
+            if let Some(s) = c.caller
+                && let Some(item) = Self::hierarchy_item(a, s)
+            {
+                return Some(((a.sm.file(s.file).path.clone(), s.start), item));
+            }
+            // the top level of a file (or a test)
+            let at_file = a.sm.file(c.at.file);
+            let path = at_file.path.clone();
+            let item = CallHierarchyItem {
+                name: (path.file_name().unwrap_or_default().to_string_lossy()).into_owned(),
+                kind: SymbolKind::FILE,
+                tags: None,
+                detail: Some("top level".into()),
+                uri: path_to_uri(&path),
+                range: Range::new(
+                    Position::new(0, 0),
+                    offset_to_pos(&at_file.text, at_file.text.len()),
+                ),
+                selection_range: Range::new(Position::new(0, 0), Position::new(0, 0)),
+                data: None,
+            };
+            Some(((path, u32::MAX), item))
+        });
         Some(
-            by_caller
-                .into_values()
+            (calls.into_iter())
                 .map(|(from, from_ranges)| CallHierarchyIncomingCall { from, from_ranges })
                 .collect(),
         )
@@ -309,36 +283,42 @@ impl Server {
         p: CallHierarchyOutgoingCallsParams,
     ) -> Option<Vec<CallHierarchyOutgoingCall>> {
         let key = Self::item_key(&p.item)?;
-        let mut by_callee: BTreeMap<(PathBuf, u32), (CallHierarchyItem, Vec<Range>)> =
-            BTreeMap::new();
-        let mut seen = std::collections::HashSet::new();
-        for a in self.analyses.values() {
-            for c in &a.index.calls {
-                let Some(caller) = c.caller else { continue };
-                if (a.sm.file(caller.file).path.clone(), caller.start) != key {
-                    continue;
-                }
-                let at_file = a.sm.file(c.at.file);
-                if !seen.insert((at_file.path.clone(), c.at.start)) {
-                    continue;
-                }
-                let Some(item) = Self::hierarchy_item(a, c.callee) else {
-                    continue;
-                };
-                let ck = (a.sm.file(c.callee.file).path.clone(), c.callee.start);
-                by_callee
-                    .entry(ck)
-                    .or_insert_with(|| (item, vec![]))
-                    .1
-                    .push(span_range(&at_file.text, c.at));
+        let calls = self.grouped_calls(|a, c| {
+            let caller = c.caller?;
+            if (a.sm.file(caller.file).path.clone(), caller.start) != key {
+                return None;
             }
-        }
+            let ck = (a.sm.file(c.callee.file).path.clone(), c.callee.start);
+            Some((ck, Self::hierarchy_item(a, c.callee)?))
+        });
         Some(
-            by_callee
-                .into_values()
+            (calls.into_iter())
                 .map(|(to, from_ranges)| CallHierarchyOutgoingCall { to, from_ranges })
                 .collect(),
         )
+    }
+
+    /// The call sites of every analysis, each once, grouped by the item (with its sort key)
+    /// that `group` gives them; `None` leaves a call out.
+    fn grouped_calls(
+        &self,
+        group: impl Fn(&Analysis, &Call) -> Option<((PathBuf, u32), CallHierarchyItem)>,
+    ) -> Vec<(CallHierarchyItem, Vec<Range>)> {
+        let mut groups: BTreeMap<(PathBuf, u32), (CallHierarchyItem, Vec<Range>)> = BTreeMap::new();
+        let mut seen = std::collections::HashSet::new();
+        for a in self.analyses.values() {
+            for c in &a.index.calls {
+                let Some((key, item)) = group(a, c) else {
+                    continue;
+                };
+                let at_file = a.sm.file(c.at.file);
+                if seen.insert((at_file.path.clone(), c.at.start)) {
+                    let ranges = &mut groups.entry(key).or_insert_with(|| (item, vec![])).1;
+                    ranges.push(span_range(&at_file.text, c.at));
+                }
+            }
+        }
+        groups.into_values().collect()
     }
 
     // ------------------------------------------------------------------ selection ranges

@@ -845,10 +845,7 @@ impl Server {
         uri: &Uri,
         pos: Position,
     ) -> Option<(&Analysis, &crate::check::index::SymRef)> {
-        let path = uri_to_path(uri)?;
-        let a = self.analyses.get(&path)?;
-        let fid = a.file_id(&path)?;
-        let text = &a.sm.file(fid).text;
+        let (a, fid, text) = self.analysis(uri)?;
         let off = pos_to_offset(text, pos) as u32;
         a.ref_at(fid, off).map(|r| (a, r))
     }
@@ -929,16 +926,21 @@ impl Server {
     /// The analysis of a document, when it was made from the document's current text: its
     /// file id and that text.
     fn fresh(&self, uri: &Uri) -> Option<(&Analysis, u32, &str)> {
-        let path = uri_to_path(uri)?;
-        let a = self.analyses.get(&path)?;
-        let fid = a.file_id(&path)?;
-        let text = &a.sm.file(fid).text;
-        if let Some(cur) = self.docs.get(&path)
+        let (a, fid, text) = self.analysis(uri)?;
+        if let Some(cur) = self.docs.get(&uri_to_path(uri)?)
             && cur != text
         {
             return None;
         }
         Some((a, fid, text))
+    }
+
+    /// The last analysis of a document: its file id and the text it analysed.
+    fn analysis(&self, uri: &Uri) -> Option<(&Analysis, u32, &str)> {
+        let path = uri_to_path(uri)?;
+        let a = self.analyses.get(&path)?;
+        let fid = a.file_id(&path)?;
+        Some((a, fid, &a.sm.file(fid).text))
     }
 
     fn definition(&self, p: GotoDefinitionParams) -> Option<GotoDefinitionResponse> {
