@@ -168,69 +168,6 @@ test "generic struct" {
 }
 ```
 
-## Constants
-
-Besides types, generics can take compile-time constants. A constant parameter is written with its type, `int`, `uint` or `byte`, instead of `type`. Constants are most useful as the sizes of [fixed-size arrays](./types/array#fixed-size-arrays):
-
-```nc
-fn first_of<type T, uint N>(T[N] arr) T {
-  return arr[0]
-}
-
-test "generic constant" {
-  int[3] nums = [1, 2, 3]
-  assert first_of<int, 3>(nums) == 1
-}
-```
-
-Like type arguments, constant arguments are always written explicitly, as integer literals or (inside another generic) as other constants.
-
-Array sizes can be computed from constants with `+`, `-`, `*`, `/` (integer division), `%` and parentheses, so the size of the result can depend on the sizes of the inputs:
-
-```nc
-fn join<type T, uint N, uint M>(T[N] a, T[M] b) T[N + M] {
-  return a <> b
-}
-
-fn twice<uint N>(int[N] arr) int[2 * N] {
-  return join<int, N, N>(arr, arr)
-}
-
-test "computed sizes" {
-  int[5] all = join<int, 2, 3>([1, 2], [3, 4, 5])
-  int[6] doubled = twice<3>([1, 2, 3])
-  assert doubled == [1, 2, 3, 1, 2, 3]
-}
-```
-
-The sizes are computed when the generic is used, and an invalid result is a compile error:
-
-```nc
-fn drop_one<type T, uint N>(T[N] arr) T[N - 1] {
-  return arr[1:$] // a slice with constant bounds keeps a fixed size
-}
-
-drop_one<int, 0>([]) // error: array size `N - 1` is -1, which is not a valid size (in instantiation `drop_one<int, 0>`)
-```
-
-Inside the definition, a constant can also be used as a value of the type it was declared with:
-
-```nc
-fn len_of<type T, uint N>(T[N] _arr) uint {
-  return N
-}
-```
-
-Structs and enums take constants in the same way:
-
-```nc
-struct Grid<type T, uint W, uint H> {
-  T[W * H] cells
-}
-
-Grid<str, 2, 1> row = Grid<str, 2, 1>{.cells = ["a", "b"]}
-```
-
 ## Chaining generics
 
 You can of course chain together generics with different types and pass type parameters through them:

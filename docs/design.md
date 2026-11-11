@@ -5,19 +5,13 @@
 1. **Lexing and parsing** (`src/lexer.rs`, `src/parser.rs`): source → AST (`src/ast.rs`).
    Newlines end statements, except after binary operators and inside brackets.
    Interpolated strings are lexed recursively.
-2. **Module loading** (`src/modules.rs`): resolves imports.
-   - `./` and `../` paths are relative to the importing file.
-   - `.../` paths are relative to `$ROOT`.
-   - `std/` and `libc/` paths resolve in the NC home, `$NC_HOME` or `~/.nc/` when it is
-     unset (so `std/math` is `~/.nc/std/math.nc`).
-   - All other paths resolve in `$ROOT/.nc/deps/`.
-   - `$ROOT` is the nearest directory that contains `.nc/config.toml`.
+2. **Module loading** (`src/modules.rs`): resolves imports, following the rules in
+   [design-updates.md](design-updates.md#modules-and-declarations).
 3. **Checking** (`src/check/`): name resolution, type checking and generic
    monomorphisation. It also covers closure capture analysis, exhaustiveness and
    control-flow (return/value) analysis, and lowers the AST to a typed IR (`src/tir.rs`).
-   - Imported modules contribute only the top-level statements that write globals reachable
-     from the entry module.
-4. **Warnings** (`src/lint.rs`): possible data races in `async` code.
+   Imported modules contribute only the top-level statements that the program needs.
+4. **Warnings** (`src/lint.rs`): possible data races in `async` code, and unused code.
 5. **Compile-time evaluation** (`src/eval.rs`): an interpreter for pure code. In every mode it
    rejects expressions that always panic, such as a call with constant arguments that
    overflows. In release mode it folds constant expressions and pure calls with constant
@@ -38,16 +32,12 @@ Every phase recovers and keeps going, so a single run reports all errors in sour
 
 ## Unused code
 
-After a program checks without errors, `lint::unused` reports what is never used: local
-variables (including pattern and `for` bindings), parameters, private (non-`pub`) functions,
-structs, enums, type aliases, module-level variables and extern functions, and imports. A
-declaration is used when the checker's index has a reference to it from anywhere else, tests
-included. The checker records which import aliases it resolved, and each module's `pub` names.
-Names starting with `_` and dependency modules (under `.nc/deps` or the NC home's `std/` and `libc/`) are skipped. Generic
-declarations are indexed when declared, so an uninstantiated generic is reported too.
-
-Debug builds, `ncc check` and `ncc test` print these as warnings; release builds (`-r`) report
-them as errors and stop. The language server shows the same diagnostics, faded, with quick fixes.
+After a program checks without errors, `lint::unused` reports what is never used (see
+[design-updates.md](design-updates.md#unused-code) for the rules). A declaration is used when
+the checker's index has a reference to it from anywhere else. The checker records which import
+aliases it resolved, and each module's `pub` names. Generic declarations are indexed when
+declared, so an uninstantiated generic is reported too. The language server shows the same
+diagnostics, faded, with quick fixes.
 
 ## Lean output
 
@@ -125,38 +115,17 @@ A request that panics is answered with an error; the server keeps running.
 | `fut T` | `nc_fut *`, run on a worker pool. Awaiting a future that has not started runs it inline. |
 | `mutex T` | `nc_mutex *` (pthread mutex plus value) |
 
-Values have value semantics. Containers are shared by reference count and copied on the first
-mutation while shared. Mutable variables captured by nested functions live in heap cells. Panics
-print `panic: <reason> (file:line)` and exit with code 101; an uncaught error prints
-`error: <msg>` and exits with code 1.
+Containers are shared by reference count and copied on the first mutation while shared, which
+gives them value semantics. Mutable variables captured by nested functions live in heap cells.
 
 ## Extern C ABI
 
-An `extern "file.c" as alias { ... }` block names a C file, relative to the NC file, that is
-pasted into the program's generated C (after a `#line` directive, so C diagnostics point at the
-file), letting the C compiler inline its functions. It shares the translation unit with the
-generated code, so its file-scope names must not clash with the runtime's `nc_` names or
-generated names. Headers it includes from its own directory are found when building. The file
-includes `nc.h` (`src/runtime/nc.h`): NC's
-value types, the runtime functions C code may call, and the optionals and error unions of the
-built-in types (`nc_err_int`, `nc_opt_str`, ...). It needs nothing else, so a copy can sit
-next to the C file for editors. For other types (structs, tuples, ...) the file includes
-`nc_gen.h` instead, a header generated during the build that includes `nc.h` and defines
-every type the program's extern signatures use. Each extern function is called with plain C
-arguments, without a closure environment:
+The C side of `extern` blocks (the `nc.h` and `nc_gen.h` headers, type mapping and ownership
+rules) is described in [design-updates.md](design-updates.md#external-functions-and-c).
 
-```c
-#include "nc.h"
-
-int64_t nc_test_add(int64_t a, int64_t b) { return a + b; }
-
-/* fn safe_div(int a, int b) int! = "nc_test_div" */
-nc_err_int nc_test_div(int64_t a, int64_t b) {
-  if (b == 0) return (nc_err_int){.err = nc_str_from_cstr("division by zero")};
-  return (nc_err_int){NULL, a / b};
-}
-```
-
-Generated type names are `nc_<mangled>`, for example `nc_err_int`, `nc_opt_str`, `nc_tup_int_str`
-or `nc_<StructName>`. Arguments are borrowed. Returned managed values must be owned
-(reference count +1).
+The C file is pasted into the program's generated C after a `#line` directive, so C
+diagnostics point at the file, and so the C compiler can inline its functions. `nc.h` is the
+public part of the runtime (`src/runtime/nc.h`), holding NC's value types, the runtime
+functions C code may call, and the optionals and error unions of the built-in types; it needs
+nothing else, so a copy can sit next to the C file for editors. `nc_gen.h` is generated during
+the build. Each extern function is called without a closure environment.

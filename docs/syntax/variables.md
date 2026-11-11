@@ -57,16 +57,6 @@ _ = hello() // discarded
 _ = "hi" // discarded
 ```
 
-## Unused names
-
-The compiler reports variables, parameters, private functions and types, and imports that are never used: as warnings in debug builds, and as errors in release builds (`-r`). Names starting with `_` are never reported, so you can keep a name that is unused on purpose:
-
-```nc
-fn handler(int _code) {
-  // `_code` is not used, and that's fine
-}
-```
-
 ## Sigil ordering
 
 Types are read from left to right. For instance, `int[]?` is a [signed integer](../types/numeric#int) [array](../types/array) that is [optional](../optionals), while `int?[]` is an array of signed integers that are optional.

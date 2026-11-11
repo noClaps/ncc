@@ -5,26 +5,13 @@ described in [`docs/syntax`](../../docs/syntax).
 
 ## Notes
 
-- Statements end at a newline, and newlines inside brackets are ignored. The grammar also
-  accepts a newline right after a binary operator. The compiler rejects that outside
-  brackets (`(1 +` followed by `2)` is required), but the leniency is harmless for
-  highlighting.
-- Operator precedence follows [`docs/FIXME.md`](../../docs/FIXME.md). From tightest to
-  loosest:
-  - postfix
-  - unary
-  - `**` (right-associative)
-  - `* / %`
-  - `+ -`
-  - `<< >>`
-  - `&`
-  - `^`
-  - `|`
-  - `<>`
-  - comparisons and `in`
-  - `and`
-  - `or`
-  - `else` / `catch`
+The language rules this grammar follows, such as
+[operator precedence](../../docs/design-updates.md#operators) and
+[line breaks in expressions](../../docs/design-updates.md#line-breaks-in-expressions), are in
+[`docs/design-updates.md`](../../docs/design-updates.md). Where the grammar differs:
+
+- It accepts a newline right after a binary operator even outside brackets, which the
+  compiler rejects. The leniency is harmless for highlighting.
 - Generic arguments must touch the name (`map<int, str>(...)`, `Matrix<int>`), which is
   how they are told apart from a `<` comparison.
 - `if` patterns are parsed as expressions: `_`, literals, tuples, arrays, struct literals

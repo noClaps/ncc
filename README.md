@@ -5,8 +5,9 @@ the system C compiler (`$CC`, falling back to `cc`).
 
 - Language reference: [docs/syntax/](docs/syntax/)
 - Compiler behaviour and CLI: [docs/compiler.md](docs/compiler.md)
-- Clarifications made while implementing the spec: [docs/FIXME.md](docs/FIXME.md)
-- Implementation notes and the extern C ABI: [docs/design.md](docs/design.md)
+- Language design changes since the spec: [docs/design-updates.md](docs/design-updates.md)
+- Tooling clarifications: [docs/FIXME.md](docs/FIXME.md)
+- Implementation notes: [docs/design.md](docs/design.md)
 
 ## Building
 

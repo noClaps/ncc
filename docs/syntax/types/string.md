@@ -26,19 +26,6 @@ for i in my_string {
 // 🍪
 ```
 
-## Slicing
-
-Strings can be sliced like [arrays](../array#slicing), with `string[start:end]`. The bounds count characters, not bytes, and the result is a new string:
-
-```nc
-test "string slicing" {
-  str s = "cookie 🍪"
-  assert s[0:5] == "cookie"
-  assert s[7:$] == "🍪"
-  assert s[0:$-1] == "cookie "
-}
-```
-
 ## Format strings
 
 You can insert values into format strings using `{<value>}`:
