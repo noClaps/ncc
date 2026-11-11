@@ -230,7 +230,7 @@ impl Server {
         let path = uri_to_path(&pp.text_document.uri)?;
         let text = self.text_of(&path)?;
         let off = pos_to_offset(&text, pp.position);
-        let line_start = text[..off].rfind('\n').map_or(0, |i| i + 1);
+        let line_start = super::line_start(&text, off);
         let before = &text[line_start..off];
         let analysis = self.analyses.get(&path);
         let fid = analysis.and_then(|a| a.file_id(&path));

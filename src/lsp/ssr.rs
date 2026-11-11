@@ -286,7 +286,7 @@ impl Server {
                     - text[nl + 1..].trim_start_matches([' ', '\t']).len();
                 let mut next = &text[after_start..];
                 let mut del_end = after_start;
-                let prev_line = &text[before.rfind('\n').map_or(0, |x| x + 1)..before.len()];
+                let prev_line = &before[super::line_start(before, before.len())..];
                 if prev_line.trim_start().starts_with("//") && next.starts_with("//") {
                     let n = next.len() - next.trim_start_matches('/').len();
                     next = next[n..].trim_start();

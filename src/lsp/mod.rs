@@ -398,8 +398,9 @@ fn offset_to_pos(text: &str, offset: usize) -> Position {
     let offset = offset.min(text.len());
     let before = &text[..offset];
     let line = before.matches('\n').count();
-    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
-    let col: usize = text[line_start..offset].encode_utf16().count();
+    let col: usize = text[line_start(text, offset)..offset]
+        .encode_utf16()
+        .count();
     Position::new(line as u32, col as u32)
 }
 
