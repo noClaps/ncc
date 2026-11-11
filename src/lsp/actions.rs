@@ -7,7 +7,7 @@
 //! Refactors: extract an expression into a variable, inline a variable.
 //! Source actions: remove all unused imports.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use lsp_types::*;
@@ -345,24 +345,13 @@ impl Server {
         let path = uri_to_path(&uri)?;
         let text = self.text_of(&path)?;
         let mut out = Vec::new();
-        let action = |title: String,
-                      kind: CodeActionKind,
-                      diag: Option<&Diagnostic>,
-                      edits: Vec<TextEdit>,
-                      preferred: bool| {
-            let mut changes = HashMap::new();
-            changes.insert(uri.clone(), edits);
-            CodeActionOrCommand::CodeAction(CodeAction {
-                title,
-                kind: Some(kind),
-                diagnostics: diag.map(|d| vec![d.clone()]),
-                edit: Some(WorkspaceEdit {
-                    changes: Some(changes),
-                    ..Default::default()
-                }),
-                is_preferred: preferred.then_some(true),
-                ..Default::default()
-            })
+        let action = |title, kind, diag, edits: Vec<TextEdit>, preferred: bool| {
+            let changes = edits.into_iter().map(|e| (uri.clone(), e)).collect();
+            let mut a = edit_action(title, kind, changes, diag);
+            if let CodeActionOrCommand::CodeAction(c) = &mut a {
+                c.is_preferred = preferred.then_some(true);
+            }
+            a
         };
         let insert = |at: Position, s: &str| TextEdit::new(Range::new(at, at), s.to_string());
         let (module, _) = crate::parser::parse_module_recover(&text, 0);

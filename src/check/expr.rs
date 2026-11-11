@@ -502,16 +502,7 @@ impl Checker {
                 mk(EK::Else(Box::new(o), fallback), inner)
             }
             E::Catch(x, name, name_span, b) => {
-                let v = self.check_expr(x, None)?;
-                let TyKind::ErrU(inner) = *self.types.kind(v.ty) else {
-                    return err(
-                        x.span,
-                        format!(
-                            "`catch` can only be used on error unions, found `{}`",
-                            self.types.show(v.ty)
-                        ),
-                    );
-                };
+                let (v, inner) = self.check_error_union(x, "catch")?;
                 let id = self.new_jump();
                 self.push_scope();
                 let local = if name == "_" {
@@ -538,16 +529,7 @@ impl Checker {
             }
             E::Try(x) => {
                 self.require_throwing(span, "`try`")?;
-                let v = self.check_expr(x, None)?;
-                let TyKind::ErrU(inner) = *self.types.kind(v.ty) else {
-                    return err(
-                        x.span,
-                        format!(
-                            "`try` can only be used on error unions, found `{}`",
-                            self.types.show(v.ty)
-                        ),
-                    );
-                };
+                let (v, inner) = self.check_error_union(x, "try")?;
                 mk(EK::Try(Box::new(v)), inner)
             }
             E::Async(call) => {
@@ -1248,6 +1230,19 @@ impl Checker {
         (vals.into_iter().zip(&def.fields))
             .map(|(v, (name, _))| v.ok_or_else(|| Diag::new(span, missing(name))))
             .collect()
+    }
+
+    /// The operand of `catch` or `try` (`kw`), which must be an error union, and its value type.
+    fn check_error_union(&mut self, x: &ast::Expr, kw: &str) -> Result<(Expr, TyId)> {
+        let v = self.check_expr(x, None)?;
+        let TyKind::ErrU(inner) = *self.types.kind(v.ty) else {
+            let ty = self.types.show(v.ty);
+            return err(
+                x.span,
+                format!("`{kw}` can only be used on error unions, found `{ty}`"),
+            );
+        };
+        Ok((v, inner))
     }
 
     fn op_error<T>(&self, span: Span, op: &str, ty: TyId) -> Result<T> {

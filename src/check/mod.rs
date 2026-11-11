@@ -670,14 +670,9 @@ impl Checker {
                 return err(*sp, format!("duplicate field `{name}`"));
             }
             let t = self.resolve_type(fty, m, tp)?;
-            if matches!(
-                self.types.kind(t),
-                TyKind::Void | TyKind::Never | TyKind::Mutex(_) | TyKind::Fut(_)
-            ) {
-                return err(
-                    *sp,
-                    format!("struct fields cannot have type `{}`", self.types.show(t)),
-                );
+            if !self.storable(t) {
+                let ts = self.types.show(t);
+                return err(*sp, format!("struct fields cannot have type `{ts}`"));
             }
             fields.push((name.clone(), t));
         }
@@ -685,17 +680,12 @@ impl Checker {
             .field_spans
             .insert(ty, s.fields.iter().map(|f| f.2).collect());
         self.ix.type_spans.insert(ty, s.span);
+        for ((name, t), (.., sp)) in fields.iter().zip(&s.fields) {
+            let detail = format!("{} {name}", self.types.show(*t));
+            self.idx_decl(name, *sp, index::DeclKind::Field, detail, vec![]);
+        }
         if let TyKind::Struct(i) = *self.types.kind(ty) {
             self.types.structs[i as usize].fields = fields;
-        }
-        for (_, name, sp) in &s.fields {
-            let fdetail = self
-                .types
-                .struct_def(ty)
-                .and_then(|d| d.fields.iter().find(|f| &f.0 == name))
-                .map(|f| format!("{} {name}", self.types.show(f.1)))
-                .unwrap_or_default();
-            self.idx_decl(name, *sp, index::DeclKind::Field, fdetail, vec![]);
         }
         Ok(())
     }
@@ -1344,17 +1334,22 @@ impl Checker {
         })
     }
 
-    fn check_elem_type(&self, t: TyId, sp: Span) -> Result<()> {
-        if matches!(
+    /// Whether values of type `t` can be stored in containers and struct fields.
+    fn storable(&self, t: TyId) -> bool {
+        !matches!(
             self.types.kind(t),
             TyKind::Void | TyKind::Never | TyKind::Mutex(_) | TyKind::Fut(_)
-        ) {
-            return err(
-                sp,
-                format!("`{}` cannot be stored in a container", self.types.show(t)),
-            );
+        )
+    }
+
+    fn check_elem_type(&self, t: TyId, sp: Span) -> Result<()> {
+        if self.storable(t) {
+            return Ok(());
         }
-        Ok(())
+        err(
+            sp,
+            format!("`{}` cannot be stored in a container", self.types.show(t)),
+        )
     }
 
     /// Types supporting `==` and conversion to `str` (printing, format strings): those with no
