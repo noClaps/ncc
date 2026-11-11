@@ -145,7 +145,8 @@ fn cc_command() -> (String, Vec<String>) {
 
 struct TempDir(PathBuf);
 impl TempDir {
-    fn new() -> std::io::Result<Self> {
+    /// A new temporary directory; `None` (already reported) when it cannot be created.
+    fn new() -> Option<Self> {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static N: AtomicUsize = AtomicUsize::new(0);
         let base = std::env::temp_dir();
@@ -153,9 +154,12 @@ impl TempDir {
             let n = N.fetch_add(1, Ordering::Relaxed);
             let p = base.join(format!("ncc-{}-{n}", std::process::id()));
             match std::fs::create_dir(&p) {
-                Ok(()) => return Ok(Self(p)),
+                Ok(()) => return Some(Self(p)),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(e) => return Err(e),
+                Err(e) => {
+                    eprintln!("error: cannot create a temporary directory: {e}");
+                    return None;
+                }
             }
         }
     }
@@ -183,12 +187,8 @@ fn compile(
         }
         return true;
     }
-    let tmp = match TempDir::new() {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("error: cannot create a temporary directory: {e}");
-            return false;
-        }
+    let Some(tmp) = TempDir::new() else {
+        return false;
     };
     let main_c = tmp.0.join("main.c");
     let ok = std::fs::write(&main_c, &c_src)
@@ -308,12 +308,8 @@ fn build_and_run(o: &Options, mode: Mode) -> ExitCode {
     let Some(p) = frontend(file, &mut sm, o.release, true) else {
         return ExitCode::FAILURE;
     };
-    let tmp = match TempDir::new() {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("error: cannot create a temporary directory: {e}");
-            return ExitCode::FAILURE;
-        }
+    let Some(tmp) = TempDir::new() else {
+        return ExitCode::FAILURE;
     };
     let exe = tmp.0.join("program");
     if !compile(&p, &sm, mode, o.release, Format::Exe, &exe) {

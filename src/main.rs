@@ -191,23 +191,19 @@ fn main() -> ExitCode {
         },
         "init" => {
             let mut name = None;
-            let mut i = 0;
-            while i < rest.len() {
-                match rest[i].as_str() {
+            let mut it = rest.iter();
+            while let Some(a) = it.next() {
+                match a.as_str() {
                     "-h" | "--help" => {
                         println!("{HELP_INIT}");
                         return ExitCode::SUCCESS;
                     }
-                    "--name" => {
-                        i += 1;
-                        match rest.get(i) {
-                            Some(n) => name = Some(n.clone()),
-                            None => return usage_error("`--name` requires a value", HELP_INIT),
-                        }
-                    }
+                    "--name" => match it.next() {
+                        Some(n) => name = Some(n.clone()),
+                        None => return usage_error("`--name` requires a value", HELP_INIT),
+                    },
                     a => return usage_error(&format!("unexpected argument `{a}`"), HELP_INIT),
                 }
-                i += 1;
             }
             driver::init(name)
         }
@@ -219,9 +215,9 @@ fn main() -> ExitCode {
                 _ => HELP_TEST,
             };
             let mut opts = driver::Options::default();
-            let mut i = 0;
-            while i < rest.len() {
-                let a = rest[i].as_str();
+            let mut it = rest.iter();
+            while let Some(a) = it.next() {
+                let a = a.as_str();
                 match a {
                     "-h" | "--help" => {
                         println!("{help}");
@@ -229,13 +225,12 @@ fn main() -> ExitCode {
                     }
                     // everything after `--` goes to the program, options included
                     "--" if cmd == "run" || cmd == "test" => {
-                        opts.args = rest[i + 1..].to_vec();
+                        opts.args = it.cloned().collect();
                         break;
                     }
                     "-r" | "--release" if cmd == "build" || cmd == "run" => opts.release = true,
                     "-f" | "--format" if cmd == "build" => {
-                        i += 1;
-                        let Some(f) = rest.get(i) else {
+                        let Some(f) = it.next() else {
                             return usage_error("`--format` requires a value", help);
                         };
                         opts.format = Some(match f.as_str() {
@@ -251,8 +246,7 @@ fn main() -> ExitCode {
                         });
                     }
                     "-o" | "--output" if cmd == "build" => {
-                        i += 1;
-                        let Some(o) = rest.get(i) else {
+                        let Some(o) = it.next() else {
                             return usage_error("`--output` requires a value", help);
                         };
                         opts.output = Some(o.into());
@@ -267,7 +261,6 @@ fn main() -> ExitCode {
                         opts.file = Some(a.into());
                     }
                 }
-                i += 1;
             }
             if opts.file.is_none() {
                 return usage_error("missing <file>", help);
