@@ -592,23 +592,33 @@ impl Server {
         use crate::lexer::Tok;
         match toks.last().map(|t| &t.tok) {
             // a call's argument, not a parameter of a declaration (`fn f(int a, |`)
-            Some(Tok::LParen | Tok::Comma) => {
-                if in_fn_header(&toks) {
+            Some(Tok::LParen | Tok::Comma | Tok::LBracket) => {
+                let Some((open, commas)) = unclosed(&toks) else {
+                    return Slot::Other;
+                };
+                let open_off = toks[open].span.start as usize;
+                if toks[open].tok == Tok::LBracket {
+                    return match open.checked_sub(1).map(|i| &toks[i].tok) {
+                        // a map type: `[str]int m`
+                        None | Some(Tok::Newline | Tok::LBrace | Tok::RBrace) => Slot::Other,
+                        // an index or key: `xs[`
+                        Some(Tok::Ident(k)) if k != "return" => Slot::Value(None),
+                        Some(Tok::RParen | Tok::RBracket) => Slot::Value(None),
+                        // an array element: of the array's element type
+                        _ => match self.slot_at(uri, text, a, fid, open_off) {
+                            Slot::Value(t) => Slot::Value(t.as_deref().and_then(elem_ty)),
+                            Slot::Other => Slot::Other,
+                        },
+                    };
+                }
+                if toks[open].tok != Tok::LParen || in_fn_header(&toks) {
                     return Slot::Other;
                 }
                 if let Some(c) = self.call_at(uri, s) {
-                    let ty = super::calls::params(&c.label)
-                        .get(c.arg as usize)
-                        .map(|(t, _)| t.clone());
-                    // a type naming the callee's own generic parameters only says whether it
-                    // is a function
-                    return Slot::Value(ty.filter(|t| is_fn_ty(t) || !open_generics(&c.label, t)));
+                    return Slot::Value(arg_ty(a.zip(fid), text, &toks, open, &c));
                 }
                 // a tuple's element or a parenthesized value: where the `(` is
-                let Some((open, commas)) = unclosed_paren(&toks) else {
-                    return Slot::Other;
-                };
-                match self.slot_at(uri, text, a, fid, toks[open].span.start as usize) {
+                match self.slot_at(uri, text, a, fid, open_off) {
                     Slot::Value(Some(t)) if !is_fn_ty(&t) && t.starts_with('(') => {
                         let inner = &t[1..t.len() - 1];
                         let elems = super::calls::split_top(inner);
@@ -680,15 +690,6 @@ impl Server {
             // the enclosing function's return value
             Some(Tok::Ident(k)) if k == "return" => {
                 Slot::Value(enclosing_fn_return(text, &toks).map(str::to_string))
-            }
-            // an array element (not a map type: `[str]int m`)
-            Some(Tok::LBracket)
-                if !matches!(
-                    toks.iter().rev().nth(1).map(|t| &t.tok),
-                    None | Some(Tok::Newline | Tok::LBrace | Tok::RBrace)
-                ) =>
-            {
-                Slot::Value(None)
             }
             _ => Slot::Other,
         }
@@ -981,6 +982,195 @@ fn is_fn_ty(t: &str) -> bool {
 /// The innermost unclosed `(` at the end of `toks` (not inside `[...]` or `{...}`), with the
 /// number of commas after it at its level.
 fn unclosed_paren(toks: &[&crate::lexer::Token]) -> Option<(usize, usize)> {
+    unclosed(toks).filter(|&(i, _)| toks[i].tok == crate::lexer::Tok::LParen)
+}
+
+/// The generic parameters a signature label declares (`fn map<type I, type O>(` -> `I`, `O`);
+/// none when the call gave them (`fn map<int, str>(`).
+fn declared_generics(label: &str) -> Vec<String> {
+    let head = &label[..label.find('(').unwrap_or(label.len())];
+    let (Some(l), Some(r)) = (head.find('<'), head.rfind('>')) else {
+        return vec![];
+    };
+    let list = &head[l + 1..r];
+    // declared parameters are `kind name`; given arguments are types (`int`, `(fn() int)`)
+    super::calls::split_top(list)
+        .into_iter()
+        .filter_map(|(x, y)| {
+            let (kind, name) = list[x..y].split_once(' ')?;
+            (kind.bytes().all(is_ident_byte) && name.bytes().all(is_ident_byte))
+                .then(|| name.to_string())
+        })
+        .collect()
+}
+
+/// Whether `ty` names one of the generic parameters `tps`.
+fn mentions(ty: &str, tps: &[String]) -> bool {
+    ty.split(|c: char| !c.is_ascii() || !is_ident_byte(c as u8))
+        .any(|w| tps.iter().any(|t| t == w))
+}
+
+/// The type expected for argument `c.arg` of the call whose `(` is `toks[open]`. A generic
+/// parameter (`T`, `I[]`) is resolved from the types of the arguments before it
+/// (`pick(h, |` with `fn pick<type T>(T a, T b)`); one that stays unresolved only says
+/// whether it is a function.
+fn arg_ty(
+    a: Option<(&Analysis, u32)>,
+    text: &str,
+    toks: &[&crate::lexer::Token],
+    open: usize,
+    c: &super::calls::CallCtx,
+) -> Option<String> {
+    use crate::lexer::Tok;
+    let ps = super::calls::params(&c.label);
+    let ty = ps.get(c.arg as usize)?.0.clone();
+    let tps = declared_generics(&c.label);
+    if !mentions(&ty, &tps) {
+        return Some(ty);
+    }
+    // the arguments' spans: (first token, last token)
+    let mut args: Vec<(usize, usize)> = Vec::new();
+    let (mut depth, mut first) = (0, None);
+    for (i, t) in toks.iter().enumerate().skip(open + 1) {
+        match t.tok {
+            Tok::Newline => continue,
+            Tok::Comma if depth == 0 => {
+                args.extend(first.map(|f| (f, i - 1)));
+                first = None;
+                continue;
+            }
+            Tok::LParen | Tok::LBracket | Tok::LBrace => depth += 1,
+            Tok::RParen | Tok::RBracket | Tok::RBrace => depth -= 1,
+            _ => {}
+        }
+        first.get_or_insert(i);
+    }
+    let mut binds: HashMap<String, String> = HashMap::new();
+    if let Some((a, fid)) = a {
+        for (k, &(f, l)) in args.iter().enumerate().take(c.arg as usize) {
+            let (start, end) = (toks[f].span.start, toks[l].span.end);
+            // the checked type, or (on the line being typed, which does not parse yet) the
+            // type of a simple expression
+            let x = match a.expr_ty(fid, start, end) {
+                Some(x) => Some(x.ty.clone()),
+                None => text_ty(a, fid, text, &toks[f..=l]),
+            };
+            let (Some(x), Some((p, _))) = (x, ps.get(k)) else {
+                continue;
+            };
+            for (n, t) in accepts(p, &x, &tps).unwrap_or_default() {
+                binds.entry(n).or_insert(t);
+            }
+        }
+    }
+    let (names, with): (Vec<String>, Vec<String>) = binds.into_iter().unzip();
+    let ty = super::calls::substitute(&ty, &names, &with);
+    (is_fn_ty(&ty) || !mentions(&ty, &tps)).then_some(ty)
+}
+
+/// The type of a simple expression from its tokens: a literal, a name, a chain (`p.x`,
+/// `f().y`), an array literal or a struct literal.
+fn text_ty(a: &Analysis, fid: u32, text: &str, toks: &[&crate::lexer::Token]) -> Option<String> {
+    use crate::lexer::Tok;
+    let (first, last) = (toks.first()?, toks.last()?);
+    let src = &text[first.span.start as usize..last.span.end as usize];
+    if let [t] = toks {
+        match &t.tok {
+            Tok::Int(_, false) => return Some("int".into()),
+            Tok::Int(_, true) => return Some("uint".into()),
+            Tok::Float(_) => return Some("float".into()),
+            Tok::Str(_) => return Some("str".into()),
+            Tok::Char(_) => return Some("char".into()),
+            Tok::Ident(b) if b == "true" || b == "false" => return Some("bool".into()),
+            Tok::Ident(n) => {
+                let d = visible(a, fid, first.span.start as usize)
+                    .into_iter()
+                    .find(|d| &d.name == n)?;
+                return match d.kind {
+                    DeclKind::Variable => d.ty.clone(),
+                    DeclKind::Function => fn_value_ty(&d.detail),
+                    _ => None,
+                };
+            }
+            _ => {}
+        }
+    }
+    // `[a, b]`: an array of the first element's type
+    if first.tok == Tok::LBracket && last.tok == Tok::RBracket {
+        let mut depth = 0;
+        let end = toks[1..]
+            .iter()
+            .position(|t| {
+                match t.tok {
+                    Tok::LParen | Tok::LBracket | Tok::LBrace => depth += 1,
+                    Tok::RParen | Tok::RBracket | Tok::RBrace => depth -= 1,
+                    Tok::Comma if depth == 0 => return true,
+                    _ => {}
+                }
+                depth < 0
+            })
+            .map_or(toks.len() - 1, |p| p + 1);
+        return (end > 1)
+            .then(|| text_ty(a, fid, text, &toks[1..end]))
+            .flatten()
+            .map(|t| format!("{t}[]"));
+    }
+    // `Name{...}`, `Name<int>{...}`
+    if last.tok == Tok::RBrace
+        && let Some(b) = src.find('{')
+        && src[..b]
+            .trim()
+            .starts_with(|c: char| c.is_ascii_uppercase())
+    {
+        return Some(src[..b].trim().to_string());
+    }
+    receiver_chain(src)
+        .filter(|(_, start)| *start == 0)
+        .and_then(|(chain, _)| chain_ty(a, fid, first.span.start as usize, &chain))
+}
+
+/// The type of a function as a value, from its signature label:
+/// `fn add(int a, int b) int` -> `(fn(int, int) int)`.
+fn fn_value_ty(detail: &str) -> Option<String> {
+    let (_, r) = super::calls::params_range(detail)?;
+    let ps: Vec<String> = super::calls::params(detail)
+        .into_iter()
+        .map(|(t, _)| t)
+        .collect();
+    let ret = detail[r + 1..].trim();
+    Some(if ret.is_empty() {
+        format!("(fn({}))", ps.join(", "))
+    } else {
+        format!("(fn({}) {ret})", ps.join(", "))
+    })
+}
+
+/// The element type of an array type (`int[]`, `P[3]` -> `int`, `P`); not of a map.
+fn elem_ty(t: &str) -> Option<String> {
+    let t = t.trim();
+    if t.starts_with('[') || !t.ends_with(']') {
+        return None;
+    }
+    let mut depth = 0;
+    for (i, c) in t.char_indices().rev() {
+        match c {
+            ']' | ')' | '>' => depth += 1,
+            '(' | '<' => depth -= 1,
+            '[' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(t[..i].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The innermost unclosed `(`, `[` or `{` at the end of `toks`, with the number of commas
+/// after it at its level.
+fn unclosed(toks: &[&crate::lexer::Token]) -> Option<(usize, usize)> {
     use crate::lexer::Tok;
     let (mut depth, mut commas) = (0, 0);
     let mut i = toks.len();
@@ -992,32 +1182,11 @@ fn unclosed_paren(toks: &[&crate::lexer::Token]) -> Option<(usize, usize)> {
         match toks[i].tok {
             Tok::RParen | Tok::RBracket | Tok::RBrace => depth += 1,
             Tok::LParen | Tok::LBracket | Tok::LBrace if depth > 0 => depth -= 1,
-            Tok::LParen => return Some((i, commas)),
-            Tok::LBracket | Tok::LBrace => return None,
+            Tok::LParen | Tok::LBracket | Tok::LBrace => return Some((i, commas)),
             Tok::Comma if depth == 0 => commas += 1,
             _ => {}
         }
     }
-}
-
-/// Whether `ty` names a generic parameter of the signature `label` that the call did not
-/// give explicitly (`fn map<type I, type O>(...)`, not `fn map<int, str>(...)`).
-fn open_generics(label: &str, ty: &str) -> bool {
-    let head = &label[..label.find('(').unwrap_or(label.len())];
-    let (Some(l), Some(r)) = (head.find('<'), head.rfind('>')) else {
-        return false;
-    };
-    let list = &head[l + 1..r];
-    // declared parameters are `kind name`; given arguments are types (`int`, `(fn() int)`)
-    let declared: Vec<&str> = super::calls::split_top(list)
-        .into_iter()
-        .filter_map(|(x, y)| {
-            let (kind, name) = list[x..y].split_once(' ')?;
-            (kind.bytes().all(is_ident_byte) && name.bytes().all(is_ident_byte)).then_some(name)
-        })
-        .collect();
-    ty.split(|c: char| !is_ident_byte(c as u8) || !c.is_ascii())
-        .any(|w| declared.contains(&w))
 }
 
 /// Whether the innermost unclosed `(` at the end of `toks` opens the parameters of a function
@@ -1462,13 +1631,20 @@ fn struct_literal_fields(a: &Analysis, text: &str, dot: usize) -> Option<Vec<Com
 #[cfg(test)]
 mod tests {
     #[test]
-    fn open_generic_parameters() {
-        let g = "fn map<type I, type O>(I[] arr, (fn(I) O) f) O[]";
-        assert!(super::open_generics(g, "I[]"));
-        assert!(!super::open_generics(g, "int[]"));
+    fn generic_parameters_and_elements() {
+        let g = super::declared_generics("fn map<type I, type O>(I[] arr, (fn(I) O) f) O[]");
+        assert_eq!(g, ["I", "O"]);
+        assert!(super::mentions("I[]", &g) && !super::mentions("int[]", &g));
         let given = "fn map<int, (fn() str)>(int[] arr, (fn(int) (fn() str)) f) (fn() str)[]";
-        assert!(!super::open_generics(given, "int[]"));
-        assert!(!super::open_generics("fn add(int a, int b) int", "int"));
+        assert!(super::declared_generics(given).is_empty());
+        assert!(super::declared_generics("fn add(int a, int b) int").is_empty());
+        assert_eq!(super::elem_ty("P[]").as_deref(), Some("P"));
+        assert_eq!(
+            super::elem_ty("(fn() int)[3]").as_deref(),
+            Some("(fn() int)")
+        );
+        assert_eq!(super::elem_ty("int[][]").as_deref(), Some("int[]"));
+        assert_eq!(super::elem_ty("[str]int"), None);
     }
 
     #[test]

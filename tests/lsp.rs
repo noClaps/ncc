@@ -2132,7 +2132,7 @@ fn generic_bodies() {
 #[test]
 fn function_value_completion() {
     let mut s = Session::start("fnvalue");
-    let src = "fn func() int {\n  return 1\n}\n\nfn other_func((fn() int) f) int {\n  return f()\n}\n\nstruct Handler {\n  (fn() int) cb\n  int n\n}\n\nstruct Box<type T> {\n  T value\n  (fn() int) cb\n}\n\nmut (fn() int) g = func\nint v = other_func(func)\nmut Handler h = Handler{.cb = func, .n = 1}\nHandler[] hs = [h]\n@println(v, g(), h.n, hs.len)\n";
+    let src = "fn func() int {\n  return 1\n}\n\nfn other_func((fn() int) f) int {\n  return f()\n}\n\nstruct Handler {\n  (fn() int) cb\n  int n\n}\n\nstruct Box<type T> {\n  T value\n  (fn() int) cb\n}\n\nfn pick<type T>(T a, T b) T {\n  return a\n}\n\nfn map<type I, type O>(I[] xs, (fn(I) O) f) O[] {\n  mut O[] out = []\n  for i in xs {\n    out = out <> [f(xs[i])]\n  }\n  return out\n}\n\nmut (fn() int) g = func\nint v = other_func(func)\nmut Handler h = Handler{.cb = func, .n = 1}\nHandler[] hs = [h]\n@println(v, g(), h.n, hs.len)\n";
     let diags = s.open(src);
     assert!(diags.iter().all(|d| d["severity"] != 1), "{diags:?}");
     // the insert text of `label` when completing at the end of `line` appended to `src`
@@ -2216,6 +2216,36 @@ fn function_value_completion() {
     assert_eq!(insert("(int, (fn() int)) t = (f", "func"), "func()$0");
     assert_eq!(insert("int x = other_func((f", "func"), Value::Null);
     assert_eq!(insert("(int, H", "Handler"), Value::Null);
+
+    // generic parameters resolved from the arguments before
+    assert_eq!(insert("Handler k = pick(h, H", "Handler"), literal);
+    assert_eq!(
+        insert(
+            "Box<int> k = pick(Box<int>{.value = 1, .cb = func}, B",
+            "Box"
+        ),
+        "Box<int>{.value = $1, .cb = $2}$0"
+    );
+    assert_eq!(
+        insert(
+            "Box<int>[] k = map([1], fn(int n) Box<int> {\n  return B",
+            "Box"
+        ),
+        "Box<int>{.value = $1, .cb = $2}$0"
+    );
+    assert_eq!(insert("(fn() int) k = pick(func, f", "func"), Value::Null);
+    assert_eq!(insert("int k = pick(1, f", "func"), "func()$0");
+    assert_eq!(insert("int k = pick(f", "func"), "func()$0");
+    assert_eq!(insert("Handler[] k = pick([h], [H", "Handler"), literal);
+    assert_eq!(insert("int[] k = map([1, 2], f", "func"), Value::Null);
+    assert_eq!(insert("Handler[] k = map([h], f", "func"), Value::Null);
+
+    // array elements
+    assert_eq!(insert("Handler[] ks = [h, H", "Handler"), literal);
+    assert_eq!(insert("(fn() int)[] fs = [f", "func"), Value::Null);
+    assert_eq!(insert("(fn() int)[] fs = [func, f", "func"), Value::Null);
+    assert_eq!(insert("int[] xs = [1, f", "func"), "func()$0");
+    assert_eq!(insert("@println(hs[f", "func"), "func()$0");
 
     // but not where a type is expected
     assert_eq!(insert("H", "Handler"), Value::Null);
