@@ -9,38 +9,31 @@ use crate::tir::*;
 /// Shared mutable state touched by a function: (variable name, access location).
 fn shared_accesses(p: &Program, f: FuncId) -> Vec<(String, Span)> {
     let func = &p.funcs[f];
-    let mut out = Vec::new();
-    let mut visit = |e: &Expr| {
-        if let EK::Var(v) = &e.kind {
-            match v {
-                VarRef::Global(g) if p.globals[*g].mutable => {
-                    out.push((p.globals[*g].name.clone(), e.span));
-                }
-                VarRef::Local(l) if matches!(func.locals[*l].kind, LocalKind::CapRef(_)) => {
-                    out.push((func.locals[*l].name.clone(), e.span));
-                }
-                _ => {}
-            }
+    // the name of a shared mutable variable: a mutable global or a captured reference
+    let shared = |v: VarRef| match v {
+        VarRef::Global(g) if p.globals[g].mutable => Some(p.globals[g].name.clone()),
+        VarRef::Local(l) if matches!(func.locals[l].kind, LocalKind::CapRef(_)) => {
+            Some(func.locals[l].name.clone())
         }
+        _ => None,
     };
+    let mut out = Vec::new();
     for s in &func.body.stmts {
-        flow::visit_stmt(s, &mut visit);
+        flow::visit_stmt(s, &mut |e| {
+            if let EK::Var(v) = e.kind
+                && let Some(name) = shared(v)
+            {
+                out.push((name, e.span));
+            }
+        });
     }
     // assignment targets
     for s in &func.body.stmts {
         flow::visit_stmts(s, &mut |s| {
-            if let SK::Assign(pl, _) = &s.kind {
-                match flow::place_root(pl) {
-                    Some(VarRef::Global(g)) if p.globals[g].mutable => {
-                        out.push((p.globals[g].name.clone(), s.span));
-                    }
-                    Some(VarRef::Local(l))
-                        if matches!(func.locals[l].kind, LocalKind::CapRef(_)) =>
-                    {
-                        out.push((func.locals[l].name.clone(), s.span));
-                    }
-                    _ => {}
-                }
+            if let SK::Assign(pl, _) = &s.kind
+                && let Some(name) = flow::place_root(pl).and_then(shared)
+            {
+                out.push((name, s.span));
             }
         });
     }

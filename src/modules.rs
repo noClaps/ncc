@@ -126,19 +126,13 @@ pub fn load_with(
             return;
         }
         visited[i] = true;
-        let mut deps: Vec<(&String, &usize)> = g.modules[i].imports.iter().collect();
-        // keep source order of imports
-        let order_of = |alias: &str| {
-            g.modules[i]
-                .ast
-                .items
-                .iter()
-                .position(|it| matches!(it, Item::Import(im) if im.alias == alias))
-                .unwrap_or(0)
-        };
-        deps.sort_by_key(|(a, _)| order_of(a));
-        for (_, &d) in deps {
-            visit(g, d, visited, out);
+        // imports in source order
+        for it in &g.modules[i].ast.items {
+            if let Item::Import(im) = it
+                && let Some(&d) = g.modules[i].imports.get(&im.alias)
+            {
+                visit(g, d, visited, out);
+            }
         }
         out.push(i);
     }
@@ -190,12 +184,9 @@ impl Loader<'_> {
             .ast
             .items
             .iter()
-            .filter_map(|it| {
-                if let Item::Import(im) = it {
-                    Some(im.clone())
-                } else {
-                    None
-                }
+            .filter_map(|it| match it {
+                Item::Import(im) => Some(im.clone()),
+                _ => None,
             })
             .collect();
         let dir = path.parent().unwrap().to_path_buf();
