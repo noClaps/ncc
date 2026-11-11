@@ -4,7 +4,7 @@
 //! constant arguments that overflows), and in release mode to fold constant expressions and
 //! pure calls with constant arguments into literals.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::ast::{BinOp, UnOp};
@@ -82,9 +82,17 @@ pub struct Evaluator<'p> {
     gconst: HashMap<GlobalId, Val>,
     /// every always-panicking expression found
     errs: Vec<Diag>,
+    /// per function, the globals it may change, directly or through calls (`None`: any)
+    gwrites: Vec<Option<HashSet<GlobalId>>>,
+    /// interpreter steps left for the whole propagation pass
+    budget: u64,
 }
 
 const CALL_FUEL: u64 = 2_000_000;
+/// Largest value (in nodes) written into the program as a literal by propagation.
+const MAX_LITERAL: usize = 1024;
+/// Interpreter steps for all of release propagation, so failed attempts stay cheap overall.
+const PROP_FUEL: u64 = 50_000_000;
 const MAX_DEPTH: usize = 200;
 
 pub fn purity(p: &Program) -> Vec<bool> {
@@ -152,6 +160,8 @@ impl<'p> Evaluator<'p> {
             depth: 0,
             gconst: HashMap::new(),
             errs: vec![],
+            gwrites: vec![],
+            budget: PROP_FUEL,
         }
     }
 
@@ -169,7 +179,35 @@ impl<'p> Evaluator<'p> {
     pub fn run(p: &mut Program, sm: &SourceMap, fold: bool) -> Results<()> {
         let (funcs, mut errs) = {
             let mut ev = Evaluator::new(p, sm);
-            // constants for immutable globals with constant initialisers (in main, in order)
+            ev.init_gconst();
+            let mut funcs = p.funcs.clone();
+            for f in &mut funcs {
+                ev.fold_block(&mut f.body, &f.locals, &mut HashMap::new());
+            }
+            (funcs, ev.errs)
+        };
+        if !errs.is_empty() {
+            errs.sort_by_key(|d| (d.span.file, d.span.start));
+            errs.dedup_by(|a, b| a.span == b.span && a.msg == b.msg);
+            return Err(errs);
+        }
+        if fold {
+            p.funcs = funcs;
+            let funcs = {
+                let mut ev = Evaluator::new(p, sm);
+                ev.init_gconst();
+                ev.propagate()
+            };
+            p.funcs = funcs;
+        }
+        Ok(())
+    }
+
+    /// Constants for immutable globals with constant initialisers (in main, in order).
+    fn init_gconst(&mut self) {
+        let p = self.p;
+        {
+            let ev = self;
             let main = &p.funcs[p.main];
             for s in &main.body.stmts {
                 if let SK::Let(Some(VarRef::Global(g)), e) = &s.kind
@@ -194,30 +232,13 @@ impl<'p> Evaluator<'p> {
                     }
                 }
             }
-            let mut funcs = p.funcs.clone();
-            for f in &mut funcs {
-                ev.fold_block(&mut f.body, &f.locals, &mut HashMap::new());
-            }
-            (funcs, ev.errs)
-        };
-        if !errs.is_empty() {
-            errs.sort_by_key(|d| (d.span.file, d.span.start));
-            errs.dedup_by(|a, b| a.span == b.span && a.msg == b.msg);
-            return Err(errs);
         }
-        if fold {
-            p.funcs = funcs;
-        }
-        Ok(())
     }
 
     /// Evaluate an expression that is fully constant (no variables), if possible.
     fn try_const(&mut self, e: &Expr) -> Result<Option<Val>, Diag> {
         self.fuel = CALL_FUEL;
-        let mut env = Env {
-            locals: vec![],
-            dollar: vec![],
-        };
+        let mut env = Env::new(0);
         match self.expr(e, &mut env, true) {
             Ok(v) => Ok(Some(v)),
             Err(Stop::Unknown) => Ok(None),
@@ -432,6 +453,290 @@ impl<'p> Evaluator<'p> {
         }
     }
 
+    // ------------------------------------------------------------ release propagation
+    //
+    // Release mode only, after folding: walks each function body in order, tracking the
+    // values of variables (mutable ones and top-level globals included) that are known at
+    // each point. A statement whose inputs are known is run by the interpreter: when it
+    // completes without effects (the interpreter refuses output, impure calls and anything
+    // it cannot model, and its fuel bounds loops), its result replaces it. A loop that
+    // finishes within the fuel is thereby proven to terminate, and becomes assignments of the
+    // final values of the variables it changed. Statements that cannot run have their
+    // expressions folded with what is known. Panics are left to happen at run time.
+
+    fn propagate(&mut self) -> Vec<Func> {
+        let p = self.p;
+        // spawned tasks may change globals at any time
+        let mut has_async = false;
+        for f in &p.funcs {
+            for s in &f.body.stmts {
+                flow::visit_stmt(s, &mut |e| has_async |= matches!(e.kind, EK::Async(..)));
+            }
+        }
+        self.gwrites = global_writes(p);
+        let mut funcs = p.funcs.clone();
+        for (fi, f) in funcs.iter_mut().enumerate() {
+            let mut env = Env::new(f.locals.len());
+            env.track_globals = !has_async;
+            self.prop_block(&mut f.body, fi, &mut env);
+        }
+        funcs
+    }
+
+    /// Whether the value of `v` can be tracked: it is not shared with other code.
+    fn trackable(&self, f: FuncId, v: VarRef, track_globals: bool) -> bool {
+        match v {
+            VarRef::Local(l) => {
+                let local = &self.p.funcs[f].locals[l];
+                matches!(local.kind, LocalKind::Normal | LocalKind::Param) && !local.boxed
+            }
+            VarRef::Global(g) => {
+                track_globals
+                    && !matches!(self.p.types.kind(self.p.globals[g].ty), TyKind::Mutex(_))
+            }
+        }
+    }
+
+    /// Drop what the interpreter learnt about variables that are not trackable.
+    fn forget_untracked(&self, f: FuncId, env: &mut Env) {
+        for l in 0..env.locals.len() {
+            if env.locals[l].is_some() && !self.trackable(f, VarRef::Local(l), true) {
+                env.locals[l] = None;
+            }
+        }
+        let tg = env.track_globals;
+        env.globals
+            .retain(|g, _| self.trackable(f, VarRef::Global(*g), tg));
+    }
+
+    fn var_ty(&self, f: FuncId, v: VarRef) -> TyId {
+        match v {
+            VarRef::Local(l) => self.p.funcs[f].locals[l].ty,
+            VarRef::Global(g) => self.p.globals[g].ty,
+        }
+    }
+
+    /// The globals that code called by `s` may change; `None` when any global may change.
+    fn clobbers(
+        &self,
+        s: &Stmt,
+        gwrites: &[Option<HashSet<GlobalId>>],
+    ) -> Option<HashSet<GlobalId>> {
+        let mut out = Some(HashSet::new());
+        flow::visit_stmts(s, &mut |s| {
+            if matches!(s.kind, SK::Lock { .. }) {
+                out = None;
+            }
+        });
+        flow::visit_stmt(s, &mut |e| match &e.kind {
+            EK::Call(Callee::Direct(f), _) => match (&gwrites[*f], &mut out) {
+                (Some(w), Some(o)) => o.extend(w),
+                (None, _) => out = None,
+                _ => {}
+            },
+            // C code cannot reach NC globals
+            EK::Call(Callee::Extern(_), _) => {}
+            EK::Call(..) | EK::Async(..) | EK::Await(_) => out = None,
+            _ => {}
+        });
+        out
+    }
+
+    fn start_fuel(&mut self) {
+        self.fuel = CALL_FUEL.min(self.budget);
+    }
+
+    fn end_fuel(&mut self) {
+        self.budget -= CALL_FUEL.min(self.budget) - self.fuel;
+    }
+
+    fn prop_block(&mut self, b: &mut Block, f: FuncId, env: &mut Env) {
+        for s in &mut b.stmts {
+            self.prop_stmt(s, f, env);
+        }
+    }
+
+    fn prop_stmt(&mut self, s: &mut Stmt, f: FuncId, env: &mut Env) {
+        if let SK::Block(b) = &mut s.kind {
+            return self.prop_block(b, f, env);
+        }
+        let (assigned, declared) = written(s);
+        let runnable = matches!(
+            s.kind,
+            SK::Let(..) | SK::Assign(..) | SK::While { .. } | SK::For { .. } | SK::Expr(_)
+        );
+        if runnable {
+            let mut trial = env.clone();
+            self.start_fuel();
+            let r = self.stmt(s, &mut trial);
+            self.end_fuel();
+            if let Ok(Flow::Normal) = r {
+                trial.dollar.clear();
+                let replaced = self.replacement(s, f, &trial, &assigned, &declared);
+                self.forget_untracked(f, &mut trial);
+                match replaced {
+                    Some(kind) => s.kind = kind,
+                    None => {
+                        // the result is known but has no literal form: fold inside
+                        let mut inner = env.clone();
+                        for v in assigned.iter().chain(&declared) {
+                            inner.forget(*v);
+                        }
+                        self.prop_inside(s, f, &mut inner);
+                    }
+                }
+                *env = trial;
+                return;
+            }
+        }
+        let clobbers = self.clobbers(s, &self.gwrites);
+        let nested = matches!(s.kind, SK::While { .. } | SK::For { .. } | SK::Lock { .. })
+            || has_nested_blocks(s);
+        let mut inner = env.clone();
+        if nested {
+            for v in assigned.iter().chain(&declared) {
+                inner.forget(*v);
+            }
+        }
+        forget_globals(&mut inner, &clobbers);
+        self.prop_inside(s, f, &mut inner);
+        for v in assigned.iter().chain(&declared) {
+            env.forget(*v);
+        }
+        forget_globals(env, &clobbers);
+        self.forget_untracked(f, env);
+    }
+
+    /// The statement replacing `s`, which ran to completion leaving `after`, when its
+    /// results can be written as literals.
+    fn replacement(
+        &self,
+        s: &Stmt,
+        f: FuncId,
+        after: &Env,
+        assigned: &HashSet<VarRef>,
+        declared: &HashSet<VarRef>,
+    ) -> Option<SK> {
+        let lit = |v: VarRef| -> Option<Expr> {
+            let val = after.var(v).ok()?;
+            if val_size(&val) > MAX_LITERAL {
+                return None;
+            }
+            val_expr(&val, self.var_ty(f, v), s.span, &self.p.types)
+        };
+        let assign = |v: VarRef| -> Option<Stmt> {
+            Some(Stmt {
+                kind: SK::Assign(Place::Var(v), lit(v)?),
+                span: s.span,
+            })
+        };
+        match &s.kind {
+            SK::Let(Some(v), _) => Some(SK::Let(Some(*v), lit(*v)?)),
+            SK::Let(None, _) => Some(SK::Block(Block { stmts: vec![] })),
+            SK::Assign(pl, _) => {
+                let root = flow::place_root(pl)?;
+                Some(assign(root)?.kind)
+            }
+            _ => {
+                let mut outer: Vec<VarRef> = assigned.difference(declared).copied().collect();
+                outer.sort_by_key(|v| match v {
+                    VarRef::Global(g) => (0, *g),
+                    VarRef::Local(l) => (1, *l),
+                });
+                let stmts = outer.into_iter().map(assign).collect::<Option<Vec<_>>>()?;
+                Some(SK::Block(Block { stmts }))
+            }
+        }
+    }
+
+    /// Fold the expressions and nested blocks of `s` with what `env` knows on entry.
+    fn prop_inside(&mut self, s: &mut Stmt, f: FuncId, env: &mut Env) {
+        match &mut s.kind {
+            SK::Let(_, e)
+            | SK::Destructure(_, e)
+            | SK::Expr(e)
+            | SK::Throw(e)
+            | SK::Assert(e)
+            | SK::Return(Some(e))
+            | SK::Break(_, Some(e)) => self.prop_expr(e, f, env),
+            SK::Assign(pl, e) => {
+                self.prop_place(pl, f, env);
+                self.prop_expr(e, f, env);
+            }
+            SK::Return(None) | SK::Break(_, None) | SK::Continue(_) => {}
+            SK::While { cond: e, body, .. }
+            | SK::For { iter: e, body, .. }
+            | SK::Lock { mutex: e, body, .. } => {
+                // the loop changes what `env` no longer knows: every iteration starts alike
+                self.prop_expr(e, f, env);
+                self.prop_block(body, f, &mut env.clone());
+            }
+            SK::Block(b) => self.prop_block(b, f, env),
+        }
+    }
+
+    fn prop_place(&mut self, pl: &mut Place, f: FuncId, env: &mut Env) {
+        match pl {
+            Place::Var(_) => {}
+            Place::Field(b, _) | Place::TupleIndex(b, _) => self.prop_place(b, f, env),
+            // a `$` in the index is unknown on its own, so it stays
+            Place::Index(b, i) => {
+                self.prop_place(b, f, env);
+                self.prop_expr(i, f, env);
+            }
+        }
+    }
+
+    /// Replace the largest known sub-expressions of `e` with their values.
+    fn prop_expr(&mut self, e: &mut Expr, f: FuncId, env: &mut Env) {
+        if is_lit_tree(e) {
+            return;
+        }
+        let candidate = !contains_control(e) && !matches!(e.kind, EK::Closure(_) | EK::FnRef(_));
+        if candidate {
+            self.start_fuel();
+            let r = self.expr(e, env, false);
+            self.end_fuel();
+            env.dollar.clear();
+            if let Ok(v) = r
+                && val_size(&v) <= MAX_LITERAL
+                && (cheap(&v) || !is_place_expr(e))
+                && let Some(x) = val_expr(&v, e.ty, e.span, &self.p.types)
+            {
+                *e = x;
+                return;
+            }
+        }
+        for_children(e, &mut |c: &mut Expr| self.prop_expr(c, f, env));
+        match &mut e.kind {
+            EK::If(i) => {
+                for arm in &mut i.arms {
+                    for pt in &mut arm.patterns {
+                        self.prop_pat(pt, f, env);
+                    }
+                    self.prop_block(&mut arm.body, f, &mut env.clone());
+                }
+                self.select_arm(i);
+            }
+            EK::Else(_, Fallback::Block(b, _)) | EK::Catch(_, _, b, _) => {
+                self.prop_block(b, f, &mut env.clone());
+            }
+            _ => {}
+        }
+    }
+
+    fn prop_pat(&mut self, pt: &mut Pat, f: FuncId, env: &mut Env) {
+        match pt {
+            Pat::Wild | Pat::Bind(_) => {}
+            Pat::Value(e) | Pat::Cond(e) => self.prop_expr(e, f, env),
+            Pat::Tuple(ps) | Pat::Struct(ps) | Pat::Array(ps) | Pat::Variant(_, ps) => {
+                for p in ps {
+                    self.prop_pat(p, f, env);
+                }
+            }
+        }
+    }
+
     // ------------------------------------------------------------ interpreter
 
     fn call_fn(&mut self, f: FuncId, args: Vec<Val>, caps: &[Val]) -> R<Flow> {
@@ -442,10 +747,7 @@ impl<'p> Evaluator<'p> {
             return Err(Stop::Unknown);
         }
         let func = &self.p.funcs[f];
-        let mut env = Env {
-            locals: vec![None; func.locals.len()],
-            dollar: vec![],
-        };
+        let mut env = Env::new(func.locals.len());
         for (i, a) in func.params.iter().zip(args) {
             env.locals[*i] = Some(a);
         }
@@ -576,15 +878,7 @@ impl<'p> Evaluator<'p> {
         // compute index values first (immutable borrow of env), then mutate
         let mut path = Vec::new();
         let root = self.place_path(p, env, &mut path)?;
-        let VarRef::Local(l) = root else {
-            return Err(Stop::Unknown);
-        };
-        let slot = env
-            .locals
-            .get_mut(l)
-            .and_then(|x| x.as_mut())
-            .ok_or(Stop::Unknown)?;
-        set_path(slot, &path, v)
+        set_path(env.slot(root)?, &path, v)
     }
 
     fn place_path(&mut self, p: &Place, env: &mut Env, path: &mut Vec<PathStep>) -> R<VarRef> {
@@ -727,7 +1021,10 @@ impl<'p> Evaluator<'p> {
                 }
                 env.get(*l)?
             }
-            EK::Var(VarRef::Global(g)) => self.gconst.get(g).cloned().ok_or(Stop::Unknown)?,
+            EK::Var(VarRef::Global(g)) => match env.globals.get(g) {
+                Some(v) if !const_only => v.clone(),
+                _ => self.gconst.get(g).cloned().ok_or(Stop::Unknown)?,
+            },
             EK::FnRef(f) => Val::Fn(*f, Rc::new(vec![])),
             EK::Closure(f) => {
                 let func = &self.p.funcs[*f];
@@ -1063,12 +1360,54 @@ fn seq_len(v: &Val) -> R<usize> {
     }
 }
 
+#[derive(Clone)]
 struct Env {
     locals: Vec<Option<Val>>,
     dollar: Vec<Val>,
+    /// known values of globals (release-mode propagation only, see `track_globals`)
+    globals: HashMap<GlobalId, Val>,
+    /// whether declarations and assignments of globals are tracked in `globals`
+    track_globals: bool,
 }
 
 impl Env {
+    fn new(locals: usize) -> Self {
+        Env {
+            locals: vec![None; locals],
+            dollar: vec![],
+            globals: HashMap::new(),
+            track_globals: false,
+        }
+    }
+
+    fn var(&self, r: VarRef) -> R<Val> {
+        match r {
+            VarRef::Local(l) => self.get(l),
+            VarRef::Global(g) => self.globals.get(&g).cloned().ok_or(Stop::Unknown),
+        }
+    }
+
+    fn slot(&mut self, r: VarRef) -> R<&mut Val> {
+        match r {
+            VarRef::Local(l) => self.locals.get_mut(l).and_then(|x| x.as_mut()),
+            VarRef::Global(g) => self.globals.get_mut(&g),
+        }
+        .ok_or(Stop::Unknown)
+    }
+
+    fn forget(&mut self, r: VarRef) {
+        match r {
+            VarRef::Local(l) => {
+                if let Some(x) = self.locals.get_mut(l) {
+                    *x = None;
+                }
+            }
+            VarRef::Global(g) => {
+                self.globals.remove(&g);
+            }
+        }
+    }
+
     fn get(&self, l: LocalId) -> R<Val> {
         self.locals.get(l).cloned().flatten().ok_or(Stop::Unknown)
     }
@@ -1080,10 +1419,13 @@ impl Env {
         self.locals[l] = Some(v);
     }
 
-    /// Bind a declaration target: globals are only known through `gconst`.
+    /// Bind a declaration target: globals are only known through `gconst`, unless tracked.
     fn declare(&mut self, target: Option<VarRef>, v: Val) -> R<()> {
         match target {
             Some(VarRef::Local(l)) => self.set(l, v),
+            Some(VarRef::Global(g)) if self.track_globals => {
+                self.globals.insert(g, v);
+            }
             Some(VarRef::Global(_)) => return Err(Stop::Unknown),
             None => {}
         }
@@ -1336,6 +1678,11 @@ fn val_expr(v: &Val, ty: TyId, span: Span, t: &Types) -> Option<Expr> {
             EK::Struct(items(xs, &mut fs.iter().map(|f| f.1))?)
         }
         (Val::Arr(xs), _) if b != STR => EK::Array(items(xs, &mut std::iter::repeat(t.elem(b)?))?),
+        (Val::Map(es), TyKind::Map(kt, vt)) => EK::Map(
+            es.iter()
+                .map(|(k, v)| Some((val_expr(k, *kt, span, t)?, val_expr(v, *vt, span, t)?)))
+                .collect::<Option<Vec<_>>>()?,
+        ),
         (Val::Variant(i, xs), TyKind::Enum(ei)) => {
             let ps = &t.enums[*ei as usize].variants[*i].1;
             EK::Variant(*i, items(xs, &mut ps.iter().copied())?)
@@ -1405,10 +1752,7 @@ fn panic<T>(msg: &str, span: Span) -> R<T> {
 }
 
 fn read_path(r: VarRef, path: &[PathStep], env: &Env) -> R<Val> {
-    let VarRef::Local(l) = r else {
-        return Err(Stop::Unknown);
-    };
-    let mut cur = env.get(l)?;
+    let mut cur = env.var(r)?;
     for st in path {
         cur = match (st, &cur) {
             (PathStep::Elem(i), Val::Tuple(xs) | Val::Struct(xs)) => xs[*i].clone(),
@@ -1620,4 +1964,150 @@ fn binop(op: BinOp, x: Val, y: Val, span: Span) -> R<Val> {
         (op, Val::Char(a), Val::Char(b)) => ord(op, a, b)?,
         _ => return Err(Stop::Unknown),
     })
+}
+
+/// Number of nodes in a value.
+fn val_size(v: &Val) -> usize {
+    1 + match v {
+        Val::Arr(xs) | Val::Tuple(xs) | Val::Struct(xs) | Val::Variant(_, xs) => {
+            xs.iter().map(val_size).sum()
+        }
+        Val::Map(m) => m.iter().map(|(k, v)| val_size(k) + val_size(v)).sum(),
+        Val::Some(x) | Val::Ok(x) => val_size(x),
+        _ => 0,
+    }
+}
+
+/// Whether a value's literal costs no allocation, so copying it into each use is free.
+fn cheap(v: &Val) -> bool {
+    match v {
+        Val::Arr(_) | Val::Map(_) | Val::Variant(..) | Val::Fn(..) => false,
+        Val::Tuple(xs) | Val::Struct(xs) => xs.iter().all(cheap),
+        Val::Some(x) | Val::Ok(x) => cheap(x),
+        _ => true,
+    }
+}
+
+/// A variable or a part of one: reading it shares the existing value instead of building one.
+fn is_place_expr(e: &Expr) -> bool {
+    match &e.kind {
+        EK::Var(_) => true,
+        EK::Field(b, _) | EK::TupleIndex(b, _) | EK::Index(b, _) | EK::Retype(b) => {
+            is_place_expr(b)
+        }
+        _ => false,
+    }
+}
+
+/// Whether a statement's expressions contain blocks (`if` arms, `catch` and `else` blocks).
+fn has_nested_blocks(s: &Stmt) -> bool {
+    let mut found = false;
+    flow::visit_stmt(s, &mut |e| {
+        found |= matches!(
+            e.kind,
+            EK::If(_) | EK::Catch(..) | EK::Else(_, Fallback::Block(..))
+        );
+    });
+    found
+}
+
+/// The variables a statement assigns, and those it declares (including in nested blocks).
+fn written(s: &Stmt) -> (HashSet<VarRef>, HashSet<VarRef>) {
+    let mut assigned = HashSet::new();
+    let mut declared = HashSet::new();
+    flow::visit_stmts(s, &mut |s| match &s.kind {
+        SK::Assign(p, _) => {
+            if let Some(v) = flow::place_root(p) {
+                assigned.insert(v);
+            }
+        }
+        SK::Let(Some(v), _) => {
+            declared.insert(*v);
+        }
+        SK::Destructure(ts, _) => declared.extend(ts.iter().filter_map(|t| t.0)),
+        SK::For { var, .. } => {
+            declared.insert(VarRef::Local(*var));
+        }
+        SK::Lock { alias, .. } => {
+            declared.insert(VarRef::Local(*alias));
+        }
+        _ => {}
+    });
+    fn binds(p: &Pat, out: &mut HashSet<VarRef>) {
+        match p {
+            Pat::Bind(l) => {
+                out.insert(VarRef::Local(*l));
+            }
+            Pat::Tuple(ps) | Pat::Struct(ps) | Pat::Array(ps) | Pat::Variant(_, ps) => {
+                ps.iter().for_each(|p| binds(p, out));
+            }
+            _ => {}
+        }
+    }
+    flow::visit_stmt(s, &mut |e| match &e.kind {
+        EK::If(i) => i
+            .arms
+            .iter()
+            .flat_map(|a| &a.patterns)
+            .for_each(|p| binds(p, &mut declared)),
+        EK::Catch(_, Some(l), _, _) => {
+            declared.insert(VarRef::Local(*l));
+        }
+        _ => {}
+    });
+    (assigned, declared)
+}
+
+fn forget_globals(env: &mut Env, which: &Option<HashSet<GlobalId>>) {
+    match which {
+        None => env.globals.clear(),
+        Some(gs) => env.globals.retain(|g, _| !gs.contains(g)),
+    }
+}
+
+/// Per function, the globals it may change directly or through the functions it calls.
+/// `None` when it calls unknown code (a function value) or spawns tasks.
+fn global_writes(p: &Program) -> Vec<Option<HashSet<GlobalId>>> {
+    let n = p.funcs.len();
+    let mut out: Vec<Option<HashSet<GlobalId>>> = vec![Some(HashSet::new()); n];
+    let mut calls: Vec<Vec<FuncId>> = vec![vec![]; n];
+    for (i, f) in p.funcs.iter().enumerate() {
+        let mut w = HashSet::new();
+        let mut unknown = false;
+        for s in &f.body.stmts {
+            flow::writes_stmt(s, &mut w);
+            flow::visit_stmt(s, &mut |e| match &e.kind {
+                EK::Call(Callee::Direct(g), _) => calls[i].push(*g),
+                EK::Call(Callee::Extern(_), _) => {}
+                EK::Call(..) | EK::Async(..) | EK::Await(_) => unknown = true,
+                _ => {}
+            });
+            flow::visit_stmts(s, &mut |s| unknown |= matches!(s.kind, SK::Lock { .. }));
+        }
+        out[i] = (!unknown).then_some(w);
+    }
+    loop {
+        let mut changed = false;
+        for i in 0..n {
+            for &g in &calls[i] {
+                let add = out[g].clone();
+                match (&mut out[i], add) {
+                    (Some(_), None) => {
+                        out[i] = None;
+                        changed = true;
+                    }
+                    (Some(mine), Some(theirs)) => {
+                        let before = mine.len();
+                        mine.extend(theirs);
+                        changed |= mine.len() != before;
+                    }
+                    (None, _) => {}
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    out
 }

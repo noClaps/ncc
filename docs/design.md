@@ -16,11 +16,26 @@
    rejects expressions that always panic, such as a call with constant arguments that
    overflows. In release mode it folds constant expressions and pure calls with constant
    arguments into literals, so `@println(fibonacci(10))` becomes `@println(55)`.
+
+   Release mode then propagates values through every function body, top-level code
+   included. It walks the statements in order and tracks the values of variables known at
+   each point, including mutable variables and top-level globals. Globals are tracked only
+   when the program spawns no tasks. A call forgets the globals that the called code may
+   change. A statement whose inputs are known runs in the interpreter. If it completes with
+   no effect, its result is written back as literals. A loop that finishes within the
+   interpreter's step budget has thereby been shown to terminate, and becomes assignments of
+   the final values of the variables it changes. Other statements have their known
+   sub-expressions folded; inside a loop that stays, the variables it changes count as
+   unknown. Panics are left to happen at run time. The fibonacci loop above, written as
+   top-level code, compiles to `puts("55")`.
 6. **Dead code elimination** (`src/dce.rs`, release mode only): removes stores to variables
    that kept code never reads, and discarded expressions, when they have no effect. Effect-free
    code cannot print, call functions, loop, panic or jump; allocation counts as effect-free,
    because running out of memory is not observable behaviour. A program with no I/O, such as
    `mut int[] a = [1, 2, 3]` then `a = a <> [4]`, compiles to an empty `main`.
+   Within a block, an effect-free assignment is also removed when a later assignment
+   overwrites it before anything reads it. A `let` overwritten this way is merged into the
+   later assignment. Nested blocks that declare nothing are flattened into their parent.
 7. **C generation** (`src/cgen/`): emits one readable C23 translation unit with the runtime
    embedded (the public header `src/runtime/nc.h`, then the implementation
    `src/runtime/nc_impl.h`), then calls the C compiler. Debug builds use

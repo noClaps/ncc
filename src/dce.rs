@@ -194,16 +194,21 @@ enum Removable {
     Store(Key),
 }
 
-fn removable(p: &Program, func: FuncId, s: &Stmt) -> Option<Removable> {
-    let store_key = |v: VarRef| match v {
+/// The key of a variable whose stores may be removed: captured or aliased variables are
+/// shared with other code, so their stores are kept.
+fn store_key(p: &Program, func: FuncId, v: VarRef) -> Option<Key> {
+    match v {
         VarRef::Global(g) => Some(Key::Global(g)),
         VarRef::Local(l) => {
             let local = &p.funcs[func].locals[l];
-            // captured or aliased variables are shared with other code: keep their stores
             (matches!(local.kind, LocalKind::Normal | LocalKind::Param) && !local.boxed)
                 .then_some(Key::Local(func, l))
         }
-    };
+    }
+}
+
+fn removable(p: &Program, func: FuncId, s: &Stmt) -> Option<Removable> {
+    let store_key = |v: VarRef| store_key(p, func, v);
     match &s.kind {
         SK::Expr(e) | SK::Let(None, e) if pure(p, e) => Some(Removable::Discard),
         SK::Block(b) if b.stmts.is_empty() => Some(Removable::Discard),
@@ -377,18 +382,124 @@ struct Prune<'a> {
 
 impl Prune<'_> {
     fn block(&self, b: &mut Block) {
+        // blocks that declare nothing need no scope of their own
+        if b.stmts
+            .iter()
+            .any(|s| matches!(&s.kind, SK::Block(x) if flat(x)))
+        {
+            let mut out = Vec::with_capacity(b.stmts.len());
+            for s in std::mem::take(&mut b.stmts) {
+                match s.kind {
+                    SK::Block(x) if flat(&x) => out.extend(x.stmts),
+                    kind => out.push(Stmt { kind, ..s }),
+                }
+            }
+            b.stmts = out;
+            self.changed.set(true);
+        }
         let before = b.stmts.len();
         b.stmts.retain(|s| match removable(self.p, self.func, s) {
             Some(Removable::Discard) => false,
             Some(Removable::Store(k)) => self.live.contains(&k),
             None => true,
         });
+        self.overwritten(b);
         if b.stmts.len() != before {
             self.changed.set(true);
         }
         for s in &mut b.stmts {
             self.stmt(s);
         }
+    }
+
+    /// Remove effect-free assignments that a later statement of the block overwrites before
+    /// anything reads them.
+    fn overwritten(&self, b: &mut Block) {
+        // variables fully assigned later in the block, with no read in between: the index of
+        // that assignment
+        let mut over: HashMap<Key, usize> = HashMap::new();
+        let mut keep = vec![true; b.stmts.len()];
+        // assignments that become the declaration of their variable
+        let mut declare = vec![];
+        for (i, s) in b.stmts.iter().enumerate().rev() {
+            let simple = matches!(s.kind, SK::Let(..) | SK::Assign(..) | SK::Expr(_))
+                && !has_nested_blocks(s);
+            if !simple {
+                over.clear();
+                continue;
+            }
+            if let Some(Removable::Store(k)) = removable(self.p, self.func, s)
+                && let Some(&later) = over.get(&k)
+            {
+                keep[i] = false;
+                // the later assignment declares the variable instead
+                if let SK::Let(..) = s.kind {
+                    declare.push(later);
+                    over.remove(&k);
+                }
+                continue;
+            }
+            // the store happens after the reads of its own value
+            match &s.kind {
+                SK::Assign(Place::Var(v), _) => {
+                    if let Some(k) = store_key(self.p, self.func, *v) {
+                        over.insert(k, i);
+                    }
+                }
+                SK::Let(Some(v), _) => {
+                    if let Some(k) = store_key(self.p, self.func, *v) {
+                        over.remove(&k);
+                    }
+                }
+                _ => {}
+            }
+            // a partial store reads the rest of the variable
+            if let SK::Assign(pl, _) = &s.kind
+                && !matches!(pl, Place::Var(_))
+                && let Some(v) = place_root(pl)
+                && let Some(k) = store_key(self.p, self.func, v)
+            {
+                over.remove(&k);
+            }
+            crate::check::flow::visit_stmt(s, &mut |e| match &e.kind {
+                EK::Var(v) => {
+                    if let Some(k) = store_key(self.p, self.func, *v) {
+                        over.remove(&k);
+                    }
+                }
+                // called code may read any global; locals reach it only as captured values,
+                // read when the closure is created
+                EK::Call(..) | EK::Async(..) | EK::Await(_) | EK::FnRef(_) => {
+                    over.retain(|k, _| matches!(k, Key::Local(..)));
+                }
+                EK::Closure(f) => {
+                    over.retain(|k, _| matches!(k, Key::Local(..)));
+                    for c in &self.p.funcs[*f].captures {
+                        over.remove(&Key::Local(self.func, c.outer));
+                    }
+                }
+                _ => {}
+            });
+        }
+        for d in declare {
+            let s = &mut b.stmts[d];
+            if let SK::Assign(Place::Var(v), e) = &mut s.kind {
+                let e = std::mem::replace(
+                    e,
+                    Expr {
+                        kind: EK::None,
+                        ty: e.ty,
+                        span: e.span,
+                    },
+                );
+                s.kind = SK::Let(Some(*v), e);
+            }
+        }
+        let mut i = 0;
+        b.stmts.retain(|_| {
+            i += 1;
+            keep[i - 1]
+        });
     }
 
     fn stmt(&self, s: &mut Stmt) {
@@ -507,4 +618,21 @@ impl Prune<'_> {
             | EK::Embed(..) => {}
         }
     }
+}
+
+fn has_nested_blocks(s: &Stmt) -> bool {
+    let mut found = false;
+    crate::check::flow::visit_stmt(s, &mut |e| {
+        found |= matches!(
+            e.kind,
+            EK::If(_) | EK::Catch(..) | EK::Else(_, Fallback::Block(..))
+        );
+    });
+    found
+}
+
+fn flat(b: &Block) -> bool {
+    !b.stmts
+        .iter()
+        .any(|s| matches!(s.kind, SK::Let(..) | SK::Destructure(..)))
 }
