@@ -169,8 +169,7 @@ impl CGen<'_> {
         // globals
         let mut globals = String::new();
         for (i, gl) in self.p.globals.iter().enumerate() {
-            let c = self.tg.ct(gl.ty);
-            self.tg.need(gl.ty);
+            let c = self.ct(gl.ty);
             writeln!(globals, "static {c} {}; /* {} */", self.gname(i), gl.name).unwrap();
         }
         // function bodies
@@ -334,6 +333,12 @@ impl CGen<'_> {
         self.p.types.base(t)
     }
 
+    /// The C type of `t`, making sure it is declared.
+    fn ct(&mut self, t: TyId) -> String {
+        self.tg.need(t);
+        self.tg.ct(t)
+    }
+
     fn push_clean(&mut self, var: String, kind: CleanKind, temp: bool) {
         self.cleanup.push(Clean {
             var,
@@ -352,8 +357,7 @@ impl CGen<'_> {
 
     /// Declare a temporary holding an owned value.
     fn temp(&mut self, ty: TyId, init: &str) -> CVal {
-        self.tg.need(ty);
-        let c = self.tg.ct(ty);
+        let c = self.ct(ty);
         let v = self.fresh("t");
         self.line(format!("{c} {v} = {init};"));
         if self.managed(ty) {
@@ -445,8 +449,7 @@ impl CGen<'_> {
         self.func = i;
         for &p in &f.params {
             let t = f.locals[p].ty;
-            self.tg.need(t);
-            let c = self.tg.ct(t);
+            let c = self.ct(t);
             ps.push(format!("{c} {}", self.lname(p)));
         }
         format!("static {rc} {}({})", self.fname(i), c_params(ps))
@@ -586,8 +589,7 @@ impl CGen<'_> {
             VarRef::Local(l) => {
                 let loc = self.local(l).clone();
                 let n = self.lname(l);
-                self.tg.need(loc.ty);
-                let c = self.tg.ct(loc.ty);
+                let c = self.ct(loc.ty);
                 if loc.boxed {
                     let h = self.h(loc.ty);
                     self.line(format!("nc_cell *{n} = nc_cell_new(&ti_{h});"));
@@ -637,8 +639,7 @@ impl CGen<'_> {
                         {
                             let o = self.own(val, inner);
                             let ih = self.h(inner);
-                            self.tg.need(inner);
-                            let ic = self.tg.ct(inner);
+                            let ic = self.ct(inner);
                             let m = self.fresh("m");
                             self.line(format!("nc_mutex *{m} = nc_mutex_new(&ti_{ih});"));
                             self.line(format!("*({ic} *){m}->val = {o};"));
@@ -671,8 +672,7 @@ impl CGen<'_> {
                         for (k, t) in sub.iter().enumerate() {
                             parts.push(self.own(CVal::b(format!("{tv}.f{}", start + k)), *t));
                         }
-                        self.tg.need(sty);
-                        let c = self.tg.ct(sty);
+                        let c = self.ct(sty);
                         format!("({c}){{{}}}", parts.join(", "))
                     };
                     self.declare(*var, code);
@@ -717,12 +717,7 @@ impl CGen<'_> {
             SK::Throw(e) => {
                 let val = self.expr(e);
                 let o = self.own(val, STR);
-                let er = self.fresh("err");
-                self.line(format!("nc_str *{er} = {o};"));
-                self.unwind_to(0);
-                let fret = self.p.funcs[self.func].ret;
-                let rc = self.tg.ct(fret);
-                self.line(format!("return ({rc}){{.err = {er}}};"));
+                self.return_err(&o);
             }
             SK::Break(id, v) => {
                 let j = self.jumps[id].clone();
@@ -746,8 +741,6 @@ impl CGen<'_> {
                 self.line(format!("goto {lbl};"));
             }
             SK::While { id, cond, body } => {
-                let brk = format!("brk_{id}");
-                let cont = format!("cont_{id}");
                 self.line("for (;;) {");
                 self.ind += 1;
                 let hh = self.cleanup.len();
@@ -760,15 +753,7 @@ impl CGen<'_> {
                 self.line(format!("if (!{cv}) break;"));
                 self.ind -= 1;
                 self.line("}");
-                self.jumps.insert(
-                    *id,
-                    JumpInfo {
-                        height: h,
-                        brk: brk.clone(),
-                        cont: Some((cont.clone(), hh)),
-                        result: None,
-                    },
-                );
+                let (brk, cont) = self.jump(*id, h, Some(hh));
                 self.block(body);
                 self.line(format!("{cont}:;"));
                 self.ind -= 1;
@@ -782,8 +767,6 @@ impl CGen<'_> {
                 iter,
                 body,
             } => {
-                let brk = format!("brk_{id}");
-                let cont = format!("cont_{id}");
                 self.line("{");
                 self.ind += 1;
                 let it = self.expr(iter);
@@ -794,56 +777,41 @@ impl CGen<'_> {
                 let ih = self.h(iter.ty);
                 self.line(format!("{ic} {sv} = {snap};"));
                 self.push_clean(sv.clone(), CleanKind::Release(ih), false);
-                let hloop = self.cleanup.len();
                 let n = self.fresh("n");
                 let i = self.fresh("i");
-                match kind {
+                // the loop variable's type and value
+                let (vc, vval) = match kind {
                     ForKind::Index => {
                         let len = if self.p.types.base(iter.ty) == STR {
-                            format!("(uint64_t){sv}->clen")
+                            "clen"
                         } else {
-                            format!("(uint64_t){sv}->len")
+                            "len"
                         };
-                        self.line(format!("uint64_t {n} = {len};"));
-                        self.line(format!("for (uint64_t {i} = 0; {i} < {n}; {i}++) {{"));
-                        self.ind += 1;
-                        let vn = self.lname(*var);
-                        self.line(format!("uint64_t {vn} = {i};"));
-                        self.line(format!("(void){vn};"));
+                        self.line(format!("uint64_t {n} = (uint64_t){sv}->{len};"));
+                        ("uint64_t".to_string(), i.clone())
                     }
                     ForKind::Keys => {
                         let kt = self.local(*var).ty;
                         let kh = self.h(kt);
-                        self.tg.need(kt);
-                        let kc = self.tg.ct(kt);
+                        let kc = self.ct(kt);
                         let keys = self.fresh("keys");
                         self.line(format!("nc_arr *{keys} = nc_map_keys({sv}, &ti_{kh});"));
                         self.push_clean(keys.clone(), CleanKind::Arr, false);
                         self.line(format!("uint64_t {n} = (uint64_t){keys}->len;"));
-                        self.line(format!("for (uint64_t {i} = 0; {i} < {n}; {i}++) {{"));
-                        self.ind += 1;
-                        let vn = self.lname(*var);
-                        self.line(format!("{kc} {vn} = (({kc} *){keys}->data)[{i}];"));
-                        self.line(format!("(void){vn};"));
+                        let val = format!("(({kc} *){keys}->data)[{i}]");
+                        (kc, val)
                     }
-                }
-                let hbody = self.cleanup.len();
-                let _ = hloop;
-                self.jumps.insert(
-                    *id,
-                    JumpInfo {
-                        height: h,
-                        brk: brk.clone(),
-                        cont: Some((cont.clone(), hbody)),
-                        result: None,
-                    },
-                );
+                };
+                self.line(format!("for (uint64_t {i} = 0; {i} < {n}; {i}++) {{"));
+                self.ind += 1;
+                let vn = self.lname(*var);
+                self.line(format!("{vc} {vn} = {vval};"));
+                self.line(format!("(void){vn};"));
+                let (brk, cont) = self.jump(*id, h, Some(self.cleanup.len()));
                 self.block(body);
                 self.line(format!("{cont}:;"));
                 self.ind -= 1;
                 self.line("}");
-                let hl = self.cleanup.len();
-                let _ = hl;
                 self.end_scope(h);
                 self.ind -= 1;
                 self.line("}");
@@ -855,7 +823,6 @@ impl CGen<'_> {
                 alias,
                 body,
             } => {
-                let brk = format!("brk_{id}");
                 let inner = self.local(*alias).ty;
                 let ic = self.tg.ct(inner);
                 self.line("{");
@@ -867,15 +834,7 @@ impl CGen<'_> {
                 self.push_clean(mv.clone(), CleanKind::Unlock, false);
                 let an = self.lname(*alias);
                 self.line(format!("{ic} *{an} = ({ic} *){mv}->val;"));
-                self.jumps.insert(
-                    *id,
-                    JumpInfo {
-                        height: h,
-                        brk: brk.clone(),
-                        cont: None,
-                        result: None,
-                    },
-                );
+                let (brk, _) = self.jump(*id, h, None);
                 self.block(body);
                 self.end_scope(h);
                 self.ind -= 1;
@@ -890,6 +849,29 @@ impl CGen<'_> {
             }
         }
         self.end_stmt(h);
+    }
+
+    /// Return the error `err` (an owned string) from the current function.
+    fn return_err(&mut self, err: &str) {
+        let er = self.fresh("err");
+        self.line(format!("nc_str *{er} = {err};"));
+        self.unwind_to(0);
+        let rc = self.tg.ct(self.p.funcs[self.func].ret);
+        self.line(format!("return ({rc}){{.err = {er}}};"));
+    }
+
+    /// Register a loop or `lock` as a jump target, with the cleanup heights to unwind to when
+    /// breaking and (for loops) continuing; returns its break and continue labels.
+    fn jump(&mut self, id: JumpId, height: usize, cont: Option<usize>) -> (String, String) {
+        let (brk, cont_lbl) = (format!("brk_{id}"), format!("cont_{id}"));
+        let info = JumpInfo {
+            height,
+            brk: brk.clone(),
+            cont: cont.map(|h| (cont_lbl.clone(), h)),
+            result: None,
+        };
+        self.jumps.insert(id, info);
+        (brk, cont_lbl)
     }
 
     // ------------------------------------------------------------ assignment
@@ -915,8 +897,7 @@ impl CGen<'_> {
         }
         let val = self.expr(e);
         let o = self.own(val, ty);
-        self.tg.need(ty);
-        let c = self.tg.ct(ty);
+        let c = self.ct(ty);
         let nv = self.fresh("nv");
         self.line(format!("{c} {nv} = {o};"));
         let p = self.place_ptr(place);
@@ -968,8 +949,7 @@ impl CGen<'_> {
             Place::Index(b, idx) => {
                 let t = self.place_ty(b);
                 let et = self.place_ty(p);
-                self.tg.need(et);
-                let ec = self.tg.ct(et);
+                let ec = self.ct(et);
                 let bp = self.place_ptr(b);
                 let bpv = self.fresh("pp");
                 let bc = self.tg.ct(t);
@@ -1040,8 +1020,7 @@ impl CGen<'_> {
     }
 
     fn zero(&mut self, ty: TyId) -> String {
-        self.tg.need(ty);
-        let c = self.tg.ct(ty);
+        let c = self.ct(ty);
         format!("({c}){{0}}")
     }
 
@@ -1165,8 +1144,7 @@ impl CGen<'_> {
             EK::Index(b, idx) => {
                 let bv = self.expr(b);
                 let bn = self.bind(b.ty, &bv);
-                let ec = self.tg.ct(ty);
-                self.tg.need(ty);
+                let ec = self.ct(ty);
                 match self.p.types.kind(self.p.types.base(b.ty)).clone() {
                     TyKind::Map(k, _) => {
                         let kv = self.expr(idx);
@@ -1215,8 +1193,7 @@ impl CGen<'_> {
             }
             EK::Tuple(items) | EK::Struct(items) => {
                 let mut parts = self.owned_all(items);
-                let c = self.tg.ct(ty);
-                self.tg.need(ty);
+                let c = self.ct(ty);
                 if parts.is_empty() {
                     parts.push("0".into());
                 }
@@ -1224,9 +1201,8 @@ impl CGen<'_> {
             }
             EK::Array(items) => {
                 let et = self.p.types.elem(ty).unwrap();
-                self.tg.need(et);
                 let eh = self.h(et);
-                let ec = self.tg.ct(et);
+                let ec = self.ct(et);
                 let a = self.temp(ty, &format!("nc_arr_new(&ti_{eh}, {})", items.len()));
                 for it in items {
                     let v = self.expr(it);
@@ -1243,10 +1219,8 @@ impl CGen<'_> {
                     TyKind::Map(k, v) => (*k, *v),
                     _ => unreachable!(),
                 };
-                self.tg.need(k);
-                self.tg.need(v);
                 let (kh, vh) = (self.h(k), self.h(v));
-                let (kc, vc) = (self.tg.ct(k), self.tg.ct(v));
+                let (kc, vc) = (self.ct(k), self.ct(v));
                 let m = self.temp(
                     ty,
                     &format!("nc_map_new(&ti_{kh}, &ti_{vh}, {})", entries.len()),
@@ -1286,14 +1260,12 @@ impl CGen<'_> {
                 let o = self.own(v, x.ty);
                 if self.p.types.opt_boxed(self.p.types.base(ty)) {
                     let ih = self.h(x.ty);
-                    self.tg.need(x.ty);
-                    let ic = self.tg.ct(x.ty);
+                    let ic = self.ct(x.ty);
                     let c = self.temp(ty, &format!("nc_cell_new(&ti_{ih})"));
                     self.line(format!("*({ic} *){}->val = {o};", c.code));
                     c
                 } else {
-                    let c = self.tg.ct(ty);
-                    self.tg.need(ty);
+                    let c = self.ct(ty);
                     if self.managed(ty) {
                         self.temp(ty, &format!("({c}){{true, {o}}}"))
                     } else {
@@ -1310,12 +1282,7 @@ impl CGen<'_> {
                 let rv = self.bind(x.ty, &v);
                 self.line(format!("if ({rv}.err) {{"));
                 self.ind += 1;
-                let er = self.fresh("err");
-                self.line(format!("nc_str *{er} = nc_str_rt({rv}.err);"));
-                self.unwind_to(0);
-                let fret = self.p.funcs[self.func].ret;
-                let rc = self.tg.ct(fret);
-                self.line(format!("return ({rc}){{.err = {er}}};"));
+                self.return_err(&format!("nc_str_rt({rv}.err)"));
                 self.ind -= 1;
                 self.line("}");
                 if ty == VOID {
@@ -1339,8 +1306,7 @@ impl CGen<'_> {
                     .clone()
                     .expect("target is detected before code generation");
                 let (os, cpu) = (self.lit_str(&os), self.lit_str(&cpu));
-                self.tg.need(ty);
-                let c = self.tg.ct(ty);
+                let c = self.ct(ty);
                 CVal::b(format!("(({c}){{&{os}, &{cpu}}})"))
             }
             EK::Embed(bytes, path) => {
@@ -1367,8 +1333,7 @@ impl CGen<'_> {
             }
             EK::Await(x) => {
                 let v = self.expr(x);
-                let c = self.tg.ct(ty);
-                self.tg.need(ty);
+                let c = self.ct(ty);
                 let r = format!("(*({c} *)nc_fut_await({}))", v.code);
                 if ty == VOID {
                     self.line(format!("(void){r};"));
@@ -1513,13 +1478,11 @@ impl CGen<'_> {
         self.fut_sites += 1;
         let sname = format!("nc_fut_site{}", self.fut_sites);
         let params = self.callee_params(c);
-        self.tg.need(rt);
-        let rc = self.tg.ct(rt);
+        let rc = self.ct(rt);
         // struct definition
         let mut def = format!("struct {sname} {{\n  nc_fut h;\n  nc_fn fn;\n");
         for (i, p) in params.iter().enumerate() {
-            self.tg.need(*p);
-            let pc = self.tg.ct(*p);
+            let pc = self.ct(*p);
             writeln!(def, "  {pc} a{i};").unwrap();
         }
         writeln!(def, "  {rc} result;\n}};").unwrap();
@@ -1728,8 +1691,7 @@ impl CGen<'_> {
         if ty == VOID || ty == NEVER {
             return None;
         }
-        self.tg.need(ty);
-        let c = self.tg.ct(ty);
+        let c = self.ct(ty);
         let r = self.fresh("res");
         let z = self.zero(ty);
         self.line(format!("{c} {r} = {z};"));

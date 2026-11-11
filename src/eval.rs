@@ -1505,7 +1505,7 @@ fn unsigned(
     let chk = |v: Option<u128>| -> R<Val> {
         match v {
             Some(v) if v <= max => Ok(mk(v)),
-            _ => Err(Stop::Panic("integer overflow".into(), span)),
+            _ => panic("integer overflow", span),
         }
     };
     match op {
@@ -1548,12 +1548,19 @@ fn unsigned(
         BitAnd => Ok(mk(a & b)),
         BitOr => Ok(mk(a | b)),
         BitXor => Ok(mk(a ^ b)),
-        Lt => Ok(Val::Bool(a < b)),
-        Gt => Ok(Val::Bool(a > b)),
-        Le => Ok(Val::Bool(a <= b)),
-        Ge => Ok(Val::Bool(a >= b)),
-        _ => Err(Stop::Unknown),
+        _ => ord(op, a, b),
     }
+}
+
+/// An ordering comparison.
+fn ord<T: PartialOrd>(op: BinOp, a: T, b: T) -> R<Val> {
+    Ok(Val::Bool(match op {
+        BinOp::Lt => a < b,
+        BinOp::Gt => a > b,
+        BinOp::Le => a <= b,
+        BinOp::Ge => a >= b,
+        _ => return Err(Stop::Unknown),
+    }))
 }
 
 fn binop(op: BinOp, x: Val, y: Val, span: Span) -> R<Val> {
@@ -1644,11 +1651,7 @@ fn binop(op: BinOp, x: Val, y: Val, span: Span) -> R<Val> {
             BitAnd => Val::Int(a & b),
             BitOr => Val::Int(a | b),
             BitXor => Val::Int(a ^ b),
-            Lt => Val::Bool(a < b),
-            Gt => Val::Bool(a > b),
-            Le => Val::Bool(a <= b),
-            Ge => Val::Bool(a >= b),
-            _ => return Err(Stop::Unknown),
+            _ => ord(op, a, b)?,
         },
         (op, Val::UInt(a), Val::UInt(b)) => {
             unsigned(op, a as u128, b as u128, u64::MAX as u128, span, |v| {
@@ -1664,19 +1667,9 @@ fn binop(op: BinOp, x: Val, y: Val, span: Span) -> R<Val> {
             Mul => Val::Float(a * b),
             Div => Val::Float(a / b),
             Pow => Val::Float(a.powf(b)),
-            Lt => Val::Bool(a < b),
-            Gt => Val::Bool(a > b),
-            Le => Val::Bool(a <= b),
-            Ge => Val::Bool(a >= b),
-            _ => return Err(Stop::Unknown),
+            _ => ord(op, a, b)?,
         },
-        (op, Val::Char(a), Val::Char(b)) => match op {
-            Lt => Val::Bool(a < b),
-            Gt => Val::Bool(a > b),
-            Le => Val::Bool(a <= b),
-            Ge => Val::Bool(a >= b),
-            _ => return Err(Stop::Unknown),
-        },
+        (op, Val::Char(a), Val::Char(b)) => ord(op, a, b)?,
         _ => return Err(Stop::Unknown),
     })
 }
