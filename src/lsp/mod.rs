@@ -44,7 +44,7 @@ use lsp_types::*;
 
 use crate::ast;
 use crate::check::index::{DeclKind, Index};
-use crate::diag::{Diag, SourceMap, Span};
+use crate::diag::{SourceMap, Span};
 use crate::lexer::Tok;
 /// The identifier itself within a reference or declaration span: types and `struct`/`enum`/`type`
 /// declarations put the name first (`Matrix<int>`), everything else ends with it (`p.x`).
@@ -597,25 +597,46 @@ impl Server {
     // ------------------------------------------------------------------ notifications
 
     fn notification(&mut self, n: Notification) -> Vec<Notification> {
-        let path = match n.method.as_str() {
+        if n.method == "workspace/didChangeWatchedFiles" {
+            // files changed outside the editor: analyse them and what imports them again
+            let Ok(p) = serde_json::from_value::<DidChangeWatchedFilesParams>(n.params) else {
+                return vec![];
+            };
+            let mut entries = Vec::new();
+            for path in p.changes.iter().filter_map(|c| uri_to_path(&c.uri)) {
+                if !self.docs.contains_key(&path) {
+                    entries.extend(self.dependents(&path));
+                    entries.push(path);
+                }
+            }
+            return self.refresh(entries);
+        }
+        let Some(path) = self.sync_document(n) else {
+            return vec![];
+        };
+        // re-analyse the document, what imports it, and every open document
+        let mut entries = vec![path.clone()];
+        entries.extend(self.dependents(&path));
+        entries.extend(self.docs.keys().filter(|p| **p != path).cloned());
+        self.refresh(entries)
+    }
+
+    /// Apply a document open, change, save or close; returns the document's path.
+    fn sync_document(&mut self, n: Notification) -> Option<PathBuf> {
+        fn params<T: serde::de::DeserializeOwned>(n: Notification) -> Option<T> {
+            serde_json::from_value(n.params).ok()
+        }
+        Some(match n.method.as_str() {
             DidOpenTextDocument::METHOD => {
-                let Ok(p) = serde_json::from_value::<DidOpenTextDocumentParams>(n.params) else {
-                    return vec![];
-                };
-                let Some(path) = uri_to_path(&p.text_document.uri) else {
-                    return vec![];
-                };
+                let p: DidOpenTextDocumentParams = params(n)?;
+                let path = uri_to_path(&p.text_document.uri)?;
                 self.docs.insert(path.clone(), p.text_document.text);
                 self.versions.insert(path.clone(), p.text_document.version);
                 path
             }
             DidChangeTextDocument::METHOD => {
-                let Ok(p) = serde_json::from_value::<DidChangeTextDocumentParams>(n.params) else {
-                    return vec![];
-                };
-                let Some(path) = uri_to_path(&p.text_document.uri) else {
-                    return vec![];
-                };
+                let p: DidChangeTextDocumentParams = params(n)?;
+                let path = uri_to_path(&p.text_document.uri)?;
                 let mut text = self.docs.remove(&path).unwrap_or_default();
                 for change in p.content_changes {
                     match change.range {
@@ -632,93 +653,55 @@ impl Server {
                 path
             }
             DidSaveTextDocument::METHOD => {
-                let Ok(p) = serde_json::from_value::<DidSaveTextDocumentParams>(n.params) else {
-                    return vec![];
-                };
-                let Some(path) = uri_to_path(&p.text_document.uri) else {
-                    return vec![];
-                };
-                path
-            }
-            "workspace/didChangeWatchedFiles" => {
-                // files changed outside the editor: analyse them and what imports them again
-                let Ok(p) = serde_json::from_value::<DidChangeWatchedFilesParams>(n.params) else {
-                    return vec![];
-                };
-                let mut entries = Vec::new();
-                for c in p.changes {
-                    let Some(path) = uri_to_path(&c.uri) else {
-                        continue;
-                    };
-                    if self.docs.contains_key(&path) {
-                        continue;
-                    }
-                    entries.extend(self.dependents(&path));
-                    entries.push(path);
-                }
-                return self.refresh(entries);
+                let p: DidSaveTextDocumentParams = params(n)?;
+                uri_to_path(&p.text_document.uri)?
             }
             DidCloseTextDocument::METHOD => {
-                let Ok(p) = serde_json::from_value::<DidCloseTextDocumentParams>(n.params) else {
-                    return vec![];
-                };
-                let Some(path) = uri_to_path(&p.text_document.uri) else {
-                    return vec![];
-                };
+                let p: DidCloseTextDocumentParams = params(n)?;
+                let path = uri_to_path(&p.text_document.uri)?;
                 self.docs.remove(&path);
                 self.versions.remove(&path);
                 // the file is now analysed as it is on disk (or forgotten when it is not)
                 path
             }
-            _ => return vec![],
-        };
-        // re-analyse the document, what imports it, and every open document
-        let mut entries = vec![path.clone()];
-        entries.extend(self.dependents(&path));
-        entries.extend(self.docs.keys().filter(|p| **p != path).cloned());
-        self.refresh(entries)
+            _ => return None,
+        })
     }
 
     /// Analyse an entry file; returns diagnostics per file.
     fn analyze(&mut self, entry: &Path) -> Vec<(PathBuf, Diagnostic)> {
         let mut sm = SourceMap::default();
-        let mut diags: Vec<(Diag, DiagnosticSeverity)> = Vec::new();
+        let mut warnings = Vec::new();
         let mut index = None;
-        let mut imports = None;
+        let mut imports = HashMap::new();
         let mut clean = false;
-        match crate::modules::load_with(&mut sm, entry, &self.docs) {
-            Err(errs) => diags.extend(errs.into_iter().map(|d| (d, DiagnosticSeverity::ERROR))),
-            Ok((graph, load_errors)) => {
-                let loaded = load_errors.is_empty();
-                diags.extend(
-                    load_errors
-                        .into_iter()
-                        .map(|d| (d, DiagnosticSeverity::ERROR)),
-                );
-                let mut im = HashMap::new();
+        let errors = match crate::modules::load_with(&mut sm, entry, &self.docs) {
+            Err(errs) => errs,
+            Ok((graph, mut errors)) => {
+                let loaded = errors.is_empty();
                 for (alias, &m) in &graph.modules[0].imports {
-                    im.insert(alias.clone(), graph.modules[m].path.clone());
+                    imports.insert(alias.clone(), graph.modules[m].path.clone());
                 }
-                imports = Some(im);
                 let (mut p, errs, ix) = crate::check::check(graph, true);
                 clean = loaded && errs.is_empty();
-                diags.extend(errs.into_iter().map(|d| (d, DiagnosticSeverity::ERROR)));
+                errors.extend(errs);
                 if let Err(errs) = crate::eval::Evaluator::run(&mut p, &sm, false) {
-                    diags.extend(errs.into_iter().map(|d| (d, DiagnosticSeverity::ERROR)));
+                    errors.extend(errs);
                 }
                 if clean {
-                    for w in crate::lint::race_warnings(&p) {
-                        diags.push((w, DiagnosticSeverity::WARNING));
-                    }
+                    warnings = crate::lint::race_warnings(&p);
                 }
                 index = Some(ix);
+                errors
             }
-        }
+        };
+        let diags = (errors.into_iter().map(|d| (d, DiagnosticSeverity::ERROR))).chain(
+            warnings
+                .into_iter()
+                .map(|d| (d, DiagnosticSeverity::WARNING)),
+        );
         let mut out = Vec::new();
-        for (d, sev) in diags {
-            if sm.files.is_empty() {
-                continue;
-            }
+        for (d, sev) in diags.filter(|_| !sm.files.is_empty()) {
             let f = sm.file(d.span.file);
             out.push((
                 f.path.clone(),
@@ -733,7 +716,6 @@ impl Server {
         }
         // keep the previous index when the file did not load
         if let Some(index) = index {
-            let imports = imports.unwrap_or_default();
             let decl_at = index
                 .decls
                 .iter()
