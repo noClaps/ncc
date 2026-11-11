@@ -181,7 +181,7 @@ impl CGen<'_> {
             Mode::Run => self.run_main(),
             Mode::Test => {
                 let main = &self.p.funcs[self.p.main];
-                let stmts: Vec<Stmt> = main
+                let stmts = main
                     .body
                     .stmts
                     .iter()
@@ -193,8 +193,7 @@ impl CGen<'_> {
                     .cloned()
                     .collect();
                 let body = Block { stmts };
-                let erru = self.p.funcs[self.p.main].ret;
-                let proto = format!("static {} nc_test_init(void)", self.tg.ct(erru));
+                let proto = format!("static {} nc_test_init(void)", self.tg.ct(main.ret));
                 writeln!(self.protos, "{proto};").unwrap();
                 self.gen_fn(self.p.main, Some(("nc_test_init", body)));
                 self.test_main()
@@ -360,14 +359,27 @@ impl CGen<'_> {
         let c = self.ct(ty);
         let v = self.fresh("t");
         self.line(format!("{c} {v} = {init};"));
+        self.owned_temp(v, ty)
+    }
+
+    /// An owned value: in a temporary when it needs releasing, otherwise as is.
+    fn owned(&mut self, ty: TyId, code: String) -> CVal {
         if self.managed(ty) {
-            self.push_clean(v.clone(), CleanKind::Release(self.h(ty)), true);
-            CVal {
-                code: v,
-                owned: true,
-            }
+            self.temp(ty, &code)
         } else {
-            CVal::b(v)
+            CVal::b(code)
+        }
+    }
+
+    /// The temporary variable `v`, released at the end of the statement if `ty` is managed.
+    fn owned_temp(&mut self, v: String, ty: TyId) -> CVal {
+        if !self.managed(ty) {
+            return CVal::b(v);
+        }
+        self.push_clean(v.clone(), CleanKind::Release(self.h(ty)), true);
+        CVal {
+            code: v,
+            owned: true,
         }
     }
 
@@ -628,28 +640,23 @@ impl CGen<'_> {
         let h = self.cleanup.len();
         match &s.kind {
             SK::Let(v, e) => {
-                if e.ty == NEVER {
-                    self.expr(e);
-                } else {
-                    let val = self.expr(e);
-                    let mty = v.map_or(e.ty, |v| self.var_ty(v));
-                    match (self.p.types.kind(mty).clone(), v) {
-                        (TyKind::Mutex(inner), Some(var))
-                            if !matches!(self.p.types.kind(e.ty), TyKind::Mutex(_)) =>
-                        {
-                            let o = self.own(val, inner);
-                            let ih = self.h(inner);
-                            let ic = self.ct(inner);
-                            let m = self.fresh("m");
-                            self.line(format!("nc_mutex *{m} = nc_mutex_new(&ti_{ih});"));
-                            self.line(format!("*({ic} *){m}->val = {o};"));
-                            self.declare(*var, m);
-                        }
-                        (_, Some(var)) => {
-                            let o = self.own(val, e.ty);
-                            self.declare(*var, o);
-                        }
-                        (_, None) => {}
+                let val = self.expr(e);
+                if let Some(var) = *v
+                    && e.ty != NEVER
+                {
+                    if let TyKind::Mutex(inner) = *self.p.types.kind(self.var_ty(var))
+                        && !matches!(self.p.types.kind(e.ty), TyKind::Mutex(_))
+                    {
+                        let o = self.own(val, inner);
+                        let ih = self.h(inner);
+                        let ic = self.ct(inner);
+                        let m = self.fresh("m");
+                        self.line(format!("nc_mutex *{m} = nc_mutex_new(&ti_{ih});"));
+                        self.line(format!("*({ic} *){m}->val = {o};"));
+                        self.declare(var, m);
+                    } else {
+                        let o = self.own(val, e.ty);
+                        self.declare(var, o);
                     }
                 }
             }
@@ -723,12 +730,9 @@ impl CGen<'_> {
                 let j = self.jumps[id].clone();
                 if let Some(e) = v {
                     let (rv, rty) = j.result.clone().unwrap();
-                    if e.ty == NEVER {
-                        self.expr(e);
-                    } else {
-                        let val = self.expr(e);
-                        let o = self.own(val, rty);
-                        self.line(format!("{rv} = {o};"));
+                    let val = self.expr(e);
+                    if e.ty != NEVER {
+                        self.store(Some(&rv), val, rty);
                     }
                 }
                 self.unwind_to(j.height);
@@ -849,6 +853,14 @@ impl CGen<'_> {
             }
         }
         self.end_stmt(h);
+    }
+
+    /// Store `v` (of type `ty`) in the result variable `r`, if there is one.
+    fn store(&mut self, r: Option<&str>, v: CVal, ty: TyId) {
+        if let Some(r) = r {
+            let o = self.own(v, ty);
+            self.line(format!("{r} = {o};"));
+        }
     }
 
     /// Return the error `err` (an owned string) from the current function.
@@ -1266,11 +1278,7 @@ impl CGen<'_> {
                     c
                 } else {
                     let c = self.ct(ty);
-                    if self.managed(ty) {
-                        self.temp(ty, &format!("({c}){{true, {o}}}"))
-                    } else {
-                        CVal::b(format!("({c}){{true, {o}}}"))
-                    }
+                    self.owned(ty, format!("({c}){{true, {o}}}"))
                 }
             }
             EK::Retype(x) => self.expr(x),
@@ -1340,11 +1348,7 @@ impl CGen<'_> {
                     return CVal::b("(nc_void)0");
                 }
                 let o = self.own(CVal::b(r), ty);
-                if self.managed(ty) {
-                    self.temp(ty, &o)
-                } else {
-                    CVal::b(o)
-                }
+                self.owned(ty, o)
             }
         }
     }
@@ -1566,33 +1570,16 @@ impl CGen<'_> {
             _ => "",
         };
         let code = match op {
+            // checked integer arithmetic: `nc_add_i64` and so on
             Add | Sub | Mul | Div | Mod | Pow | Shl | Shr if !s.is_empty() => {
-                let name = match op {
-                    Add => "add",
-                    Sub => "sub",
-                    Mul => "mul",
-                    Div => "div",
-                    Mod => "mod",
-                    Pow => "pow",
-                    Shl => "shl",
-                    Shr => "shr",
-                    _ => unreachable!(),
-                };
+                let name = format!("{op:?}").to_lowercase();
                 format!("nc_{name}_{s}({x}, {y}, {loc})")
             }
-            Add => format!("({x} + {y})"),
-            Sub => format!("({x} - {y})"),
-            Mul => format!("({x} * {y})"),
-            Div => format!("({x} / {y})"),
             Pow => format!("pow({x}, {y})"),
             Mod | Shl | Shr | And | Or => unreachable!(),
-            BitAnd => format!("({x} & {y})"),
-            BitOr => format!("({x} | {y})"),
-            BitXor => format!("({x} ^ {y})"),
-            Lt => format!("({x} < {y})"),
-            Gt => format!("({x} > {y})"),
-            Le => format!("({x} <= {y})"),
-            Ge => format!("({x} >= {y})"),
+            Add | Sub | Mul | Div | BitAnd | BitOr | BitXor | Lt | Gt | Le | Ge => {
+                format!("({x} {} {y})", op.symbol())
+            }
             Eq | Ne => {
                 let eq = if self.is_prim(a.ty) {
                     format!("({x} == {y})")
@@ -1700,17 +1687,7 @@ impl CGen<'_> {
 
     fn finish_result(&mut self, r: Option<String>, ty: TyId) -> CVal {
         match r {
-            Some(r) => {
-                if self.managed(ty) {
-                    self.push_clean(r.clone(), CleanKind::Release(self.h(ty)), true);
-                    CVal {
-                        code: r,
-                        owned: true,
-                    }
-                } else {
-                    CVal::b(r)
-                }
-            }
+            Some(r) => self.owned_temp(r, ty),
             None => CVal::b("(nc_void)0"),
         }
     }
@@ -1914,24 +1891,16 @@ impl CGen<'_> {
         };
         self.line(format!("if ({has}) {{"));
         self.ind += 1;
-        if let Some(r) = &r {
-            let ow = self.own(CVal::b(val), ty);
-            self.line(format!("{r} = {ow};"));
-        }
+        self.store(r.as_deref(), CVal::b(val), ty);
         self.ind -= 1;
         self.line("} else {");
         self.ind += 1;
         let h = self.cleanup.len();
         match fb {
             Fallback::Expr(x) => {
-                if x.ty == NEVER {
-                    self.expr(x);
-                } else {
-                    let v = self.expr(x);
-                    if let Some(r) = &r {
-                        let ow = self.own(v, ty);
-                        self.line(format!("{r} = {ow};"));
-                    }
+                let v = self.expr(x);
+                if x.ty != NEVER {
+                    self.store(r.as_deref(), v, ty);
                 }
                 self.end_stmt(h);
             }
@@ -1969,10 +1938,7 @@ impl CGen<'_> {
         self.line(format!("goto {end};"));
         self.ind -= 1;
         self.line("}");
-        if let Some(r) = &r {
-            let ow = self.own(CVal::b(format!("{xn}.val")), ty);
-            self.line(format!("{r} = {ow};"));
-        }
+        self.store(r.as_deref(), CVal::b(format!("{xn}.val")), ty);
         self.line(format!("{end}:;"));
         self.finish_result(r, ty)
     }
