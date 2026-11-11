@@ -33,6 +33,16 @@ const PREC = {
 const commaSep1 = (rule) => seq(rule, repeat(seq(',', rule)));
 /** comma separated list allowing a trailing comma */
 const commaSepTrailing = (rule) => optional(seq(commaSep1(rule), optional(',')));
+/** `{ a, b c }`: members with optional separating commas */
+const members = (rule) => seq('{', repeat(seq(rule, optional(','))), '}');
+/** newline separated lines, allowing blank lines */
+const lines = ($, rule) => seq(repeat($._terminator), optional(seq(rule, repeat(seq($._terminator, optional(rule))))));
+/** parameters and an optional return type */
+const signature = ($) => [field('parameters', $.parameter_list), optional(field('return_type', $._return_type))];
+const typeName = ($) => alias($.identifier, $.type_identifier);
+const fieldName = ($) => alias($.identifier, $.field_identifier);
+const binary = ($, operand, p, op, assoc = prec.left) =>
+  assoc(p, seq(field('left', operand), field('operator', op), field('right', operand)));
 
 module.exports = grammar({
   name: 'nc',
@@ -52,7 +62,7 @@ module.exports = grammar({
   ],
 
   rules: {
-    source_file: ($) => seq(repeat($._terminator), optional(seq($._item, repeat(seq($._terminator, optional($._item)))))),
+    source_file: ($) => lines($, $._item),
 
     _terminator: (_) => '\n',
 
@@ -72,8 +82,7 @@ module.exports = grammar({
 
     visibility: (_) => 'pub',
 
-    import_declaration: ($) =>
-      seq('import', '{', repeat(seq($.import_spec, optional(','))), '}'),
+    import_declaration: ($) => seq('import', members($.import_spec)),
 
     import_spec: ($) => seq(field('path', $.string), 'as', field('alias', $.identifier)),
 
@@ -92,8 +101,7 @@ module.exports = grammar({
       seq(
         'fn',
         field('name', $.identifier),
-        field('parameters', $.parameter_list),
-        optional(field('return_type', $._return_type)),
+        ...signature($),
         '=',
         field('symbol', $.string),
       ),
@@ -102,34 +110,30 @@ module.exports = grammar({
       seq(
         optional($.visibility),
         'struct',
-        field('name', alias($.identifier, $.type_identifier)),
+        field('name', typeName($)),
         optional(field('type_parameters', $.type_parameters)),
-        '{',
-        repeat(seq($.field_declaration, optional(','))),
-        '}',
+        members($.field_declaration),
       ),
 
-    field_declaration: ($) => seq(field('type', $._type), field('name', alias($.identifier, $.field_identifier))),
+    field_declaration: ($) => seq(field('type', $._type), field('name', fieldName($))),
 
     enum_declaration: ($) =>
       seq(
         optional($.visibility),
         'enum',
-        field('name', alias($.identifier, $.type_identifier)),
+        field('name', typeName($)),
         optional(field('type_parameters', $.type_parameters)),
-        '{',
-        repeat(seq($.enum_member, optional(','))),
-        '}',
+        members($.enum_member),
       ),
 
     enum_member: ($) =>
       seq(field('name', $.identifier), optional(seq('(', commaSepTrailing($._type), ')'))),
 
     type_declaration: ($) =>
-      seq(optional($.visibility), 'type', field('name', alias($.identifier, $.type_identifier)), '=', field('type', $._type)),
+      seq(optional($.visibility), 'type', field('name', typeName($)), '=', field('type', $._type)),
 
     type_parameters: ($) =>
-      seq('<', commaSep1(choice(seq('type', alias($.identifier, $.type_identifier)), $.constant_parameter)), '>'),
+      seq('<', commaSep1(choice(seq('type', typeName($)), $.constant_parameter)), '>'),
 
     // `uint N`: a generic constant
     constant_parameter: ($) => seq(field('type', $.primitive_type), field('name', $.identifier)),
@@ -140,8 +144,7 @@ module.exports = grammar({
         'fn',
         field('name', $.identifier),
         optional(field('type_parameters', $.type_parameters)),
-        field('parameters', $.parameter_list),
-        optional(field('return_type', $._return_type)),
+        ...signature($),
         field('body', $.block),
       ),
 
@@ -174,10 +177,7 @@ module.exports = grammar({
         $.expression_statement,
       ),
 
-    block: ($) =>
-      seq('{', repeat($._terminator), optional(seq($._block_item, repeat(seq($._terminator, optional($._block_item))))), '}'),
-
-    _block_item: ($) => choice($._statement, $.function_declaration),
+    block: ($) => seq('{', lines($, choice($._statement, $.function_declaration)), '}'),
 
     variable_declaration: ($) =>
       prec.dynamic(1, seq(
@@ -279,7 +279,7 @@ module.exports = grammar({
         '}',
       )),
 
-    field_initializer: ($) => seq('.', field('field', alias($.identifier, $.field_identifier)), '=', field('value', $._expression)),
+    field_initializer: ($) => seq('.', field('field', fieldName($)), '=', field('value', $._expression)),
 
     unary_expression: ($) =>
       prec(PREC.unary, seq(field('operator', choice('-', '!', 'not')), field('operand', $._expression))),
@@ -290,23 +290,21 @@ module.exports = grammar({
 
     binary_expression: ($) => {
       const table = [
-        [prec.left, PREC.or, 'or'],
-        [prec.left, PREC.and, 'and'],
-        [prec.left, PREC.compare, choice('==', '!=', '<', '>', '<=', '>=', 'in')],
-        [prec.left, PREC.concat, '<>'],
-        [prec.left, PREC.bit_or, '|'],
-        [prec.left, PREC.bit_xor, '^'],
-        [prec.left, PREC.bit_and, '&'],
-        [prec.left, PREC.shift, choice('<<', '>>')],
-        [prec.left, PREC.additive, choice('+', '-')],
-        [prec.left, PREC.multiplicative, choice('*', '/', '%')],
-        [prec.right, PREC.power, '**'],
+        [PREC.or, 'or'],
+        [PREC.and, 'and'],
+        [PREC.compare, choice('==', '!=', '<', '>', '<=', '>=', 'in')],
+        [PREC.concat, '<>'],
+        [PREC.bit_or, '|'],
+        [PREC.bit_xor, '^'],
+        [PREC.bit_and, '&'],
+        [PREC.shift, choice('<<', '>>')],
+        [PREC.additive, choice('+', '-')],
+        [PREC.multiplicative, choice('*', '/', '%')],
       ];
       return choice(
-        ...table.map(([fn, p, op]) =>
-          // @ts-ignore
-          fn(p, seq(field('left', $._expression), field('operator', op), field('right', $._expression))),
-        ),
+        // @ts-ignore
+        ...table.map(([p, op]) => binary($, $._expression, p, op)),
+        binary($, $._expression, PREC.power, '**', prec.right),
       );
     },
 
@@ -350,7 +348,7 @@ module.exports = grammar({
       )),
 
     field_expression: ($) =>
-      prec(PREC.postfix, seq(field('value', $._expression), '.', field('field', alias($.identifier, $.field_identifier)))),
+      prec(PREC.postfix, seq(field('value', $._expression), '.', field('field', fieldName($)))),
 
     index_expression: ($) =>
       prec(PREC.postfix, seq(field('value', $._expression), '[', field('index', $._expression), ']')),
@@ -369,8 +367,7 @@ module.exports = grammar({
     function_literal: ($) =>
       seq(
         'fn',
-        field('parameters', $.parameter_list),
-        optional(field('return_type', $._return_type)),
+        ...signature($),
         field('body', $.block),
       ),
 
@@ -396,17 +393,17 @@ module.exports = grammar({
         $.future_type,
       ),
 
-    _simple_type: ($) => choice($.primitive_type, alias($.identifier, $.type_identifier)),
+    _simple_type: ($) => choice($.primitive_type, typeName($)),
 
     primitive_type: (_) =>
       choice('int', 'uint', 'byte', 'float', 'bool', 'char', 'str', 'void', 'error', 'never'),
 
     qualified_type: ($) =>
-      seq(field('module', $.identifier), '.', field('name', alias($.identifier, $.type_identifier))),
+      seq(field('module', $.identifier), '.', field('name', typeName($))),
 
     generic_type: ($) =>
       prec(PREC.generic, seq(
-        field('name', choice(alias($.identifier, $.type_identifier), $.qualified_type)),
+        field('name', choice(typeName($), $.qualified_type)),
         field('type_arguments', $.type_arguments),
       )),
 
@@ -420,8 +417,8 @@ module.exports = grammar({
 
     constant_expression: ($) =>
       choice(
-        prec.left(PREC.additive, seq(field('left', $._constant), field('operator', choice('+', '-')), field('right', $._constant))),
-        prec.left(PREC.multiplicative, seq(field('left', $._constant), field('operator', choice('*', '/', '%')), field('right', $._constant))),
+        binary($, $._constant, PREC.additive, choice('+', '-')),
+        binary($, $._constant, PREC.multiplicative, choice('*', '/', '%')),
         prec(PREC.unary, seq('-', $._constant)),
         seq('(', $._constant, ')'),
       ),
@@ -438,8 +435,7 @@ module.exports = grammar({
       seq(
         '(',
         'fn',
-        field('parameters', $.parameter_list),
-        optional(field('return_type', $._return_type)),
+        ...signature($),
         ')',
       ),
 
