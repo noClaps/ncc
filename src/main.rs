@@ -1,6 +1,7 @@
 mod ast;
 mod cgen;
 mod check;
+mod dce;
 mod diag;
 mod driver;
 mod eval;

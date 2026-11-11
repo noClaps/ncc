@@ -57,6 +57,9 @@ fn frontend(file: &Path, sm: &mut SourceMap, release: bool, codegen: bool) -> Op
                 }
             }
         }
+        if release && errors.is_empty() {
+            crate::dce::run(&mut p);
+        }
         (p, errors)
     });
     let errors = match r {

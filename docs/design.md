@@ -16,7 +16,12 @@
    rejects expressions that always panic, such as a call with constant arguments that
    overflows. In release mode it folds constant expressions and pure calls with constant
    arguments into literals, so `@println(fibonacci(10))` becomes `@println(55)`.
-6. **C generation** (`src/cgen/`): emits one readable C23 translation unit with the runtime
+6. **Dead code elimination** (`src/dce.rs`, release mode only): removes stores to variables
+   that kept code never reads, and discarded expressions, when they have no effect. Effect-free
+   code cannot print, call functions, loop, panic or jump; allocation counts as effect-free,
+   because running out of memory is not observable behaviour. A program with no I/O, such as
+   `mut int[] a = [1, 2, 3]` then `a = a <> [4]`, compiles to an empty `main`.
+7. **C generation** (`src/cgen/`): emits one readable C23 translation unit with the runtime
    embedded (the public header `src/runtime/nc.h`, then the implementation
    `src/runtime/nc_impl.h`), then calls the C compiler. Debug builds use
    `-O0 -g -fno-omit-frame-pointer`; release builds use `-O3 -DNDEBUG`, which also inlines.

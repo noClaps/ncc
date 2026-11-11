@@ -1,0 +1,510 @@
+//! Release-mode dead code elimination on the typed IR.
+//!
+//! Removes statements whose only effect is to compute a value nobody observes:
+//! - stores (`let` and assignments) to variables that are never read by live code;
+//! - discarded expressions (`_ = e`, expression statements) without side effects.
+//!
+//! A store is only removed when its value (and any index in its target) is effect-free: it
+//! cannot print, call, loop, panic or transfer control. Allocation counts as effect-free:
+//! running out of memory is not an observable behaviour of an NC program.
+//!
+//! Liveness is computed over the whole program: a variable is live when code that is kept
+//! reads it. Reads inside a store to `x` only matter once `x` itself is live, so
+//! self-referencing chains such as `a = a <> [4]` are removed together.
+
+use std::cell::Cell;
+use std::collections::{HashMap, HashSet};
+
+use crate::ast::{BinOp, UnOp};
+use crate::check::flow::place_root;
+use crate::tir::*;
+use crate::types::TyKind;
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Key {
+    Global(GlobalId),
+    Local(FuncId, LocalId),
+}
+
+pub fn run(p: &mut Program) {
+    // removing statements can empty blocks and make more variables dead: repeat until stable
+    while pass(p) {}
+}
+
+/// One round of elimination; whether anything was removed.
+fn pass(p: &mut Program) -> bool {
+    let live = {
+        let mut a = Analysis {
+            p,
+            func: 0,
+            live: HashSet::new(),
+            deps: HashMap::new(),
+        };
+        for f in 0..p.funcs.len() {
+            a.func = f;
+            // every statement, including those in nested bodies and in blocks of expressions
+            for s in &p.funcs[f].body.stmts {
+                crate::check::flow::visit_stmts(s, &mut |s| a.stmt(s));
+            }
+        }
+        a.propagate()
+    };
+    let mut changed = false;
+    for f in 0..p.funcs.len() {
+        let mut body = std::mem::replace(&mut p.funcs[f].body, Block { stmts: vec![] });
+        let pr = Prune {
+            p,
+            func: f,
+            live: &live,
+            changed: Cell::new(false),
+        };
+        pr.block(&mut body);
+        changed |= pr.changed.get();
+        p.funcs[f].body = body;
+    }
+    changed
+}
+
+struct Analysis<'p> {
+    p: &'p Program,
+    func: FuncId,
+    /// variables read by code that is kept
+    live: HashSet<Key>,
+    /// variables read by removable stores to a variable: live once that variable is
+    deps: HashMap<Key, HashSet<Key>>,
+}
+
+impl Analysis<'_> {
+    fn stmt(&mut self, s: &Stmt) {
+        match removable(self.p, self.func, s) {
+            Some(Removable::Discard) => return,
+            Some(Removable::Store(k)) => {
+                let mut reads = HashSet::new();
+                match &s.kind {
+                    SK::Let(_, e) => self.reads(e, &mut reads),
+                    SK::Assign(pl, e) => {
+                        self.place_reads(pl, &mut reads);
+                        self.reads(e, &mut reads);
+                    }
+                    _ => unreachable!(),
+                }
+                self.deps.entry(k).or_default().extend(reads);
+                return;
+            }
+            None => {}
+        }
+        let mut live = HashSet::new();
+        match &s.kind {
+            SK::Let(_, e) | SK::Destructure(_, e) | SK::Expr(e) | SK::Throw(e) | SK::Assert(e) => {
+                self.reads(e, &mut live);
+            }
+            SK::Assign(pl, e) => {
+                // a store that is kept needs its variable declared: keep the variable
+                if let Some(v) = place_root(pl) {
+                    live.insert(self.key(v));
+                }
+                self.place_reads(pl, &mut live);
+                self.reads(e, &mut live);
+            }
+            SK::Return(e) | SK::Break(_, e) => {
+                if let Some(e) = e {
+                    self.reads(e, &mut live);
+                }
+            }
+            SK::Continue(_) => {}
+            SK::While { cond: e, .. } | SK::For { iter: e, .. } | SK::Lock { mutex: e, .. } => {
+                self.reads(e, &mut live);
+            }
+            SK::Block(_) => {}
+        }
+        // a kept `let` or destructuring keeps its variables declared
+        match &s.kind {
+            SK::Let(Some(v), _) => {
+                live.insert(self.key(*v));
+            }
+            SK::Destructure(ts, _) => {
+                live.extend(ts.iter().filter_map(|(t, _, _)| t.map(|v| self.key(v))));
+            }
+            _ => {}
+        }
+        self.live.extend(live);
+    }
+
+    fn key(&self, v: VarRef) -> Key {
+        match v {
+            VarRef::Global(g) => Key::Global(g),
+            VarRef::Local(l) => Key::Local(self.func, l),
+        }
+    }
+
+    fn place_reads(&self, pl: &Place, out: &mut HashSet<Key>) {
+        match pl {
+            Place::Var(_) => {}
+            Place::Field(b, _) | Place::TupleIndex(b, _) => self.place_reads(b, out),
+            Place::Index(b, i) => {
+                self.place_reads(b, out);
+                self.reads(i, out);
+            }
+        }
+    }
+
+    /// Record the variables `e` reads. Statements in its nested blocks are analysed on their
+    /// own, so their reads are not included.
+    fn reads(&self, e: &Expr, out: &mut HashSet<Key>) {
+        for c in children(e) {
+            self.reads(c, out);
+        }
+        match &e.kind {
+            EK::Var(v) => {
+                out.insert(self.key(*v));
+            }
+            EK::FnRef(f)
+            | EK::Closure(f)
+            | EK::Call(Callee::Direct(f), _)
+            | EK::Async(Callee::Direct(f), _) => {
+                // creating or calling a nested function reads the variables it captures
+                let func = &self.p.funcs[*f];
+                if let Some(parent) = func.parent {
+                    out.extend(func.captures.iter().map(|c| Key::Local(parent, c.outer)));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn propagate(mut self) -> HashSet<Key> {
+        let mut work: Vec<Key> = self.live.iter().copied().collect();
+        while let Some(k) = work.pop() {
+            if let Some(ds) = self.deps.remove(&k) {
+                for d in ds {
+                    if self.live.insert(d) {
+                        work.push(d);
+                    }
+                }
+            }
+        }
+        self.live
+    }
+}
+
+enum Removable {
+    /// An effect-free expression whose value is discarded.
+    Discard,
+    /// An effect-free store to a variable: removable when the variable is not live.
+    Store(Key),
+}
+
+fn removable(p: &Program, func: FuncId, s: &Stmt) -> Option<Removable> {
+    let store_key = |v: VarRef| match v {
+        VarRef::Global(g) => Some(Key::Global(g)),
+        VarRef::Local(l) => {
+            let local = &p.funcs[func].locals[l];
+            // captured or aliased variables are shared with other code: keep their stores
+            (matches!(local.kind, LocalKind::Normal | LocalKind::Param) && !local.boxed)
+                .then_some(Key::Local(func, l))
+        }
+    };
+    match &s.kind {
+        SK::Expr(e) | SK::Let(None, e) if pure(p, e) => Some(Removable::Discard),
+        SK::Block(b) if b.stmts.is_empty() => Some(Removable::Discard),
+        SK::Let(Some(v), e) if pure(p, e) => store_key(*v).map(Removable::Store),
+        SK::Assign(pl, e) if pure(p, e) && place_pure(pl) => {
+            store_key(place_root(pl)?).map(Removable::Store)
+        }
+        _ => None,
+    }
+}
+
+fn place_pure(pl: &Place) -> bool {
+    match pl {
+        Place::Var(_) => true,
+        Place::Field(b, _) | Place::TupleIndex(b, _) => place_pure(b),
+        // an index out of bounds panics
+        Place::Index(..) => false,
+    }
+}
+
+/// Whether evaluating `e` has no observable effect: no output, calls, control transfer or
+/// panics. Allocation is not observable.
+fn pure(p: &Program, e: &Expr) -> bool {
+    let float = |e: &Expr| matches!(p.types.kind(e.ty), TyKind::Float);
+    match &e.kind {
+        EK::Lit(_)
+        | EK::None
+        | EK::Var(_)
+        | EK::FnRef(_)
+        | EK::Closure(_)
+        | EK::Dollar
+        | EK::Args
+        | EK::Env
+        | EK::Target
+        | EK::Embed(..) => true,
+        EK::Unary(op, a) => (*op != UnOp::Neg || float(a)) && pure(p, a),
+        EK::Binary(op, a, b) => {
+            let ok = match op {
+                BinOp::Concat
+                | BinOp::Eq
+                | BinOp::Ne
+                | BinOp::Lt
+                | BinOp::Gt
+                | BinOp::Le
+                | BinOp::Ge
+                | BinOp::In
+                | BinOp::And
+                | BinOp::Or
+                | BinOp::BitAnd
+                | BinOp::BitOr
+                | BinOp::BitXor => true,
+                // integer arithmetic can overflow or divide by zero, shifts can be out of range
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Pow => {
+                    float(a) && float(b)
+                }
+                BinOp::Shl | BinOp::Shr => false,
+            };
+            ok && pure(p, a) && pure(p, b)
+        }
+        EK::ToStr(a)
+        | EK::Field(a, _)
+        | EK::TupleIndex(a, _)
+        | EK::Len(a)
+        | EK::Some(a)
+        | EK::Retype(a) => pure(p, a),
+        EK::Format(xs) | EK::Tuple(xs) | EK::Array(xs) | EK::Struct(xs) | EK::Variant(_, xs) => {
+            xs.iter().all(|x| pure(p, x))
+        }
+        EK::Map(es) => es.iter().all(|(k, v)| pure(p, k) && pure(p, v)),
+        // an `if` with nothing left in its arms (the checker ensures one arm matches)
+        EK::If(i) => {
+            i.scrutinee.as_ref().is_none_or(|s| pure(p, s))
+                && i.arms
+                    .iter()
+                    .all(|a| a.body.stmts.is_empty() && a.patterns.iter().all(|pt| pat_pure(p, pt)))
+        }
+        EK::Else(a, Fallback::Expr(b)) => pure(p, a) && pure(p, b),
+        // calls may print, loop forever or panic; casts, indexing and slicing may panic
+        EK::Call(..)
+        | EK::Print(..)
+        | EK::Cast(_)
+        | EK::Index(..)
+        | EK::Slice(..)
+        | EK::Else(_, Fallback::Block(..))
+        | EK::Catch(..)
+        | EK::Try(_)
+        | EK::Async(..)
+        | EK::Await(_) => false,
+    }
+}
+
+fn pat_pure(p: &Program, pt: &Pat) -> bool {
+    match pt {
+        Pat::Wild | Pat::Bind(_) => true,
+        Pat::Value(e) | Pat::Cond(e) => pure(p, e),
+        Pat::Tuple(ps) | Pat::Struct(ps) | Pat::Array(ps) | Pat::Variant(_, ps) => {
+            ps.iter().all(|pt| pat_pure(p, pt))
+        }
+    }
+}
+
+/// The expressions directly inside `e`, including those in `if` patterns but not the
+/// statements of its nested blocks.
+fn children(e: &Expr) -> Vec<&Expr> {
+    fn pat<'a>(pt: &'a Pat, out: &mut Vec<&'a Expr>) {
+        match pt {
+            Pat::Wild | Pat::Bind(_) => {}
+            Pat::Value(e) | Pat::Cond(e) => out.push(e),
+            Pat::Tuple(ps) | Pat::Struct(ps) | Pat::Array(ps) | Pat::Variant(_, ps) => {
+                ps.iter().for_each(|pt| pat(pt, out));
+            }
+        }
+    }
+    let mut out: Vec<&Expr> = vec![];
+    match &e.kind {
+        EK::Lit(_)
+        | EK::None
+        | EK::Var(_)
+        | EK::FnRef(_)
+        | EK::Closure(_)
+        | EK::Dollar
+        | EK::Args
+        | EK::Env
+        | EK::Target
+        | EK::Embed(..) => {}
+        EK::Unary(_, a)
+        | EK::Cast(a)
+        | EK::ToStr(a)
+        | EK::Field(a, _)
+        | EK::TupleIndex(a, _)
+        | EK::Len(a)
+        | EK::Some(a)
+        | EK::Retype(a)
+        | EK::Try(a)
+        | EK::Await(a)
+        | EK::Catch(a, ..)
+        | EK::Else(a, Fallback::Block(..)) => out.push(&**a),
+        EK::Binary(_, a, b) | EK::Index(a, b) | EK::Else(a, Fallback::Expr(b)) => {
+            out.extend([&**a, &**b]);
+        }
+        EK::Slice(a, lo, hi) => out.extend([&**a, &**lo, &**hi]),
+        EK::Call(c, xs) | EK::Async(c, xs) => {
+            if let Callee::Value(f) = c {
+                out.push(&**f);
+            }
+            out.extend(xs.iter());
+        }
+        EK::Print(_, _, xs)
+        | EK::Format(xs)
+        | EK::Tuple(xs)
+        | EK::Array(xs)
+        | EK::Struct(xs)
+        | EK::Variant(_, xs) => out.extend(xs.iter()),
+        EK::Map(es) => es.iter().for_each(|(k, v)| out.extend([k, v])),
+        EK::If(i) => {
+            out.extend(&i.scrutinee);
+            for a in &i.arms {
+                a.patterns.iter().for_each(|pt| pat(pt, &mut out));
+            }
+        }
+    }
+    out
+}
+
+struct Prune<'a> {
+    p: &'a Program,
+    func: FuncId,
+    live: &'a HashSet<Key>,
+    changed: Cell<bool>,
+}
+
+impl Prune<'_> {
+    fn block(&self, b: &mut Block) {
+        let before = b.stmts.len();
+        b.stmts.retain(|s| match removable(self.p, self.func, s) {
+            Some(Removable::Discard) => false,
+            Some(Removable::Store(k)) => self.live.contains(&k),
+            None => true,
+        });
+        if b.stmts.len() != before {
+            self.changed.set(true);
+        }
+        for s in &mut b.stmts {
+            self.stmt(s);
+        }
+    }
+
+    fn stmt(&self, s: &mut Stmt) {
+        match &mut s.kind {
+            SK::Let(_, e) | SK::Destructure(_, e) | SK::Expr(e) | SK::Throw(e) | SK::Assert(e) => {
+                self.expr(e)
+            }
+            SK::Assign(pl, e) => {
+                self.place(pl);
+                self.expr(e);
+            }
+            SK::Return(e) | SK::Break(_, e) => {
+                if let Some(e) = e {
+                    self.expr(e);
+                }
+            }
+            SK::Continue(_) => {}
+            SK::While { cond: e, body, .. }
+            | SK::For { iter: e, body, .. }
+            | SK::Lock { mutex: e, body, .. } => {
+                self.expr(e);
+                self.block(body);
+            }
+            SK::Block(b) => self.block(b),
+        }
+    }
+
+    fn place(&self, pl: &mut Place) {
+        match pl {
+            Place::Var(_) => {}
+            Place::Field(b, _) | Place::TupleIndex(b, _) => self.place(b),
+            Place::Index(b, i) => {
+                self.place(b);
+                self.expr(i);
+            }
+        }
+    }
+
+    fn pat(&self, pt: &mut Pat) {
+        match pt {
+            Pat::Wild | Pat::Bind(_) => {}
+            Pat::Value(e) | Pat::Cond(e) => self.expr(e),
+            Pat::Tuple(ps) | Pat::Struct(ps) | Pat::Array(ps) | Pat::Variant(_, ps) => {
+                ps.iter_mut().for_each(|p| self.pat(p));
+            }
+        }
+    }
+
+    /// Prune the blocks nested in `e`.
+    fn expr(&self, e: &mut Expr) {
+        match &mut e.kind {
+            EK::If(i) => {
+                if let Some(s) = &mut i.scrutinee {
+                    self.expr(s);
+                }
+                for a in &mut i.arms {
+                    a.patterns.iter_mut().for_each(|p| self.pat(p));
+                    self.block(&mut a.body);
+                }
+            }
+            EK::Catch(a, _, b, _) => {
+                self.expr(a);
+                self.block(b);
+            }
+            EK::Else(a, fb) => {
+                self.expr(a);
+                match fb {
+                    Fallback::Expr(b) => self.expr(b),
+                    Fallback::Block(b, _) => self.block(b),
+                }
+            }
+            EK::Unary(_, a)
+            | EK::Cast(a)
+            | EK::ToStr(a)
+            | EK::Field(a, _)
+            | EK::TupleIndex(a, _)
+            | EK::Len(a)
+            | EK::Some(a)
+            | EK::Retype(a)
+            | EK::Try(a)
+            | EK::Await(a) => self.expr(a),
+            EK::Binary(_, a, b) | EK::Index(a, b) => {
+                self.expr(a);
+                self.expr(b);
+            }
+            EK::Slice(a, lo, hi) => {
+                self.expr(a);
+                self.expr(lo);
+                self.expr(hi);
+            }
+            EK::Call(c, xs) | EK::Async(c, xs) => {
+                if let Callee::Value(f) = c {
+                    self.expr(f);
+                }
+                xs.iter_mut().for_each(|x| self.expr(x));
+            }
+            EK::Print(_, _, xs)
+            | EK::Format(xs)
+            | EK::Tuple(xs)
+            | EK::Array(xs)
+            | EK::Struct(xs)
+            | EK::Variant(_, xs) => xs.iter_mut().for_each(|x| self.expr(x)),
+            EK::Map(es) => es.iter_mut().for_each(|(k, v)| {
+                self.expr(k);
+                self.expr(v);
+            }),
+            EK::Lit(_)
+            | EK::None
+            | EK::Var(_)
+            | EK::FnRef(_)
+            | EK::Closure(_)
+            | EK::Dollar
+            | EK::Args
+            | EK::Env
+            | EK::Target
+            | EK::Embed(..) => {}
+        }
+    }
+}
