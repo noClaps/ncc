@@ -97,6 +97,21 @@ const BUILTINS: &[(&str, &str, &str)] = &[
     ),
 ];
 
+/// A document symbol, serialized like `DocumentSymbol` but without its deprecated
+/// `deprecated` field (which `DocumentSymbol` cannot be built without).
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DocSymbol {
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
+    kind: SymbolKind,
+    range: Range,
+    selection_range: Range,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    children: Option<Vec<DocSymbol>>,
+}
+
 /// Result of analysing one entry document.
 struct Analysis {
     sm: SourceMap,
@@ -470,7 +485,6 @@ fn indent_at(text: &str, off: usize) -> &str {
 }
 
 impl Server {
-    #[allow(deprecated)]
     fn init(&mut self, p: InitializeParams) {
         self.pull = p
             .capabilities
@@ -485,16 +499,9 @@ impl Server {
             .and_then(|c| c.completion_item.as_ref())
             .and_then(|c| c.snippet_support)
             .unwrap_or(false);
-        for f in p.workspace_folders.unwrap_or_default() {
-            if let Some(path) = uri_to_path(&f.uri) {
-                self.roots.push(path);
-            }
-        }
-        if self.roots.is_empty()
-            && let Some(path) = p.root_uri.as_ref().and_then(uri_to_path)
-        {
-            self.roots.push(path);
-        }
+        self.roots = (p.workspace_folders.unwrap_or_default().iter())
+            .filter_map(|f| uri_to_path(&f.uri))
+            .collect();
     }
 
     /// Analyse every `.nc` file of the workspace that is not analysed yet (once), so that
@@ -951,8 +958,7 @@ impl Server {
         )))
     }
 
-    #[allow(deprecated)]
-    fn symbols(&self, p: DocumentSymbolParams) -> Option<DocumentSymbolResponse> {
+    fn symbols(&self, p: DocumentSymbolParams) -> Option<Vec<DocSymbol>> {
         let path = uri_to_path(&p.text_document.uri)?;
         let text = self.text_of(&path)?;
         let (module, _) = crate::parser::parse_module_recover(&text, 0);
@@ -960,7 +966,7 @@ impl Server {
                    kind: SymbolKind,
                    span: Span,
                    detail: Option<String>,
-                   children: Option<Vec<DocumentSymbol>>| {
+                   children: Option<Vec<DocSymbol>>| {
             let range = span_range(&text, span);
             // the name comes last in `int x` (fields, variables, imports) and first elsewhere
             let first = !matches!(
@@ -972,7 +978,7 @@ impl Server {
             );
             let selection_range =
                 name_span(&text, span, name, first).map_or(range, |s| span_range(&text, s));
-            DocumentSymbol {
+            DocSymbol {
                 name: if name.is_empty() {
                     "_".into()
                 } else {
@@ -980,8 +986,6 @@ impl Server {
                 },
                 detail,
                 kind,
-                tags: None,
-                deprecated: None,
                 range,
                 selection_range,
                 children,
@@ -1003,9 +1007,9 @@ impl Server {
             let t = src(Span::new(sig.span.file, start, start + end));
             t.starts_with('(').then_some(t)
         };
-        let fn_symbol = |f: &ast::FnDecl| -> DocumentSymbol {
+        let fn_symbol = |f: &ast::FnDecl| -> DocSymbol {
             // functions declared directly in the body
-            let nested: Vec<DocumentSymbol> = f
+            let nested: Vec<DocSymbol> = f
                 .body
                 .stmts
                 .iter()
@@ -1118,7 +1122,7 @@ impl Server {
                 },
             }
         }
-        Some(DocumentSymbolResponse::Nested(out))
+        Some(out)
     }
 }
 
@@ -1420,7 +1424,6 @@ impl Server {
         Some(out)
     }
 
-    #[allow(deprecated)]
     fn workspace_symbols(&self, p: WorkspaceSymbolParams) -> WorkspaceSymbolResponse {
         let q = p.query.to_lowercase();
         let mut seen = HashSet::new();
@@ -1448,18 +1451,21 @@ impl Server {
                     DeclKind::Struct | DeclKind::Enum | DeclKind::Type | DeclKind::Function
                 );
                 let span = name_span(&f.text, d.span, &d.name, first).unwrap_or(d.span);
-                out.push(SymbolInformation {
+                out.push(WorkspaceSymbol {
                     name: d.name.clone(),
                     kind,
                     tags: None,
-                    deprecated: None,
-                    location: Location::new(path_to_uri(&f.path), span_range(&f.text, span)),
                     container_name: f.path.file_name().map(|n| n.to_string_lossy().into_owned()),
+                    location: OneOf::Left(Location::new(
+                        path_to_uri(&f.path),
+                        span_range(&f.text, span),
+                    )),
+                    data: None,
                 });
             }
         }
         out.sort_by(|a, b| a.name.cmp(&b.name));
-        WorkspaceSymbolResponse::Flat(out)
+        WorkspaceSymbolResponse::Nested(out)
     }
 }
 

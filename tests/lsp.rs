@@ -458,7 +458,7 @@ impl Session {
         let root = format!("file://{}", dir.display());
         c.request(
             "initialize",
-            json!({"processId": null, "rootUri": root, "capabilities": {
+            json!({"processId": null, "rootUri": null, "workspaceFolders": [{"uri": root, "name": "ws"}], "capabilities": {
                 "textDocument": {"completion": {"completionItem": {"snippetSupport": true}}}
             }}),
         );
@@ -1172,7 +1172,12 @@ fn workspace_features() {
     let mut c = Client::start();
     c.request(
         "initialize",
-        json!({"processId": null, "rootUri": format!("file://{}", dir.display()), "capabilities": {}}),
+        json!({
+            "processId": null,
+            "rootUri": null,
+            "workspaceFolders": [{"uri": format!("file://{}", dir.display()), "name": "ws"}],
+            "capabilities": {}
+        }),
     );
     c.notify("initialized", json!({}));
     // diagnostics for the whole workspace, not only open files
