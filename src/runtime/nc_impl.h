@@ -672,11 +672,8 @@ static nc_map *nc_map_new(const nc_ti *kti, const nc_ti *vti, int64_t cap) {
 }
 static inline void *nc_map_key(const nc_map *m, int64_t i) { return (char *)m->keys + (size_t)i * m->kti->size; }
 static inline void *nc_map_val(const nc_map *m, int64_t i) { return (char *)m->vals + (size_t)i * m->vti->size; }
-static void nc_map_retain(nc_map *m) {
-  if (m) nc_inc(&m->rc);
-}
 static inline nc_map *nc_map_rt(nc_map *m) {
-  nc_map_retain(m);
+  if (m) nc_inc(&m->rc);
   return m;
 }
 static void nc_map_release(nc_map *m) {
@@ -822,11 +819,8 @@ static nc_cell *nc_cell_new(const nc_ti *ti) {
   c->ti = ti;
   return c;
 }
-static void nc_cell_retain(nc_cell *c) {
-  if (c) nc_inc(&c->rc);
-}
 static inline nc_cell *nc_cell_rt(nc_cell *c) {
-  nc_cell_retain(c);
+  if (c) nc_inc(&c->rc);
   return c;
 }
 static void nc_cell_release(nc_cell *c) {

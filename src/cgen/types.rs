@@ -323,10 +323,10 @@ impl<'t> TypeGen<'t> {
                 s(st),
             )
         };
-        // reference-counted runtime objects with their own helpers (`nc_str_retain`, ...)
-        let object = |p: &str, st: &str| {
+        // reference-counted runtime objects with their own helpers (`nc_str_eq`, ...)
+        let object = |p: &str, retain: &str, st: &str| {
             (
-                format!("{p}_retain(x);"),
+                format!("{p}_{retain}(x);"),
                 format!("{p}_release(x);"),
                 format!("return {p}_eq(a, b);"),
                 format!("return {p}_hash(x);"),
@@ -350,15 +350,17 @@ impl<'t> TypeGen<'t> {
             TyKind::Int => prim("nc_hash_u64((uint64_t)x)", "nc_sb_i64(sb, x);"),
             TyKind::Char => prim("nc_hash_u64(x)", "nc_sb_char(sb, x);"),
             TyKind::Float => prim("nc_hs_float(&x)", "nc_sb_f64(sb, x);"),
-            TyKind::Str | TyKind::Error => object("nc_str", "nc_sb_str(sb, x);"),
-            TyKind::Array(_) | TyKind::Fixed(..) => object("nc_arr", "nc_arr_str(sb, x);"),
-            TyKind::Map(..) => object("nc_map", "nc_map_str(sb, x);"),
+            TyKind::Str | TyKind::Error => object("nc_str", "retain", "nc_sb_str(sb, x);"),
+            TyKind::Array(_) | TyKind::Fixed(..) => {
+                object("nc_arr", "retain", "nc_arr_str(sb, x);")
+            }
+            TyKind::Map(..) => object("nc_map", "rt", "nc_map_str(sb, x);"),
             TyKind::Opt(i) => {
                 let i = self.t.base(*i);
                 let ic = self.ct(i);
                 if self.t.opt_boxed(t) {
                     (
-                        s("nc_cell_retain(x);"),
+                        s("nc_cell_rt(x);"),
                         s("nc_cell_release(x);"),
                         format!(
                             "if (!a || !b) return a == b; return eq_{i}(*({ic} *)a->val, *({ic} *)b->val);"
