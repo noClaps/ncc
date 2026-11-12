@@ -1317,25 +1317,14 @@ impl Checker {
             TyKind::Fn(..) | TyKind::Fut(_) | TyKind::Mutex(_) | TyKind::Void | TyKind::Never => {
                 false
             }
-            TyKind::ErrU(e) => *e == VOID || self.plain_in(*e, seen),
+            TyKind::ErrU(e) if *e == VOID => true,
             TyKind::Named(_) => self.plain_in(ty.base(t), seen),
-            TyKind::Array(e) | TyKind::Fixed(e, _) | TyKind::Opt(e) => self.plain_in(*e, seen),
-            TyKind::Map(k, v) => self.plain_in(*k, seen) && self.plain_in(*v, seen),
-            TyKind::Tuple(ts) => ts.iter().all(|x| self.plain_in(*x, seen)),
-            TyKind::Struct(i) => {
+            _ => {
                 seen.push(t);
-                let r = (ty.structs[*i as usize].fields.iter()).all(|f| self.plain_in(f.1, seen));
+                let r = ty.components(t).into_iter().all(|c| self.plain_in(c, seen));
                 seen.pop();
                 r
             }
-            TyKind::Enum(i) => {
-                seen.push(t);
-                let r = (ty.enums[*i as usize].variants.iter())
-                    .all(|v| v.1.iter().all(|f| self.plain_in(*f, seen)));
-                seen.pop();
-                r
-            }
-            _ => true,
         }
     }
 

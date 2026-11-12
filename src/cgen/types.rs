@@ -147,35 +147,8 @@ impl<'t> TypeGen<'t> {
             }
             _ => {}
         }
-        // components
-        let comps: Vec<TyId> = match &kind {
-            TyKind::Array(e)
-            | TyKind::Fixed(e, _)
-            | TyKind::Opt(e)
-            | TyKind::ErrU(e)
-            | TyKind::Fut(e)
-            | TyKind::Mutex(e) => vec![*e],
-            TyKind::Map(k, v) => vec![*k, *v],
-            TyKind::Tuple(ts) => ts.clone(),
-            TyKind::Fn(ps, r) => {
-                let mut v = ps.clone();
-                v.push(*r);
-                v
-            }
-            TyKind::Struct(i) => self.t.structs[*i as usize]
-                .fields
-                .iter()
-                .map(|f| f.1)
-                .collect(),
-            TyKind::Enum(i) => self.t.enums[*i as usize]
-                .variants
-                .iter()
-                .flat_map(|v| v.1.clone())
-                .collect(),
-            _ => vec![],
-        };
-        for c in &comps {
-            self.need(*c);
+        for c in self.t.components(t) {
+            self.need(c);
         }
         let ct = self.ct(t);
         // definitions

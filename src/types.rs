@@ -197,6 +197,31 @@ impl Types {
         }
     }
 
+    /// The types `t` is directly built from: elements, keys and values, fields, payloads,
+    /// parameters and results. A named type's underlying type is not one of them.
+    pub fn components(&self, t: TyId) -> Vec<TyId> {
+        match self.kind(t) {
+            TyKind::Array(e)
+            | TyKind::Fixed(e, _)
+            | TyKind::Opt(e)
+            | TyKind::ErrU(e)
+            | TyKind::Fut(e)
+            | TyKind::Mutex(e) => vec![*e],
+            TyKind::Map(k, v) => vec![*k, *v],
+            TyKind::Tuple(ts) => ts.clone(),
+            TyKind::Fn(ps, r) => ps.iter().chain([r]).copied().collect(),
+            TyKind::Struct(i) => self.structs[*i as usize]
+                .fields
+                .iter()
+                .map(|f| f.1)
+                .collect(),
+            TyKind::Enum(i) => (self.enums[*i as usize].variants.iter())
+                .flat_map(|v| v.1.iter().copied())
+                .collect(),
+            _ => vec![],
+        }
+    }
+
     pub fn struct_def(&self, t: TyId) -> Option<&StructDef> {
         match self.kind(t) {
             TyKind::Struct(i) => Some(&self.structs[*i as usize]),
