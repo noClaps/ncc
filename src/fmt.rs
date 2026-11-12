@@ -377,7 +377,8 @@ impl<'a> Printer<'a> {
         }
     }
 
-    /// `head { ... }` (an extern block, struct or enum ending at `span`), one member per line;
+    /// `head { ... }` (an extern block, struct or enum ending at `span`), one member per line,
+    /// or `head {}` with neither members nor comments;
     /// `show` prints a member after the comments before it. Blank lines between members are
     /// kept as between statements; comments before the first member never get one above them.
     fn members<'m, T: 'm>(
@@ -388,8 +389,14 @@ impl<'a> Printer<'a> {
         show: impl Fn(&mut Self, &T) -> String,
     ) {
         self.out.push_str(&head);
+        let open = self.find_outside_comments(span.start as usize, '{');
+        let mut members = members.peekable();
+        if members.peek().is_none() && !self.has_comment_in(open, span.end as usize) {
+            self.out.push_str(" {}\n");
+            return;
+        }
         self.out.push_str(" {\n");
-        self.cursor = self.find_outside_comments(span.start as usize, '{') + 1;
+        self.cursor = open + 1;
         for (i, (sp, m)) in members.enumerate() {
             self.entry_start(sp.start as usize, 1, i == 0);
             let text = show(self, m);
@@ -909,6 +916,15 @@ mod tests {
     fn blank_lines_between_members() {
         let src = "struct P {\n  int x\n\n\n  int y\n  // c\n\n  int z\n}\n\nenum E {\n\n  A\n\n  B\n}\n\nextern \"m.h\" as m {\n  fn f() = \"f\"\n\n  fn g() = \"g\"\n}\n";
         let out = "struct P {\n  int x\n\n  int y\n  // c\n\n  int z\n}\n\nenum E {\n  A\n\n  B\n}\n\nextern \"m.h\" as m {\n  fn f() = \"f\"\n\n  fn g() = \"g\"\n}\n";
+        assert_eq!(fmt(src), out);
+        assert_eq!(fmt(out), out);
+    }
+
+    #[test]
+    fn empty_members() {
+        let src =
+            "struct Q {\n}\nenum E {}\nextern \"m.h\" as m {\n\n}\nstruct C {\n  // only\n}\n";
+        let out = "struct Q {}\nenum E {}\nextern \"m.h\" as m {}\nstruct C {\n  // only\n}\n";
         assert_eq!(fmt(src), out);
         assert_eq!(fmt(out), out);
     }
