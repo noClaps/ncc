@@ -492,6 +492,35 @@ fn handler(int _code) {
 }
 ```
 
+## Unreachable code after endless loops
+
+**Addition: code after a loop that never finishes is reported**, like unused code: a warning in
+debug builds, `ncc check` and `ncc test`, and an error in release builds (`-r`).
+
+- A `while` loop never finishes when its condition is always `true` and no `break` ends it. The
+  condition counts as always true when:
+  - it is a constant: `true`, an expression of constants such as `1 < 2`, or a constant global.
+    The checker already knows such a loop does not fall through, so a function ending in one
+    needs no final `return`;
+  - or it is true from the values variables are known to have when the loop starts, and the
+    loop changes none of them. Values are worked out the same way release builds fold code;
+    a variable stops being known when the loop assigns it, or calls code that may change it
+    (for a global). For example, `mut int x = 5` followed by `while x > 0 { @println("tick") }`.
+- The statements after such a loop in the same block are reported, because they can never run.
+- The language server also marks a loop that nothing leaves at all (no `break`, `return`,
+  `throw`, `try`, or jump to an outer loop) with an information diagnostic: it runs until a
+  panic or until the program is stopped.
+- As with unused code, dependencies are not checked.
+
+```nc
+fn serve() {
+  while true {
+    handle()
+  }
+  @println("stopped") // unreachable: a warning in debug builds, an error with `-r`
+}
+```
+
 ## Tests
 
 **Clarification: top-level code under `ncc test`.** Only global writes in the entry file run

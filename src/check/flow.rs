@@ -7,7 +7,7 @@ use crate::tir::*;
 use crate::types::NEVER;
 
 /// Visit every expression (pre-order) in a statement, including nested blocks.
-pub fn visit_stmt(s: &Stmt, f: &mut dyn FnMut(&Expr)) {
+pub fn visit_stmt<'a>(s: &'a Stmt, f: &mut dyn FnMut(&'a Expr)) {
     match &s.kind {
         SK::Let(_, e) | SK::Destructure(_, e) | SK::Expr(e) | SK::Throw(e) | SK::Assert(e) => {
             visit_expr(e, f);
@@ -38,7 +38,7 @@ pub fn visit_stmt(s: &Stmt, f: &mut dyn FnMut(&Expr)) {
     }
 }
 
-fn visit_place(p: &Place, f: &mut dyn FnMut(&Expr)) {
+fn visit_place<'a>(p: &'a Place, f: &mut dyn FnMut(&'a Expr)) {
     match p {
         Place::Var(_) => {}
         Place::Field(b, _) | Place::TupleIndex(b, _) => visit_place(b, f),
@@ -49,19 +49,19 @@ fn visit_place(p: &Place, f: &mut dyn FnMut(&Expr)) {
     }
 }
 
-fn visit_block(b: &Block, f: &mut dyn FnMut(&Expr)) {
+fn visit_block<'a>(b: &'a Block, f: &mut dyn FnMut(&'a Expr)) {
     for s in &b.stmts {
         visit_stmt(s, f);
     }
 }
 
-fn visit_callee(c: &Callee, f: &mut dyn FnMut(&Expr)) {
+fn visit_callee<'a>(c: &'a Callee, f: &mut dyn FnMut(&'a Expr)) {
     if let Callee::Value(e) = c {
         visit_expr(e, f);
     }
 }
 
-fn visit_pat(p: &Pat, f: &mut dyn FnMut(&Expr)) {
+fn visit_pat<'a>(p: &'a Pat, f: &mut dyn FnMut(&'a Expr)) {
     match p {
         Pat::Wild | Pat::Bind(_) => {}
         Pat::Value(e) | Pat::Cond(e) => visit_expr(e, f),
@@ -73,7 +73,7 @@ fn visit_pat(p: &Pat, f: &mut dyn FnMut(&Expr)) {
     }
 }
 
-pub fn visit_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
+pub fn visit_expr<'a>(e: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
     f(e);
     match &e.kind {
         EK::Lit(_)

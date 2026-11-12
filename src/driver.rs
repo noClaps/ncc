@@ -37,6 +37,8 @@ fn frontend(file: &Path, sm: &mut SourceMap, release: bool, codegen: bool) -> Op
                 Err(e) => errors.push(crate::diag::Diag::new(Default::default(), e)),
             }
         }
+        // loops are checked before release folding rewrites them, so both modes agree
+        let loops = errors.is_empty().then(|| crate::lint::loops(&p, sm));
         // compile-time panics are reported alongside type errors
         if let Err(more) = crate::eval::Evaluator::run(&mut p, sm, release && errors.is_empty()) {
             errors.extend(more);
@@ -46,6 +48,15 @@ fn frontend(file: &Path, sm: &mut SourceMap, release: bool, codegen: bool) -> Op
         if errors.is_empty() {
             for w in crate::lint::race_warnings(&p) {
                 eprintln!("{}", w.render_as("warning", sm));
+            }
+            // unreachable code after a loop that never finishes: like unused code below
+            let unreachable = loops.map(|l| l.unreachable).unwrap_or_default();
+            if release {
+                errors.extend(unreachable);
+            } else {
+                for d in unreachable {
+                    eprintln!("{}", d.render_as("warning", sm));
+                }
             }
             // unused code: warnings in debug mode, errors in release mode
             let unused = crate::lint::unused(&index, sm);

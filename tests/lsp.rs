@@ -341,6 +341,37 @@ fn language_server() {
     assert_eq!(diags.len(), 1, "{diags:?}");
     assert_eq!(diags[0]["severity"], 2);
 
+    // a loop that never ends is information; the code after it is a faded warning
+    let spin = "mut int n = 0\nwhile 1 < 2 {\n  n = n + 1\n}\n@println(n)\n@println(\"done\")\n";
+    c.notify(
+        "textDocument/didChange",
+        json!({"textDocument": {"uri": uri, "version": 41}, "contentChanges": [{"text": spin}]}),
+    );
+    let diags = c.diagnostics(&uri);
+    assert_eq!(diags.len(), 2, "{diags:?}");
+    let info = diags.iter().find(|d| d["code"] == "infinite-loop").unwrap();
+    assert_eq!(info["severity"], 3);
+    assert_eq!(info["range"]["start"], pos(1, 0));
+    assert_eq!(info["range"]["end"], pos(1, 11));
+    let dead = diags
+        .iter()
+        .find(|d| d["code"] == "unreachable-code")
+        .unwrap();
+    assert_eq!(dead["severity"], 2);
+    assert_eq!(dead["tags"], json!([1]));
+    assert_eq!(dead["range"]["start"], pos(4, 0));
+    assert_eq!(dead["range"]["end"], pos(5, 16));
+
+    // a loop left by `return` is not endless, but the code after it still never runs
+    let ret = "fn f() int {\n  while true {\n    if {\n      @args().len > 1 -> { return 1 }\n      _ -> {}\n    }\n  }\n  return 0\n}\n@println(f())\n";
+    c.notify(
+        "textDocument/didChange",
+        json!({"textDocument": {"uri": uri, "version": 42}, "contentChanges": [{"text": ret}]}),
+    );
+    let diags = c.diagnostics(&uri);
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0]["code"], "unreachable-code");
+
     // every error is published, not just the first
     let many = "int a = \"x\"\nstr b = 1\nint c = 1 / 0\nint d = (\n";
     c.notify(

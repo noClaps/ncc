@@ -538,3 +538,41 @@ fn release_folds_top_level_code() {
     assert!(c.contains("for (;;)"), "{c}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Code after a loop that never finishes is a warning in debug builds and an error in release.
+#[test]
+fn unreachable_after_endless_loop() {
+    let dir = std::env::temp_dir().join(format!("ncc-loops-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let nc = dir.join("main.nc");
+    std::fs::write(
+        &nc,
+        "fn spin() {\n  mut int n = 0\n  while true {\n    n = n + 1\n  }\n  @println(n)\n}\n\
+         fn fine() {\n  mut int k = 0\n  while true {\n    k = k + 1\n    if {\n      k > 3 -> { break }\n      _ -> {}\n    }\n  }\n  @println(k)\n}\n\
+         fn stuck() {\n  mut int x = 5\n  while x > 0 {\n    @println(\"tick\")\n  }\n  @println(\"stuck\")\n}\n\
+         fn counts() {\n  mut int x = 5\n  while x > 0 {\n    x = x - 1\n  }\n  @println(x)\n}\n\
+         mut int g = 0\nfn bump() {\n  g = g + 1\n}\n\
+         fn changed() {\n  g = 1\n  while g > 0 {\n    bump()\n  }\n  @println(g)\n}\n\
+         fine()\nspin()\nstuck()\ncounts()\nchanged()\n",
+    )
+    .unwrap();
+    let msg = "unreachable code: the loop before it never finishes";
+    let (_, err, code) = run(&["check"], &nc);
+    assert_eq!(code, 0, "{err}");
+    // `spin` (constant condition) and `stuck` (`x` is known and never changes); not `counts`,
+    // whose loop changes `x`, nor `changed`, whose loop calls code that changes `g`
+    assert_eq!(err.matches(msg).count(), 2, "{err}");
+    assert!(err.contains("main.nc:24:3"), "{err}");
+    assert!(err.contains("warning: unreachable code"), "{err}");
+    assert!(err.contains("main.nc:6:3"), "{err}");
+
+    let out = dir.join("main.c");
+    let (_, err, code) = run(
+        &["build", "-r", "-f", "c", "-o", out.to_str().unwrap()],
+        &nc,
+    );
+    assert_ne!(code, 0);
+    assert!(err.contains(&format!("error: {msg}")), "{err}");
+    assert!(!out.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -676,6 +676,7 @@ impl Server {
         let mut index = None;
         let mut imports = HashMap::new();
         let mut clean = false;
+        let mut loops = crate::lint::Loops::default();
         let errors = match crate::modules::load_with(&mut sm, entry, &self.docs) {
             Err(errs) => errs,
             Ok((graph, mut errors)) => {
@@ -691,6 +692,7 @@ impl Server {
                 }
                 if clean {
                     warnings = crate::lint::race_warnings(&p);
+                    loops = crate::lint::loops(&p, &sm);
                 }
                 index = Some(ix);
                 errors
@@ -713,6 +715,39 @@ impl Server {
                     message: d.msg.clone(),
                     ..Default::default()
                 },
+            ));
+        }
+        // loops that never end are information; the code after one is faded: unreachable
+        // code is a warning in debug builds and an error in release builds
+        let lint = |d: crate::diag::Diag, sev, code: &str, tags| {
+            let f = sm.file(d.span.file);
+            (
+                f.path.clone(),
+                Diagnostic {
+                    range: span_range(&f.text, d.span),
+                    severity: Some(sev),
+                    code: Some(NumberOrString::String(code.into())),
+                    source: Some("ncc".into()),
+                    message: d.msg,
+                    tags,
+                    ..Default::default()
+                },
+            )
+        };
+        for d in loops.infinite {
+            out.push(lint(
+                d,
+                DiagnosticSeverity::INFORMATION,
+                "infinite-loop",
+                None,
+            ));
+        }
+        for d in loops.unreachable {
+            out.push(lint(
+                d,
+                DiagnosticSeverity::WARNING,
+                "unreachable-code",
+                Some(vec![DiagnosticTag::UNNECESSARY]),
             ));
         }
         // keep the previous index when the file did not load

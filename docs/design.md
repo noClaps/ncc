@@ -11,7 +11,11 @@
    monomorphisation. It also covers closure capture analysis, exhaustiveness and
    control-flow (return/value) analysis, and lowers the AST to a typed IR (`src/tir.rs`).
    Imported modules contribute only the top-level statements that the program needs.
-4. **Warnings** (`src/lint.rs`): possible data races in `async` code, and unused code.
+4. **Warnings** (`src/lint.rs`): possible data races in `async` code, unused code, and code after
+   a `while` loop that never finishes (no `break`, and a condition that is constant-true, or
+   true from the values release propagation knows at the start of every iteration). Loops are
+   checked before release folding, by running propagation without changing the program, so
+   debug and release builds report the same code.
 5. **Compile-time evaluation** (`src/eval.rs`): an interpreter for pure code. In every mode it
    rejects expressions that always panic, such as a call with constant arguments that
    overflows. In release mode it folds constant expressions and pure calls with constant
@@ -111,7 +115,7 @@ Features (see [lsp.md](lsp.md) for a comparison with Gleam's language server and
 
 | Area | Features |
 | --- | --- |
-| Diagnostics | parse and type errors, compile-time panics, data-race warnings; unused code (as the compiler reports it), unreachable `if` branches (faded) |
+| Diagnostics | parse and type errors, compile-time panics, data-race warnings; unused code and code after a loop that never finishes (as the compiler reports them, faded), unreachable `if` branches (faded), loops that never end (information) |
 | Navigation | hover (with `///` doc comments, expression types, builtins, keywords), go to definition, declaration and type definition, references, highlights (including a function's exit points), call hierarchy, selection ranges, document links (imports, externs, `@embed`), document and workspace symbols |
 | Editing | completion (scope- and type-aware, struct literal fields, enum variants, module members, modules that are not imported yet (adding the import), import and `@embed` paths, snippets), signature help, rename (also of import aliases; refused when the new name clashes), import updates when a file is renamed, formatting (whole document or range, as minimal edits), folding |
 | Display | inlay hints (parameter names, bound variable types, `fn name` after long blocks), semantic tokens |

@@ -86,6 +86,8 @@ pub struct Evaluator<'p> {
     gwrites: Vec<Option<HashSet<GlobalId>>>,
     /// interpreter steps left for the whole propagation pass
     budget: u64,
+    /// `while` loops whose condition propagation found true at the start of every iteration
+    endless: HashSet<(FuncId, JumpId)>,
 }
 
 const CALL_FUEL: u64 = 2_000_000;
@@ -162,6 +164,7 @@ impl<'p> Evaluator<'p> {
             errs: vec![],
             gwrites: vec![],
             budget: PROP_FUEL,
+            endless: HashSet::new(),
         }
     }
 
@@ -599,6 +602,17 @@ impl<'p> Evaluator<'p> {
             }
         }
         forget_globals(&mut inner, &clobbers);
+        // `inner` holds what is true at the start of every iteration of a loop: a condition
+        // that is true from that alone never becomes false
+        if let SK::While { id, cond, .. } = &s.kind {
+            self.start_fuel();
+            let r = self.expr(cond, &mut inner, false);
+            self.end_fuel();
+            inner.dollar.clear();
+            if let Ok(Val::Bool(true)) = r {
+                self.endless.insert((f, *id));
+            }
+        }
         self.prop_inside(s, f, &mut inner);
         for v in assigned.iter().chain(&declared) {
             env.forget(*v);
@@ -878,6 +892,10 @@ impl<'p> Evaluator<'p> {
         // compute index values first (immutable borrow of env), then mutate
         let mut path = Vec::new();
         let root = self.place_path(p, env, &mut path)?;
+        if path.is_empty() {
+            // a whole-variable store does not need the old value
+            return env.declare(Some(root), v);
+        }
         set_path(env.slot(root)?, &path, v)
     }
 
@@ -1964,6 +1982,29 @@ fn binop(op: BinOp, x: Val, y: Val, span: Span) -> R<Val> {
         (op, Val::Char(a), Val::Char(b)) => ord(op, a, b)?,
         _ => return Err(Stop::Unknown),
     })
+}
+
+/// Compile-time evaluation of constant expressions, for lints.
+pub struct Consts<'p>(Evaluator<'p>);
+
+impl<'p> Consts<'p> {
+    pub fn new(p: &'p Program, sm: &'p SourceMap) -> Self {
+        let mut ev = Evaluator::new(p, sm);
+        ev.init_gconst();
+        Consts(ev)
+    }
+
+    /// `while` loops whose condition stays true on every iteration, as found by propagating
+    /// known values through the program (as release builds do, without changing it).
+    pub fn endless_loops(&mut self) -> HashSet<(FuncId, JumpId)> {
+        self.0.propagate();
+        std::mem::take(&mut self.0.endless)
+    }
+
+    /// Whether `e` is a constant that is always `true`.
+    pub fn always_true(&mut self, e: &Expr) -> bool {
+        matches!(self.0.try_const(e), Ok(Some(Val::Bool(true))))
+    }
 }
 
 /// Number of nodes in a value.
