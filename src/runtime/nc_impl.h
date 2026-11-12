@@ -129,79 +129,37 @@ static inline bool nc_unique(_Atomic int64_t *rc) { return atomic_load_explicit(
 
 /* ------------------------------------------------------------------ checked integer arithmetic */
 
-static inline int64_t nc_add_i64(int64_t a, int64_t b, const char *loc) {
-  int64_t r;
-  if (ckd_add(&r, a, b)) nc_panic("integer overflow", loc);
-  return r;
-}
-static inline int64_t nc_sub_i64(int64_t a, int64_t b, const char *loc) {
-  int64_t r;
-  if (ckd_sub(&r, a, b)) nc_panic("integer overflow", loc);
-  return r;
-}
-static inline int64_t nc_mul_i64(int64_t a, int64_t b, const char *loc) {
-  int64_t r;
-  if (ckd_mul(&r, a, b)) nc_panic("integer overflow", loc);
-  return r;
-}
-static inline int64_t nc_pow_i64(int64_t a, int64_t b, const char *loc) {
-  if (b < 0) nc_panic("negative exponent", loc);
-  int64_t r = 1;
-  while (b > 0) {
-    if ((b & 1) && ckd_mul(&r, r, a)) nc_panic("integer overflow", loc);
-    b >>= 1;
-    if (b > 0 && ckd_mul(&a, a, a)) nc_panic("integer overflow", loc);
+/* `name(a, b, loc)` computes `a op b` with `ckd`, the `ckd_` function for `op` */
+#define NC_CHECKED(name, ckd, T) \
+  static inline T name(T a, T b, const char *loc) { \
+    T r; \
+    if (ckd(&r, a, b)) nc_panic("integer overflow", loc); \
+    return r; \
   }
-  return r;
-}
-static inline uint64_t nc_add_u64(uint64_t a, uint64_t b, const char *loc) {
-  uint64_t r;
-  if (ckd_add(&r, a, b)) nc_panic("integer overflow", loc);
-  return r;
-}
-static inline uint64_t nc_sub_u64(uint64_t a, uint64_t b, const char *loc) {
-  uint64_t r;
-  if (ckd_sub(&r, a, b)) nc_panic("integer overflow", loc);
-  return r;
-}
-static inline uint64_t nc_mul_u64(uint64_t a, uint64_t b, const char *loc) {
-  uint64_t r;
-  if (ckd_mul(&r, a, b)) nc_panic("integer overflow", loc);
-  return r;
-}
-static inline uint64_t nc_pow_u64(uint64_t a, uint64_t b, const char *loc) {
-  uint64_t r = 1;
-  while (b > 0) {
-    if ((b & 1) && ckd_mul(&r, r, a)) nc_panic("integer overflow", loc);
-    b >>= 1;
-    if (b > 0 && ckd_mul(&a, a, a)) nc_panic("integer overflow", loc);
+/* `name(a, b, loc)` raises `a` to the power `b` (`b < 0` never holds for unsigned `T`) */
+#define NC_CHECKED_POW(name, T) \
+  static inline T name(T a, T b, const char *loc) { \
+    if (b < 0) nc_panic("negative exponent", loc); \
+    T r = 1; \
+    while (b > 0) { \
+      if ((b & 1) && ckd_mul(&r, r, a)) nc_panic("integer overflow", loc); \
+      b >>= 1; \
+      if (b > 0 && ckd_mul(&a, a, a)) nc_panic("integer overflow", loc); \
+    } \
+    return r; \
   }
-  return r;
-}
-static inline uint8_t nc_add_u8(uint8_t a, uint8_t b, const char *loc) {
-  uint8_t r;
-  if (ckd_add(&r, a, b)) nc_panic("integer overflow", loc);
-  return r;
-}
-static inline uint8_t nc_sub_u8(uint8_t a, uint8_t b, const char *loc) {
-  uint8_t r;
-  if (ckd_sub(&r, a, b)) nc_panic("integer overflow", loc);
-  return r;
-}
-static inline uint8_t nc_mul_u8(uint8_t a, uint8_t b, const char *loc) {
-  uint8_t r;
-  if (ckd_mul(&r, a, b)) nc_panic("integer overflow", loc);
-  return r;
-}
-static inline uint8_t nc_pow_u8(uint8_t a, uint8_t b, const char *loc) {
-  uint8_t r = 1;
-  while (b > 0) {
-    if ((b & 1) && ckd_mul(&r, r, a)) nc_panic("integer overflow", loc);
-    b >>= 1;
-    if (b > 0 && ckd_mul(&a, a, a)) nc_panic("integer overflow", loc);
-  }
-  return r;
-}
+NC_CHECKED(nc_add_i64, ckd_add, int64_t)
+NC_CHECKED(nc_sub_i64, ckd_sub, int64_t)
+NC_CHECKED(nc_mul_i64, ckd_mul, int64_t)
+NC_CHECKED_POW(nc_pow_i64, int64_t)
+NC_CHECKED(nc_add_u64, ckd_add, uint64_t)
+NC_CHECKED(nc_sub_u64, ckd_sub, uint64_t)
+NC_CHECKED(nc_mul_u64, ckd_mul, uint64_t)
+NC_CHECKED_POW(nc_pow_u64, uint64_t)
+NC_CHECKED(nc_add_u8, ckd_add, uint8_t)
+NC_CHECKED(nc_sub_u8, ckd_sub, uint8_t)
+NC_CHECKED(nc_mul_u8, ckd_mul, uint8_t)
+NC_CHECKED_POW(nc_pow_u8, uint8_t)
 
 static inline int64_t nc_div_i64(int64_t a, int64_t b, const char *loc) {
   if (b == 0) nc_panic("division by zero", loc);

@@ -1,9 +1,11 @@
 //! Dead-code elimination over the generated C translation unit.
 //!
 //! The output (runtime included) is split into top-level items: functions, prototypes,
-//! structs, typedefs, variables, `#define`s and `#include`s. Starting from `main`, only items
-//! whose names are transitively referenced are kept, and a standard header is only included
-//! when kept code uses something it declares. Comments travel with the item that follows them.
+//! structs, typedefs, variables, `#define`s, `#include`s and calls of macros that define the
+//! function named by their first argument (`NC_CHECKED(nc_add_i64, ...)`). Starting from
+//! `main`, only items whose names are transitively referenced are kept, and a standard header
+//! is only included when kept code uses something it declares. Comments travel with the item
+//! that follows them.
 
 use crate::lexer::is_ident_byte;
 use std::collections::{HashMap, HashSet};
@@ -66,9 +68,7 @@ pub fn public_api(runtime: &str) -> Vec<String> {
     split(runtime)
         .into_iter()
         .filter(|it| {
-            !it.code.starts_with("static")
-                && it.code.contains('(')
-                && !it.code.starts_with("typedef")
+            it.code.ends_with('}') && !it.code.starts_with("static") && !it.code.starts_with('#')
         })
         .filter_map(|it| match it.kind {
             Kind::Decl(names) => names.into_iter().next(),
@@ -179,6 +179,7 @@ fn split(src: &str) -> Vec<Item> {
         }
         // declaration or definition: scan to its end
         let start = i;
+        let call = b.get(i + ident_prefix(&src[i..]).len()) == Some(&b'(');
         let mut depth = 0i32;
         while i < b.len() {
             if let Some(end) = comment_end(src, i) {
@@ -194,6 +195,9 @@ fn split(src: &str) -> Vec<Item> {
                 b'}' | b')' | b']' => {
                     depth -= 1;
                     i += 1;
+                    if depth == 0 && call {
+                        break;
+                    }
                     if depth == 0 && b[i - 1] == b'}' {
                         // a closing brace ends a function body unless the declaration
                         // continues on the same line (`} name;`, `};`)
@@ -214,7 +218,10 @@ fn split(src: &str) -> Vec<Item> {
             }
         }
         let code = src[start..i].trim().to_string();
-        let names = decl_names(&code);
+        let names = match code.split_once('(') {
+            Some((_, args)) if call => vec![ident_prefix(args.trim_start()).to_string()],
+            _ => decl_names(&code),
+        };
         items.push(Item {
             comments: std::mem::take(&mut comments),
             code,
@@ -431,6 +438,15 @@ mod tests {
             ),
             ["nc_ti", "nc_ti"]
         );
+    }
+
+    #[test]
+    fn macro_calls() {
+        let src = "#define F(name) static int name(void) { return 1; }\nF(used)\nF(unused)\nint main(void) {\n  return used();\n}\n";
+        let out = prune(src, &[]);
+        assert!(out.contains("#define F") && out.contains("F(used)\n"));
+        assert!(!out.contains("F(unused)"));
+        assert_eq!(public_api(src), ["main"]);
     }
 
     #[test]
