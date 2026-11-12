@@ -199,20 +199,16 @@ impl Server {
         let Some((ty, _)) = c.sig.params.get(c.arg as usize) else {
             return vec![];
         };
-        let Some(TypeExpr::Fn(ps, ret, _)) = ty else {
+        let Some(fty @ TypeExpr::Fn(ps, ret, _)) = ty else {
             return vec![];
         };
-        let ty = ty.as_ref().map(TypeExpr::show).unwrap_or_default();
-        let ret = ret.as_ref().map(|r| r.show()).unwrap_or_default();
+        let ret_part = ret
+            .as_ref()
+            .map_or(String::new(), |r| format!(" {}", r.show()));
         let names = ["a", "b", "c", "d", "e", "f", "g", "h"];
+        let name = |i: usize| names.get(i).map_or(format!("a{i}"), |n| n.to_string());
         let args: Vec<(String, String)> = (ps.iter().enumerate())
-            .map(|(i, t)| {
-                let n = names
-                    .get(i)
-                    .map(ToString::to_string)
-                    .unwrap_or(format!("a{i}"));
-                (t.show(), n)
-            })
+            .map(|(i, t)| (t.show(), name(i)))
             .collect();
         let plain: Vec<String> = args.iter().map(|(t, n)| format!("{t} {n}")).collect();
         let snip: Vec<String> = args
@@ -220,16 +216,11 @@ impl Server {
             .enumerate()
             .map(|(i, (t, n))| format!("{t} ${{{}:{n}}}", i + 1))
             .collect();
-        let ret_part = if ret.is_empty() {
-            String::new()
-        } else {
-            format!(" {ret}")
-        };
         let label = format!("fn({}){ret_part} {{}}", plain.join(", "));
         vec![CompletionItem {
             label,
             kind: Some(CompletionItemKind::SNIPPET),
-            detail: Some(format!("function literal for `{ty}`")),
+            detail: Some(format!("function literal for `{}`", fty.show())),
             filter_text: Some("fn".into()),
             sort_text: Some("0fn".into()),
             insert_text: Some(format!("fn({}){ret_part} {{\n\t$0\n}}", snip.join(", "))),

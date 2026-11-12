@@ -640,19 +640,10 @@ fn indent_at(text: &str, off: usize) -> &str {
 
 impl Server {
     fn init(&mut self, p: InitializeParams) {
-        self.pull = p
-            .capabilities
-            .text_document
-            .as_ref()
-            .is_some_and(|t| t.diagnostic.is_some());
-        self.snippets = p
-            .capabilities
-            .text_document
-            .as_ref()
-            .and_then(|t| t.completion.as_ref())
-            .and_then(|c| c.completion_item.as_ref())
-            .and_then(|c| c.snippet_support)
-            .unwrap_or(false);
+        let td = p.capabilities.text_document.as_ref();
+        self.pull = td.is_some_and(|t| t.diagnostic.is_some());
+        let item = td.and_then(|t| t.completion.as_ref()?.completion_item.as_ref());
+        self.snippets = item.and_then(|c| c.snippet_support).unwrap_or(false);
         self.roots = (p.workspace_folders.unwrap_or_default().iter())
             .filter_map(|f| uri_to_path(&f.uri))
             .collect();
