@@ -309,7 +309,7 @@ impl<'a> Printer<'a> {
             Item::Extern(e) => {
                 let head = format!("extern {} as {}", quote(&e.path), e.alias);
                 let fns = e.fns.iter().map(|f| (f.sig.span, f));
-                self.members(head, fns, e.span, false, |p, f| {
+                self.members(head, fns, e.span, |p, f| {
                     let sig = p.sig(&f.sig, true, 1);
                     format!("{sig} = {}", quote(&f.symbol))
                 });
@@ -318,13 +318,13 @@ impl<'a> Printer<'a> {
                 let params = GenericParam::list(&s.type_params);
                 let head = format!("{}struct {}{params}", vis(s.public), s.name);
                 let fields = s.fields.iter().map(|f| (f.span, f));
-                self.members(head, fields, s.span, true, |_, f| f.show());
+                self.members(head, fields, s.span, |_, f| f.show());
             }
             Item::Enum(e) => {
                 let params = GenericParam::list(&e.type_params);
                 let head = format!("{}enum {}{params}", vis(e.public), e.name);
                 let variants = e.variants.iter().map(|v| (v.span, v));
-                self.members(head, variants, e.span, true, |_, v| match &v.payload[..] {
+                self.members(head, variants, e.span, |_, v| match &v.payload[..] {
                     [] => v.name.clone(),
                     ts => format!("{}({})", v.name, TypeExpr::show_list(ts)),
                 });
@@ -352,20 +352,19 @@ impl<'a> Printer<'a> {
     }
 
     /// `head { ... }` (an extern block, struct or enum ending at `span`), one member per line;
-    /// `show` prints a member after the comments before it. With `fresh`, comments before the
-    /// first member never get a blank line above them.
+    /// `show` prints a member after the comments before it. Comments before the first member
+    /// never get a blank line above them.
     fn members<'m, T: 'm>(
         &mut self,
         head: String,
         members: impl Iterator<Item = (Span, &'m T)>,
         span: Span,
-        fresh: bool,
         show: impl Fn(&mut Self, &T) -> String,
     ) {
         self.out.push_str(&head);
         self.out.push_str(" {\n");
         for (i, (sp, m)) in members.enumerate() {
-            self.flush_comments(sp.start as usize, 1, fresh && i == 0);
+            self.flush_comments(sp.start as usize, 1, i == 0);
             let text = show(self, m);
             self.out.push_str(&format!("{INDENT}{text}\n"));
             self.cursor = self.line_end(sp.end as usize);
@@ -852,6 +851,8 @@ mod tests {
     #[test]
     fn comment_on_first_member() {
         let src = "int a = 1\n\nstruct P {\n  /// x\n  int x\n}\n\nenum E {\n  // c\n  A\n}\n";
+        assert_eq!(fmt(src), src);
+        let src = "int a = 1\n\nextern \"m.h\" as m {\n  // g\n  fn g() = \"g\"\n}\n";
         assert_eq!(fmt(src), src);
     }
 
