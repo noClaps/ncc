@@ -722,10 +722,7 @@ impl<'p> Evaluator<'p> {
     // ------------------------------------------------------------ interpreter
 
     fn call_fn(&mut self, f: FuncId, args: Vec<Val>, caps: &[Val]) -> R<Flow> {
-        if !self.pure[f] {
-            return Err(Stop::Unknown);
-        }
-        if self.depth >= MAX_DEPTH {
+        if !self.pure[f] || self.depth >= MAX_DEPTH {
             return Err(Stop::Unknown);
         }
         let func = &self.p.funcs[f];
@@ -931,7 +928,6 @@ impl<'p> Evaluator<'p> {
             None => None,
         };
         for arm in &i.arms {
-            let mut matched = false;
             for p in &arm.patterns {
                 let ok = match (&scrut, p) {
                     (_, Pat::Cond(c)) => match self.expr(c, env, false)? {
@@ -943,12 +939,8 @@ impl<'p> Evaluator<'p> {
                     _ => return Err(Stop::Unknown),
                 };
                 if ok {
-                    matched = true;
-                    break;
+                    return self.block_value(&arm.body, i.id, env);
                 }
-            }
-            if matched {
-                return self.block_value(&arm.body, i.id, env);
             }
         }
         Err(Stop::Unknown)
