@@ -38,15 +38,10 @@ fn unused_imports(text: &str, module: &ast::Module) -> Vec<(Span, Span, String)>
     super::nav::qualifier_uses(&toks, &mut |n, _| {
         used.insert(n.to_string());
     });
-    let mut out = Vec::new();
-    for it in &module.items {
-        if let ast::Item::Import(im) = it
-            && !used.contains(&im.alias)
-        {
-            out.push((im.span, im.alias_span, im.alias.clone()));
-        }
-    }
-    out
+    (module.imports())
+        .filter(|im| !used.contains(&im.alias))
+        .map(|im| (im.span, im.alias_span, im.alias.clone()))
+        .collect()
 }
 
 /// `if` branches that can never run, because earlier branches match everything they match:
@@ -259,14 +254,7 @@ pub(super) fn importable_modules(dir: &Path) -> (Vec<(String, String)>, Vec<Path
 
 /// An edit adding `import { "path" as alias }` after the last import (or at the top).
 pub(super) fn add_import(text: &str, module: &ast::Module, path: &str, alias: &str) -> TextEdit {
-    let last = module
-        .items
-        .iter()
-        .filter_map(|it| match it {
-            ast::Item::Import(im) => Some(im.span.end as usize),
-            _ => None,
-        })
-        .max();
+    let last = module.imports().map(|im| im.span.end as usize).max();
     let at = match last {
         // after the `}` closing the block of the last import
         Some(e) => {

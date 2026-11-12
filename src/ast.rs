@@ -577,6 +577,16 @@ pub struct Module {
     pub items: Vec<Item>,
 }
 
+impl Module {
+    /// The module's imports, in source order.
+    pub fn imports(&self) -> impl Iterator<Item = &Import> {
+        (self.items.iter()).filter_map(|it| match it {
+            Item::Import(im) => Some(im),
+            _ => None,
+        })
+    }
+}
+
 /// Walks over the syntax tree.
 pub mod visit {
     use super::{ExprKind as E, StmtKind as S, *};

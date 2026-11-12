@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use crate::ast::{Item, Module};
+use crate::ast::Module;
 use crate::diag::{Diag, Result, Results, SourceMap, Span};
 use crate::parser::parse_module_recover;
 
@@ -141,10 +141,8 @@ pub fn load_with(
         }
         visited[i] = true;
         // imports in source order
-        for it in &g.modules[i].ast.items {
-            if let Item::Import(im) = it
-                && let Some(&d) = g.modules[i].imports.get(&im.alias)
-            {
+        for im in g.modules[i].ast.imports() {
+            if let Some(&d) = g.modules[i].imports.get(&im.alias) {
                 visit(g, d, visited, out);
             }
         }
@@ -210,15 +208,7 @@ impl Loader<'_> {
             ast,
             imports: HashMap::new(),
         });
-        let imports: Vec<_> = self.graph.modules[idx]
-            .ast
-            .items
-            .iter()
-            .filter_map(|it| match it {
-                Item::Import(im) => Some(im.clone()),
-                _ => None,
-            })
-            .collect();
+        let imports: Vec<_> = self.graph.modules[idx].ast.imports().cloned().collect();
         let dir = path.parent().unwrap().to_path_buf();
         for im in imports {
             let root = &mut self.root;

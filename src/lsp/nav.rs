@@ -109,8 +109,7 @@ impl Server {
                     continue;
                 };
                 let module = self.module_of(importer, &text);
-                for it in &module.items {
-                    let ast::Item::Import(im) = it else { continue };
+                for im in module.imports() {
                     let Some(target) = a.imports.get(&im.alias) else {
                         continue;
                     };
