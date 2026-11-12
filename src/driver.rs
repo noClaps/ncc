@@ -153,6 +153,21 @@ fn detect_target() -> Result<(String, String), String> {
 }
 
 /// The C compiler command from `$CC`, falling back to `cc`.
+/// Linker flags for release executables on `os` (as named by `detect_target`): drop unreached
+/// code and data, unneeded shared libraries and the symbol table. None when the linker is
+/// unknown.
+fn release_link_flags(os: Option<&str>) -> &'static [&'static str] {
+    match os {
+        // ld64: `-x` drops local symbols; the global ones left are few and dyld needs some
+        Some("macos") => &["-Wl,-dead_strip", "-Wl,-x"],
+        // GNU ld, gold, lld and mold all accept these
+        Some("linux" | "android" | "freebsd" | "openbsd" | "netbsd") => {
+            &["-Wl,--gc-sections", "-Wl,--as-needed", "-s"]
+        }
+        _ => &[],
+    }
+}
+
 fn cc_command() -> (String, Vec<String>) {
     let cc = std::env::var("CC")
         .ok()
@@ -256,7 +271,21 @@ fn compile(
     let (prog, mut args) = cc_command();
     args.push("-std=c23".into());
     if release {
-        args.extend(["-O3", "-DNDEBUG"].map(String::from));
+        // -O3 for speed; the section and unwind flags only shrink the binary. Sections let
+        // the linker drop unused functions and data (see `release_link_flags`); unwind tables
+        // are only needed by debuggers, profilers and C++ exceptions, none of which a release
+        // NC binary relies on (panics in tests use longjmp).
+        args.extend(
+            [
+                "-O3",
+                "-DNDEBUG",
+                "-ffunction-sections",
+                "-fdata-sections",
+                "-fno-asynchronous-unwind-tables",
+                "-fno-unwind-tables",
+            ]
+            .map(String::from),
+        );
     } else {
         args.extend(["-O0", "-g", "-fno-omit-frame-pointer"].map(String::from));
     }
@@ -275,6 +304,13 @@ fn compile(
     args.push("-o".into());
     args.push(out.display().to_string());
     if format == Format::Exe {
+        if release {
+            let os = match &p.target {
+                Some((os, _)) => Some(os.clone()),
+                None => detect_target().ok().map(|(os, _)| os),
+            };
+            args.extend(release_link_flags(os.as_deref()).iter().map(|f| f.to_string()));
+        }
         args.push("-lm".into());
         args.push("-lpthread".into());
     }

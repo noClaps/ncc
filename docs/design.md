@@ -53,6 +53,10 @@
    embedded (the public header `src/runtime/nc.h`, then the implementation
    `src/runtime/nc_impl.h`), then calls the C compiler. Debug builds use
    `-O0 -g -fno-omit-frame-pointer`; release builds use `-O3 -DNDEBUG`, which also inlines.
+   Release builds also shrink the binary without slowing it down. They compile with
+   `-ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables`.
+   They link executables with the target's dead-stripping and symbol-stripping flags: on macOS,
+   `-Wl,-dead_strip -Wl,-x`; on Linux and the BSDs, `-Wl,--gc-sections -Wl,--as-needed -s`.
 
 ## Error reporting
 
