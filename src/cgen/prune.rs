@@ -256,18 +256,19 @@ fn directive_kind(line: &str) -> Kind {
         return Kind::Include(h);
     }
     if let Some(rest) = body.strip_prefix("define") {
-        let name: String = rest
-            .trim_start()
-            .chars()
-            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-            .collect();
+        let name = ident_prefix(rest.trim_start());
         if name == "NC_RUNTIME_H" {
             return Kind::Guard;
         }
-        return Kind::Decl(vec![name]);
+        return Kind::Decl(vec![name.to_string()]);
     }
     // #ifndef / #ifdef / #endif at top level are the runtime's include guards
     Kind::Guard
+}
+
+/// The identifier (or number) `s` starts with, if any.
+fn ident_prefix(s: &str) -> &str {
+    &s[..s.bytes().take_while(|&b| is_ident_byte(b)).count()]
 }
 
 /// Identifiers in code, ignoring string/char literals and comments.
@@ -283,11 +284,9 @@ fn identifiers(code: &str) -> Vec<String> {
         match b[i] {
             b'"' | b'\'' => i = skip_literal(b, i),
             c if c.is_ascii_alphabetic() || c == b'_' => {
-                let s = i;
-                while i < b.len() && is_ident_byte(b[i]) {
-                    i += 1;
-                }
-                out.push(code[s..i].to_string());
+                let id = ident_prefix(&code[i..]);
+                i += id.len();
+                out.push(id.to_string());
             }
             c if c.is_ascii_digit() => {
                 while i < b.len() && (is_ident_byte(b[i]) || b[i] == b'.') {
@@ -326,13 +325,9 @@ fn decl_names(code: &str) -> Vec<String> {
                     // `(*name)` function pointer typedef
                     let rest = code[i + 1..].trim_start();
                     if let Some(r) = rest.strip_prefix('*') {
-                        let n: String = r
-                            .trim_start()
-                            .chars()
-                            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-                            .collect();
+                        let n = ident_prefix(r.trim_start());
                         if !n.is_empty() {
-                            paren_ident = Some(n);
+                            paren_ident = Some(n.to_string());
                         }
                     }
                 }
@@ -340,11 +335,9 @@ fn decl_names(code: &str) -> Vec<String> {
             }
             b'=' if depth == 0 => break,
             c if (c.is_ascii_alphabetic() || c == b'_') && depth == 0 => {
-                let s = i;
-                while i < b.len() && is_ident_byte(b[i]) {
-                    i += 1;
-                }
-                tokens.push(code[s..i].to_string());
+                let id = ident_prefix(&code[i..]);
+                i += id.len();
+                tokens.push(id.to_string());
                 continue;
             }
             _ => {}
