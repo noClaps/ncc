@@ -399,8 +399,9 @@ impl Checker {
         members: Vec<(String, String)>,
     ) {
         let detail = self.type_detail(ty);
-        self.idx_decl(name, span, name_span, kind, detail, members);
-        self.idx_last_ty(name, ty);
+        if let Some(d) = self.idx_decl(name, span, name_span, kind, detail, members) {
+            d.ty = Some(ty);
+        }
     }
 
     /// Whether `name` is an import or extern block alias in module `m`.
@@ -482,11 +483,9 @@ impl Checker {
                 match it {
                     ast::Item::Fn(f) if f.sig.type_params.is_empty() => {
                         let (params, ret) = self.resolve_sig(&f.sig, m, &none)?;
+                        let sig = self.sig_of(&params, ret, &f.sig);
+                        self.idx_fn_decl(&f.sig.name, f.sig.span, None, sig, Some(ret));
                         let id = self.reserve_decl(&f.sig, params, ret);
-                        let sig = self.fn_sig(id);
-                        self.idx_fn_decl(&f.sig.name, f.sig.span, None, sig);
-                        let ret = self.sigs[id].1;
-                        self.idx_last_ty(&f.sig.name, ret);
                         if let Some(SymEntry {
                             sym: Sym::Fn { func, .. },
                             ..
@@ -515,7 +514,7 @@ impl Checker {
                             ret: f.sig.ret.clone(),
                         };
                         self.idx_type_params(&f.sig.type_params);
-                        self.idx_fn_decl(&f.sig.name, f.sig.span, None, sig);
+                        self.idx_fn_decl(&f.sig.name, f.sig.span, None, sig, None);
                     }
                     ast::Item::Struct(st) if !st.type_params.is_empty() => {
                         // the fields, for struct literal completions
@@ -537,18 +536,10 @@ impl Checker {
                         for f in &e.fns {
                             let (params, ret) = self.resolve_sig(&f.sig, m, &none)?;
                             let id = self.externs.len();
-                            let sig = index::Sig {
-                                type_params: vec![],
-                                params: (params.iter().zip(&f.sig.params))
-                                    .map(|(t, p)| {
-                                        (Some(self.types.to_type_expr(*t)), p.name.clone())
-                                    })
-                                    .collect(),
-                                ret: (ret != VOID).then(|| self.types.to_type_expr(ret)),
-                            };
+                            let sig = self.sig_of(&params, ret, &f.sig);
                             let (detail, _) = sig.label(&format!("{}.{}", e.alias, f.sig.name));
-                            self.idx_fn_decl(&f.sig.name, f.sig.span, Some(&e.alias), sig);
-                            self.idx_last_ty(&f.sig.name, ret);
+                            let (name, span) = (&f.sig.name, f.sig.span);
+                            self.idx_fn_decl(name, span, Some(&e.alias), sig, Some(ret));
                             self.ix.extern_decls.insert(id, (f.sig.span, detail));
                             self.externs.push(Extern {
                                 name: format!("{}.{}", e.alias, f.sig.name),

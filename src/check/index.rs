@@ -214,8 +214,16 @@ impl Checker {
         }
     }
 
-    /// Declare a function (one of an `extern` block when `alias` is given) with its signature.
-    pub fn idx_fn_decl(&mut self, name: &str, span: Span, alias: Option<&str>, sig: Sig) {
+    /// Declare a function (one of an `extern` block when `alias` is given) with its signature
+    /// and return type.
+    pub fn idx_fn_decl(
+        &mut self,
+        name: &str,
+        span: Span,
+        alias: Option<&str>,
+        sig: Sig,
+        ret: Option<TyId>,
+    ) {
         let shown = alias.map_or_else(|| name.to_string(), |a| format!("{a}.{name}"));
         let (detail, _) = sig.label(&shown);
         if let Some(d) = self.idx_decl(name, span, span, DeclKind::Function, detail, vec![]) {
@@ -224,22 +232,19 @@ impl Checker {
                 .collect();
             d.extern_alias = alias.map(String::from);
             d.sig = Some(sig);
+            d.ty = ret;
         }
     }
 
-    /// The signature of the declared function `f`, with its parameter names.
-    pub fn fn_sig(&self, f: FuncId) -> Sig {
-        let (ps, r) = &self.sigs[f];
-        let names = self.ix.fn_params.get(&f).cloned().unwrap_or_default();
+    /// The signature of the function declared by `sig`, with parameter types `ps` and return
+    /// type `r`.
+    pub fn sig_of(&self, ps: &[TyId], r: TyId, sig: &crate::ast::FnSig) -> Sig {
         Sig {
             type_params: vec![],
-            params: (ps.iter().enumerate())
-                .map(|(i, p)| {
-                    let name = names.get(i).cloned().unwrap_or_default();
-                    (Some(self.types.to_type_expr(*p)), name)
-                })
+            params: (ps.iter().zip(&sig.params))
+                .map(|(t, p)| (Some(self.types.to_type_expr(*t)), p.name.clone()))
                 .collect(),
-            ret: (*r != VOID).then(|| self.types.to_type_expr(*r)),
+            ret: (r != VOID).then(|| self.types.to_type_expr(r)),
         }
     }
 
@@ -341,16 +346,6 @@ impl Checker {
         d.scope = scope;
         d.ty = Some(ty);
         self.ix.index.refs.last_mut().unwrap().type_def = type_def;
-    }
-
-    /// Set the type of the declaration just recorded (a function's return type, a type's own).
-    pub fn idx_last_ty(&mut self, name: &str, t: TyId) {
-        if name == "_" || name.is_empty() {
-            return;
-        }
-        if let Some(d) = self.ix.index.decls.last_mut() {
-            d.ty = Some(t);
-        }
     }
 
     /// A reference ending with the referenced name (`x`, `m.x`, `.x`); see `name_refs`.
