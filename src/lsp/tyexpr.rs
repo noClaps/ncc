@@ -18,11 +18,6 @@ pub fn named(name: &str) -> T {
     }
 }
 
-/// Whether two types are written the same.
-pub fn same(a: &T, b: &T) -> bool {
-    a.show() == b.show()
-}
-
 pub fn is_fn(t: &T) -> bool {
     matches!(t, T::Fn(..))
 }
@@ -56,7 +51,7 @@ fn const_param<'a>(c: &'a ConstExpr, tps: &[String]) -> Option<&'a str> {
     }
 }
 
-/// Apply `f` to each type directly inside `t`.
+/// The types directly inside `t`.
 fn children(t: &T) -> Vec<&T> {
     match t {
         T::Named { args, .. } | T::Tuple(args, _) => args.iter().collect(),
@@ -191,7 +186,7 @@ fn unify(p: &T, c: &T, tps: &[String], binds: &mut HashMap<String, T>) -> bool {
 /// Bind the generic parameter `name` to `c`, or check that it is bound to it already.
 fn bind(name: &str, c: &T, binds: &mut HashMap<String, T>) -> bool {
     match binds.get(name) {
-        Some(b) => same(b, c),
+        Some(b) => b.show() == c.show(),
         None => {
             binds.insert(name.to_string(), c.clone());
             true
