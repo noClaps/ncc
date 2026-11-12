@@ -117,7 +117,7 @@ impl GenericParam {
 impl TypeExpr {
     /// The type as NC source (`int[]`, `[str]int`, `(fn(int) str)`, `Matrix<T>`).
     pub fn show(&self) -> String {
-        let list = |ts: &[Self]| ts.iter().map(Self::show).collect::<Vec<_>>().join(", ");
+        let list = Self::show_list;
         match self {
             Self::Named {
                 module, name, args, ..
@@ -142,6 +142,11 @@ impl TypeExpr {
             Self::Fut(i, _) => format!("fut {}", i.show()),
             Self::Const(c) => c.show(),
         }
+    }
+
+    /// Types as NC source, separated by commas.
+    pub fn show_list(ts: &[Self]) -> String {
+        ts.iter().map(Self::show).collect::<Vec<_>>().join(", ")
     }
 
     pub fn span(&self) -> Span {

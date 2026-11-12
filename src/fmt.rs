@@ -14,7 +14,7 @@
 use std::collections::HashSet;
 
 use crate::ast::*;
-use crate::diag::Diag;
+use crate::diag::{Diag, Span};
 
 /// Lines longer than this are wrapped where a bracketed list allows it.
 pub const MAX_WIDTH: usize = 100;
@@ -170,11 +170,11 @@ fn quote(s: &str) -> String {
 }
 
 impl<'a> Printer<'a> {
-    fn text(&self, s: crate::diag::Span) -> &'a str {
+    fn text(&self, s: Span) -> &'a str {
         &self.src[s.start as usize..(s.end as usize).min(self.src.len())]
     }
 
-    fn multiline(&self, s: crate::diag::Span) -> bool {
+    fn multiline(&self, s: Span) -> bool {
         self.text(s).contains('\n')
     }
 
@@ -321,48 +321,25 @@ impl<'a> Printer<'a> {
                 self.out.push_str("}\n");
             }
             Item::Struct(s) => {
-                self.out.push_str(&format!(
-                    "{}struct {}{} {{\n",
-                    vis(s.public),
-                    s.name,
-                    GenericParam::list(&s.type_params)
-                ));
-                for (i, (ty, name, sp)) in s.fields.iter().enumerate() {
-                    self.flush_comments(sp.start as usize, 1, i == 0);
-                    let t = ty.show();
-                    self.out.push_str(&format!("{INDENT}{t} {name}\n"));
-                    self.cursor = sp.end as usize;
-                    self.trailing_comment(sp.end as usize);
-                }
-                self.flush_comments(s.span.end as usize, 1, false);
-                self.out.push_str("}\n");
+                let head = format!("{}struct {}", vis(s.public), s.name);
+                let fields = (s.fields.iter())
+                    .map(|(ty, name, sp)| (*sp, format!("{} {name}", ty.show()), sp.end))
+                    .collect();
+                self.type_body(head, &s.type_params, fields, s.span.end);
             }
             Item::Enum(e) => {
-                self.out.push_str(&format!(
-                    "{}enum {}{} {{\n",
-                    vis(e.public),
-                    e.name,
-                    GenericParam::list(&e.type_params)
-                ));
-                for (i, (name, tys, sp)) in e.variants.iter().enumerate() {
-                    self.flush_comments(sp.start as usize, 1, i == 0);
-                    let payload = if tys.is_empty() {
-                        String::new()
-                    } else {
-                        format!(
-                            "({})",
-                            tys.iter()
-                                .map(super::ast::TypeExpr::show)
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        )
-                    };
-                    self.out.push_str(&format!("{INDENT}{name}{payload}\n"));
-                    self.cursor = self.line_end(sp.end as usize);
-                    self.trailing_comment(sp.end as usize);
-                }
-                self.flush_comments(e.span.end as usize, 1, false);
-                self.out.push_str("}\n");
+                let head = format!("{}enum {}", vis(e.public), e.name);
+                let variants = (e.variants.iter())
+                    .map(|(name, tys, sp)| {
+                        let text = if tys.is_empty() {
+                            name.clone()
+                        } else {
+                            format!("{name}({})", TypeExpr::show_list(tys))
+                        };
+                        (*sp, text, self.line_end(sp.end as usize) as u32)
+                    })
+                    .collect();
+                self.type_body(head, &e.type_params, variants, e.span.end);
             }
             Item::Type(t) => {
                 let ty = t.ty.show();
@@ -384,6 +361,27 @@ impl<'a> Printer<'a> {
                 self.out.push('\n');
             }
         }
+    }
+
+    /// A struct or enum after its name: type parameters and members, one per line. Each member
+    /// has its span, text and where the printed text ends in the source.
+    fn type_body(
+        &mut self,
+        head: String,
+        ps: &[GenericParam],
+        members: Vec<(Span, String, u32)>,
+        end: u32,
+    ) {
+        self.out
+            .push_str(&format!("{head}{} {{\n", GenericParam::list(ps)));
+        for (i, (sp, text, cursor)) in members.into_iter().enumerate() {
+            self.flush_comments(sp.start as usize, 1, i == 0);
+            self.out.push_str(&format!("{INDENT}{text}\n"));
+            self.cursor = cursor as usize;
+            self.trailing_comment(sp.end as usize);
+        }
+        self.flush_comments(end as usize, 1, false);
+        self.out.push_str("}\n");
     }
 
     fn fn_decl(&mut self, f: &FnDecl, indent: usize) -> String {
@@ -485,24 +483,18 @@ impl<'a> Printer<'a> {
                 targets,
                 value,
             } => {
-                let mut out = String::new();
-                if *public {
-                    out.push_str("pub ");
-                }
-                if *mutable {
-                    out.push_str("mut ");
-                }
-                if *mutex {
-                    out.push_str("mutex ");
-                }
-                let ts: Vec<String> = targets
-                    .iter()
+                let kw = if *mutable {
+                    "mut "
+                } else if *mutex {
+                    "mutex "
+                } else {
+                    ""
+                };
+                let ts: Vec<String> = (targets.iter())
                     .map(|t| format!("{} {}", t.ty.show(), t.name))
                     .collect();
-                out.push_str(&ts.join(", "));
-                out.push_str(" = ");
-                out.push_str(&self.expr(value, indent));
-                out
+                let value = self.expr(value, indent);
+                format!("{}{kw}{} = {value}", vis(*public), ts.join(", "))
             }
             StmtKind::FnVar { name, value, .. } => {
                 format!("fn {name} = {}", self.expr(value, indent))
@@ -522,8 +514,7 @@ impl<'a> Printer<'a> {
                 if let ExprKind::Tuple(items) = &e.kind
                     && !self.text(e.span).starts_with('(')
                 {
-                    let items: Vec<String> = items.iter().map(|x| self.expr(x, indent)).collect();
-                    return format!("return {}", items.join(", "));
+                    return format!("return {}", self.list(items, indent));
                 }
                 format!("return {}", self.expr(e, indent))
             }
@@ -579,8 +570,10 @@ impl<'a> Printer<'a> {
         if needed { format!("({s})") } else { s }
     }
 
-    fn list(&mut self, items: &[Expr], indent: usize) -> Vec<String> {
-        items.iter().map(|x| self.expr(x, indent)).collect()
+    /// Expressions separated by commas.
+    fn list(&mut self, items: &[Expr], indent: usize) -> String {
+        let items: Vec<String> = items.iter().map(|x| self.expr(x, indent)).collect();
+        items.join(", ")
     }
 
     /// Bracketed list, one entry per line if the original spanned several lines.
@@ -665,29 +658,17 @@ impl<'a> Printer<'a> {
                 let callee = self.paren(f, indent, prec(f) < POSTFIX);
                 let multi = (self.multiline(e.span) && args.len() > 1 && self.args_multiline(e))
                     || (self.force.contains(&(e.span.end as usize)) && !args.is_empty());
-                if multi {
-                    let entries = expr_entries(args);
-                    let list = self.bracketed("(", ")", entries, true, indent, e.span.end as usize);
-                    format!("{callee}{list}")
-                } else if args.is_empty() {
-                    format!("{callee}()")
-                } else if hugs(args) {
+                if !multi && hugs(args) {
                     // `f([...])`: the inner list breaks, not the call
-                    format!("{callee}({})", self.list(args, indent).join(", "))
-                } else {
-                    let mark = format!("{MARK_START}{}{MARK_END}", e.span.end);
-                    format!("{callee}{mark}({})", self.list(args, indent).join(", "))
+                    return format!("{callee}({})", self.list(args, indent));
                 }
+                let entries = expr_entries(args);
+                let list = self.bracketed("(", ")", entries, multi, indent, e.span.end as usize);
+                format!("{callee}{list}")
             }
             ExprKind::Generic(inner, args) => {
                 let base = self.paren(inner, indent, prec(inner) < POSTFIX);
-                format!(
-                    "{base}<{}>",
-                    args.iter()
-                        .map(super::ast::TypeExpr::show)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
+                format!("{base}<{}>", TypeExpr::show_list(args))
             }
             ExprKind::Builtin(name, ty, args) => {
                 let mut entries = Vec::new();
@@ -696,7 +677,7 @@ impl<'a> Printer<'a> {
                 }
                 entries.extend(expr_entries(args));
                 if ty.is_none() && hugs(args) {
-                    return format!("@{name}({})", self.list(args, indent).join(", "));
+                    return format!("@{name}({})", self.list(args, indent));
                 }
                 let list = self.bracketed("(", ")", entries, false, indent, e.span.end as usize);
                 format!("@{name}{list}")
@@ -717,7 +698,7 @@ impl<'a> Printer<'a> {
                     self.expr(hi, indent)
                 )
             }
-            ExprKind::Tuple(items) => format!("({})", self.list(items, indent).join(", ")),
+            ExprKind::Tuple(items) => format!("({})", self.list(items, indent)),
             ExprKind::Array(items) => {
                 let multi = self.multiline(e.span);
                 let entries = expr_entries(items);
@@ -807,7 +788,7 @@ impl<'a> Printer<'a> {
             .map_or(i.span.end as usize, |a| a.span.start as usize);
         for (k, arm) in i.arms.iter().enumerate() {
             self.entry_start(arm.span.start as usize, indent + 1, k == 0);
-            let pats = self.list(&arm.patterns, indent + 1).join(", ");
+            let pats = self.list(&arm.patterns, indent + 1);
             let body = self.block(&arm.body, indent + 1, true);
             self.out.push_str(&ind(indent + 1));
             self.out.push_str(&format!("{pats} -> {body}\n"));
