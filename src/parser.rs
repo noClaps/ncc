@@ -446,11 +446,7 @@ impl Parser {
             return Ok(());
         }
         if self.at_kw("struct") {
-            let ((name, name_span), type_params, fields, end) = self.type_body(|p| {
-                let ty = p.parse_type()?;
-                let (fname, fsp) = p.ident()?;
-                Ok((ty, fname, fsp))
-            })?;
+            let ((name, name_span), type_params, fields, end) = self.type_body(Self::param)?;
             items.push(Item::Struct(StructDecl {
                 name,
                 type_params,
@@ -463,13 +459,17 @@ impl Parser {
         }
         if self.at_kw("enum") {
             let ((name, name_span), type_params, variants, end) = self.type_body(|p| {
-                let (vname, vsp) = p.ident()?;
-                let tys = if p.eat(&Tok::LParen) {
+                let (name, span) = p.ident()?;
+                let payload = if p.eat(&Tok::LParen) {
                     p.list(&Tok::RParen, Self::parse_type)?
                 } else {
                     vec![]
                 };
-                Ok((vname, tys, vsp))
+                Ok(Variant {
+                    name,
+                    payload,
+                    span,
+                })
             })?;
             items.push(Item::Enum(EnumDecl {
                 name,
@@ -513,12 +513,12 @@ impl Parser {
             let name_span = self.span();
             let name = self.plain_string("test name")?;
             let body = self.block()?;
-            items.push(Item::Test(
+            items.push(Item::Test(Test {
                 name,
                 body,
-                start.to(self.prev_span()),
+                span: start.to(self.prev_span()),
                 name_span,
-            ));
+            }));
             return Ok(());
         }
         let stmt = self.stmt(public)?;
@@ -696,13 +696,16 @@ impl Parser {
 
     fn params_and_ret(&mut self) -> Result<(Vec<Param>, Option<TypeExpr>)> {
         self.expect(&Tok::LParen)?;
-        let params = self.list(&Tok::RParen, |p| {
-            let ty = p.parse_type()?;
-            let (name, span) = p.ident()?;
-            Ok(Param { ty, name, span })
-        })?;
+        let params = self.list(&Tok::RParen, Self::param)?;
         let ret = self.ret_type()?;
         Ok((params, ret))
+    }
+
+    /// A parameter or struct field: `T name`
+    fn param(&mut self) -> Result<Param> {
+        let ty = self.parse_type()?;
+        let (name, span) = self.ident()?;
+        Ok(Param { ty, name, span })
     }
 
     fn ret_type(&mut self) -> Result<Option<TypeExpr>> {

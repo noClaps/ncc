@@ -242,7 +242,7 @@ impl Checker {
         for m in 0..self.mods.len() {
             let ast = Rc::clone(&self.mods[m].ast);
             for it in &ast.items {
-                if let ast::Item::Test(name, body, ..) = it {
+                if let ast::Item::Test(ast::Test { name, body, .. }) = it {
                     let erru = self.types.erru(VOID);
                     let f = self.reserve_fn(vec![], erru);
                     let mut ctx = FnCtx::new(f, m, erru, HashMap::new());
@@ -518,13 +518,12 @@ impl Checker {
                     }
                     ast::Item::Struct(st) if !st.type_params.is_empty() => {
                         // the fields, for struct literal completions
-                        let fields = (st.fields.iter())
-                            .map(|(t, n, _)| (n.clone(), format!("{} {n}", t.show())))
-                            .collect();
+                        let fields = (st.fields.iter()).map(|f| (f.name.clone(), f.show()));
+                        let fields = fields.collect();
                         let (spans, kind) = ((st.span, st.name_span), index::DeclKind::Struct);
                         let tps = &st.type_params;
                         if let Some(d) = self.idx_generic_decl(&st.name, spans, kind, tps, fields) {
-                            d.field_tys = st.fields.iter().map(|f| f.0.clone()).collect();
+                            d.field_tys = st.fields.iter().map(|f| f.ty.clone()).collect();
                         }
                     }
                     ast::Item::Enum(en) if !en.type_params.is_empty() => {
@@ -598,25 +597,25 @@ impl Checker {
         tp: &HashMap<String, TyId>,
     ) -> Result<()> {
         let mut fields = Vec::new();
-        for (fty, name, sp) in &s.fields {
-            if fields.iter().any(|(n, _): &(String, TyId)| n == name) {
-                return err(*sp, format!("duplicate field `{name}`"));
+        for f in &s.fields {
+            if fields.iter().any(|(n, _): &(String, TyId)| *n == f.name) {
+                return err(f.span, format!("duplicate field `{}`", f.name));
             }
-            let t = self.resolve_type(fty, m, tp)?;
+            let t = self.resolve_type(&f.ty, m, tp)?;
             if !self.storable(t) {
                 let ts = self.types.show(t);
-                return err(*sp, format!("struct fields cannot have type `{ts}`"));
+                return err(f.span, format!("struct fields cannot have type `{ts}`"));
             }
-            fields.push((name.clone(), t));
+            fields.push((f.name.clone(), t));
         }
         self.ix
             .index
             .field_spans
-            .insert(ty, s.fields.iter().map(|f| f.2).collect());
+            .insert(ty, s.fields.iter().map(|f| f.span).collect());
         self.ix.type_spans.insert(ty, s.span);
-        for ((name, t), (.., sp)) in fields.iter().zip(&s.fields) {
+        for ((name, t), f) in fields.iter().zip(&s.fields) {
             let detail = format!("{} {name}", self.types.show(*t));
-            self.idx_decl(name, *sp, *sp, index::DeclKind::Field, detail, vec![]);
+            self.idx_decl(name, f.span, f.span, index::DeclKind::Field, detail, vec![]);
         }
         if let TyKind::Struct(i) = *self.types.kind(ty) {
             self.types.structs[i as usize].fields = fields;
@@ -632,37 +631,30 @@ impl Checker {
         tp: &HashMap<String, TyId>,
     ) -> Result<()> {
         let mut variants = Vec::new();
-        for (name, tys, sp) in &e.variants {
+        for v in &e.variants {
             if variants
                 .iter()
-                .any(|(n, _): &(String, Vec<TyId>)| n == name)
+                .any(|(n, _): &(String, Vec<TyId>)| *n == v.name)
             {
-                return err(*sp, format!("duplicate enum member `{name}`"));
+                return err(v.span, format!("duplicate enum member `{}`", v.name));
             }
-            let ts = tys
-                .iter()
+            let ts = (v.payload.iter())
                 .map(|t| self.resolve_type(t, m, tp))
                 .collect::<Result<_>>()?;
-            variants.push((name.clone(), ts));
+            variants.push((v.name.clone(), ts));
         }
         self.ix
             .index
             .variant_spans
-            .insert(ty, e.variants.iter().map(|v| v.2).collect());
+            .insert(ty, e.variants.iter().map(|v| v.span).collect());
         self.ix.type_spans.insert(ty, e.span);
         if let TyKind::Enum(i) = *self.types.kind(ty) {
             self.types.enums[i as usize].variants = variants;
         }
         let ename = self.types.show(ty);
-        for (vn, _, sp) in &e.variants {
-            self.idx_decl(
-                vn,
-                *sp,
-                *sp,
-                index::DeclKind::Variant,
-                format!("{ename}.{vn}"),
-                vec![],
-            );
+        for ast::Variant { name, span, .. } in &e.variants {
+            let detail = format!("{ename}.{name}");
+            self.idx_decl(name, *span, *span, index::DeclKind::Variant, detail, vec![]);
         }
         Ok(())
     }

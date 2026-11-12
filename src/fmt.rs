@@ -317,21 +317,16 @@ impl<'a> Printer<'a> {
             Item::Struct(s) => {
                 let params = GenericParam::list(&s.type_params);
                 let head = format!("{}struct {}{params}", vis(s.public), s.name);
-                let fields = s.fields.iter().map(|f| (f.2, f));
-                self.members(head, fields, s.span, true, |_, (ty, name, _)| {
-                    format!("{} {name}", ty.show())
-                });
+                let fields = s.fields.iter().map(|f| (f.span, f));
+                self.members(head, fields, s.span, true, |_, f| f.show());
             }
             Item::Enum(e) => {
                 let params = GenericParam::list(&e.type_params);
                 let head = format!("{}enum {}{params}", vis(e.public), e.name);
-                let variants = e.variants.iter().map(|v| (v.2, v));
-                self.members(head, variants, e.span, true, |_, (name, tys, _)| {
-                    if tys.is_empty() {
-                        name.clone()
-                    } else {
-                        format!("{name}({})", TypeExpr::show_list(tys))
-                    }
+                let variants = e.variants.iter().map(|v| (v.span, v));
+                self.members(head, variants, e.span, true, |_, v| match &v.payload[..] {
+                    [] => v.name.clone(),
+                    ts => format!("{}({})", v.name, TypeExpr::show_list(ts)),
                 });
             }
             Item::Type(t) => {
@@ -344,9 +339,9 @@ impl<'a> Printer<'a> {
                 self.out.push_str(&text);
                 self.out.push('\n');
             }
-            Item::Test(name, body, ..) => {
-                let b = self.block(body, 0, false);
-                self.out.push_str(&format!("test {} {b}\n", quote(name)));
+            Item::Test(t) => {
+                let b = self.block(&t.body, 0, false);
+                self.out.push_str(&format!("test {} {b}\n", quote(&t.name)));
             }
             Item::Stmt(s) => {
                 let text = self.stmt(s, 0);
@@ -391,11 +386,7 @@ impl<'a> Printer<'a> {
         let entries = s
             .params
             .iter()
-            .map(|p| {
-                entry(p.span.start as usize, move |_, _| {
-                    format!("{} {}", p.ty.show(), p.name)
-                })
-            })
+            .map(|p| entry(p.span.start as usize, move |_, _| p.show()))
             .collect();
         // the parameter list ends at the `)` after the last parameter
         let end = s

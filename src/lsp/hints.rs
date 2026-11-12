@@ -116,7 +116,7 @@ impl Server {
                 ast::Item::Fn(f) => closing(format!("fn {}", f.sig.name), f.body.span),
                 ast::Item::Struct(s) => closing(format!("struct {}", s.name), s.span),
                 ast::Item::Enum(e) => closing(format!("enum {}", e.name), e.span),
-                ast::Item::Test(name, b, ..) => closing(format!("test \"{name}\""), b.span),
+                ast::Item::Test(t) => closing(format!("test \"{}\"", t.name), t.body.span),
                 _ => {}
             }
         }

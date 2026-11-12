@@ -1233,7 +1233,10 @@ impl Server {
                 ast::Item::Fn(f) => out.push(fn_symbol(f)),
                 ast::Item::Struct(s) => {
                     let fields = (s.fields.iter())
-                        .map(|(t, n, sp)| sym(n, SymbolKind::FIELD, *sp, *sp, Some(src(t.span()))))
+                        .map(|f| {
+                            let detail = Some(src(f.ty.span()));
+                            sym(&f.name, SymbolKind::FIELD, f.span, f.span, detail)
+                        })
                         .collect();
                     let s = sym(&s.name, SymbolKind::STRUCT, s.span, s.name_span, None);
                     out.push(DocSymbol {
@@ -1243,13 +1246,20 @@ impl Server {
                 }
                 ast::Item::Enum(e) => {
                     let vs = (e.variants.iter())
-                        .map(|(n, ts, sp)| {
-                            let detail = (!ts.is_empty()).then(|| {
-                                let ts: Vec<String> = ts.iter().map(|t| src(t.span())).collect();
-                                format!("({})", ts.join(", "))
-                            });
-                            sym(n, SymbolKind::ENUM_MEMBER, *sp, *sp, detail)
-                        })
+                        .map(
+                            |ast::Variant {
+                                 name,
+                                 payload,
+                                 span,
+                             }| {
+                                let detail = (!payload.is_empty()).then(|| {
+                                    let ts: Vec<String> =
+                                        payload.iter().map(|t| src(t.span())).collect();
+                                    format!("({})", ts.join(", "))
+                                });
+                                sym(name, SymbolKind::ENUM_MEMBER, *span, *span, detail)
+                            },
+                        )
                         .collect();
                     let e = sym(&e.name, SymbolKind::ENUM, e.span, e.name_span, None);
                     out.push(DocSymbol {
@@ -1267,7 +1277,12 @@ impl Server {
                         detail,
                     ));
                 }
-                ast::Item::Test(name, _, span, name_span) => {
+                ast::Item::Test(ast::Test {
+                    name,
+                    span,
+                    name_span,
+                    ..
+                }) => {
                     let detail = Some("test".into());
                     out.push(sym(name, SymbolKind::METHOD, *span, *name_span, detail));
                 }

@@ -333,10 +333,28 @@ pub struct Block {
     pub span: Span,
 }
 
+/// A function parameter or struct field: `T name`, spanning the name.
 #[derive(Clone, Debug)]
 pub struct Param {
     pub ty: TypeExpr,
     pub name: String,
+    pub span: Span,
+}
+
+impl Param {
+    /// `T name`
+    pub fn show(&self) -> String {
+        format!("{} {}", self.ty.show(), self.name)
+    }
+}
+
+pub type Field = Param;
+
+/// An enum member: `Name` or `Name(T, U)`, spanning the name.
+#[derive(Clone, Debug)]
+pub struct Variant {
+    pub name: String,
+    pub payload: Vec<TypeExpr>,
     pub span: Span,
 }
 
@@ -428,7 +446,7 @@ pub struct Stmt {
 pub struct StructDecl {
     pub name: String,
     pub type_params: Vec<GenericParam>,
-    pub fields: Vec<(TypeExpr, String, Span)>,
+    pub fields: Vec<Field>,
     pub public: bool,
     pub span: Span,
     pub name_span: Span,
@@ -438,7 +456,7 @@ pub struct StructDecl {
 pub struct EnumDecl {
     pub name: String,
     pub type_params: Vec<GenericParam>,
-    pub variants: Vec<(String, Vec<TypeExpr>, Span)>,
+    pub variants: Vec<Variant>,
     pub public: bool,
     pub span: Span,
     pub name_span: Span,
@@ -468,6 +486,15 @@ pub struct ExternDecl {
     pub alias_span: Span,
 }
 
+/// `test "name" { ... }`
+#[derive(Clone, Debug)]
+pub struct Test {
+    pub name: String,
+    pub body: Block,
+    pub span: Span,
+    pub name_span: Span,
+}
+
 #[derive(Clone, Debug)]
 pub struct Import {
     pub path: String,
@@ -484,8 +511,7 @@ pub enum Item {
     Enum(EnumDecl),
     Type(TypeDecl),
     Fn(FnDecl),
-    /// `test "name" { ... }`: the name, body, whole span and the name's span
-    Test(String, Block, Span, Span),
+    Test(Test),
     Stmt(Stmt),
 }
 
@@ -524,7 +550,7 @@ impl Item {
             Self::Enum(e) => (e.span.start, e.span.end),
             Self::Type(t) => (t.span.start, t.span.end),
             Self::Fn(f) => (f.sig.span.start, f.body.span.end),
-            Self::Test(_, b, sp, _) => (sp.start, b.span.end.max(sp.end)),
+            Self::Test(t) => (t.span.start, t.body.span.end.max(t.span.end)),
             Self::Stmt(s) => (s.span.start, s.span.end),
         }
     }
@@ -568,18 +594,13 @@ pub mod visit {
             }
             Item::Struct(s) => {
                 out(Node::Span(s.span));
-                for (t, _, sp) in &s.fields {
-                    out(Node::Span(*sp));
-                    type_spans(t, out);
-                }
+                params_spans(&s.fields, out);
             }
             Item::Enum(e) => {
                 out(Node::Span(e.span));
-                for (_, ts, sp) in &e.variants {
-                    out(Node::Span(*sp));
-                    for t in ts {
-                        type_spans(t, out);
-                    }
+                for v in &e.variants {
+                    out(Node::Span(v.span));
+                    v.payload.iter().for_each(|t| type_spans(t, out));
                 }
             }
             Item::Type(t) => {
@@ -587,9 +608,9 @@ pub mod visit {
                 type_spans(&t.ty, out);
             }
             Item::Fn(f) => fn_spans(f, out),
-            Item::Test(_, b, sp, _) => {
-                out(Node::Span(*sp));
-                block_spans(b, out);
+            Item::Test(t) => {
+                out(Node::Span(t.span));
+                block_spans(&t.body, out);
             }
             Item::Stmt(s) => stmt_spans(s, out),
         }
@@ -604,12 +625,16 @@ pub mod visit {
 
     fn sig_spans<'a>(s: &'a FnSig, out: &mut dyn FnMut(Node<'a>)) {
         out(Node::Span(s.span));
-        for p in &s.params {
-            out(Node::Span(p.span));
-            type_spans(&p.ty, out);
-        }
+        params_spans(&s.params, out);
         if let Some(r) = &s.ret {
             type_spans(r, out);
+        }
+    }
+
+    fn params_spans<'a>(ps: &'a [Param], out: &mut dyn FnMut(Node<'a>)) {
+        for p in ps {
+            out(Node::Span(p.span));
+            type_spans(&p.ty, out);
         }
     }
 
