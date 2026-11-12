@@ -56,6 +56,8 @@ struct Open {
     plain: bool,
     /// The opener itself was unreachable.
     dead: bool,
+    /// No branch end seen so far (of an `if` and its `else`s) was reachable.
+    ends_dead: bool,
     /// The lines opening the block, held back while it is unreachable (an `if` and its
     /// `} else {`), until a kept jump lands inside it. Empty once written.
     held: Vec<String>,
@@ -157,12 +159,10 @@ impl Body {
                 return self.push(line);
             };
             let written = o.held.is_empty();
-            if !o.plain {
-                // as before the block: an `if` may be skipped, a loop is left by its jumps
-                self.dead = o.dead;
-            }
+            let ends_dead = o.ends_dead && self.dead;
             if opens {
                 // `} else {`: the else branch is reachable when the `if` was
+                self.dead = o.dead;
                 let mut held = o.held;
                 if !written {
                     held.push(line.clone());
@@ -170,8 +170,13 @@ impl Body {
                 self.open.push(Open {
                     plain: false,
                     dead: o.dead,
+                    ends_dead,
                     held,
                 });
+            } else if !o.plain {
+                // after a block that may be skipped or left early: reachable when it was
+                // entered, or (a jump landed inside it) when the end of one of its branches is
+                self.dead = o.dead && ends_dead;
             }
             if written {
                 if o.plain {
@@ -186,6 +191,7 @@ impl Body {
                 self.open.push(Open {
                     plain: t == "{",
                     dead: true,
+                    ends_dead: true,
                     held: vec![line],
                 });
             }
@@ -195,6 +201,7 @@ impl Body {
             self.open.push(Open {
                 plain: t == "{",
                 dead: false,
+                ends_dead: true,
                 held: vec![],
             });
             return self.push(line);
@@ -308,7 +315,7 @@ mod tests {
         let body = "  if (c) goto inner;\n  return;\n  if (d) {\n    x = 1;\n  } else {\n    inner:;\n    y = 2;\n  }\n  return;\n";
         assert_eq!(
             run(body, &[]),
-            "  if (c) goto inner;\n  return;\n  if (d) {\n  } else {\n    inner:;\n    y = 2;\n  }\n"
+            "  if (c) goto inner;\n  return;\n  if (d) {\n  } else {\n    inner:;\n    y = 2;\n  }\n  return;\n"
         );
     }
 
