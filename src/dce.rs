@@ -75,75 +75,36 @@ struct Analysis<'p> {
 
 impl Analysis<'_> {
     fn stmt(&mut self, s: &Stmt) {
+        let mut reads = HashSet::new();
+        for e in own_exprs(s) {
+            self.reads(e, &mut reads);
+        }
         match removable(self.p, self.func, s) {
             Some(Removable::Discard) => return,
             Some(Removable::Store(k)) => {
-                let mut reads = HashSet::new();
-                match &s.kind {
-                    SK::Let(_, e) => self.reads(e, &mut reads),
-                    SK::Assign(pl, e) => {
-                        self.place_reads(pl, &mut reads);
-                        self.reads(e, &mut reads);
-                    }
-                    _ => unreachable!(),
-                }
                 self.deps.entry(k).or_default().extend(reads);
                 return;
             }
             None => {}
         }
-        let mut live = HashSet::new();
+        // a kept store, `let` or destructuring keeps its variables declared
         match &s.kind {
-            SK::Let(_, e) | SK::Destructure(_, e) | SK::Expr(e) | SK::Throw(e) | SK::Assert(e) => {
-                self.reads(e, &mut live);
-            }
-            SK::Assign(pl, e) => {
-                // a store that is kept needs its variable declared: keep the variable
-                if let Some(v) = place_root(pl) {
-                    live.insert(self.key(v));
-                }
-                self.place_reads(pl, &mut live);
-                self.reads(e, &mut live);
-            }
-            SK::Return(e) | SK::Break(_, e) => {
-                if let Some(e) = e {
-                    self.reads(e, &mut live);
-                }
-            }
-            SK::Continue(_) => {}
-            SK::While { cond: e, .. } | SK::For { iter: e, .. } | SK::Lock { mutex: e, .. } => {
-                self.reads(e, &mut live);
-            }
-            SK::Block(_) => {}
-        }
-        // a kept `let` or destructuring keeps its variables declared
-        match &s.kind {
+            SK::Assign(pl, _) => reads.extend(place_root(pl).map(|v| self.key(v))),
             SK::Let(Some(v), _) => {
-                live.insert(self.key(*v));
+                reads.insert(self.key(*v));
             }
             SK::Destructure(ts, _) => {
-                live.extend(ts.iter().filter_map(|(t, _, _)| t.map(|v| self.key(v))));
+                reads.extend(ts.iter().filter_map(|(t, _, _)| t.map(|v| self.key(v))));
             }
             _ => {}
         }
-        self.live.extend(live);
+        self.live.extend(reads);
     }
 
     fn key(&self, v: VarRef) -> Key {
         match v {
             VarRef::Global(g) => Key::Global(g),
             VarRef::Local(l) => Key::Local(self.func, l),
-        }
-    }
-
-    fn place_reads(&self, pl: &Place, out: &mut HashSet<Key>) {
-        match pl {
-            Place::Var(_) => {}
-            Place::Field(b, _) | Place::TupleIndex(b, _) => self.place_reads(b, out),
-            Place::Index(b, i) => {
-                self.place_reads(b, out);
-                self.reads(i, out);
-            }
         }
     }
 
@@ -183,6 +144,37 @@ impl Analysis<'_> {
             }
         }
         self.live
+    }
+}
+
+/// The expressions of a statement itself (including indices of its target), not those of the
+/// statements nested in it.
+fn own_exprs(s: &Stmt) -> Vec<&Expr> {
+    match &s.kind {
+        SK::Let(_, e)
+        | SK::Destructure(_, e)
+        | SK::Expr(e)
+        | SK::Throw(e)
+        | SK::Assert(e)
+        | SK::While { cond: e, .. }
+        | SK::For { iter: e, .. }
+        | SK::Lock { mutex: e, .. } => vec![e],
+        SK::Return(e) | SK::Break(_, e) => e.iter().collect(),
+        SK::Assign(pl, e) => {
+            let mut pl = pl;
+            let mut out = vec![e];
+            loop {
+                match pl {
+                    Place::Var(_) => return out,
+                    Place::Field(b, _) | Place::TupleIndex(b, _) => pl = b,
+                    Place::Index(b, i) => {
+                        out.push(i);
+                        pl = b;
+                    }
+                }
+            }
+        }
+        SK::Continue(_) | SK::Block(_) => vec![],
     }
 }
 
