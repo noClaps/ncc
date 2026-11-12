@@ -148,34 +148,44 @@ impl Analysis<'_> {
 }
 
 /// The expressions of a statement itself (including indices of its target), not those of the
-/// statements nested in it.
-fn own_exprs(s: &Stmt) -> Vec<&Expr> {
-    match &s.kind {
-        SK::Let(_, e)
-        | SK::Destructure(_, e)
-        | SK::Expr(e)
-        | SK::Throw(e)
-        | SK::Assert(e)
-        | SK::While { cond: e, .. }
-        | SK::For { iter: e, .. }
-        | SK::Lock { mutex: e, .. } => vec![e],
-        SK::Return(e) | SK::Break(_, e) => e.iter().collect(),
-        SK::Assign(pl, e) => {
-            let mut pl = pl;
-            let mut out = vec![e];
-            loop {
-                match pl {
-                    Place::Var(_) => return out,
-                    Place::Field(b, _) | Place::TupleIndex(b, _) => pl = b,
-                    Place::Index(b, i) => {
-                        out.push(i);
-                        pl = b;
+/// statements nested in it. `$iter` is `iter` or `iter_mut`, matching how `$kind` is borrowed.
+macro_rules! own_exprs {
+    ($kind:expr, $iter:ident) => {
+        match $kind {
+            SK::Let(_, e)
+            | SK::Destructure(_, e)
+            | SK::Expr(e)
+            | SK::Throw(e)
+            | SK::Assert(e)
+            | SK::While { cond: e, .. }
+            | SK::For { iter: e, .. }
+            | SK::Lock { mutex: e, .. } => vec![e],
+            SK::Return(e) | SK::Break(_, e) => e.$iter().collect(),
+            SK::Assign(pl, e) => {
+                let mut pl = pl;
+                let mut out = vec![e];
+                loop {
+                    match pl {
+                        Place::Var(_) => break out,
+                        Place::Field(b, _) | Place::TupleIndex(b, _) => pl = b,
+                        Place::Index(b, i) => {
+                            out.push(i);
+                            pl = b;
+                        }
                     }
                 }
             }
+            SK::Continue(_) | SK::Block(_) => vec![],
         }
-        SK::Continue(_) | SK::Block(_) => vec![],
-    }
+    };
+}
+
+fn own_exprs(s: &Stmt) -> Vec<&Expr> {
+    own_exprs!(&s.kind, iter)
+}
+
+fn own_exprs_mut(s: &mut Stmt) -> Vec<&mut Expr> {
+    own_exprs!(&mut s.kind, iter_mut)
 }
 
 enum Removable {
@@ -443,38 +453,15 @@ impl Prune<'_> {
     }
 
     fn stmt(&mut self, s: &mut Stmt) {
-        match &mut s.kind {
-            SK::Let(_, e) | SK::Destructure(_, e) | SK::Expr(e) | SK::Throw(e) | SK::Assert(e) => {
-                self.expr(e)
-            }
-            SK::Assign(pl, e) => {
-                self.place(pl);
-                self.expr(e);
-            }
-            SK::Return(e) | SK::Break(_, e) => {
-                if let Some(e) = e {
-                    self.expr(e);
-                }
-            }
-            SK::Continue(_) => {}
-            SK::While { cond: e, body, .. }
-            | SK::For { iter: e, body, .. }
-            | SK::Lock { mutex: e, body, .. } => {
-                self.expr(e);
-                self.block(body);
-            }
-            SK::Block(b) => self.block(b),
+        for e in own_exprs_mut(s) {
+            self.expr(e);
         }
-    }
-
-    fn place(&mut self, pl: &mut Place) {
-        match pl {
-            Place::Var(_) => {}
-            Place::Field(b, _) | Place::TupleIndex(b, _) => self.place(b),
-            Place::Index(b, i) => {
-                self.place(b);
-                self.expr(i);
-            }
+        if let SK::While { body, .. }
+        | SK::For { body, .. }
+        | SK::Lock { body, .. }
+        | SK::Block(body) = &mut s.kind
+        {
+            self.block(body);
         }
     }
 
