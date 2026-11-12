@@ -466,24 +466,10 @@ pub fn run() -> ExitCode {
 // ------------------------------------------------------------------ URIs and positions
 
 fn uri_to_path(uri: &Uri) -> Option<PathBuf> {
-    let s = uri.as_str();
-    let rest = s.strip_prefix("file://")?;
-    let bytes = rest.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%'
-            && i + 2 < bytes.len()
-            && let Ok(v) = u8::from_str_radix(&rest[i + 1..i + 3], 16)
-        {
-            out.push(v);
-            i += 3;
-            continue;
-        }
-        out.push(bytes[i]);
-        i += 1;
+    if !uri.as_str().starts_with("file://") {
+        return None;
     }
-    let p = PathBuf::from(String::from_utf8(out).ok()?);
+    let p = PathBuf::from(&*uri.path().as_estr().decode().into_string().ok()?);
     // a request resolves its document several times: remember the paths of files that exist
     thread_local! {
         static RESOLVED: std::cell::RefCell<HashMap<PathBuf, PathBuf>> =
