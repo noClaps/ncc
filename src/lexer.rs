@@ -66,48 +66,49 @@ impl Tok {
             Self::Builtin(s) => format!("`@{s}`"),
             Self::Newline => "newline".into(),
             Self::Eof => "end of file".into(),
-            t => format!("`{}`", punct(t)),
+            t => {
+                let (text, _) = PUNCT.iter().find(|(_, p)| p == t).unwrap();
+                format!("`{text}`")
+            }
         }
     }
 }
 
-fn punct(t: &Tok) -> &'static str {
-    match t {
-        Tok::LParen => "(",
-        Tok::RParen => ")",
-        Tok::LBracket => "[",
-        Tok::RBracket => "]",
-        Tok::LBrace => "{",
-        Tok::RBrace => "}",
-        Tok::Comma => ",",
-        Tok::Dot => ".",
-        Tok::Colon => ":",
-        Tok::Question => "?",
-        Tok::Bang => "!",
-        Tok::Dollar => "$",
-        Tok::Assign => "=",
-        Tok::Arrow => "->",
-        Tok::Plus => "+",
-        Tok::Minus => "-",
-        Tok::Star => "*",
-        Tok::StarStar => "**",
-        Tok::Slash => "/",
-        Tok::Percent => "%",
-        Tok::Shl => "<<",
-        Tok::Shr => ">>",
-        Tok::Amp => "&",
-        Tok::Pipe => "|",
-        Tok::Caret => "^",
-        Tok::Concat => "<>",
-        Tok::Eq => "==",
-        Tok::Ne => "!=",
-        Tok::Lt => "<",
-        Tok::Gt => ">",
-        Tok::Le => "<=",
-        Tok::Ge => ">=",
-        _ => "?",
-    }
-}
+/// Punctuation tokens and their text, two-character ones first.
+const PUNCT: &[(&str, Tok)] = &[
+    ("**", Tok::StarStar),
+    ("<<", Tok::Shl),
+    (">>", Tok::Shr),
+    ("<>", Tok::Concat),
+    ("<=", Tok::Le),
+    (">=", Tok::Ge),
+    ("==", Tok::Eq),
+    ("!=", Tok::Ne),
+    ("->", Tok::Arrow),
+    ("(", Tok::LParen),
+    (")", Tok::RParen),
+    ("[", Tok::LBracket),
+    ("]", Tok::RBracket),
+    ("{", Tok::LBrace),
+    ("}", Tok::RBrace),
+    (",", Tok::Comma),
+    (".", Tok::Dot),
+    (":", Tok::Colon),
+    ("?", Tok::Question),
+    ("!", Tok::Bang),
+    ("$", Tok::Dollar),
+    ("=", Tok::Assign),
+    ("+", Tok::Plus),
+    ("-", Tok::Minus),
+    ("*", Tok::Star),
+    ("/", Tok::Slash),
+    ("%", Tok::Percent),
+    ("&", Tok::Amp),
+    ("|", Tok::Pipe),
+    ("^", Tok::Caret),
+    ("<", Tok::Lt),
+    (">", Tok::Gt),
+];
 
 #[derive(Clone, Debug)]
 pub struct Token {
@@ -190,10 +191,17 @@ impl<'a> Lexer<'a> {
     }
 
     fn peek(&self) -> u8 {
-        *self.bytes.get(self.pos).unwrap_or(&0)
+        self.peek_at(0)
     }
     fn peek_at(&self, n: usize) -> u8 {
         *self.bytes.get(self.pos + n).unwrap_or(&0)
+    }
+
+    /// Advance past the character at `self.pos`.
+    fn bump_char(&mut self) -> char {
+        let ch = self.src[self.pos..].chars().next().unwrap();
+        self.pos += ch.len_utf8();
+        ch
     }
 
     /// Advance past the bytes matching `f`; returns where they start.
@@ -248,56 +256,13 @@ impl<'a> Lexer<'a> {
             b'\'' => self.char_lit(start)?,
             b'"' => self.string(start)?,
             _ => {
-                let two = (c, self.peek_at(1));
-                let (t, n) = match two {
-                    (b'*', b'*') => (Tok::StarStar, 2),
-                    (b'<', b'<') => (Tok::Shl, 2),
-                    (b'>', b'>') => (Tok::Shr, 2),
-                    (b'<', b'>') => (Tok::Concat, 2),
-                    (b'<', b'=') => (Tok::Le, 2),
-                    (b'>', b'=') => (Tok::Ge, 2),
-                    (b'=', b'=') => (Tok::Eq, 2),
-                    (b'!', b'=') => (Tok::Ne, 2),
-                    (b'-', b'>') => (Tok::Arrow, 2),
-                    _ => {
-                        let t = match c {
-                            b'(' => Tok::LParen,
-                            b')' => Tok::RParen,
-                            b'[' => Tok::LBracket,
-                            b']' => Tok::RBracket,
-                            b'{' => Tok::LBrace,
-                            b'}' => Tok::RBrace,
-                            b',' => Tok::Comma,
-                            b'.' => Tok::Dot,
-                            b':' => Tok::Colon,
-                            b'?' => Tok::Question,
-                            b'!' => Tok::Bang,
-                            b'$' => Tok::Dollar,
-                            b'=' => Tok::Assign,
-                            b'+' => Tok::Plus,
-                            b'-' => Tok::Minus,
-                            b'*' => Tok::Star,
-                            b'/' => Tok::Slash,
-                            b'%' => Tok::Percent,
-                            b'&' => Tok::Amp,
-                            b'|' => Tok::Pipe,
-                            b'^' => Tok::Caret,
-                            b'<' => Tok::Lt,
-                            b'>' => Tok::Gt,
-                            _ => {
-                                let ch = self.src[self.pos..].chars().next().unwrap();
-                                self.pos += ch.len_utf8();
-                                return err(
-                                    self.span(start),
-                                    format!("unexpected character `{ch}`"),
-                                );
-                            }
-                        };
-                        (t, 1)
-                    }
+                let rest = &self.src[self.pos..];
+                let Some((text, t)) = PUNCT.iter().find(|(text, _)| rest.starts_with(text)) else {
+                    let ch = self.bump_char();
+                    return err(self.span(start), format!("unexpected character `{ch}`"));
                 };
-                self.pos += n;
-                t
+                self.pos += text.len();
+                t.clone()
             }
         };
         Ok(Token {
@@ -435,11 +400,7 @@ impl<'a> Lexer<'a> {
             b'\'' | b'\n' | 0 => {
                 return err(self.span(start), "empty or unterminated char literal");
             }
-            _ => {
-                let ch = self.src[self.pos..].chars().next().unwrap();
-                self.pos += ch.len_utf8();
-                ch
-            }
+            _ => self.bump_char(),
         };
         if self.peek() != b'\'' {
             return err(
@@ -492,9 +453,7 @@ impl<'a> Lexer<'a> {
                 parts.push(StrPart::Expr(text, self.base + off));
             }
             _ => {
-                let ch = self.src[self.pos..].chars().next().unwrap();
-                self.pos += ch.len_utf8();
-                cur.push(ch);
+                cur.push(self.bump_char());
             }
         }
         Ok(())
