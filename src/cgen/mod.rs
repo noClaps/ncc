@@ -552,29 +552,22 @@ impl CGen<'_> {
             let en = self.env_name(i);
             let mut s = format!("struct {en} {{\n  nc_env h;\n");
             let mut drop = String::new();
+            let parent = &self.p.funcs[f.parent.unwrap()];
             for (ci, cap) in f.captures.iter().enumerate() {
-                let parent = f.parent.unwrap();
-                let oty = self.p.funcs[parent].locals[cap.outer].ty;
-                self.tg.need(oty);
-                if cap.by_ref {
-                    writeln!(
-                        s,
-                        "  nc_cell *c{ci}; /* {} */",
-                        self.p.funcs[parent].locals[cap.outer].name
-                    )
-                    .unwrap();
-                    writeln!(drop, "  nc_cell_release(e->c{ci});").unwrap();
+                let outer = &parent.locals[cap.outer];
+                self.tg.need(outer.ty);
+                let (c, release) = if cap.by_ref {
+                    ("nc_cell *".to_string(), Some("nc_cell_release".to_string()))
                 } else {
-                    let c = self.tg.ct(oty);
-                    writeln!(
-                        s,
-                        "  {c} c{ci}; /* {} */",
-                        self.p.funcs[parent].locals[cap.outer].name
+                    let c = format!("{} ", self.tg.ct(outer.ty));
+                    (
+                        c,
+                        (self.managed(outer.ty)).then(|| format!("rl_{}", self.h(outer.ty))),
                     )
-                    .unwrap();
-                    if self.managed(oty) {
-                        writeln!(drop, "  rl_{}(e->c{ci});", self.h(oty)).unwrap();
-                    }
+                };
+                writeln!(s, "  {c}c{ci}; /* {} */", outer.name).unwrap();
+                if let Some(r) = release {
+                    writeln!(drop, "  {r}(e->c{ci});").unwrap();
                 }
             }
             s.push_str("};\n");
@@ -1997,9 +1990,8 @@ impl CGen<'_> {
     /// subject `sv`, in evaluation order; `None` when a value in it needs statements to compute.
     fn pat_cond(&mut self, p: &Pat, sv: &str, st: TyId) -> Option<Vec<String>> {
         let st = self.p.types.base(st);
-        let mut conds = Vec::new();
         match p {
-            Pat::Wild | Pat::Bind(_) => return Some(conds),
+            Pat::Wild | Pat::Bind(_) => return Some(vec![]),
             Pat::Cond(_) => unreachable!(),
             Pat::Value(e) => {
                 // computing anything else may emit statements, which must run only once the
@@ -2010,24 +2002,20 @@ impl CGen<'_> {
                 let (out, clean) = (self.body.len(), self.cleanup.len());
                 let v = self.expr(e);
                 debug_assert!(self.body.len() == out && self.cleanup.len() == clean);
-                conds.push(if self.is_prim(st) {
+                return Some(vec![if self.is_prim(st) {
                     format!("{sv} == {}", v.code)
                 } else {
                     self.tg.need(st);
                     format!("eq_{st}({sv}, {})", v.code)
-                });
-                return Some(conds);
+                }]);
             }
-            Pat::Array(ps) if matches!(self.p.types.kind(st), TyKind::Array(_)) => {
-                conds.push(format!("{sv}->len == {}", ps.len()));
-            }
-            Pat::Variant(idx, _) if !self.p.types.enum_has_payload(st) => {
-                conds.push(format!("{sv} == {idx}"));
-                return Some(conds);
-            }
-            Pat::Variant(idx, _) => conds.push(format!("{sv}->tag == {idx}")),
             _ => {}
         }
+        let shape = self.pat_shape(p, sv, st);
+        let mut conds: Vec<String> = shape
+            .map(|(a, b)| format!("{a} == {b}"))
+            .into_iter()
+            .collect();
         for (sp, ssv, sty) in self.pat_parts(p, sv, st) {
             conds.extend(self.pat_cond(sp, &ssv, sty)?);
         }
@@ -2048,15 +2036,10 @@ impl CGen<'_> {
                 self.line("}");
                 return;
             }
-            Pat::Array(ps) if matches!(self.p.types.kind(st), TyKind::Array(_)) => {
-                self.line(format!("if ({sv}->len != {}) {ok} = false;", ps.len()));
-            }
-            Pat::Variant(idx, _) if !self.p.types.enum_has_payload(st) => {
-                self.line(format!("if ({sv} != {idx}) {ok} = false;"));
-                return;
-            }
-            Pat::Variant(idx, _) => self.line(format!("if ({sv}->tag != {idx}) {ok} = false;")),
             _ => {}
+        }
+        if let Some((a, b)) = self.pat_shape(p, sv, st) {
+            self.line(format!("if ({a} != {b}) {ok} = false;"));
         }
         for (sp, ssv, sty) in self.pat_parts(p, sv, st) {
             if matches!(sp, Pat::Wild | Pat::Bind(_)) {
@@ -2065,6 +2048,21 @@ impl CGen<'_> {
             self.line(format!("if ({ok}) {{"));
             self.pat_test(sp, &ssv, sty, ok);
             self.line("}");
+        }
+    }
+
+    /// The test an array or variant pattern makes on the subject `sv` itself, before testing its
+    /// parts: that the two sides are equal.
+    fn pat_shape(&self, p: &Pat, sv: &str, st: TyId) -> Option<(String, String)> {
+        match p {
+            Pat::Array(ps) if matches!(self.p.types.kind(st), TyKind::Array(_)) => {
+                Some((format!("{sv}->len"), ps.len().to_string()))
+            }
+            Pat::Variant(idx, _) if !self.p.types.enum_has_payload(st) => {
+                Some((sv.to_string(), idx.to_string()))
+            }
+            Pat::Variant(idx, _) => Some((format!("{sv}->tag"), idx.to_string())),
+            _ => None,
         }
     }
 
