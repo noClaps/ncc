@@ -167,21 +167,18 @@ impl Parser {
     fn at_kw(&self, kw: &str) -> bool {
         matches!(self.peek(), Tok::Ident(s) if s == kw)
     }
-    fn eat(&mut self, t: &Tok) -> bool {
-        if self.at(t) {
+    /// Consume the current token if `at` (a check of it) holds.
+    fn bump_if(&mut self, at: bool) -> bool {
+        if at {
             self.bump();
-            true
-        } else {
-            false
         }
+        at
+    }
+    fn eat(&mut self, t: &Tok) -> bool {
+        self.bump_if(self.at(t))
     }
     fn eat_kw(&mut self, kw: &str) -> bool {
-        if self.at_kw(kw) {
-            self.bump();
-            true
-        } else {
-            false
-        }
+        self.bump_if(self.at_kw(kw))
     }
     fn expect(&mut self, t: &Tok) -> Result<Span> {
         if self.at(t) {
@@ -235,6 +232,13 @@ impl Parser {
                 format!("expected identifier, found {}", t.describe()),
             ),
         }
+    }
+    /// An identifier, or `_`.
+    fn ident_or_wild(&mut self) -> Result<(String, Span)> {
+        if self.at_kw("_") {
+            return Ok(("_".into(), self.bump().span));
+        }
+        self.ident()
     }
     fn skip_nl(&mut self) {
         while self.at(&Tok::Newline) {
@@ -882,12 +886,11 @@ impl Parser {
     }
 
     fn break_label(&mut self) -> Result<Option<String>> {
-        if self.at(&Tok::Colon) {
-            self.bump();
-            Ok(Some(self.ident()?.0))
+        Ok(if self.eat(&Tok::Colon) {
+            Some(self.ident()?.0)
         } else {
-            Ok(None)
-        }
+            None
+        })
     }
 
     fn at_stmt_end(&self) -> bool {
@@ -925,8 +928,7 @@ impl Parser {
             return Ok(s);
         }
         let kind = match self.peek().clone() {
-            Tok::Ident(k) if k == "return" => {
-                self.bump();
+            _ if self.eat_kw("return") => {
                 if self.at_stmt_end() {
                     StmtKind::Return(None)
                 } else {
@@ -946,12 +948,8 @@ impl Parser {
                     }
                 }
             }
-            Tok::Ident(k) if k == "throw" => {
-                self.bump();
-                StmtKind::Throw(self.expr()?)
-            }
-            Tok::Ident(k) if k == "break" => {
-                self.bump();
+            _ if self.eat_kw("throw") => StmtKind::Throw(self.expr()?),
+            _ if self.eat_kw("break") => {
                 let label = self.break_label()?;
                 let value = if label.is_none() && !self.at_stmt_end() {
                     Some(self.expr()?)
@@ -960,16 +958,9 @@ impl Parser {
                 };
                 StmtKind::Break { label, value }
             }
-            Tok::Ident(k) if k == "continue" => {
-                self.bump();
-                StmtKind::Continue(self.break_label()?)
-            }
-            Tok::Ident(k) if k == "assert" => {
-                self.bump();
-                StmtKind::Assert(self.expr()?)
-            }
-            Tok::Ident(k) if k == "while" => {
-                self.bump();
+            _ if self.eat_kw("continue") => StmtKind::Continue(self.break_label()?),
+            _ if self.eat_kw("assert") => StmtKind::Assert(self.expr()?),
+            _ if self.eat_kw("while") => {
                 let cond = self.no_struct_expr()?;
                 let body = self.block()?;
                 StmtKind::While {
@@ -978,8 +969,7 @@ impl Parser {
                     body,
                 }
             }
-            Tok::Ident(k) if k == "for" => {
-                self.bump();
+            _ if self.eat_kw("for") => {
                 let (var, var_span) = self.ident()?;
                 self.expect_kw("in")?;
                 let iter = self.no_struct_expr()?;
@@ -992,8 +982,7 @@ impl Parser {
                     body,
                 }
             }
-            Tok::Ident(k) if k == "lock" => {
-                self.bump();
+            _ if self.eat_kw("lock") => {
                 let (name, name_span) = self.ident()?;
                 let body = self.block()?;
                 StmtKind::Lock {
@@ -1084,10 +1073,7 @@ impl Parser {
         loop {
             let start = self.span();
             let ty = self.parse_type()?;
-            let (name, nsp) = match self.peek().clone() {
-                Tok::Ident(s) if s == "_" => (s, self.bump().span),
-                _ => self.ident()?,
-            };
+            let (name, nsp) = self.ident_or_wild()?;
             out.push(DeclTarget {
                 ty,
                 name,
@@ -1110,35 +1096,25 @@ impl Parser {
     pub fn expr(&mut self) -> Result<Expr> {
         let mut e = self.binary(0)?;
         loop {
-            if self.at_kw("else") {
-                self.bump();
+            let start = e.span;
+            let kind = if self.eat_kw("else") {
                 let fb = if self.at(&Tok::LBrace) {
                     ElseFallback::Block(self.block()?)
                 } else {
                     ElseFallback::Expr(Box::new(self.binary(0)?))
                 };
-                let sp = e.span.to(self.prev_span());
-                e = Expr {
-                    kind: ExprKind::Else(Box::new(e), fb),
-                    span: sp,
-                };
-            } else if self.at_kw("catch") {
-                self.bump();
-                let (name, name_span) = match self.peek().clone() {
-                    Tok::Ident(s) if s == "_" => (s, self.bump().span),
-                    _ => self.ident()?,
-                };
-                let b = self.block()?;
-                let sp = e.span.to(self.prev_span());
-                e = Expr {
-                    kind: ExprKind::Catch(Box::new(e), name, name_span, b),
-                    span: sp,
-                };
+                ExprKind::Else(Box::new(e), fb)
+            } else if self.eat_kw("catch") {
+                let (name, name_span) = self.ident_or_wild()?;
+                ExprKind::Catch(Box::new(e), name, name_span, self.block()?)
             } else {
-                break;
-            }
+                return Ok(e);
+            };
+            e = Expr {
+                kind,
+                span: start.to(self.prev_span()),
+            };
         }
-        Ok(e)
     }
 
     /// The binary operator at the current token and its precedence (`**` is parsed apart).
@@ -1208,21 +1184,16 @@ impl Parser {
         }
         let continued = !matches!(self.toks[j].tok, Tok::Eof | Tok::RBrace)
             && matches!((self.column(j), self.column(self.stmt_start)), (Some(n), Some(s)) if n > s);
-        if continued {
-            err(
-                opsp,
-                format!(
-                    "an expression continued on the next line after `{sym}` must be wrapped in parentheses"
-                ),
+        let msg = if continued {
+            format!(
+                "an expression continued on the next line after `{sym}` must be wrapped in parentheses"
             )
         } else {
-            err(
-                opsp,
-                format!(
-                    "expected an expression after `{sym}` (to continue an expression on the next line, wrap it in parentheses)"
-                ),
+            format!(
+                "expected an expression after `{sym}` (to continue an expression on the next line, wrap it in parentheses)"
             )
-        }
+        };
+        err(opsp, msg)
     }
 
     fn pow(&mut self) -> Result<Expr> {
@@ -1279,14 +1250,11 @@ impl Parser {
         let mut e = self.primary()?;
         loop {
             let start = e.span;
-            match self.peek().clone() {
+            let kind = match self.peek().clone() {
                 Tok::LParen => {
                     self.bump();
                     let args = self.with_no_struct(false, |p| p.list(&Tok::RParen, Self::expr))?;
-                    e = Expr {
-                        kind: ExprKind::Call(Box::new(e), args),
-                        span: start.to(self.prev_span()),
-                    };
+                    ExprKind::Call(Box::new(e), args)
                 }
                 Tok::LBracket => {
                     self.bump();
@@ -1311,22 +1279,15 @@ impl Parser {
                         Ok((lo, hi))
                     })?;
                     self.expect(&Tok::RBracket)?;
-                    let kind = match hi {
+                    match hi {
                         Some(hi) => ExprKind::Slice(Box::new(e), lo, hi),
                         None => ExprKind::Index(Box::new(e), lo),
-                    };
-                    e = Expr {
-                        kind,
-                        span: start.to(self.prev_span()),
-                    };
+                    }
                 }
                 Tok::Dot => {
                     self.bump();
                     let (name, _) = self.ident()?;
-                    e = Expr {
-                        kind: ExprKind::Field(Box::new(e), name),
-                        span: start.to(self.prev_span()),
-                    };
+                    ExprKind::Field(Box::new(e), name)
                 }
                 Tok::Lt if matches!(e.kind, ExprKind::Ident(_) | ExprKind::Field(..)) => {
                     // speculative generic arguments
@@ -1334,15 +1295,12 @@ impl Parser {
                     let saved_toks = self.toks.clone();
                     match self.generic_args() {
                         Ok(args) if matches!(self.peek(), Tok::LParen | Tok::LBrace | Tok::Dot) => {
-                            e = Expr {
-                                kind: ExprKind::Generic(Box::new(e), args),
-                                span: start.to(self.prev_span()),
-                            };
+                            ExprKind::Generic(Box::new(e), args)
                         }
                         _ => {
                             self.pos = save;
                             self.toks = saved_toks;
-                            break;
+                            return Ok(e);
                         }
                     }
                 }
@@ -1360,15 +1318,15 @@ impl Parser {
                         p.skip_nl();
                         Ok((name, p.expr()?, fsp))
                     })?;
-                    e = Expr {
-                        kind: ExprKind::Struct(Box::new(e), fields),
-                        span: start.to(self.prev_span()),
-                    };
+                    ExprKind::Struct(Box::new(e), fields)
                 }
-                _ => break,
-            }
+                _ => return Ok(e),
+            };
+            e = Expr {
+                kind,
+                span: start.to(self.prev_span()),
+            };
         }
-        Ok(e)
     }
 
     /// The expressions of a list after its first one (`, b, c)`), up to `close` (consumed).
@@ -1394,19 +1352,28 @@ impl Parser {
     fn primary(&mut self) -> Result<Expr> {
         let start = self.span();
         let t = self.peek().clone();
+        // tokens that are a whole expression
+        let leaf = match &t {
+            Tok::Int(v, u) => Some(ExprKind::Int(*v, *u)),
+            Tok::Float(f) => Some(ExprKind::Float(*f)),
+            Tok::Char(c) => Some(ExprKind::Char(*c)),
+            Tok::Dollar => Some(ExprKind::Dollar),
+            Tok::Ident(k) => match k.as_str() {
+                "true" => Some(ExprKind::Bool(true)),
+                "false" => Some(ExprKind::Bool(false)),
+                "none" => Some(ExprKind::None),
+                "_" => Some(ExprKind::Wildcard),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(kind) = leaf {
+            return Ok(Expr {
+                kind,
+                span: self.bump().span,
+            });
+        }
         let kind = match t {
-            Tok::Int(v, u) => {
-                self.bump();
-                ExprKind::Int(v, u)
-            }
-            Tok::Float(f) => {
-                self.bump();
-                ExprKind::Float(f)
-            }
-            Tok::Char(c) => {
-                self.bump();
-                ExprKind::Char(c)
-            }
             Tok::Str(parts) => {
                 self.bump();
                 let mut segs = Vec::new();
@@ -1430,10 +1397,6 @@ impl Parser {
                     }
                 }
                 ExprKind::Str(segs)
-            }
-            Tok::Dollar => {
-                self.bump();
-                ExprKind::Dollar
             }
             Tok::Builtin(name) => {
                 self.bump();
@@ -1498,22 +1461,6 @@ impl Parser {
                 })?
             }
             Tok::Ident(k) => match k.as_str() {
-                "true" => {
-                    self.bump();
-                    ExprKind::Bool(true)
-                }
-                "false" => {
-                    self.bump();
-                    ExprKind::Bool(false)
-                }
-                "none" => {
-                    self.bump();
-                    ExprKind::None
-                }
-                "_" => {
-                    self.bump();
-                    ExprKind::Wildcard
-                }
                 "fn" => {
                     self.bump();
                     let (params, ret) = self.params_and_ret()?;
