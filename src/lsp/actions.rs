@@ -323,214 +323,181 @@ impl Server {
         let uri = p.text_document.uri.clone();
         let (path, text) = self.source(&uri)?;
         let mut out = Vec::new();
-        // a quick fix for the diagnostic `d`
-        let fix = |title, d, edits, preferred: bool| {
-            let mut a = edit_action(title, CodeActionKind::QUICKFIX, &uri, edits, Some(d));
-            if let CodeActionOrCommand::CodeAction(c) = &mut a {
-                c.is_preferred = preferred.then_some(true);
-            }
-            a
-        };
         let insert = |at: Position, s: &str| TextEdit::new(Range::new(at, at), s.to_string());
         let module = self.module_of(&path, &text);
         let fresh = self.fresh(&uri);
 
         for d in &p.context.diagnostics {
             let code = diag_code(d);
+            // a quick fix for the diagnostic
+            let fix = |title: &str, edit, preferred: bool| {
+                let (kind, edits) = (CodeActionKind::QUICKFIX, vec![edit]);
+                let mut a = edit_action(title.into(), kind, &uri, edits, Some(d));
+                if let CodeActionOrCommand::CodeAction(c) = &mut a {
+                    c.is_preferred = preferred.then_some(true);
+                }
+                a
+            };
             let (s, e) = (
                 pos_to_offset(&text, d.range.start),
                 pos_to_offset(&text, d.range.end),
             );
-            if code == codes::IMMUTABLE {
-                if let Some((a, r)) = self.lookup(&uri, d.range.start)
-                    && let Some(def) = r.def
-                    && a.sm.file(def.file).path == path
-                {
-                    let edit = insert_at(&text, def.start as usize, "mut ");
-                    out.push(fix("Make the variable mutable".into(), d, vec![edit], true));
+            match code {
+                codes::IMMUTABLE => {
+                    if let Some((a, r)) = self.lookup(&uri, d.range.start)
+                        && let Some(def) = r.def
+                        && a.sm.file(def.file).path == path
+                    {
+                        let edit = insert_at(&text, def.start as usize, "mut ");
+                        out.push(fix("Make the variable mutable", edit, true));
+                    }
                 }
-            } else if code == codes::UNUSED_VALUE {
-                out.push(fix(
-                    "Discard the value with `_ =`".into(),
-                    d,
-                    vec![insert(d.range.start, "_ = ")],
-                    true,
-                ));
-            } else if matches!(
-                code,
-                "unused-variable" | "unused-parameter" | "unused-function" | "unused-type"
-            ) {
-                out.push(fix(
-                    "Prefix the name with `_`".into(),
-                    d,
-                    vec![insert(d.range.start, "_")],
-                    true,
-                ));
-                if matches!(code, "unused-variable" | "unused-parameter") {
-                    out.push(fix(
-                        "Rename to `_`".into(),
-                        d,
-                        vec![TextEdit::new(d.range, "_".into())],
-                        false,
-                    ));
+                codes::UNUSED_VALUE => {
+                    let edit = insert(d.range.start, "_ = ");
+                    out.push(fix("Discard the value with `_ =`", edit, true));
                 }
-            } else if code == UNREACHABLE_BRANCH {
-                // the whole lines when the branch is alone on them
-                let (ls, le) = (line_start(&text, s), line_end(&text, e));
-                let alone = text[ls..s].trim().is_empty() && text[e..le].trim().is_empty();
-                let (s, e) = if alone { (ls, le) } else { (s, e) };
-                out.push(fix(
-                    "Remove the unreachable branch".into(),
-                    d,
-                    vec![TextEdit::new(range(&text, s, e), String::new())],
-                    true,
-                ));
-            } else if code == UNUSED_IMPORT {
-                let off = s as u32;
-                if let Some((span, ..)) = unused_imports(&text, &module)
-                    .into_iter()
-                    .find(|(sp, ..)| sp.start <= off && off <= sp.end)
-                {
-                    out.push(fix(
-                        "Remove unused import".into(),
-                        d,
-                        vec![remove_import(&text, span)],
-                        true,
-                    ));
+                "unused-variable" | "unused-parameter" | "unused-function" | "unused-type" => {
+                    let edit = insert(d.range.start, "_");
+                    out.push(fix("Prefix the name with `_`", edit, true));
+                    if matches!(code, "unused-variable" | "unused-parameter") {
+                        let edit = TextEdit::new(d.range, "_".into());
+                        out.push(fix("Rename to `_`", edit, false));
+                    }
                 }
-            } else if code == codes::UNKNOWN_NAME
-                && let Some(name) = diag_data(d, 0)
-            {
-                // names in scope (or imported) that are close to the misspelt one
-                if let Some(a) = self.analyses.get(&path)
-                    && let Some(fid) = a.file_id(&path)
-                {
-                    let mut cands: Vec<(usize, String)> = super::complete::visible_names(a, fid, s)
+                UNREACHABLE_BRANCH => {
+                    // the whole lines when the branch is alone on them
+                    let (ls, le) = (line_start(&text, s), line_end(&text, e));
+                    let alone = text[ls..s].trim().is_empty() && text[e..le].trim().is_empty();
+                    let (s, e) = if alone { (ls, le) } else { (s, e) };
+                    let edit = TextEdit::new(range(&text, s, e), String::new());
+                    out.push(fix("Remove the unreachable branch", edit, true));
+                }
+                UNUSED_IMPORT => {
+                    let off = s as u32;
+                    if let Some((span, ..)) = unused_imports(&text, &module)
                         .into_iter()
-                        .chain(a.imports.keys().cloned())
-                        .filter(|n| n != name)
-                        .map(|n| (levenshtein(name, &n), n))
-                        .filter(|(dist, n)| *dist <= (name.len().max(n.len()) / 3).max(1))
-                        .collect();
-                    cands.sort();
-                    cands.dedup();
-                    if let Some(i) = text[s..e].find(name) {
-                        let r = range(&text, s + i, s + i + name.len());
-                        // a module used as `name.x` that is not imported yet
-                        let used_as_module = text[s + i + name.len()..].starts_with('.');
-                        if used_as_module {
-                            for m in self.find_modules(&path, name).into_iter().take(3) {
-                                out.push(fix(
-                                    format!("Import `{m}` as `{name}`"),
-                                    d,
-                                    vec![add_import(&text, &module, &m, name)],
-                                    true,
-                                ));
+                        .find(|(sp, ..)| sp.start <= off && off <= sp.end)
+                    {
+                        let edit = remove_import(&text, span);
+                        out.push(fix("Remove unused import", edit, true));
+                    }
+                }
+                codes::UNKNOWN_NAME => {
+                    // names in scope (or imported) that are close to the misspelt one
+                    if let Some(name) = diag_data(d, 0)
+                        && let Some(a) = self.analyses.get(&path)
+                        && let Some(fid) = a.file_id(&path)
+                    {
+                        let mut cands: Vec<(usize, String)> =
+                            super::complete::visible_names(a, fid, s)
+                                .into_iter()
+                                .chain(a.imports.keys().cloned())
+                                .filter(|n| n != name)
+                                .map(|n| (levenshtein(name, &n), n))
+                                .filter(|(dist, n)| *dist <= (name.len().max(n.len()) / 3).max(1))
+                                .collect();
+                        cands.sort();
+                        cands.dedup();
+                        if let Some(i) = text[s..e].find(name) {
+                            let r = range(&text, s + i, s + i + name.len());
+                            // a module used as `name.x` that is not imported yet
+                            let used_as_module = text[s + i + name.len()..].starts_with('.');
+                            if used_as_module {
+                                for m in self.find_modules(&path, name).into_iter().take(3) {
+                                    let edit = add_import(&text, &module, &m, name);
+                                    out.push(fix(&format!("Import `{m}` as `{name}`"), edit, true));
+                                }
                             }
-                        }
-                        // a call to a function that does not exist yet
-                        if text[s + i + name.len()..].starts_with('(')
-                            && let Some(mut x) =
-                                generate_function(a, fid, &module, &text, s + i, name, &uri)
-                        {
-                            if let CodeActionOrCommand::CodeAction(ca) = &mut x {
-                                ca.diagnostics = Some(vec![d.clone()]);
+                            // a call to a function that does not exist yet
+                            if text[s + i + name.len()..].starts_with('(')
+                                && let Some(mut x) =
+                                    generate_function(a, fid, &module, &text, s + i, name, &uri)
+                            {
+                                if let CodeActionOrCommand::CodeAction(ca) = &mut x {
+                                    ca.diagnostics = Some(vec![d.clone()]);
+                                }
+                                out.push(x);
                             }
-                            out.push(x);
-                        }
-                        for (k, (_, c)) in cands.into_iter().take(3).enumerate() {
-                            out.push(fix(
-                                format!("Change to `{c}`"),
-                                d,
-                                vec![TextEdit::new(r, c)],
-                                k == 0 && !used_as_module,
-                            ));
+                            for (k, (_, c)) in cands.into_iter().take(3).enumerate() {
+                                let title = format!("Change to `{c}`");
+                                let preferred = k == 0 && !used_as_module;
+                                out.push(fix(&title, TextEdit::new(r, c), preferred));
+                            }
                         }
                     }
                 }
-            } else if code == codes::NEEDS_THROWING {
-                // the innermost function around the error with a return type
-                let best = last_node(&module, |n| match n {
-                    Node::Fn(sig) if sig.span.start as usize <= s => Some(sig),
-                    _ => None,
-                });
-                if let Some(sig) = best {
-                    let (at, ins) = if let Some(r) = &sig.ret {
-                        (r.span().end as usize, "!".to_string())
-                    } else {
-                        // `fn f(...)` -> `fn f(...) void!` (the span covers the name)
-                        let from = sig.span.end as usize;
-                        let brace = text[from..].find('{').map(|i| from + i);
-                        let close = brace.and_then(|b| text[from..b].rfind(')').map(|i| from + i));
-                        match close {
-                            Some(c) => (c + 1, " void!".to_string()),
-                            None => (sig.span.end as usize, String::new()),
-                        }
-                    };
-                    if !ins.is_empty() {
-                        out.push(fix(
-                            format!("Make `{}` throwing", sig.name),
-                            d,
-                            vec![insert_at(&text, at, ins)],
-                            true,
-                        ));
-                    }
-                }
-            } else if code == codes::MISSING_FIELD {
-                if let Some(a) = fresh.map(|f| f.0)
-                    && let Some(edit) =
-                        add_missing_fields(a, &module, &text, s as u32, default_value)
-                {
-                    out.push(fix("Add missing fields".into(), d, vec![edit], true));
-                }
-            } else if code == codes::NOT_EXHAUSTIVE {
-                let off = s as u32;
-                let target = last_node(&module, |n| match n {
-                    Node::Expr(e) => match &e.kind {
-                        E::If(i) if i.span.start <= off && off <= i.span.end => Some(i),
+                codes::NEEDS_THROWING => {
+                    // the innermost function around the error with a return type
+                    let best = last_node(&module, |n| match n {
+                        Node::Fn(sig) if sig.span.start as usize <= s => Some(sig),
                         _ => None,
-                    },
-                    _ => None,
-                });
-                if let Some(ife) = target {
-                    let arm_indent = ife.arms.first().map_or_else(
-                        || format!("{}  ", indent_at(&text, ife.span.start as usize)),
-                        |a| indent_at(&text, a.span.start as usize).to_string(),
-                    );
-                    let end = ife.span.end as usize;
-                    let close = text[..end].rfind('}').unwrap_or(end);
-                    let at = line_start(&text, close);
-                    let at = if text[at..close].trim().is_empty() {
-                        at
-                    } else {
-                        close
-                    };
-                    let lead = if at == close { "\n" } else { "" };
-                    let missing =
-                        fresh.and_then(|(a, fid, _)| missing_variants(a, fid, ife, &text));
-                    if let Some(vs) = missing.filter(|v| !v.is_empty()) {
-                        let arms: String = vs
-                            .iter()
-                            .map(|v| format!("{lead}{arm_indent}{v} -> {{}}\n"))
-                            .collect();
-                        out.push(fix(
-                            "Add missing branches".into(),
-                            d,
-                            vec![insert_at(&text, at, arms)],
-                            true,
-                        ));
+                    });
+                    if let Some(sig) = best {
+                        let (at, ins) = if let Some(r) = &sig.ret {
+                            (r.span().end as usize, "!".to_string())
+                        } else {
+                            // `fn f(...)` -> `fn f(...) void!` (the span covers the name)
+                            let from = sig.span.end as usize;
+                            let brace = text[from..].find('{').map(|i| from + i);
+                            let close =
+                                brace.and_then(|b| text[from..b].rfind(')').map(|i| from + i));
+                            match close {
+                                Some(c) => (c + 1, " void!".to_string()),
+                                None => (sig.span.end as usize, String::new()),
+                            }
+                        };
+                        if !ins.is_empty() {
+                            let edit = insert_at(&text, at, ins);
+                            out.push(fix(&format!("Make `{}` throwing", sig.name), edit, true));
+                        }
                     }
-                    out.push(fix(
-                        "Add a fallback `_` branch".into(),
-                        d,
-                        vec![insert_at(
-                            &text,
-                            at,
-                            format!("{lead}{arm_indent}_ -> {{}}\n"),
-                        )],
-                        false,
-                    ));
                 }
+                codes::MISSING_FIELD => {
+                    if let Some(a) = fresh.map(|f| f.0)
+                        && let Some(edit) =
+                            add_missing_fields(a, &module, &text, s as u32, default_value)
+                    {
+                        out.push(fix("Add missing fields", edit, true));
+                    }
+                }
+                codes::NOT_EXHAUSTIVE => {
+                    let off = s as u32;
+                    let target = last_node(&module, |n| match n {
+                        Node::Expr(e) => match &e.kind {
+                            E::If(i) if i.span.start <= off && off <= i.span.end => Some(i),
+                            _ => None,
+                        },
+                        _ => None,
+                    });
+                    if let Some(ife) = target {
+                        let arm_indent = ife.arms.first().map_or_else(
+                            || format!("{}  ", indent_at(&text, ife.span.start as usize)),
+                            |a| indent_at(&text, a.span.start as usize).to_string(),
+                        );
+                        let end = ife.span.end as usize;
+                        let close = text[..end].rfind('}').unwrap_or(end);
+                        let at = line_start(&text, close);
+                        let at = if text[at..close].trim().is_empty() {
+                            at
+                        } else {
+                            close
+                        };
+                        let lead = if at == close { "\n" } else { "" };
+                        let missing =
+                            fresh.and_then(|(a, fid, _)| missing_variants(a, fid, ife, &text));
+                        if let Some(vs) = missing.filter(|v| !v.is_empty()) {
+                            let arms: String = vs
+                                .iter()
+                                .map(|v| format!("{lead}{arm_indent}{v} -> {{}}\n"))
+                                .collect();
+                            let edit = insert_at(&text, at, arms);
+                            out.push(fix("Add missing branches", edit, true));
+                        }
+                        let edit = insert_at(&text, at, format!("{lead}{arm_indent}_ -> {{}}\n"));
+                        out.push(fix("Add a fallback `_` branch", edit, false));
+                    }
+                }
+                _ => {}
             }
         }
 
