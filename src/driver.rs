@@ -309,7 +309,11 @@ fn compile(
                 Some((os, _)) => Some(os.clone()),
                 None => detect_target().ok().map(|(os, _)| os),
             };
-            args.extend(release_link_flags(os.as_deref()).iter().map(|f| f.to_string()));
+            args.extend(
+                release_link_flags(os.as_deref())
+                    .iter()
+                    .map(|f| f.to_string()),
+            );
         }
         args.push("-lm".into());
         args.push("-lpthread".into());
