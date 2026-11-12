@@ -33,7 +33,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
+use lsp_server::{Connection, Message, Notification, Request, Response};
 use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument,
     Notification as _, PublishDiagnostics,
@@ -46,11 +46,9 @@ use lsp_types::*;
 use crate::ast;
 use crate::check::index::{DeclKind, Index};
 use crate::diag::{SourceMap, Span, codes};
-use crate::lexer::Tok;
-/// The identifier itself within a reference or declaration span: types and `struct`/`enum`/`type`
-/// declarations put the name first (`Matrix<int>`), everything else ends with it (`p.x`).
+use crate::lexer::{Tok, is_ident_byte};
 use crate::parser::KEYWORDS;
-/// Builtin functions: name, signature and documentation.
+
 /// A builtin function (`@name`).
 struct Builtin {
     name: &'static str,
@@ -694,11 +692,6 @@ impl Server {
         self.outbox.extend(out);
     }
 
-    /// Analyse all of the workspace files not analysed yet.
-    fn index_workspace(&mut self) {
-        self.index_some(usize::MAX);
-    }
-
     /// The diagnostics of a file: the union of what every analysis found in it.
     fn diagnostics_of(&self, file: &Path) -> Vec<Diagnostic> {
         let diags = (self.reported_by.get(file).into_iter().flatten())
@@ -1036,7 +1029,7 @@ impl Server {
                 | "textDocument/rename"
                 | "callHierarchy/incomingCalls"
         ) {
-            self.index_workspace();
+            self.index_some(usize::MAX);
         }
         let params = req.params;
         let result = match req.method.as_str() {
@@ -1049,10 +1042,7 @@ impl Server {
             "textDocument/references" => handle(params, |p| self.references(p)),
             "textDocument/documentHighlight" => handle(params, |p| self.highlights(p)),
             "textDocument/prepareRename" => handle(params, |p| self.prepare_rename(p)),
-            "textDocument/rename" => match handle_fallible(params, |p| self.rename(p)) {
-                Ok(r) => r,
-                Err(msg) => return invalid_params(id, msg),
-            },
+            "textDocument/rename" => handle_fallible(params, |p| self.rename(p)),
             "textDocument/signatureHelp" => handle(params, |p| self.signature_help(p)),
             "textDocument/foldingRange" => handle(params, |p| self.folding(p)),
             "workspace/symbol" => handle(params, |p| self.workspace_symbols(p)),
@@ -1080,7 +1070,7 @@ impl Server {
             "workspace/willRenameFiles" => handle(params, |p| self.will_rename_files(p)),
             "textDocument/onTypeFormatting" => handle(params, |p| self.on_type_formatting(p)),
             // the parsed syntax tree, for debugging (like rust-analyzer's "view syntax tree")
-            "ncc/syntaxTree" => serde_json::from_value::<TextDocumentIdentifier>(
+            "ncc/syntaxTree" => Ok(serde_json::from_value::<TextDocumentIdentifier>(
                 params.get("textDocument").cloned().unwrap_or_default(),
             )
             .ok()
@@ -1088,23 +1078,25 @@ impl Server {
                 let (path, text) = self.source(&d.uri)?;
                 let module = self.module_of(&path, &text);
                 Some(serde_json::Value::String(format!("{module:#?}")))
-            }),
+            })),
             "textDocument/codeLens" => handle(params, |p| self.code_lenses(p)),
             "textDocument/diagnostic" => handle(params, |p| self.pull_diagnostics(p)),
             "experimental/joinLines" => handle(params, |p| self.join_lines(p)),
-            "experimental/ssr" => match handle_fallible(params, |p| self.ssr(p)) {
-                Ok(r) => r,
-                Err(msg) => return invalid_params(id, msg),
-            },
+            "experimental/ssr" => handle_fallible(params, |p| self.ssr(p)),
             "textDocument/rangeFormatting" => handle(params, |p: DocumentRangeFormattingParams| {
                 self.formatting(&p.text_document.uri, Some(p.range))
             }),
-            _ => return method_not_found(id, &req.method),
+            method => {
+                let msg = format!("unsupported request `{method}`");
+                return Response::new_err(id, lsp_server::ErrorCode::MethodNotFound as i32, msg);
+            }
         };
-        match result {
-            Some(v) => Response::new_ok(id, v),
-            None => invalid_params(id, "invalid parameters".into()),
-        }
+        let msg = match result {
+            Ok(Some(v)) => return Response::new_ok(id, v),
+            Ok(None) => "invalid parameters".into(),
+            Err(msg) => msg,
+        };
+        Response::new_err(id, lsp_server::ErrorCode::InvalidParams as i32, msg)
     }
 
     /// Find the innermost indexed reference at a position.
@@ -1422,8 +1414,6 @@ impl Server {
 /// A symbol's identity across analyses: its definition's file and offset.
 type SymKey = (PathBuf, u32);
 
-use crate::lexer::is_ident_byte;
-
 fn word_at(text: &str, off: usize) -> Option<(usize, usize)> {
     let b = text.as_bytes();
     let mut s = off.min(b.len());
@@ -1474,12 +1464,18 @@ impl Server {
         out
     }
 
-    /// The occurrences of a symbol in one file.
-    fn occurrences_in(&self, key: &SymKey, name: &str, path: &Path) -> Vec<Range> {
-        (self.occurrences(key, name).into_iter())
-            .filter(|(p, _)| p == path)
+    /// The import alias or symbol at a position: its name and its occurrences in the document.
+    fn ranges_here(&self, uri: &Uri, pos: Position) -> Option<(String, Vec<Range>)> {
+        if let Some(alias) = self.alias_at(uri, pos) {
+            return Some(alias);
+        }
+        let path = uri_to_path(uri)?;
+        let (key, name) = self.symbol_at(uri, pos)?;
+        let ranges = (self.occurrences(&key, &name).into_iter())
+            .filter(|(p, _)| *p == path)
             .map(|(_, r)| r)
-            .collect()
+            .collect();
+        Some((name, ranges))
     }
 
     fn references(&self, p: ReferenceParams) -> Option<Vec<Location>> {
@@ -1511,43 +1507,30 @@ impl Server {
 
     fn highlights(&self, p: DocumentHighlightParams) -> Option<Vec<DocumentHighlight>> {
         let pp = p.text_document_position_params;
-        let text_highlights = |ranges: Vec<Range>| {
-            let kind = Some(DocumentHighlightKind::TEXT);
-            Some(
-                ranges
-                    .into_iter()
-                    .map(|range| DocumentHighlight { range, kind })
-                    .collect(),
-            )
-        };
         // `fn`/`return`/`throw`/`try`: the function and its exit points
-        if let Some((path, text)) = self.source(&pp.text_document.uri)
-            && let off = pos_to_offset(&text, pp.position)
-            && !in_string_or_comment(&text, off)
-        {
-            let module = self.module_of(&path, &text);
-            if let Some(ranges) = refactor::exit_points(&module, &text, off) {
-                return text_highlights(ranges);
+        let exits = self.source(&pp.text_document.uri).and_then(|(path, text)| {
+            let off = pos_to_offset(&text, pp.position);
+            if in_string_or_comment(&text, off) {
+                return None;
             }
-        }
-        if let Some((_, ranges)) = self.alias_at(&pp.text_document.uri, pp.position) {
-            return text_highlights(ranges);
-        }
-        let path = uri_to_path(&pp.text_document.uri)?;
-        let (key, name) = self.symbol_at(&pp.text_document.uri, pp.position)?;
-        text_highlights(self.occurrences_in(&key, &name, &path))
+            refactor::exit_points(&self.module_of(&path, &text), &text, off)
+        });
+        let ranges = match exits {
+            Some(r) => r,
+            None => self.ranges_here(&pp.text_document.uri, pp.position)?.1,
+        };
+        let kind = Some(DocumentHighlightKind::TEXT);
+        Some(
+            ranges
+                .into_iter()
+                .map(|range| DocumentHighlight { range, kind })
+                .collect(),
+        )
     }
 
     fn prepare_rename(&self, p: TextDocumentPositionParams) -> Option<PrepareRenameResponse> {
-        let path = uri_to_path(&p.text_document.uri)?;
-        let (name, ranges) = if let Some(alias) = self.alias_at(&p.text_document.uri, p.position) {
-            alias
-        } else {
-            let (key, name) = self.symbol_at(&p.text_document.uri, p.position)?;
-            let ranges = self.occurrences_in(&key, &name, &path);
-            (name, ranges)
-        };
-        let text = self.text_of(&path)?;
+        let (name, ranges) = self.ranges_here(&p.text_document.uri, p.position)?;
+        let (_, text) = self.source(&p.text_document.uri)?;
         let off = pos_to_offset(&text, p.position);
         // the cursor must be on the name itself
         ranges
@@ -1605,25 +1588,21 @@ impl Server {
             && let Some(d) = a.decl_at.keys().find(|s| s.file == fid && s.start == key.1)
             && let Some(decl) = a.decl(*d)
         {
+            let member = |k| matches!(k, DeclKind::Field | DeclKind::Variant);
             let clash = a.index.decls.iter().any(|o| {
                 o.name == new
                     && o.span.file == fid
-                    && o.scope == decl.scope
-                    && !matches!(o.kind, DeclKind::Field | DeclKind::Variant)
-                    && !matches!(decl.kind, DeclKind::Field | DeclKind::Variant)
-            }) || a.index.decls.iter().any(|o| {
-                // fields and variants clash only with their siblings
-                o.name == new
-                    && matches!(decl.kind, DeclKind::Field | DeclKind::Variant)
-                    && o.kind == decl.kind
-                    && o.span.file == fid
-                    && a.index.decls.iter().any(|p| {
-                        matches!(p.kind, DeclKind::Struct | DeclKind::Enum)
-                            && p.span.start <= o.span.start
-                            && o.span.end <= p.span.end
-                            && p.span.start <= decl.span.start
-                            && decl.span.end <= p.span.end
-                    })
+                    && if member(decl.kind) {
+                        // fields and variants clash only with their siblings
+                        o.kind == decl.kind
+                            && a.index.decls.iter().any(|p| {
+                                matches!(p.kind, DeclKind::Struct | DeclKind::Enum)
+                                    && p.span.start <= o.span.start.min(decl.span.start)
+                                    && o.span.end.max(decl.span.end) <= p.span.end
+                            })
+                    } else {
+                        o.scope == decl.scope && !member(o.kind)
+                    }
             });
             if clash {
                 return Err(format!("`{new}` is already declared here"));
@@ -1781,20 +1760,21 @@ impl Server {
     }
 }
 
+/// The extents of the string and character literals and comments of `text`.
+fn literals_and_comments(text: &str) -> Vec<(usize, usize)> {
+    let (toks, _) = crate::lexer::lex_all(text, 0, 0);
+    (toks.iter())
+        .filter(|t| matches!(t.tok, Tok::Str(_) | Tok::Char(_)))
+        .map(|t| (t.span.start as usize, t.span.end as usize))
+        .chain(crate::lexer::comments(text))
+        .collect()
+}
+
 /// Whether an offset is inside a string literal or a comment.
 fn in_string_or_comment(text: &str, off: usize) -> bool {
-    if crate::lexer::comments(text)
+    literals_and_comments(text)
         .iter()
         .any(|&(s, e)| s <= off && off < e)
-    {
-        return true;
-    }
-    let (toks, _) = crate::lexer::lex_all(text, 0, 0);
-    toks.iter().any(|t| {
-        matches!(t.tok, Tok::Str(_) | Tok::Char(_))
-            && (t.span.start as usize) <= off
-            && off < t.span.end as usize
-    })
 }
 
 /// Line-based edits turning `old` into `new`: the changed region between the common prefix and
@@ -1974,34 +1954,25 @@ fn diag_data(d: &Diagnostic, i: usize) -> Option<&str> {
     d.data.as_ref()?.get(i)?.as_str()
 }
 
+/// What a request's handler gives: its serialized result, `None` for parameters that do not
+/// deserialize, or an error message.
+type Handled = Result<Option<serde_json::Value>, String>;
+
 /// Deserialize a request's parameters, run its handler and serialize the result.
 fn handle<P: serde::de::DeserializeOwned, R: serde::Serialize>(
     params: serde_json::Value,
     f: impl FnOnce(P) -> R,
-) -> Option<serde_json::Value> {
-    let p = serde_json::from_value(params).ok()?;
-    Some(serde_json::to_value(f(p)).unwrap())
+) -> Handled {
+    handle_fallible(params, |p| Ok(f(p)))
 }
 
 /// Like `handle`, for a handler that can reject its parameters with a message.
 fn handle_fallible<P: serde::de::DeserializeOwned, R: serde::Serialize>(
     params: serde_json::Value,
     f: impl FnOnce(P) -> Result<R, String>,
-) -> Result<Option<serde_json::Value>, String> {
+) -> Handled {
     let Ok(p) = serde_json::from_value(params) else {
         return Ok(None);
     };
     Ok(Some(serde_json::to_value(f(p)?).unwrap()))
-}
-
-fn invalid_params(id: RequestId, msg: String) -> Response {
-    Response::new_err(id, lsp_server::ErrorCode::InvalidParams as i32, msg)
-}
-
-fn method_not_found(id: RequestId, method: &str) -> Response {
-    Response::new_err(
-        id,
-        lsp_server::ErrorCode::MethodNotFound as i32,
-        format!("unsupported request `{method}`"),
-    )
 }

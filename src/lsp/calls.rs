@@ -31,18 +31,8 @@ impl Server {
         // string and character literals and comments
         let b = text.as_bytes();
         let mut skip = vec![false; b.len()];
-        let (toks, _) = crate::lexer::lex_all(&text, 0, 0);
-        for t in &toks {
-            if matches!(
-                t.tok,
-                crate::lexer::Tok::Str(_) | crate::lexer::Tok::Char(_)
-            ) {
-                let (s, e) = (t.span.start as usize, (t.span.end as usize).min(b.len()));
-                skip[s..e].iter_mut().for_each(|x| *x = true);
-            }
-        }
-        for (s, e) in crate::lexer::comments(&text) {
-            skip[s..e.min(b.len())].iter_mut().for_each(|x| *x = true);
+        for (s, e) in super::literals_and_comments(&text) {
+            skip[s..e.min(b.len())].fill(true);
         }
         let (mut depth, mut commas, mut i) = (0i32, 0u32, off.min(b.len()));
         let open = loop {
