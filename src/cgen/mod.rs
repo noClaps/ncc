@@ -1745,10 +1745,8 @@ impl CGen<'_> {
             Add | Sub | Mul | Div | BitAnd | BitOr | BitXor | Lt | Gt | Le | Ge => {
                 format!("({x} {} {y})", op.symbol())
             }
-            Eq | Ne => {
-                let eq = self.eq_code(a.ty, &x, &y);
-                if op == Ne { format!("(!{eq})") } else { eq }
-            }
+            Eq | Ne if self.is_prim(a.ty) => format!("({})", self.eq_code(a.ty, &x, &y, op == Ne)),
+            Eq | Ne => self.eq_code(a.ty, &x, &y, op == Ne),
             Concat => {
                 let f = match self.p.types.kind(ot) {
                     TyKind::Str => "nc_str_cat",
@@ -1782,13 +1780,14 @@ impl CGen<'_> {
         CVal::b(code)
     }
 
-    /// Whether `x` equals `y`, both of type `t`.
-    fn eq_code(&mut self, t: TyId, x: &str, y: &str) -> String {
+    /// Whether `x` equals `y`, both of type `t`, or differs if `ne`: binds tighter than `&&`
+    /// and `||`, and is an operand of anything else when `t` is not primitive.
+    fn eq_code(&mut self, t: TyId, x: &str, y: &str, ne: bool) -> String {
         if self.is_prim(t) {
-            format!("({x} == {y})")
+            format!("{x} {} {y}", if ne { "!=" } else { "==" })
         } else {
             self.tg.need(t);
-            format!("eq_{}({x}, {y})", self.h(t))
+            format!("{}eq_{}({x}, {y})", if ne { "!" } else { "" }, self.h(t))
         }
     }
 
@@ -1904,19 +1903,9 @@ impl CGen<'_> {
                             self.line(format!("if (!{cv}) goto {fail};"));
                         }
                     }
-                    (_, Some((sv, st))) if let Some(conds) = self.pat_cond(p, sv, *st) => {
-                        let c = match &conds[..] {
-                            [] => None,
-                            // `a == b` from `pat_cond`, with plain operands
-                            [c] if c.contains(" == ") => Some(c.replacen(" == ", " != ", 1)),
-                            [c] => Some(negate(c)),
-                            cs => {
-                                let cs: Vec<String> = cs.iter().map(|c| format!("({c})")).collect();
-                                Some(format!("!({})", cs.join(" && ")))
-                            }
-                        };
-                        if let Some(c) = c {
-                            self.line(format!("if ({c}) goto {fail};"));
+                    (_, Some((sv, st))) if let Some(fails) = self.pat_fails(p, sv, *st) => {
+                        if !fails.is_empty() {
+                            self.line(format!("if ({}) goto {fail};", fails.join(" || ")));
                         }
                     }
                     (_, Some((sv, st))) => {
@@ -1960,9 +1949,10 @@ impl CGen<'_> {
         self.finish_result(r, ty)
     }
 
-    /// The test for the pattern as a list of C conditions that all hold when it matches the
-    /// subject `sv`, in evaluation order; `None` when a value in it needs statements to compute.
-    fn pat_cond(&mut self, p: &Pat, sv: &str, st: TyId) -> Option<Vec<String>> {
+    /// The test for the pattern as a list of C comparisons any of which holds when it does not
+    /// match the subject `sv`, in evaluation order; `None` when a value in it needs statements
+    /// to compute.
+    fn pat_fails(&mut self, p: &Pat, sv: &str, st: TyId) -> Option<Vec<String>> {
         let st = self.p.types.base(st);
         match p {
             Pat::Wild | Pat::Bind(_) => return Some(vec![]),
@@ -1976,22 +1966,17 @@ impl CGen<'_> {
                 let (out, clean) = (self.body.len(), self.cleanup.len());
                 let v = self.expr(e);
                 debug_assert!(self.body.len() == out && self.cleanup.len() == clean);
-                return Some(vec![if self.is_prim(st) {
-                    format!("{sv} == {}", v.code)
-                } else {
-                    self.tg.need(st);
-                    format!("eq_{st}({sv}, {})", v.code)
-                }]);
+                return Some(vec![self.eq_code(st, sv, &v.code, true)]);
             }
             _ => {}
         }
         let shape = self.pat_shape(p, sv, st);
         let mut conds: Vec<String> = shape
-            .map(|(a, b)| format!("{a} == {b}"))
+            .map(|(a, b)| format!("{a} != {b}"))
             .into_iter()
             .collect();
         for (sp, ssv, sty) in self.pat_parts(p, sv, st) {
-            conds.extend(self.pat_cond(sp, &ssv, sty)?);
+            conds.extend(self.pat_fails(sp, &ssv, sty)?);
         }
         Some(conds)
     }
@@ -2005,7 +1990,7 @@ impl CGen<'_> {
             Pat::Value(e) => {
                 self.line(format!("if ({ok}) {{"));
                 let v = self.expr(e);
-                let eq = self.eq_code(st, sv, &v.code);
+                let eq = self.eq_code(st, sv, &v.code, false);
                 self.line(format!("{ok} = {eq};"));
                 self.line("}");
                 return;
