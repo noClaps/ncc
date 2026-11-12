@@ -50,10 +50,8 @@ impl CVal {
 enum CleanKind {
     /// `rl_<helper id>`
     Release(TyId),
-    /// a raw `nc_cell`
-    Cell,
-    /// a raw `nc_arr`
-    Arr,
+    /// a raw runtime object, released by the named function (`nc_cell_release`, ...)
+    Raw(&'static str),
     Unlock,
     /// a parameter owned only after a tail call has replaced it (see `tail_call`)
     TailParam(TyId),
@@ -691,7 +689,7 @@ impl CGen<'_> {
                     let h = self.h(loc.ty);
                     self.line(format!("nc_cell *{n} = nc_cell_new(&ti_{h});"));
                     self.line(format!("*({c} *){n}->val = {value};"));
-                    self.push_clean(n, CleanKind::Cell, false);
+                    self.push_clean(n, CleanKind::Raw("nc_cell_release"), false);
                 } else {
                     self.line(format!("{c} {n} = {value};"));
                     self.line(format!("(void){n};"));
@@ -844,7 +842,7 @@ impl CGen<'_> {
                 self.end_stmt(hh);
                 self.line(format!("if (!{cv}) break;"));
                 self.line("}");
-                let (brk, cont) = self.jump(*id, h, Some(hh));
+                let (brk, cont) = self.jump(*id, h, Some(hh), None);
                 self.block(body);
                 self.line(format!("{cont}:;"));
                 self.line("}");
@@ -879,7 +877,7 @@ impl CGen<'_> {
                         let kc = self.ct(kt);
                         let keys = self.fresh("keys");
                         self.line(format!("nc_arr *{keys} = nc_map_keys({sv}, &ti_{kh});"));
-                        self.push_clean(keys.clone(), CleanKind::Arr, false);
+                        self.push_clean(keys.clone(), CleanKind::Raw("nc_arr_release"), false);
                         self.line(format!("uint64_t {n} = (uint64_t){keys}->len;"));
                         let val = format!("(({kc} *){keys}->data)[{i}]");
                         (kc, val)
@@ -894,7 +892,7 @@ impl CGen<'_> {
                     self.line(format!("{vc} {vn} = {vval};"));
                     self.line(format!("(void){vn};"));
                 }
-                let (brk, cont) = self.jump(*id, h, Some(self.cleanup.len()));
+                let (brk, cont) = self.jump(*id, h, Some(self.cleanup.len()), None);
                 self.block(body);
                 self.line(format!("{cont}:;"));
                 self.line("}");
@@ -918,7 +916,7 @@ impl CGen<'_> {
                 self.push_clean(mv.clone(), CleanKind::Unlock, false);
                 let an = self.lname(*alias);
                 self.line(format!("{ic} *{an} = ({ic} *){mv}->val;"));
-                let (brk, _) = self.jump(*id, h, None);
+                let (brk, _) = self.jump(*id, h, None, None);
                 self.block(body);
                 self.end_scope(h);
                 self.line("}");
@@ -997,15 +995,22 @@ impl CGen<'_> {
         self.line(format!("return ({rc}){{.err = {er}}};"));
     }
 
-    /// Register a loop or `lock` as a jump target, with the cleanup heights to unwind to when
-    /// breaking and (for loops) continuing; returns its break and continue labels.
-    fn jump(&mut self, id: JumpId, height: usize, cont: Option<usize>) -> (String, String) {
+    /// Register a jump target: a loop or `lock`, or a value-producing `if`, `else` or `catch`
+    /// block storing its value in `result`. Breaking unwinds the cleanups to `height` and
+    /// continuing (loops) to `cont`; returns the break and continue labels.
+    fn jump(
+        &mut self,
+        id: JumpId,
+        height: usize,
+        cont: Option<usize>,
+        result: Option<(String, TyId)>,
+    ) -> (String, String) {
         let (brk, cont_lbl) = (format!("brk_{id}"), format!("cont_{id}"));
         let info = JumpInfo {
             height,
             brk: brk.clone(),
             cont: cont.map(|h| (cont_lbl.clone(), h)),
-            result: None,
+            result,
         };
         self.jumps.insert(id, info);
         (brk, cont_lbl)
@@ -1853,26 +1858,10 @@ impl CGen<'_> {
         }
     }
 
-    /// Register the jump `id` of a value-producing construct (`if`, `else` or `catch` block),
-    /// storing its value in `r`; returns its end label.
-    fn value_jump(&mut self, id: JumpId, height: usize, r: &Option<String>, ty: TyId) -> String {
-        let end = format!("end_{id}");
-        self.jumps.insert(
-            id,
-            JumpInfo {
-                height,
-                brk: end.clone(),
-                cont: None,
-                result: r.clone().map(|r| (r, ty)),
-            },
-        );
-        end
-    }
-
     fn if_expr(&mut self, i: &If, ty: TyId) -> CVal {
         let r = self.result_var(ty);
         let h = self.cleanup.len();
-        let end = self.value_jump(i.id, h, &r, ty);
+        let (end, _) = self.jump(i.id, h, None, r.clone().map(|r| (r, ty)));
         self.line("{");
         let scrut = match &i.scrutinee {
             Some(s) => {
@@ -2121,7 +2110,7 @@ impl CGen<'_> {
                 self.end_stmt(h);
             }
             Fallback::Block(b, id) => {
-                let end = self.value_jump(*id, h, &r, ty);
+                let (end, _) = self.jump(*id, h, None, r.clone().map(|r| (r, ty)));
                 self.block(b);
                 self.line(format!("{end}:;"));
             }
@@ -2146,7 +2135,7 @@ impl CGen<'_> {
         if let Some(l) = local {
             self.declare(VarRef::Local(l), format!("nc_str_rt({xn}.err)"));
         }
-        let end = self.value_jump(id, h, &r, ty);
+        let (end, _) = self.jump(id, h, None, r.clone().map(|r| (r, ty)));
         self.block(b);
         self.end_scope(h);
         self.line(format!("goto {end};"));
@@ -2304,8 +2293,7 @@ pub(super) fn idents(src: &str) -> impl Iterator<Item = &str> {
 
 fn release_code(c: &Clean) -> String {
     match c.kind {
-        CleanKind::Cell => format!("nc_cell_release({});", c.var),
-        CleanKind::Arr => format!("nc_arr_release({});", c.var),
+        CleanKind::Raw(f) => format!("{f}({});", c.var),
         CleanKind::Release(h) => format!("rl_{h}({});", c.var),
         CleanKind::Unlock => format!("pthread_mutex_unlock(&{}->mu);", c.var),
         CleanKind::TailParam(h) => tail_release(&c.var, h),
