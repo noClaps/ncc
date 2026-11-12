@@ -54,6 +54,8 @@ enum CleanKind {
     /// a raw `nc_arr`
     Arr,
     Unlock,
+    /// a parameter owned only after a tail call has replaced it (see `tail_call`)
+    TailParam(TyId),
 }
 
 #[derive(Clone)]
@@ -102,6 +104,11 @@ pub struct CGen<'p> {
     /// the program uses `@args`, so `main` records `argc`/`argv`
     uses_args: bool,
     embeds: usize,
+    /// the current function's self calls in tail position, which jump back to its top
+    tail: HashSet<*const Stmt>,
+    /// the managed parameters some tail call replaces, with their types' helper ids: owned by
+    /// the function once `tc_own` is set
+    tail_own: Vec<(LocalId, TyId)>,
 }
 
 /// The source of an extern C file: its path as written for `#line`, and its text.
@@ -141,6 +148,8 @@ pub fn generate(
         value_fns: HashSet::new(),
         uses_args: false,
         embeds: 0,
+        tail: HashSet::new(),
+        tail_own: vec![],
     };
     g.run(mode, externs)
 }
@@ -573,18 +582,51 @@ impl CGen<'_> {
             self.line(format!("(void){n};"));
         }
         let ret = f.ret;
+        // self calls in tail position become a jump to the end of a loop around the body
+        let (tail, replaced) = if self.c_main || is_init {
+            (HashSet::new(), vec![])
+        } else {
+            tail_calls(i, f, &body, &self.p.types)
+        };
+        self.tail = tail;
+        let looped = !self.tail.is_empty();
+        // parameters are borrowed from the caller, but the arguments of a tail call are owned
+        // by this function until the next one replaces them or it returns
+        self.tail_own = (f.params.iter().zip(replaced))
+            .filter(|&(&p, r)| r && self.managed(f.locals[p].ty))
+            .map(|(&p, _)| (p, self.h(f.locals[p].ty)))
+            .collect();
         let h = self.cleanup.len();
+        if !self.tail_own.is_empty() {
+            self.line("bool tc_own = false;");
+        }
+        for (p, th) in self.tail_own.clone() {
+            self.push_clean(self.lname(p), CleanKind::TailParam(th), false);
+        }
+        if looped {
+            self.line("for (;;) {");
+            self.ind += 1;
+        }
         self.block_stmts(&body);
         self.end_scope(h);
         // implicit return (falling off the end of C `main` returns 0)
         match self.p.types.kind(ret) {
             _ if self.c_main => {}
-            TyKind::Void => {}
+            TyKind::Void => {
+                if looped {
+                    self.line("return;");
+                }
+            }
             TyKind::ErrU(_) => {
                 let c = self.tg.ct(ret);
                 self.line(format!("return ({c}){{0}};"));
             }
             _ => self.line("unreachable();"),
+        }
+        if looped {
+            self.line("tc:;");
+            self.ind -= 1;
+            self.line("}");
         }
         let mut noreturn: HashSet<String> = (0..self.p.funcs.len())
             .filter(|&f| self.p.funcs[f].ret == NEVER)
@@ -684,6 +726,12 @@ impl CGen<'_> {
 
     fn stmt(&mut self, s: &Stmt) {
         let h = self.cleanup.len();
+        if self.tail.contains(&std::ptr::from_ref(s)) {
+            self.tail_call(call_args(s));
+            // the jump left the statement: its temporaries are released already
+            self.cleanup.truncate(h);
+            return;
+        }
         match &s.kind {
             SK::Let(v, e) => {
                 let val = self.expr(e);
@@ -912,6 +960,47 @@ impl CGen<'_> {
             }
         }
         self.end_stmt(h);
+    }
+
+    /// A call of the current function in tail position: replace the parameters with the
+    /// arguments and jump back to the top of the function, instead of growing the stack.
+    fn tail_call(&mut self, args: &[Expr]) {
+        let prog = self.p;
+        let params = &prog.funcs[self.func].params;
+        // evaluate every argument before any parameter changes, as a call would; a parameter
+        // passed back in its own position is left as it is
+        let mut vals = Vec::new();
+        for (a, &p) in args.iter().zip(params) {
+            if matches!(a.kind, EK::Var(VarRef::Local(l)) if l == p) {
+                continue;
+            }
+            let ty = self.local(p).ty;
+            let v = self.expr(a);
+            let o = self.own(v, ty);
+            let c = self.ct(ty);
+            let n = self.fresh("a");
+            self.line(format!("{c} {n} = {o};"));
+            vals.push((self.lname(p), n));
+        }
+        // the bottom of the cleanup stack holds the owned parameters (see `gen_fn`)
+        let own = self.tail_own.clone();
+        self.unwind_to(own.len());
+        for &(p, h) in &own {
+            let n = self.lname(p);
+            if vals.iter().any(|(v, _)| *v == n) {
+                self.line(tail_release(&n, h));
+            } else {
+                // still borrowed from the caller on the first tail call
+                self.line(format!("if (!tc_own) {n} = rt_{h}({n});"));
+            }
+        }
+        if !own.is_empty() {
+            self.line("tc_own = true;");
+        }
+        for (p, v) in vals {
+            self.line(format!("{p} = {v};"));
+        }
+        self.line("goto tc;");
     }
 
     /// Store `v` (of type `ty`) in the result variable `r`, if there is one.
@@ -2276,6 +2365,144 @@ fn release_code(c: &Clean) -> String {
         CleanKind::Arr => format!("nc_arr_release({});", c.var),
         CleanKind::Release(h) => format!("rl_{h}({});", c.var),
         CleanKind::Unlock => format!("pthread_mutex_unlock(&{}->mu);", c.var),
+        CleanKind::TailParam(h) => tail_release(&c.var, h),
+    }
+}
+
+/// Release the parameter `var` (of helper id `h`) if a tail call made the function own it.
+fn tail_release(var: &str, h: TyId) -> String {
+    format!("if (tc_own) rl_{h}({var});")
+}
+
+/// The arguments of the self call the tail statement `s` makes (see `tail_calls`).
+fn call_args(s: &Stmt) -> &[Expr] {
+    let (SK::Return(Some(e)) | SK::Expr(e) | SK::Break(_, Some(e))) = &s.kind else {
+        unreachable!("not a tail call")
+    };
+    match &e.kind {
+        EK::Call(_, args) => args,
+        EK::Try(x) => match &x.kind {
+            EK::Call(_, args) => args,
+            _ => unreachable!("not a tail call"),
+        },
+        _ => unreachable!("not a tail call"),
+    }
+}
+
+/// The statements of function `fid` (with body `body`) that call it in tail position: their
+/// result, or their lack of one, is what the function returns, so the call can reuse the
+/// frame. Calls inside a `lock` are left alone, since the lock must be held during them.
+/// Also returns, for each parameter, whether some tail call passes it a new value.
+fn tail_calls(
+    fid: FuncId,
+    f: &Func,
+    body: &Block,
+    types: &Types,
+) -> (HashSet<*const Stmt>, Vec<bool>) {
+    let (throws, void) = match types.kind(f.ret) {
+        TyKind::ErrU(i) => (true, *i == VOID),
+        _ => (false, f.ret == VOID),
+    };
+    let mut scan = TailScan {
+        fid,
+        f,
+        throws,
+        void,
+        ifs: vec![],
+        out: HashSet::new(),
+        replaced: vec![false; f.params.len()],
+    };
+    scan.block(body, true);
+    (scan.out, scan.replaced)
+}
+
+struct TailScan<'a> {
+    fid: FuncId,
+    f: &'a Func,
+    /// the function can throw, so its tail calls are `try`'d
+    throws: bool,
+    /// the function returns nothing (besides perhaps an error)
+    void: bool,
+    /// the `if`s whose value is returned
+    ifs: Vec<JumpId>,
+    out: HashSet<*const Stmt>,
+    /// per parameter: some tail call passes it something other than itself
+    replaced: Vec<bool>,
+}
+
+impl TailScan<'_> {
+    /// The arguments of a self call, wrapped in `try` exactly when the function can throw.
+    fn self_call<'e>(&self, e: &'e Expr) -> Option<&'e [Expr]> {
+        let call = match &e.kind {
+            EK::Try(x) if self.throws => x,
+            _ if self.throws => return None,
+            _ => e,
+        };
+        let EK::Call(c, args) = &call.kind else {
+            return None;
+        };
+        let me = match c {
+            Callee::Direct(g) => *g == self.fid,
+            Callee::Value(v) => {
+                matches!(v.kind, EK::Var(VarRef::Local(l)) if Some(l) == self.f.self_local)
+            }
+            Callee::Extern(_) => false,
+        };
+        (me && args.iter().all(|a| a.ty != NEVER)).then_some(args)
+    }
+
+    /// `tail`: the block's last statement is in tail position.
+    fn block(&mut self, b: &Block, tail: bool) {
+        for (k, s) in b.stmts.iter().enumerate() {
+            let last = tail && k + 1 == b.stmts.len();
+            // the value the function returns after this statement, if it is in tail position
+            let returned = match &s.kind {
+                SK::Return(Some(e)) => Some(e),
+                SK::Break(id, Some(e)) if self.ifs.contains(id) => Some(e),
+                // the result is discarded, then the function returns: only when there is none
+                SK::Expr(e) if last && self.void || self.f.ret == NEVER => Some(e),
+                _ => None,
+            };
+            if let Some(args) = returned.and_then(|e| self.self_call(e)) {
+                for (r, (a, &p)) in self
+                    .replaced
+                    .iter_mut()
+                    .zip(args.iter().zip(&self.f.params))
+                {
+                    *r |= !matches!(a.kind, EK::Var(VarRef::Local(l)) if l == p);
+                }
+                self.out.insert(std::ptr::from_ref(s));
+                continue;
+            }
+            // a returned `if`: its `break`s with a value are in tail position
+            let returned_if = match returned.map(|e| &e.kind) {
+                Some(EK::If(i)) => Some(i),
+                _ => None,
+            };
+            let stmt_if = match &s.kind {
+                SK::Expr(Expr {
+                    kind: EK::If(i), ..
+                }) => Some(i),
+                _ => None,
+            };
+            if let Some(i) = returned_if.or(stmt_if) {
+                if returned_if.is_some() {
+                    self.ifs.push(i.id);
+                }
+                for arm in &i.arms {
+                    self.block(&arm.body, last);
+                }
+                if returned_if.is_some() {
+                    self.ifs.pop();
+                }
+                continue;
+            }
+            match &s.kind {
+                SK::Block(b) => self.block(b, last),
+                SK::While { body, .. } | SK::For { body, .. } => self.block(body, false),
+                _ => {}
+            }
+        }
     }
 }
 

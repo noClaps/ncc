@@ -34,6 +34,8 @@ should be optimised to
 
 before being compiled.
 
+One transformation applies in both modes, because it changes whether a program can run at all rather than how fast: a function calling itself in tail position reuses its stack frame. The body is wrapped in a loop, and a tail call assigns the arguments to the parameters and jumps back to the top, so tail recursion runs in constant stack space in debug builds too. A call is in tail position when its result is returned as is: `return f(...)`, `return try f(...)` in a throwing function, a `break f(...)` out of an `if` whose value is returned, or, in a function returning nothing, a call that is the last statement (including the last statement of an `if` arm that is itself last). Calls inside a `lock` are not tail calls, since the lock is held while they run. Calls between different functions are left to the C compiler, which turns many of them into jumps in release mode.
+
 ## CLI
 
 ```
