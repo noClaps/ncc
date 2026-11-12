@@ -379,6 +379,11 @@ impl CGen<'_> {
         format!("{prefix}{}", self.tmp)
     }
 
+    /// The field holding the length of a string (in scalars) or array.
+    fn len_field(&self, t: TyId) -> &'static str {
+        if self.h(t) == STR { "clen" } else { "len" }
+    }
+
     fn managed(&self, t: TyId) -> bool {
         self.p.types.is_managed(t)
     }
@@ -411,8 +416,7 @@ impl CGen<'_> {
     /// Declare a temporary holding an owned value.
     fn temp(&mut self, ty: TyId, init: &str) -> CVal {
         let c = self.ct(ty);
-        let v = self.fresh("t");
-        self.line(format!("{c} {v} = {init};"));
+        let v = self.decl(&c, "t", init);
         self.owned_temp(v, ty)
     }
 
@@ -443,8 +447,13 @@ impl CGen<'_> {
             return v.code.clone();
         }
         let c = self.tg.ct(ty);
-        let n = self.fresh("b");
-        self.line(format!("{c} {n} = {};", v.code));
+        self.decl(&c, "b", &v.code)
+    }
+
+    /// Declare a new variable of C type `c`, named after `prefix`, holding `init`.
+    fn decl(&mut self, c: &str, prefix: &str, init: &str) -> String {
+        let n = self.fresh(prefix);
+        self.line(format!("{c} {n} = {init};"));
         n
     }
 
@@ -809,8 +818,7 @@ impl CGen<'_> {
                     if self.cleanup.iter().all(|c| c.moved) {
                         self.line(format!("return {};", wrap(&o)));
                     } else {
-                        let r = self.fresh("r");
-                        self.line(format!("{rc} {r} = {};", wrap(&o)));
+                        let r = self.decl(&rc, "r", &wrap(&o));
                         self.unwind_to(0);
                         self.line(format!("return {r};"));
                     }
@@ -854,8 +862,7 @@ impl CGen<'_> {
                 let hh = self.cleanup.len();
                 self.line("{");
                 let c = self.expr(cond);
-                let cv = self.fresh("c");
-                self.line(format!("bool {cv} = {};", c.code));
+                let cv = self.decl("bool", "c", &c.code);
                 self.end_stmt(hh);
                 self.line(format!("if (!{cv}) break;"));
                 self.line("}");
@@ -876,21 +883,15 @@ impl CGen<'_> {
                 let it = self.expr(iter);
                 // snapshot of the iterated value
                 let snap = self.own(it, iter.ty);
-                let sv = self.fresh("it");
                 let ic = self.tg.ct(iter.ty);
-                let ih = self.h(iter.ty);
-                self.line(format!("{ic} {sv} = {snap};"));
-                self.push_clean(sv.clone(), CleanKind::Release(ih), false);
+                let sv = self.decl(&ic, "it", &snap);
+                self.push_clean(sv.clone(), CleanKind::Release(self.h(iter.ty)), false);
                 let n = self.fresh("n");
                 let i = self.fresh("i");
                 // the loop variable's type and value
                 let (vc, vval) = match kind {
                     ForKind::Index => {
-                        let len = if self.p.types.base(iter.ty) == STR {
-                            "clen"
-                        } else {
-                            "len"
-                        };
+                        let len = self.len_field(iter.ty);
                         self.line(format!("uint64_t {n} = (uint64_t){sv}->{len};"));
                         ("uint64_t".to_string(), i.clone())
                     }
@@ -971,8 +972,7 @@ impl CGen<'_> {
             let v = self.expr(a);
             let o = self.own(v, ty);
             let c = self.ct(ty);
-            let n = self.fresh("a");
-            self.line(format!("{c} {n} = {o};"));
+            let n = self.decl(&c, "a", &o);
             vals.push((self.lname(p), n));
         }
         // the bottom of the cleanup stack holds the owned parameters (see `gen_fn`)
@@ -1071,9 +1071,7 @@ impl CGen<'_> {
         let nv = if matches!(e.kind, EK::Lit(_)) {
             o
         } else {
-            let nv = self.fresh("nv");
-            self.line(format!("{c} {nv} = {o};"));
-            nv
+            self.decl(&c, "nv", &o)
         };
         let p = self.place_ptr(place);
         if self.managed(ty) {
@@ -1149,9 +1147,8 @@ impl CGen<'_> {
                 self.line(format!("{bc} *{bpv} = {bp};"));
                 if let TyKind::Map(k, _) = self.p.types.kind(t).clone() {
                     let kv = self.expr(idx);
-                    let kc = self.tg.ct(k);
-                    let kn = self.fresh("k");
-                    self.line(format!("{kc} {kn} = {};", kv.code));
+                    let c = self.tg.ct(k);
+                    let kn = self.decl(&c, "k", &kv.code);
                     format!("(({ec} *)nc_map_slot({bpv}, &{kn}))")
                 } else {
                     let i = self.dollar_index(format!("(*{bpv})->len"), idx);
@@ -1326,51 +1323,45 @@ impl CGen<'_> {
                 let bv = self.expr(b);
                 let bn = self.bind(b.ty, &bv);
                 let ec = self.ct(ty);
-                match self.p.types.kind(self.p.types.base(b.ty)).clone() {
+                let loc = self.loc(e.span);
+                CVal::b(match self.p.types.kind(self.p.types.base(b.ty)).clone() {
                     TyKind::Map(k, _) => {
                         let kv = self.expr(idx);
-                        let kc = self.tg.ct(k);
-                        let kn = self.fresh("k");
-                        self.line(format!("{kc} {kn} = {};", kv.code));
-                        let loc = self.loc(e.span);
-                        CVal::b(format!("(*({ec} *)nc_map_get({bn}, &{kn}, {loc}))"))
+                        let c = self.tg.ct(k);
+                        let kn = self.decl(&c, "k", &kv.code);
+                        format!("(*({ec} *)nc_map_get({bn}, &{kn}, {loc}))")
                     }
                     TyKind::Str => {
                         let i = self.dollar_index(format!("{bn}->clen"), idx);
-                        let loc = self.loc(e.span);
-                        CVal::b(format!("nc_str_at({bn}, {i}, {loc})"))
+                        format!("nc_str_at({bn}, {i}, {loc})")
                     }
                     _ => {
                         let i = self.dollar_index(format!("{bn}->len"), idx);
-                        let loc = self.loc(e.span);
-                        CVal::b(format!("(*({ec} *)nc_arr_at({bn}, {i}, {loc}))"))
+                        format!("(*({ec} *)nc_arr_at({bn}, {i}, {loc}))")
                     }
-                }
+                })
             }
             EK::Slice(b, lo, hi) => {
                 let bv = self.expr(b);
                 let bn = self.bind(b.ty, &bv);
-                let is_str = matches!(self.p.types.kind(self.p.types.base(b.ty)), TyKind::Str);
-                let len = if is_str { "clen" } else { "len" };
+                let len = self.len_field(b.ty);
                 let loc = self.loc(e.span);
                 self.dollar.push(format!("nc_dollar({bn}->{len}, {loc})"));
                 let l = self.index_value(lo);
                 let h = self.index_value(hi);
                 self.dollar.pop();
-                let f = if is_str {
-                    "nc_str_slice"
+                let f = if self.h(b.ty) == STR {
+                    "nc_str"
                 } else {
-                    "nc_arr_slice"
+                    "nc_arr"
                 };
-                self.temp(ty, &format!("{f}({bn}, {l}, {h}, {loc})"))
+                self.temp(ty, &format!("{f}_slice({bn}, {l}, {h}, {loc})"))
             }
             EK::Dollar => CVal::b(self.dollar.last().cloned().unwrap_or_else(|| "0".into())),
             EK::Len(b) => {
                 let v = self.expr(b);
-                CVal::b(match self.p.types.kind(self.p.types.base(b.ty)) {
-                    TyKind::Str => format!("((uint64_t)({})->clen)", v.code),
-                    _ => format!("((uint64_t)({})->len)", v.code),
-                })
+                let len = self.len_field(b.ty);
+                CVal::b(format!("((uint64_t)({})->{len})", v.code))
             }
             EK::Tuple(items) | EK::Struct(items) => {
                 let mut parts = self.owned_all(items);
@@ -1730,13 +1721,9 @@ impl CGen<'_> {
         use BinOp::*;
         if matches!(op, And | Or) {
             let av = self.expr(a);
-            let r = self.fresh("l");
-            self.line(format!("bool {r} = {};", av.code));
-            if op == And {
-                self.line(format!("if ({r}) {{"));
-            } else {
-                self.line(format!("if (!{r}) {{"));
-            }
+            let r = self.decl("bool", "l", &av.code);
+            let not = if op == And { "" } else { "!" };
+            self.line(format!("if ({not}{r}) {{"));
             let h = self.cleanup.len();
             let bv = self.expr(b);
             self.line(format!("{r} = {};", bv.code));
@@ -1776,12 +1763,7 @@ impl CGen<'_> {
                 format!("({x} {} {y})", op.symbol())
             }
             Eq | Ne => {
-                let eq = if self.is_prim(a.ty) {
-                    format!("({x} == {y})")
-                } else {
-                    self.tg.need(a.ty);
-                    format!("eq_{}({x}, {y})", self.h(a.ty))
-                };
+                let eq = self.eq_code(a.ty, &x, &y);
                 if op == Ne { format!("(!{eq})") } else { eq }
             }
             Concat => {
@@ -1808,14 +1790,23 @@ impl CGen<'_> {
                             _ => "nc_arr_has",
                         };
                         let c = self.tg.ct(a.ty);
-                        let k = self.fresh("k");
-                        self.line(format!("{c} {k} = {x};"));
+                        let k = self.decl(&c, "k", &x);
                         format!("{f}({y}, &{k})")
                     }
                 }
             }
         };
         CVal::b(code)
+    }
+
+    /// Whether `x` equals `y`, both of type `t`.
+    fn eq_code(&mut self, t: TyId, x: &str, y: &str) -> String {
+        if self.is_prim(t) {
+            format!("({x} == {y})")
+        } else {
+            self.tg.need(t);
+            format!("eq_{}({x}, {y})", self.h(t))
+        }
     }
 
     fn is_prim(&self, t: TyId) -> bool {
@@ -1874,9 +1865,7 @@ impl CGen<'_> {
             return None;
         }
         let c = self.ct(ty);
-        let r = self.fresh("res");
-        self.line(format!("{c} {r} = {{0}};"));
-        Some(r)
+        Some(self.decl(&c, "res", "{0}"))
     }
 
     fn finish_result(&mut self, r: Option<String>, ty: TyId) -> CVal {
@@ -1943,8 +1932,7 @@ impl CGen<'_> {
                         if self.cleanup.len() == hp {
                             self.line(format!("if ({}) goto {fail};", negate(&v.code)));
                         } else {
-                            let cv = self.fresh("c");
-                            self.line(format!("bool {cv} = {};", v.code));
+                            let cv = self.decl("bool", "c", &v.code);
                             self.end_stmt(hp);
                             self.line(format!("if (!{cv}) goto {fail};"));
                         }
@@ -1966,8 +1954,7 @@ impl CGen<'_> {
                     }
                     (_, Some((sv, st))) => {
                         self.line("{");
-                        let ok = self.fresh("ok");
-                        self.line(format!("bool {ok} = true;"));
+                        let ok = self.decl("bool", "ok", "true");
                         self.pat_test(p, sv, *st, &ok);
                         self.end_stmt(hp);
                         self.line(format!("if (!{ok}) goto {fail};"));
@@ -2056,12 +2043,7 @@ impl CGen<'_> {
             Pat::Value(e) => {
                 self.line(format!("if ({ok}) {{"));
                 let v = self.expr(e);
-                let eq = if self.is_prim(st) {
-                    format!("({sv} == {})", v.code)
-                } else {
-                    self.tg.need(st);
-                    format!("eq_{st}({sv}, {})", v.code)
-                };
+                let eq = self.eq_code(st, sv, &v.code);
                 self.line(format!("{ok} = {eq};"));
                 self.line("}");
                 return;
