@@ -516,12 +516,20 @@ impl<'p> Evaluator<'p> {
         out
     }
 
-    fn start_fuel(&mut self) {
-        self.fuel = CALL_FUEL.min(self.budget);
+    /// Run the interpreter with the fuel for one attempt, taken from the propagation budget.
+    fn fueled<T>(&mut self, run: impl FnOnce(&mut Self) -> T) -> T {
+        let fuel = CALL_FUEL.min(self.budget);
+        self.fuel = fuel;
+        let r = run(self);
+        self.budget -= fuel - self.fuel;
+        r
     }
 
-    fn end_fuel(&mut self) {
-        self.budget -= CALL_FUEL.min(self.budget) - self.fuel;
+    /// The value of `e` from what `env` knows, if the interpreter finds it.
+    fn trial_expr(&mut self, e: &Expr, env: &mut Env) -> R<Val> {
+        let r = self.fueled(|ev| ev.expr(e, env, false));
+        env.dollar.clear();
+        r
     }
 
     fn prop_block(&mut self, b: &mut Block, f: FuncId, env: &mut Env) {
@@ -549,9 +557,7 @@ impl<'p> Evaluator<'p> {
         if runnable {
             // a trial run, undone unless it completes
             env.checkpoint();
-            self.start_fuel();
-            let r = self.stmt(s, env);
-            self.end_fuel();
+            let r = self.fueled(|ev| ev.stmt(s, env));
             if let Ok(Flow::Normal) = r {
                 env.dollar.clear();
                 let replaced = self.replacement(s, f, env, &assigned, &declared);
@@ -566,9 +572,7 @@ impl<'p> Evaluator<'p> {
                         // was known before the statement, then keep the result
                         let after = env.undo();
                         env.checkpoint();
-                        for v in assigned.iter().chain(&declared) {
-                            env.forget(*v);
-                        }
+                        env.forget_all(assigned.iter().chain(&declared));
                         self.prop_inside(s, f, env);
                         env.rollback();
                         env.redo(after);
@@ -584,27 +588,19 @@ impl<'p> Evaluator<'p> {
         // what is known inside, undone afterwards
         env.checkpoint();
         if nested {
-            for v in assigned.iter().chain(&declared) {
-                env.forget(*v);
-            }
+            env.forget_all(assigned.iter().chain(&declared));
         }
         forget_globals(env, &clobbers);
         // this holds what is true at the start of every iteration of a loop: a condition that
         // is true from that alone never becomes false
-        if let SK::While { id, cond, .. } = &s.kind {
-            self.start_fuel();
-            let r = self.expr(cond, env, false);
-            self.end_fuel();
-            env.dollar.clear();
-            if let Ok(Val::Bool(true)) = r {
-                self.endless.insert((f, *id));
-            }
+        if let SK::While { id, cond, .. } = &s.kind
+            && let Ok(Val::Bool(true)) = self.trial_expr(cond, env)
+        {
+            self.endless.insert((f, *id));
         }
         self.prop_inside(s, f, env);
         env.rollback();
-        for v in assigned.iter().chain(&declared) {
-            env.forget(*v);
-        }
+        env.forget_all(assigned.iter().chain(&declared));
         forget_globals(env, &clobbers);
         self.forget_untracked(f, env);
     }
@@ -683,20 +679,15 @@ impl<'p> Evaluator<'p> {
         if is_lit_tree(e) {
             return;
         }
-        let candidate = !contains_control(e) && !matches!(e.kind, EK::Closure(_) | EK::FnRef(_));
-        if candidate {
-            self.start_fuel();
-            let r = self.expr(e, env, false);
-            self.end_fuel();
-            env.dollar.clear();
-            if let Ok(v) = r
-                && val_size(&v) <= MAX_LITERAL
-                && (cheap(&v) || !is_place_expr(e))
-                && let Some(x) = val_expr(&v, e.ty, e.span, &self.p.types)
-            {
-                *e = x;
-                return;
-            }
+        if !contains_control(e)
+            && !matches!(e.kind, EK::Closure(_) | EK::FnRef(_))
+            && let Ok(v) = self.trial_expr(e, env)
+            && val_size(&v) <= MAX_LITERAL
+            && (cheap(&v) || !is_place_expr(e))
+            && let Some(x) = val_expr(&v, e.ty, e.span, &self.p.types)
+        {
+            *e = x;
+            return;
         }
         e.for_each_child_mut(&mut |c: &mut Expr| self.prop_expr(c, f, env));
         match &mut e.kind {
@@ -1104,20 +1095,14 @@ impl<'p> Evaluator<'p> {
                         Some((_, v)) => v.clone(),
                         None => return panic("key not found in map", span),
                     },
-                    Val::Arr(a) => {
-                        let k = idx_checked(&i, idx.span)?;
-                        match a.get(k as usize) {
-                            Some(v) if (k as usize) < a.len() => v.clone(),
-                            _ => return panic("index out of bounds", span),
-                        }
-                    }
-                    Val::Str(s) => {
-                        let k = idx_checked(&i, idx.span)?;
-                        match s.chars().nth(k as usize) {
-                            Some(c) => Val::Char(c as u32),
-                            None => return panic("string index out of bounds", span),
-                        }
-                    }
+                    Val::Arr(a) => match a.get(idx_checked(&i, idx.span)? as usize) {
+                        Some(v) => v.clone(),
+                        None => return panic("index out of bounds", span),
+                    },
+                    Val::Str(s) => match s.chars().nth(idx_checked(&i, idx.span)? as usize) {
+                        Some(c) => Val::Char(c as u32),
+                        None => return panic("string index out of bounds", span),
+                    },
                     _ => return Err(Stop::Unknown),
                 }
             }
@@ -1486,6 +1471,10 @@ impl Env {
         if self.raw(r).is_some() {
             self.write(r, None);
         }
+    }
+
+    fn forget_all<'a>(&mut self, vs: impl Iterator<Item = &'a VarRef>) {
+        vs.for_each(|v| self.forget(*v));
     }
 
     fn forget_globals(&mut self, pred: impl Fn(GlobalId) -> bool) {
