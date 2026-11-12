@@ -15,8 +15,8 @@ use crate::diag::codes;
 use crate::types::TyKind;
 
 use super::{
-    Analysis, Server, edit_action, line_end, line_start, path_to_uri, pos_to_offset, range,
-    span_range, uri_to_path,
+    Analysis, Server, edit_action, insert_at, line_end, line_start, path_to_uri, pos_to_offset,
+    range, span_range, uri_to_path,
 };
 use crate::ast::visit::{Node, item_spans, walk};
 use crate::ast::{self, ExprKind as E, StmtKind as S};
@@ -106,12 +106,11 @@ impl Server {
                 out.push(edit_action(
                     format!("Generate {kind} `{name}`"),
                     CodeActionKind::QUICKFIX,
-                    vec![(
-                        uri.clone(),
-                        TextEdit::new(
-                            range(text, at, at),
-                            format!("{lead}\n{kind} {name} {{\n}}\n"),
-                        ),
+                    uri,
+                    vec![insert_at(
+                        text,
+                        at,
+                        format!("{lead}\n{kind} {name} {{\n}}\n"),
                     )],
                     Some(d),
                 ));
@@ -160,10 +159,8 @@ impl Server {
                     out.push(edit_action(
                         format!("Make `{name}` public"),
                         CodeActionKind::QUICKFIX,
-                        vec![(
-                            path_to_uri(mpath),
-                            TextEdit::new(range(&mtext, at, at), "pub ".into()),
-                        )],
+                        &path_to_uri(mpath),
+                        vec![insert_at(&mtext, at, "pub ")],
                         Some(d),
                     ));
                 }
@@ -188,7 +185,8 @@ impl Server {
         Some(edit_action(
             "Fill in the missing fields with `_`".into(),
             CodeActionKind::QUICKFIX,
-            vec![(uri.clone(), edit)],
+            uri,
+            vec![edit],
             Some(d),
         ))
     }
@@ -224,13 +222,7 @@ fn convert_comment(uri: &Uri, text: &str, off: usize) -> Option<CodeActionOrComm
     }
     let (len, new) = if doc { (3, "//") } else { (2, "///") };
     let edits = (lo..=hi)
-        .map(|k| {
-            let s = comments[k].0;
-            (
-                uri.clone(),
-                TextEdit::new(range(text, s, s + len), new.into()),
-            )
-        })
+        .map(|k| TextEdit::new(range(text, comments[k].0, comments[k].0 + len), new.into()))
         .collect();
     let title = if doc {
         "Convert to a regular comment"
@@ -240,6 +232,7 @@ fn convert_comment(uri: &Uri, text: &str, off: usize) -> Option<CodeActionOrComm
     Some(edit_action(
         title.into(),
         CodeActionKind::REFACTOR_REWRITE,
+        uri,
         edits,
         None,
     ))
@@ -271,7 +264,8 @@ fn convert_int(uri: &Uri, text: &str, s: usize, e: usize) -> Vec<CodeActionOrCom
         edit_action(
             format!("Convert to {name} (`{lit}`)"),
             CodeActionKind::REFACTOR_REWRITE,
-            vec![(uri.clone(), TextEdit::new(range(text, ts, te), lit))],
+            uri,
+            vec![TextEdit::new(range(text, ts, te), lit)],
             None,
         )
     })
@@ -302,9 +296,10 @@ fn interpolate(uri: &Uri, text: &str, s: usize, e: usize) -> Option<CodeActionOr
     Some(edit_action(
         format!("Interpolate `{}`", sel.trim()),
         CodeActionKind::REFACTOR_REWRITE,
-        vec![(
-            uri.clone(),
-            TextEdit::new(range(text, s, e), format!("{{{}}}", sel.trim())),
+        uri,
+        vec![TextEdit::new(
+            range(text, s, e),
+            format!("{{{}}}", sel.trim()),
         )],
         None,
     ))
@@ -361,9 +356,10 @@ fn extract_constant(
     Some(edit_action(
         "Extract into a module-level constant".into(),
         CodeActionKind::REFACTOR_EXTRACT,
+        uri,
         vec![
-            (uri.clone(), TextEdit::new(range(text, at, at), decl)),
-            (uri.clone(), TextEdit::new(range(text, s, e), name)),
+            insert_at(text, at, decl),
+            TextEdit::new(range(text, s, e), name),
         ],
         None,
     ))
@@ -408,7 +404,8 @@ fn match_on_call(
     Some(edit_action(
         "Match on the result".into(),
         CodeActionKind::REFACTOR_REWRITE,
-        vec![(uri.clone(), TextEdit::new(span_range(text, x.span), body))],
+        uri,
+        vec![TextEdit::new(span_range(text, x.span), body)],
         None,
     ))
 }

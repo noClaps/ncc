@@ -599,27 +599,30 @@ fn span_range(text: &str, span: Span) -> Range {
     range(text, span.start as usize, span.end as usize)
 }
 
+/// A code action editing one document; one fixing a diagnostic is preferred.
 fn edit_action(
     title: String,
     kind: CodeActionKind,
-    changes: Vec<(Uri, TextEdit)>,
+    uri: &Uri,
+    edits: Vec<TextEdit>,
     diag: Option<&Diagnostic>,
 ) -> CodeActionOrCommand {
-    let mut map: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
-    for (u, e) in changes {
-        map.entry(u).or_default().push(e);
-    }
     CodeActionOrCommand::CodeAction(CodeAction {
         title,
         kind: Some(kind),
         diagnostics: diag.map(|d| vec![d.clone()]),
         edit: Some(WorkspaceEdit {
-            changes: Some(map),
+            changes: Some(HashMap::from([(uri.clone(), edits)])),
             ..Default::default()
         }),
         is_preferred: diag.map(|_| true),
         ..Default::default()
     })
+}
+
+/// An edit inserting `s` at offset `at`.
+fn insert_at(text: &str, at: usize, s: impl Into<String>) -> TextEdit {
+    TextEdit::new(range(text, at, at), s.into())
 }
 
 /// Offset of the start of the line containing `off`.
@@ -832,6 +835,13 @@ impl Server {
                 .ok()
                 .map(std::borrow::Cow::Owned),
         }
+    }
+
+    /// A document's path and text.
+    fn source(&self, uri: &Uri) -> Option<(PathBuf, std::borrow::Cow<'_, str>)> {
+        let path = uri_to_path(uri)?;
+        let text = self.text_of(&path)?;
+        Some((path, text))
     }
 
     // ------------------------------------------------------------------ notifications
@@ -1074,9 +1084,8 @@ impl Server {
                 params.get("textDocument").cloned().unwrap_or_default(),
             )
             .ok()
-            .and_then(|d| uri_to_path(&d.uri))
-            .and_then(|path| {
-                let text = self.text_of(&path)?;
+            .and_then(|d| {
+                let (path, text) = self.source(&d.uri)?;
                 let module = self.module_of(&path, &text);
                 Some(serde_json::Value::String(format!("{module:#?}")))
             }),
@@ -1137,8 +1146,7 @@ impl Server {
             return md_hover(value, span_range(text, r.span));
         }
         // keywords
-        if let Some(path) = uri_to_path(&pp.text_document.uri)
-            && let Some(text) = self.text_of(&path)
+        if let Some((_, text)) = self.source(&pp.text_document.uri)
             && let Some((s, e)) = word_at(&text, pos_to_offset(&text, pp.position))
             && let Some((_, doc)) = docs::KEYWORD_DOCS.iter().find(|(k, _)| *k == &text[s..e])
             && !in_string_or_comment(&text, s)
@@ -1162,8 +1170,7 @@ impl Server {
     /// and range.
     fn alias_target(&self, pp: &TextDocumentPositionParams) -> Option<(PathBuf, (String, Range))> {
         let (name, ranges) = self.alias_at(&pp.text_document.uri, pp.position)?;
-        let path = uri_to_path(&pp.text_document.uri)?;
-        let text = self.text_of(&path)?;
+        let (path, text) = self.source(&pp.text_document.uri)?;
         let off = pos_to_offset(&text, pp.position);
         let range = ranges
             .into_iter()
@@ -1224,8 +1231,7 @@ impl Server {
     }
 
     fn symbols(&self, p: DocumentSymbolParams) -> Option<Vec<DocSymbol>> {
-        let path = uri_to_path(&p.text_document.uri)?;
-        let text = self.text_of(&path)?;
+        let (path, text) = self.source(&p.text_document.uri)?;
         let module = self.module_of(&path, &text);
         // `span` is the whole declaration, `name_span` its name
         let sym = |name: &str,
@@ -1515,8 +1521,7 @@ impl Server {
             )
         };
         // `fn`/`return`/`throw`/`try`: the function and its exit points
-        if let Some(path) = uri_to_path(&pp.text_document.uri)
-            && let Some(text) = self.text_of(&path)
+        if let Some((path, text)) = self.source(&pp.text_document.uri)
             && let off = pos_to_offset(&text, pp.position)
             && !in_string_or_comment(&text, off)
         {
@@ -1628,8 +1633,7 @@ impl Server {
     }
 
     fn builtin_hover(&self, pp: &TextDocumentPositionParams) -> Option<Hover> {
-        let path = uri_to_path(&pp.text_document.uri)?;
-        let text = self.text_of(&path)?;
+        let (_, text) = self.source(&pp.text_document.uri)?;
         let off = pos_to_offset(&text, pp.position);
         let (s, e) = word_at(&text, off)?;
         let word = text[s..e].strip_prefix('@')?;
@@ -1641,8 +1645,7 @@ impl Server {
     }
 
     fn folding(&self, p: FoldingRangeParams) -> Option<Vec<FoldingRange>> {
-        let path = uri_to_path(&p.text_document.uri)?;
-        let text = self.text_of(&path)?;
+        let (_, text) = self.source(&p.text_document.uri)?;
         let (toks, _) = crate::lexer::lex_all(&text, 0, 0);
         let line = |off: u32| offset_to_pos(&text, off as usize).line;
         let mut out = Vec::new();
@@ -1737,15 +1740,14 @@ impl Server {
     /// Formatting with `ncc fmt`'s rules (nothing when the document has syntax errors). With a
     /// range, the whole document is formatted and only the changes to its lines are kept.
     fn formatting(&self, uri: &Uri, range: Option<Range>) -> Option<Vec<TextEdit>> {
-        let text = self.text_of(&uri_to_path(uri)?)?;
+        let (_, text) = self.source(uri)?;
         let formatted = crate::fmt::format(&text).ok()?;
         Some(minimal_edits(&text, &formatted, range))
     }
 
     /// After a `}` that starts its line, indent it like the line of its `{`.
     fn on_type_formatting(&self, p: DocumentOnTypeFormattingParams) -> Option<Vec<TextEdit>> {
-        let path = uri_to_path(&p.text_document_position.text_document.uri)?;
-        let text = self.text_of(&path)?;
+        let (_, text) = self.source(&p.text_document_position.text_document.uri)?;
         let off = pos_to_offset(&text, p.text_document_position.position);
         let (toks, _) = crate::lexer::lex_all(&text, 0, 0);
         let close = toks

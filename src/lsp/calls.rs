@@ -2,7 +2,7 @@
 
 use lsp_types::*;
 
-use super::{BUILTINS, DeclKind, Server, docs, is_ident_byte, markdown, uri_to_path};
+use super::{BUILTINS, DeclKind, Server, docs, is_ident_byte, markdown};
 use std::collections::HashMap;
 
 use super::tyexpr;
@@ -26,8 +26,7 @@ pub struct CallCtx {
 impl Server {
     /// The unclosed call `callee(` (or `callee<T>(`) around `off`.
     pub(super) fn call_at(&self, uri: &Uri, off: usize) -> Option<CallCtx> {
-        let path = uri_to_path(uri)?;
-        let text = self.text_of(&path)?;
+        let (path, text) = self.source(uri)?;
         // find the unclosed `(` before the cursor and count the commas at its level, skipping
         // string and character literals and comments
         let b = text.as_bytes();
@@ -171,8 +170,7 @@ impl Server {
 
     pub(super) fn signature_help(&self, p: SignatureHelpParams) -> Option<SignatureHelp> {
         let pp = p.text_document_position_params;
-        let path = uri_to_path(&pp.text_document.uri)?;
-        let text = self.text_of(&path)?;
+        let (_, text) = self.source(&pp.text_document.uri)?;
         let off = super::pos_to_offset(&text, pp.position);
         let c = self.call_at(&pp.text_document.uri, off)?;
         let (label, ranges) = c.sig.label(&c.name);

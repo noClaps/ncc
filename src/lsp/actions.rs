@@ -18,8 +18,8 @@ use crate::types::TyKind;
 
 use super::ssr::atomic;
 use super::{
-    Analysis, Server, edit_action, indent_at, line_end, line_start, offset_to_pos, pos_to_offset,
-    range, span_range, uri_to_path,
+    Analysis, Server, edit_action, indent_at, insert_at, line_end, line_start, offset_to_pos,
+    pos_to_offset, range, span_range,
 };
 use crate::ast::visit::{Node, walk};
 use crate::ast::{self, ExprKind as E, StmtKind as S};
@@ -112,36 +112,22 @@ pub(super) fn warnings(
     let Some(fid) = a.file_id(entry) else {
         return vec![];
     };
-    let text = &a.sm.file(fid).text;
-    let warn = |span: Span, msg: String, code: &str| {
-        (
-            entry.to_path_buf(),
-            Diagnostic {
-                range: span_range(text, span),
-                severity: Some(DiagnosticSeverity::WARNING),
-                code: Some(NumberOrString::String(code.into())),
-                source: Some("ncc".into()),
-                message: msg,
-                tags: Some(vec![DiagnosticTag::UNNECESSARY]),
-                ..Default::default()
-            },
-        )
+    let warn = |d: crate::diag::Diag, code| {
+        let tags = Some(vec![DiagnosticTag::UNNECESSARY]);
+        super::to_diagnostic(&a.sm, d, DiagnosticSeverity::WARNING, Some(code), tags)
     };
     let mut out = Vec::new();
     // unused code, as the compiler reports it (a warning in debug builds, an error in release)
     if a.clean {
         for u in crate::lint::unused(&a.index, &a.types) {
             if u.diag.span.file == fid {
-                out.push(warn(u.diag.span, u.diag.msg, u.kind.code()));
+                out.push(warn(u.diag, u.kind.code()));
             }
         }
     }
-    for arm in unreachable_arms(a, text, module) {
-        out.push(warn(
-            arm,
-            "unreachable branch: earlier branches match every value it matches".into(),
-            UNREACHABLE_BRANCH,
-        ));
+    let msg = "unreachable branch: earlier branches match every value it matches";
+    for arm in unreachable_arms(a, &a.sm.file(fid).text, module) {
+        out.push(warn(crate::diag::Diag::new(arm, msg), UNREACHABLE_BRANCH));
     }
     out
 }
@@ -343,14 +329,11 @@ fn default_value(types: &crate::types::Types, ty: crate::types::TyId) -> String 
 impl Server {
     pub(super) fn code_actions(&self, p: CodeActionParams) -> Option<CodeActionResponse> {
         let uri = p.text_document.uri.clone();
-        let path = uri_to_path(&uri)?;
-        let text = self.text_of(&path)?;
+        let (path, text) = self.source(&uri)?;
         let mut out = Vec::new();
-        let edits_here =
-            |edits: Vec<TextEdit>| edits.into_iter().map(|e| (uri.clone(), e)).collect();
         // a quick fix for the diagnostic `d`
         let fix = |title, d, edits, preferred: bool| {
-            let mut a = edit_action(title, CodeActionKind::QUICKFIX, edits_here(edits), Some(d));
+            let mut a = edit_action(title, CodeActionKind::QUICKFIX, &uri, edits, Some(d));
             if let CodeActionOrCommand::CodeAction(c) = &mut a {
                 c.is_preferred = preferred.then_some(true);
             }
@@ -613,7 +596,8 @@ impl Server {
                 out.push(edit_action(
                     "Remove unused imports".into(),
                     CodeActionKind::SOURCE_ORGANIZE_IMPORTS,
-                    edits_here(edits),
+                    &uri,
+                    edits,
                     None,
                 ));
             }
@@ -697,16 +681,16 @@ pub(super) fn add_missing_fields(
             ","
         };
         let body: Vec<String> = missing.iter().map(|m| format!("{indent}{m},")).collect();
-        let at = inner.len();
-        return Some(TextEdit::new(
-            range(text, at, at),
+        return Some(insert_at(
+            text,
+            inner.len(),
             format!("{comma}\n{}", body.join("\n")),
         ));
     }
     let sep = if inner.ends_with('{') { "" } else { ", " };
-    let at = inner.len();
-    Some(TextEdit::new(
-        range(text, at, at),
+    Some(insert_at(
+        text,
+        inner.len(),
         format!("{sep}{}", missing.join(", ")),
     ))
 }
@@ -802,12 +786,10 @@ fn extract_variable(
     Some(edit_action(
         "Extract into a variable".into(),
         CodeActionKind::REFACTOR_EXTRACT,
+        uri,
         vec![
-            (uri.clone(), TextEdit::new(range(text, at, at), decl)),
-            (
-                uri.clone(),
-                TextEdit::new(range(text, s as usize, e as usize), name),
-            ),
+            insert_at(text, at, decl),
+            TextEdit::new(range(text, s as usize, e as usize), name),
         ],
         None,
     ))
@@ -920,10 +902,8 @@ fn generate_function(
     Some(edit_action(
         format!("Generate function `{name}`"),
         CodeActionKind::QUICKFIX,
-        vec![(
-            uri.clone(),
-            TextEdit::new(range(text, item_end, item_end), body),
-        )],
+        uri,
+        vec![insert_at(text, item_end, body)],
         None,
     ))
 }
@@ -959,10 +939,8 @@ fn match_on_value(
     Some(edit_action(
         format!("Match on `{}`", d.name),
         CodeActionKind::REFACTOR_REWRITE,
-        vec![(
-            uri.clone(),
-            TextEdit::new(range(text, at, at), format!("{lead}{body}")),
-        )],
+        uri,
+        vec![insert_at(text, at, format!("{lead}{body}"))],
         None,
     ))
 }
@@ -1031,7 +1009,8 @@ fn inline_variable(
     Some(edit_action(
         format!("Inline `{}`", d.name),
         CodeActionKind::REFACTOR_INLINE,
-        edits.into_iter().map(|e| (uri.clone(), e)).collect(),
+        uri,
+        edits,
         None,
     ))
 }

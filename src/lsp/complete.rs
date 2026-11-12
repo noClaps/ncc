@@ -10,7 +10,7 @@ use super::tyexpr;
 use crate::ast::TypeExpr as T;
 use crate::types::TyId;
 
-use super::{Analysis, BUILTINS, KEYWORDS, Server, docs, pos_to_offset, uri_to_path};
+use super::{Analysis, BUILTINS, KEYWORDS, Server, docs, pos_to_offset};
 use crate::ast;
 use crate::check::index::{DeclKind, SymDecl};
 use crate::diag::Span;
@@ -302,8 +302,7 @@ impl Server {
 
     pub(super) fn completion(&self, p: CompletionParams) -> Option<Vec<CompletionItem>> {
         let pp = p.text_document_position;
-        let path = uri_to_path(&pp.text_document.uri)?;
-        let text = self.text_of(&path)?;
+        let (path, text) = self.source(&pp.text_document.uri)?;
         let off = pos_to_offset(&text, pp.position);
         let line_start = super::line_start(&text, off);
         let before = &text[line_start..off];

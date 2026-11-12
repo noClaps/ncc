@@ -41,8 +41,7 @@ impl Server {
     /// An import or extern alias at a position: its name and every occurrence in the file
     /// (the declaration first).
     pub(super) fn alias_at(&self, uri: &Uri, pos: Position) -> Option<(String, Vec<Range>)> {
-        let path = uri_to_path(uri)?;
-        let text = self.text_of(&path)?;
+        let (path, text) = self.source(uri)?;
         let off = pos_to_offset(&text, pos);
         let (s, e) = super::word_at(&text, off)?;
         let name = &text[s..e];
@@ -308,8 +307,7 @@ impl Server {
     // ------------------------------------------------------------------ selection ranges
 
     pub(super) fn selection_ranges(&self, p: SelectionRangeParams) -> Option<Vec<SelectionRange>> {
-        let path = uri_to_path(&p.text_document.uri)?;
-        let text = self.text_of(&path)?;
+        let (path, text) = self.source(&p.text_document.uri)?;
         let module = self.module_of(&path, &text);
         let mut spans = Vec::new();
         walk(&module, &mut |n| {
@@ -350,8 +348,7 @@ impl Server {
     // ------------------------------------------------------------------ document links
 
     pub(super) fn document_links(&self, p: DocumentLinkParams) -> Option<Vec<DocumentLink>> {
-        let path = uri_to_path(&p.text_document.uri)?;
-        let text = self.text_of(&path)?;
+        let (path, text) = self.source(&p.text_document.uri)?;
         let module = self.module_of(&path, &text);
         let dir = path.parent()?.to_path_buf();
         let imports = self.analyses.get(&path).map(|a| &a.imports);

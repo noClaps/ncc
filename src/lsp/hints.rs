@@ -146,8 +146,7 @@ impl Server {
         uri: &Uri,
         range: Option<Range>,
     ) -> Option<SemanticTokensResult> {
-        let path = super::uri_to_path(uri)?;
-        let text = self.text_of(&path)?;
+        let (path, text) = self.source(uri)?;
         // identifiers resolved by the last analysis (only usable when it saw this text)
         let mut resolved: HashMap<u32, (u32, u32)> = HashMap::new();
         if let Some((a, fid, _)) = self.fresh(uri) {

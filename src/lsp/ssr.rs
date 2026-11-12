@@ -267,8 +267,7 @@ impl Server {
     /// before a closing one, and a trailing comma before a closing bracket goes too. Comment
     /// lines lose the `//` of the joined line.
     pub(super) fn join_lines(&self, p: JoinLinesParams) -> Option<Vec<TextEdit>> {
-        let path = uri_to_path(&p.text_document.uri)?;
-        let text = self.text_of(&path)?;
+        let (_, text) = self.source(&p.text_document.uri)?;
         let mut edits = Vec::new();
         for r in p.ranges {
             let s = pos_to_offset(&text, r.start);
