@@ -1741,35 +1741,31 @@ fn minimal_edits(old: &str, new: &str, range: Option<Range>) -> Vec<TextEdit> {
     }
     let mut edits = Vec::new();
     let (mut i, mut j) = (0, 0);
-    let mut pending: Option<(usize, usize, usize)> = None; // (old line start, old end, new start)
-    let mut new_end = 0;
-    let flush =
-        |pending: &mut Option<(usize, usize, usize)>, new_end: usize, edits: &mut Vec<TextEdit>| {
-            if let Some((os, oe, ns)) = pending.take() {
+    // where the changed lines being collected start in `a` and `b`
+    let mut changed: Option<(usize, usize)> = None;
+    loop {
+        let same = i < n && j < m && a[i] == b[j];
+        if same || (i == n && j == m) {
+            if let Some((os, ns)) = changed.take() {
                 edits.push(TextEdit::new(
-                    Range::new(Position::new(os as u32, 0), Position::new(oe as u32, 0)),
-                    b[ns..new_end].concat(),
+                    Range::new(Position::new(os as u32, 0), Position::new(i as u32, 0)),
+                    b[ns..j].concat(),
                 ));
             }
-        };
-    while i < n || j < m {
-        if i < n && j < m && a[i] == b[j] {
-            flush(&mut pending, new_end, &mut edits);
+            if !same {
+                break;
+            }
             i += 1;
             j += 1;
-        } else if j < m && (i == n || dp[i * (m + 1) + j + 1] >= dp[(i + 1) * (m + 1) + j]) {
-            let p = pending.get_or_insert((i, i, j));
-            p.1 = i;
-            j += 1;
-            new_end = j;
         } else {
-            let p = pending.get_or_insert((i, i, j));
-            i += 1;
-            p.1 = i;
-            new_end = j;
+            changed.get_or_insert((i, j));
+            if j < m && (i == n || dp[i * (m + 1) + j + 1] >= dp[(i + 1) * (m + 1) + j]) {
+                j += 1;
+            } else {
+                i += 1;
+            }
         }
     }
-    flush(&mut pending, new_end, &mut edits);
     // an old text without a final newline: positions past its last line are clamped by clients
     if let Some(r) = range {
         edits.retain(|e| e.range.start.line <= r.end.line && e.range.end.line >= r.start.line);
