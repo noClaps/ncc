@@ -17,16 +17,12 @@
 
 use std::collections::{HashMap, HashSet};
 
+use super::is_ident;
+
 /// A label definition line (`name:;`), returning the label name.
 fn label(t: &str) -> Option<&str> {
     let name = t.strip_suffix(":;")?;
     is_ident(name).then_some(name)
-}
-
-fn is_ident(s: &str) -> bool {
-    !s.is_empty()
-        && s.bytes().all(|b| b == b'_' || b.is_ascii_alphanumeric())
-        && !s.as_bytes()[0].is_ascii_digit()
 }
 
 /// The target of every `goto` in the line.
@@ -317,102 +313,5 @@ mod tests {
             run(body, &[]),
             "  if (c) goto inner;\n  return;\n  if (d) {\n  } else {\n    inner:;\n    y = 2;\n  }\n  return;\n"
         );
-    }
-
-    /// A random function body in the shape code generation writes: one statement per line,
-    /// bare and `if`/`else`/loop blocks, and forward jumps to labels of the same or an
-    /// enclosing block.
-    fn random_body(rand: &mut dyn FnMut(u64) -> u64) -> String {
-        fn block(
-            rand: &mut dyn FnMut(u64) -> u64,
-            depth: usize,
-            next: &mut usize,
-            ahead: &mut Vec<String>,
-            out: &mut Vec<String>,
-        ) {
-            let ind = "  ".repeat(depth + 1);
-            // the labels this block will place, which jumps before them may target
-            let own: Vec<String> = (0..rand(3))
-                .map(|_| {
-                    *next += 1;
-                    format!("l{next}")
-                })
-                .collect();
-            let base = ahead.len();
-            ahead.extend(own.iter().cloned());
-            let mut placed = 0;
-            for _ in 0..rand(7) {
-                match rand(14) {
-                    0..=2 => out.push(format!("{ind}x = {};", rand(9))),
-                    3 | 4 if !ahead.is_empty() => {
-                        let l = &ahead[rand(ahead.len() as u64) as usize];
-                        out.push(format!("{ind}if (c) goto {l};"));
-                    }
-                    5 if !ahead.is_empty() => {
-                        let l = &ahead[rand(ahead.len() as u64) as usize];
-                        out.push(format!("{ind}goto {l};"));
-                    }
-                    6 => out.push(format!("{ind}return;")),
-                    7 => out.push(format!("{ind}unreachable();")),
-                    8 => {
-                        out.push(format!("{ind}f0_die();"));
-                        out.push(format!("{ind}unreachable();"));
-                    }
-                    9 if depth < 3 => {
-                        out.push(format!("{ind}{{"));
-                        block(rand, depth + 1, next, ahead, out);
-                        out.push(format!("{ind}}}"));
-                    }
-                    10 if depth < 3 => {
-                        out.push(format!("{ind}if (d) {{"));
-                        block(rand, depth + 1, next, ahead, out);
-                        if rand(2) == 0 {
-                            out.push(format!("{ind}}} else {{"));
-                            block(rand, depth + 1, next, ahead, out);
-                        }
-                        out.push(format!("{ind}}}"));
-                    }
-                    11 if depth < 3 => {
-                        out.push(format!("{ind}for (;;) {{"));
-                        block(rand, depth + 1, next, ahead, out);
-                        out.push(format!("{ind}}}"));
-                    }
-                    12 | 13 if placed < own.len() => {
-                        ahead.retain(|l| *l != own[placed]);
-                        out.push(format!("{ind}{}:;", own[placed]));
-                        placed += 1;
-                    }
-                    _ => {}
-                }
-            }
-            for l in &own[placed..] {
-                ahead.retain(|x| x != l);
-                out.push(format!("{ind}{l}:;"));
-            }
-            debug_assert_eq!(ahead.len(), base);
-        }
-        let mut out = Vec::new();
-        block(rand, 0, &mut 0, &mut Vec::new(), &mut out);
-        out.join("\n") + "\n"
-    }
-
-    /// Leaving unreachable code out while generating, then tidying, gives what the old text
-    /// pass over the whole body gave.
-    #[test]
-    fn matches_the_text_pass() {
-        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
-        let mut rand = move |n: u64| {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            seed % n
-        };
-        let noreturn: std::collections::HashSet<String> = ["f0_die".to_string()].into();
-        for _ in 0..20_000 {
-            let body = random_body(&mut rand);
-            let old = super::super::tidy_old::tidy(&body, &noreturn);
-            let new = super::super::tidy::tidy(&run(&body, &["f0_die"]));
-            assert_eq!(new, old, "body:\n{body}");
-        }
     }
 }

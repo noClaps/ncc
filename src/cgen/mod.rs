@@ -8,8 +8,6 @@
 mod body;
 mod prune;
 mod tidy;
-#[cfg(test)]
-mod tidy_old;
 mod types;
 
 use std::collections::{HashMap, HashSet};
@@ -2302,6 +2300,11 @@ fn irrefutable(p: &Pat) -> bool {
 
 fn is_simple(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(crate::lexer::is_ident_byte)
+}
+
+/// Whether `s` is a C identifier.
+fn is_ident(s: &str) -> bool {
+    is_simple(s) && !s.as_bytes()[0].is_ascii_digit()
 }
 
 fn c_float(f: f64) -> String {

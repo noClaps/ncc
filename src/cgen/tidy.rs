@@ -10,11 +10,7 @@
 
 use std::collections::HashSet;
 
-fn is_ident(s: &str) -> bool {
-    !s.is_empty()
-        && s.bytes().all(|b| b == b'_' || b.is_ascii_alphanumeric())
-        && !s.as_bytes()[0].is_ascii_digit()
-}
+use super::is_ident;
 
 fn indent(l: &str) -> usize {
     l.len() - l.trim_start().len()
