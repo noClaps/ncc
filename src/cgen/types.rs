@@ -171,21 +171,12 @@ impl<'t> TypeGen<'t> {
                 )
                 .unwrap();
             }
-            TyKind::Tuple(ts) => {
+            TyKind::Tuple(_) | TyKind::Struct(_) => {
+                let fields = self.c_fields(&kind);
                 let mut s = format!("struct nc_{name} {{\n");
-                for (i, x) in ts.iter().enumerate() {
+                for (f, x) in &fields {
                     let xc = self.ct(*x);
-                    writeln!(s, "  {xc} f{i};").unwrap();
-                }
-                s.push_str("};\n");
-                self.decls.push_str(&s);
-            }
-            TyKind::Struct(si) => {
-                let fields = self.t.structs[*si as usize].fields.clone();
-                let mut s = format!("struct nc_{name} {{\n");
-                for (fname, x) in &fields {
-                    let xc = self.ct(*x);
-                    writeln!(s, "  {xc} {};", field_name(fname)).unwrap();
+                    writeln!(s, "  {xc} {f};").unwrap();
                 }
                 if fields.is_empty() {
                     s.push_str("  char _empty;\n");
@@ -369,23 +360,12 @@ impl<'t> TypeGen<'t> {
                     ),
                 )
             }
-            TyKind::Tuple(ts) => {
-                let fields: Vec<(String, TyId)> = ts
-                    .iter()
-                    .enumerate()
-                    .map(|(i, t)| (format!("f{i}"), *t))
-                    .collect();
-                self.product_bodies(&fields, "(", ")", None)
-            }
+            TyKind::Tuple(_) => self.product_bodies(&self.c_fields(kind), "(", ")", None),
             TyKind::Struct(si) => {
-                let def = self.t.structs[*si as usize].clone();
-                let fields: Vec<(String, TyId)> = def
-                    .fields
-                    .iter()
-                    .map(|(n, t)| (field_name(n), *t))
-                    .collect();
+                let def = &self.t.structs[*si as usize];
                 let names: Vec<String> = def.fields.iter().map(|(n, _)| n.clone()).collect();
-                self.product_bodies(&fields, &format!("{}{{", def.name), "}", Some(names))
+                let open = format!("{}{{", def.name);
+                self.product_bodies(&self.c_fields(kind), &open, "}", Some(names))
             }
             TyKind::Enum(ei) => {
                 let def = self.t.enums[*ei as usize].clone();
@@ -457,6 +437,19 @@ impl<'t> TypeGen<'t> {
             TyKind::Fut(_) => handle("nc_fut"),
             TyKind::Mutex(_) => handle("nc_mutex"),
             TyKind::Never | TyKind::Named(_) | TyKind::Const(..) => unreachable!(),
+        }
+    }
+
+    /// The C members of a tuple or struct type, with their types.
+    fn c_fields(&self, kind: &TyKind) -> Vec<(String, TyId)> {
+        match kind {
+            TyKind::Tuple(ts) => (ts.iter().enumerate())
+                .map(|(i, t)| (format!("f{i}"), *t))
+                .collect(),
+            TyKind::Struct(si) => (self.t.structs[*si as usize].fields.iter())
+                .map(|(n, t)| (field_name(n), *t))
+                .collect(),
+            _ => unreachable!(),
         }
     }
 
