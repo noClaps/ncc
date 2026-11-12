@@ -14,7 +14,7 @@ use super::{Analysis, BUILTINS, KEYWORDS, Server, docs, pos_to_offset};
 use crate::ast;
 use crate::check::index::{DeclKind, SymDecl};
 use crate::diag::Span;
-use crate::lexer::is_ident_byte;
+use crate::lexer::{Tok, Token, is_ident_byte};
 
 /// Keyword snippets: label, snippet body, description.
 const SNIPPETS: &[(&str, &str, &str)] = &[
@@ -56,8 +56,6 @@ enum Seg {
     Slice,
 }
 
-/// Parse the receiver chain at the end of `head` (`a.b(x)[0].c`), outermost last, with the
-/// offset where the receiver starts.
 /// The offset of the opening quote when `line` (a line up to the cursor) ends in a string's
 /// literal text; `None` when it ends in code, including an interpolation `{...}`.
 fn open_string(line: &str) -> Option<usize> {
@@ -94,6 +92,8 @@ fn open_string(line: &str) -> Option<usize> {
     }
 }
 
+/// Parse the receiver chain at the end of `head` (`a.b(x)[0].c`), outermost last, with the
+/// offset where the receiver starts.
 fn receiver_chain(head: &str) -> Option<(Vec<Seg>, usize)> {
     let b = head.as_bytes();
     let mut i = head.trim_end().len();
@@ -244,14 +244,7 @@ impl Server {
             // its type arguments come from the expected type (`Box<int> b = B`) or are
             // placeholders: `Box<${1:T}>{.value = $2}`
             let tps = &d.type_params;
-            let mut k = 0;
-            let mut slot = |name: Option<&str>| {
-                k += 1;
-                match name {
-                    Some(n) => format!("${{{k}:{n}}}"),
-                    None => format!("${k}"),
-                }
-            };
+            let mut slot = tabstops();
             let targs = match expected {
                 Some(T::Named {
                     module, name, args, ..
@@ -281,14 +274,9 @@ impl Server {
                 .map(|(_, n)| n.as_str())
                 .collect();
             // a generic function takes its type arguments first: `map<${1:I}, ${2:O}>(...)`
-            let tps = &d.type_params;
-            let mut k = 0;
-            let mut slot = |name: &str| {
-                k += 1;
-                format!("${{{k}:{name}}}")
-            };
-            let targs: Vec<String> = tps.iter().map(|t| slot(t)).collect();
-            let args: Vec<String> = ps.iter().map(|p| slot(p)).collect();
+            let mut slot = tabstops();
+            let targs: Vec<String> = d.type_params.iter().map(|t| slot(Some(t))).collect();
+            let args: Vec<String> = ps.iter().map(|p| slot(Some(p))).collect();
             item.insert_text = Some(format!(
                 "{full}{}({})$0",
                 generic_args(&targs),
@@ -355,19 +343,7 @@ impl Server {
 
         // `@builtin`
         if prefix_char == Some('@') {
-            for b in BUILTINS {
-                let n = b.name;
-                let mut it = item(n, CompletionItemKind::FUNCTION, Some(b.label()));
-                it.documentation = Some(Documentation::String(b.doc.to_string()));
-                if self.snippets && call_parens {
-                    let has_args = !b.params.is_empty();
-                    it.insert_text = Some(format!("{n}{}", call_snippet(has_args)));
-                    it.insert_text_format = Some(InsertTextFormat::SNIPPET);
-                    it.command = has_args.then(param_hints);
-                }
-                items.push(it);
-            }
-            return Some(items);
+            return Some(self.builtin_items(false, call_parens));
         }
 
         // after `.`
@@ -507,27 +483,7 @@ impl Server {
             }
         }
         // builtins, found without typing `@`
-        for b in BUILTINS {
-            let n = b.name;
-            let snippet = self.snippets && call_parens;
-            let has_args = !b.params.is_empty();
-            items.push(CompletionItem {
-                label: format!("@{n}"),
-                kind: Some(CompletionItemKind::FUNCTION),
-                detail: Some(b.label()),
-                documentation: Some(Documentation::String(b.doc.to_string())),
-                filter_text: Some(n.to_string()),
-                insert_text: Some(if snippet {
-                    format!("@{n}{}", call_snippet(has_args))
-                } else {
-                    format!("@{n}")
-                }),
-                insert_text_format: snippet.then_some(InsertTextFormat::SNIPPET),
-                command: (snippet && has_args).then(param_hints),
-                sort_text: Some(format!("7{n}")),
-                ..Default::default()
-            });
-        }
+        items.extend(self.builtin_items(true, call_parens));
         // a function literal for an argument that takes a function
         if self.snippets {
             items.extend(self.fn_literal_items(&pp.text_document.uri, off));
@@ -592,11 +548,10 @@ impl Server {
             s -= 1;
         }
         let (toks, _) = crate::lexer::lex_all(text, 0, 0);
-        let toks: Vec<&crate::lexer::Token> = toks
+        let toks: Vec<&Token> = toks
             .iter()
             .take_while(|t| (t.span.end as usize) <= s)
             .collect();
-        use crate::lexer::Tok;
         match toks.last().map(|t| &t.tok) {
             // a call's argument, not a parameter of a declaration (`fn f(int a, |`)
             Some(Tok::LParen | Tok::Comma | Tok::LBracket) => {
@@ -855,20 +810,13 @@ impl Server {
                 Some(q) => format!("{q}.{}", d.name),
                 None => d.name.clone(),
             };
-            let mut k = 0;
-            let mut slot = |name: &str| {
-                k += 1;
-                format!("${{{k}:{name}}}")
-            };
+            let mut slot = tabstops();
             let targs: Vec<String> = tps
                 .iter()
-                .map(|t| match binds.get(t) {
-                    Some(b) => b.show(),
-                    None => slot(t),
-                })
+                .map(|t| binds.get(t).map_or_else(|| slot(Some(t)), T::show))
                 .collect();
             let mut args = vec![escaped.clone()];
-            args.extend(ps[1..].iter().map(|(_, n)| slot(n)));
+            args.extend(ps[1..].iter().map(|(_, n)| slot(Some(n))));
             let (new_text, format) = if self.snippets {
                 (
                     format!("{full}{}({})$0", generic_args(&targs), args.join(", ")),
@@ -898,6 +846,34 @@ impl Server {
             });
         }
         out
+    }
+
+    /// The builtins, as completions after a typed `@`, or inserting the `@` when `at`.
+    fn builtin_items(&self, at: bool, call_parens: bool) -> Vec<CompletionItem> {
+        let snippet = self.snippets && call_parens;
+        let prefix = if at { "@" } else { "" };
+        (BUILTINS.iter())
+            .map(|b| {
+                let label = format!("{prefix}{}", b.name);
+                let has_args = !b.params.is_empty();
+                CompletionItem {
+                    kind: Some(CompletionItemKind::FUNCTION),
+                    detail: Some(b.label()),
+                    documentation: Some(Documentation::String(b.doc.to_string())),
+                    filter_text: at.then(|| b.name.to_string()),
+                    insert_text: if snippet {
+                        Some(format!("{label}{}", call_snippet(has_args)))
+                    } else {
+                        at.then(|| label.clone())
+                    },
+                    insert_text_format: snippet.then_some(InsertTextFormat::SNIPPET),
+                    command: (snippet && has_args).then(param_hints),
+                    sort_text: at.then(|| format!("7{}", b.name)),
+                    label,
+                    ..Default::default()
+                }
+            })
+            .collect()
     }
 
     fn variant_items(&self, a: &Analysis, d: &SymDecl) -> Vec<CompletionItem> {
@@ -974,12 +950,6 @@ enum Slot {
     Other,
 }
 
-/// The innermost unclosed `(` at the end of `toks` (not inside `[...]` or `{...}`), with the
-/// number of commas after it at its level.
-fn unclosed_paren(toks: &[&crate::lexer::Token]) -> Option<(usize, usize)> {
-    unclosed(toks).filter(|&(i, _)| toks[i].tok == crate::lexer::Tok::LParen)
-}
-
 /// The type expected for argument `c.arg` of the call whose `(` is `toks[open]`. A generic
 /// parameter (`T`, `I[]`) is resolved from the types of the arguments before it
 /// (`pick(h, |` with `fn pick<type T>(T a, T b)`); one that stays unresolved only says
@@ -987,11 +957,10 @@ fn unclosed_paren(toks: &[&crate::lexer::Token]) -> Option<(usize, usize)> {
 fn arg_ty(
     a: Option<(&Analysis, u32)>,
     text: &str,
-    toks: &[&crate::lexer::Token],
+    toks: &[&Token],
     open: usize,
     c: &super::calls::CallCtx,
 ) -> Option<T> {
-    use crate::lexer::Tok;
     let ps = &c.sig.params;
     let ty = ps.get(c.arg as usize)?.0.clone()?;
     let tps = &c.open_tps;
@@ -1039,8 +1008,7 @@ fn arg_ty(
 
 /// The type of a simple expression from its tokens: a literal, a name, a chain (`p.x`,
 /// `f().y`), an array literal or a struct literal.
-fn text_ty(a: &Analysis, fid: u32, text: &str, toks: &[&crate::lexer::Token]) -> Option<T> {
-    use crate::lexer::Tok;
+fn text_ty(a: &Analysis, fid: u32, text: &str, toks: &[&Token]) -> Option<T> {
     let (first, last) = (toks.first()?, toks.last()?);
     let src = &text[first.span.start as usize..last.span.end as usize];
     if let [t] = toks {
@@ -1101,8 +1069,7 @@ fn text_ty(a: &Analysis, fid: u32, text: &str, toks: &[&crate::lexer::Token]) ->
 
 /// The innermost unclosed `(`, `[` or `{` at the end of `toks`, with the number of commas
 /// after it at its level.
-fn unclosed(toks: &[&crate::lexer::Token]) -> Option<(usize, usize)> {
-    use crate::lexer::Tok;
+fn unclosed(toks: &[&Token]) -> Option<(usize, usize)> {
     let (mut depth, mut commas) = (0, 0);
     let mut i = toks.len();
     loop {
@@ -1122,9 +1089,8 @@ fn unclosed(toks: &[&crate::lexer::Token]) -> Option<(usize, usize)> {
 
 /// Whether the innermost unclosed `(` at the end of `toks` opens the parameters of a function
 /// declaration (`fn name<T>(`) or function type (`(fn(`).
-fn in_fn_header(toks: &[&crate::lexer::Token]) -> bool {
-    use crate::lexer::Tok;
-    let Some((open, _)) = unclosed_paren(toks) else {
+fn in_fn_header(toks: &[&Token]) -> bool {
+    let Some((open, _)) = unclosed(toks).filter(|&(i, _)| toks[i].tok == Tok::LParen) else {
         return false;
     };
     let mut j = open;
@@ -1187,8 +1153,7 @@ fn chain_ty(a: &Analysis, fid: u32, off: usize, chain: &[Seg]) -> Option<TyId> {
 
 /// The return type of the innermost function (declaration or literal) whose body is open at
 /// the end of `toks`, when it returns something.
-fn enclosing_fn_return(text: &str, toks: &[&crate::lexer::Token]) -> Option<T> {
-    use crate::lexer::Tok;
+fn enclosing_fn_return(text: &str, toks: &[&Token]) -> Option<T> {
     // the unclosed `{`s, innermost last
     let mut open = Vec::new();
     for (i, t) in toks.iter().enumerate() {
@@ -1225,6 +1190,18 @@ fn enclosing_fn_return(text: &str, toks: &[&crate::lexer::Token]) -> Option<T> {
         }
     }
     None
+}
+
+/// Numbered snippet placeholders: `${1:name}`, or `$1` without a name.
+fn tabstops() -> impl FnMut(Option<&str>) -> String {
+    let mut k = 0;
+    move |name| {
+        k += 1;
+        match name {
+            Some(n) => format!("${{{k}:{n}}}"),
+            None => format!("${k}"),
+        }
+    }
 }
 
 /// The parentheses of a call snippet: the cursor goes inside them when the function takes
@@ -1397,7 +1374,6 @@ fn doc_at(a: &Analysis, span: Span) -> Option<Documentation> {
         .map(|value| Documentation::MarkupContent(super::markdown(value)))
 }
 
-/// Fields of the struct literal or pattern around a `.` that starts a field (`Point{.x = 1, .`).
 /// The struct of the literal whose field starts with the `.` at `dot` (`Name{.x = 1, .`), with
 /// the offset of the literal's `{`.
 fn literal_struct<'a>(a: &'a Analysis, text: &str, dot: usize) -> Option<(&'a SymDecl, usize)> {
@@ -1442,7 +1418,6 @@ fn literal_struct<'a>(a: &'a Analysis, text: &str, dot: usize) -> Option<(&'a Sy
     Some((d, open))
 }
 
-/// Fields not set yet in the struct literal around the `.` at `dot`.
 /// A struct's fields: (name, type, detail, definition). A generic struct's come from its
 /// declaration, with its type parameters unresolved.
 fn struct_fields(a: &Analysis, d: &SymDecl) -> Vec<(String, Option<T>, String, Option<Span>)> {
@@ -1456,6 +1431,7 @@ fn struct_fields(a: &Analysis, d: &SymDecl) -> Vec<(String, Option<T>, String, O
     }
 }
 
+/// Fields not set yet in the struct literal around the `.` at `dot`.
 fn struct_literal_fields(a: &Analysis, text: &str, dot: usize) -> Option<Vec<CompletionItem>> {
     let (d, open) = literal_struct(a, text, dot)?;
     let members = struct_fields(a, d);
