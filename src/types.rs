@@ -157,19 +157,21 @@ impl Types {
         self.intern(TyKind::Tuple(ts))
     }
 
-    pub fn new_struct(&mut self, name: String) -> TyId {
+    /// A new struct (the instance of a generic struct with `generic`), its fields to be filled.
+    pub fn new_struct(&mut self, name: String, generic: Option<(String, Vec<TyId>)>) -> TyId {
         self.structs.push(StructDef {
             name,
             fields: vec![],
-            generic: None,
+            generic,
         });
         self.intern(TyKind::Struct(self.structs.len() as u32 - 1))
     }
-    pub fn new_enum(&mut self, name: String) -> TyId {
+    /// A new enum (the instance of a generic enum with `generic`), its variants to be filled.
+    pub fn new_enum(&mut self, name: String, generic: Option<(String, Vec<TyId>)>) -> TyId {
         self.enums.push(EnumDef {
             name,
             variants: vec![],
-            generic: None,
+            generic,
         });
         self.intern(TyKind::Enum(self.enums.len() as u32 - 1))
     }

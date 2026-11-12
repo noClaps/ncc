@@ -372,10 +372,7 @@ impl Checker {
                     xs.push(self.check_as(it, &mut et)?);
                 }
                 let et = et.unwrap();
-                if matches!(
-                    self.types.kind(et),
-                    TyKind::Void | TyKind::Never | TyKind::Fut(_) | TyKind::Mutex(_)
-                ) {
+                if !self.storable(et) {
                     return err(
                         span,
                         format!("arrays cannot hold `{}`", self.types.show(et)),

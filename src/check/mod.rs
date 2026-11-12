@@ -336,12 +336,12 @@ impl Checker {
                     )?,
                     ast::Item::Struct(s) => {
                         let ty = (s.type_params.is_empty())
-                            .then(|| self.types.new_struct(s.name.clone()));
+                            .then(|| self.types.new_struct(s.name.clone(), None));
                         self.add_sym(m, &s.name, Sym::Struct { decl: i, ty }, s.public, s.span)?;
                     }
                     ast::Item::Enum(e) => {
-                        let ty =
-                            (e.type_params.is_empty()).then(|| self.types.new_enum(e.name.clone()));
+                        let ty = (e.type_params.is_empty())
+                            .then(|| self.types.new_enum(e.name.clone(), None));
                         self.add_sym(m, &e.name, Sym::Enum { decl: i, ty }, e.public, e.span)?;
                     }
                     ast::Item::Type(t) => {
@@ -566,13 +566,10 @@ impl Checker {
         // reject infinitely sized structs
         for it in &ast.items {
             if let ast::Item::Struct(s) = it
-                && let Some(SymEntry {
-                    sym: Sym::Struct { ty: Some(ty), .. },
-                    ..
-                }) = self.mods[m].syms.get(&s.name)
-                && let Err(d) = self.check_finite(*ty, s.span)
+                && let Some(Sym::Struct { ty: Some(ty), .. }) = self.declared(m, &s.name)
             {
-                self.errors.push(d);
+                let r = self.check_finite(ty, s.span);
+                self.report(r);
             }
         }
     }
@@ -1006,7 +1003,7 @@ impl Checker {
                 let mut consts = Vec::new();
                 for p in &f.sig.type_params {
                     let t = match p.konst.as_deref() {
-                        None => self.types.new_struct(p.name.clone()),
+                        None => self.types.new_struct(p.name.clone(), None),
                         Some(k) => {
                             let ty = builtin_type(k).unwrap_or(UINT);
                             let v = match sym_const(consts.len()) {
@@ -1061,28 +1058,21 @@ impl Checker {
             return Ok(t);
         }
         let display = self.types_name(name, &args);
+        let generic = Some((name.clone(), args.clone()));
         let ty = match item {
-            ast::Item::Struct(s) => {
-                let ty = self.types.new_struct(display);
-                let i = self.types.structs.len() - 1;
-                self.types.structs[i].generic = Some((name.clone(), args.clone()));
-                self.type_insts.insert(key, ty);
-                self.fill_struct(ty, s, m, &tp)
-                    .map_err(|d| self.in_instance(d, name, &args))?;
-                self.check_finite(ty, span)?;
-                ty
-            }
-            ast::Item::Enum(e) => {
-                let ty = self.types.new_enum(display);
-                let i = self.types.enums.len() - 1;
-                self.types.enums[i].generic = Some((name.clone(), args.clone()));
-                self.type_insts.insert(key, ty);
-                self.fill_enum(ty, e, m, &tp)
-                    .map_err(|d| self.in_instance(d, name, &args))?;
-                ty
-            }
+            ast::Item::Struct(_) => self.types.new_struct(display, generic),
+            _ => self.types.new_enum(display, generic),
+        };
+        self.type_insts.insert(key, ty);
+        let filled = match item {
+            ast::Item::Struct(s) => self.fill_struct(ty, s, m, &tp),
+            ast::Item::Enum(e) => self.fill_enum(ty, e, m, &tp),
             _ => unreachable!(),
         };
+        filled.map_err(|d| self.in_instance(d, name, &args))?;
+        if let ast::Item::Struct(_) = item {
+            self.check_finite(ty, span)?;
+        }
         Ok(ty)
     }
 

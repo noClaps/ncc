@@ -376,17 +376,10 @@ impl Checker {
                 push(out, SK::Continue(j));
             }
             S::While { label, cond, body } => {
-                let c = self.expect_expr(cond, BOOL)?;
+                let cond = self.expect_expr(cond, BOOL)?;
                 let id = self.new_jump();
-                let b = self.check_jump_block(body, id, JumpKind::Loop, label.clone());
-                push(
-                    out,
-                    SK::While {
-                        id,
-                        cond: c,
-                        body: b,
-                    },
-                );
+                let body = self.check_jump_block(body, id, JumpKind::Loop, label.clone());
+                push(out, SK::While { id, cond, body });
             }
             S::For {
                 label,
@@ -395,8 +388,8 @@ impl Checker {
                 iter,
                 body,
             } => {
-                let it = self.check_expr(iter, None)?;
-                let (kind, vty) = match self.types.kind(it.ty) {
+                let iter = self.check_expr(iter, None)?;
+                let (kind, vty) = match self.types.kind(iter.ty) {
                     TyKind::Array(_) | TyKind::Fixed(..) | TyKind::Str => (ForKind::Index, UINT),
                     TyKind::Map(k, _) => (ForKind::Keys, *k),
                     _ => {
@@ -404,7 +397,7 @@ impl Checker {
                             iter.span,
                             format!(
                                 "cannot loop over `{}`; expected an array, string or map",
-                                self.types.show(it.ty)
+                                self.types.show(iter.ty)
                             ),
                         );
                     }
@@ -412,21 +405,19 @@ impl Checker {
                 let id = self.new_jump();
                 self.push_scope();
                 self.ix.scopes.push(body.span);
-                let v = self.declare_local(var, vty, false, LocalKind::Normal, *var_span);
+                let var = self.declare_local(var, vty, false, LocalKind::Normal, *var_span);
                 self.ix.scopes.pop();
-                let file = var_span.file;
-                let hint = format!("{} ", self.types.show(vty));
-                self.idx_hint(var_span.start, file, hint, index::HintKind::Type);
-                let b = self.check_jump_block(body, id, JumpKind::Loop, label.clone());
+                self.idx_type_hint(*var_span, vty);
+                let body = self.check_jump_block(body, id, JumpKind::Loop, label.clone());
                 self.pop_scope();
                 push(
                     out,
                     SK::For {
                         id,
-                        var: v,
+                        var,
                         kind,
-                        iter: it,
-                        body: b,
+                        iter,
+                        body,
                     },
                 );
             }
@@ -444,7 +435,7 @@ impl Checker {
                 let id = self.new_jump();
                 self.push_scope();
                 let alias = self.declare_local(name, inner, true, LocalKind::LockAlias, *name_span);
-                let b = self.check_jump_block(body, id, JumpKind::Lock, label.clone());
+                let body = self.check_jump_block(body, id, JumpKind::Lock, label.clone());
                 self.pop_scope();
                 push(
                     out,
@@ -452,7 +443,7 @@ impl Checker {
                         id,
                         mutex,
                         alias,
-                        body: b,
+                        body,
                     },
                 );
             }

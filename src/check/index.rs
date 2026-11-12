@@ -407,6 +407,12 @@ impl Checker {
         });
     }
 
+    /// The type `ty` of the variable declared at `span`, shown before it.
+    pub fn idx_type_hint(&mut self, span: Span, ty: TyId) {
+        let label = format!("{} ", self.types.show(ty));
+        self.idx_hint(span.start, span.file, label, HintKind::Type);
+    }
+
     pub fn var_detail(&self, name: &str, ty: TyId, mutable: bool) -> String {
         format!(
             "{}{} {name}",
