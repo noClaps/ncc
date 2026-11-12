@@ -68,6 +68,7 @@ pub struct JumpCtx {
     pub label: Option<String>,
 }
 
+#[derive(Default)]
 pub struct FnCtx {
     pub func: FuncId,
     pub locals: Vec<Local>,
@@ -84,7 +85,6 @@ pub struct FnCtx {
     pub is_test: bool,
     /// The module top-level context: declarations at scope depth 1 become globals.
     pub is_main: bool,
-    pub is_never: bool,
     pub self_local: Option<LocalId>,
     /// `$` contexts: types of the bases of enclosing index expressions
     pub dollar: Vec<TyId>,
@@ -94,20 +94,11 @@ impl FnCtx {
     pub fn new(func: FuncId, module: usize, ret: TyId, tparams: HashMap<String, TyId>) -> Self {
         Self {
             func,
-            locals: vec![],
             scopes: vec![vec![]],
-            captures: vec![],
-            cap_map: HashMap::new(),
             ret,
-            jumps: vec![],
             module,
             tparams,
-            tspans: HashMap::new(),
-            is_test: false,
-            is_main: false,
-            is_never: false,
-            self_local: None,
-            dollar: vec![],
+            ..Default::default()
         }
     }
 }
@@ -360,19 +351,13 @@ impl Checker {
                         f.sig.span,
                     )?,
                     ast::Item::Struct(s) => {
-                        let ty = if s.type_params.is_empty() {
-                            Some(self.types.new_struct(s.name.clone()))
-                        } else {
-                            None
-                        };
+                        let ty = (s.type_params.is_empty())
+                            .then(|| self.types.new_struct(s.name.clone()));
                         self.add_sym(m, &s.name, Sym::Struct { decl: i, ty }, s.public, s.span)?;
                     }
                     ast::Item::Enum(e) => {
-                        let ty = if e.type_params.is_empty() {
-                            Some(self.types.new_enum(e.name.clone()))
-                        } else {
-                            None
-                        };
+                        let ty =
+                            (e.type_params.is_empty()).then(|| self.types.new_enum(e.name.clone()));
                         self.add_sym(m, &e.name, Sym::Enum { decl: i, ty }, e.public, e.span)?;
                     }
                     ast::Item::Type(t) => {
@@ -395,24 +380,45 @@ impl Checker {
         }
     }
 
-    /// Index a generic declaration (checked only when instantiated) and its type parameters.
+    fn idx_type_params(&mut self, tps: &[ast::GenericParam]) {
+        for t in tps {
+            self.idx_ref(t.span, Some(t.span), t.show());
+        }
+    }
+
+    /// Index a generic struct or enum (checked only when instantiated) and its type parameters.
     fn idx_generic_decl(
         &mut self,
         name: &str,
         (span, name_span): (Span, Span),
         kind: index::DeclKind,
         tps: &[ast::GenericParam],
-        detail: String,
+        members: Vec<(String, String)>,
+    ) -> Option<&mut index::SymDecl> {
+        self.idx_type_params(tps);
+        let kw = if kind == index::DeclKind::Struct {
+            "struct"
+        } else {
+            "enum"
+        };
+        let detail = format!("{kw} {name}{}", ast::GenericParam::list(tps));
+        let d = self.idx_decl(name, span, name_span, kind, detail, members)?;
+        d.type_params = tps.iter().map(|t| t.name.clone()).collect();
+        Some(d)
+    }
+
+    /// Index a struct, enum or named type `ty` declared by `name`.
+    fn idx_type_decl(
+        &mut self,
+        name: &str,
+        (span, name_span): (Span, Span),
+        kind: index::DeclKind,
+        ty: TyId,
         members: Vec<(String, String)>,
     ) {
-        for t in tps {
-            self.idx_ref(t.span, Some(t.span), t.show());
-        }
-        let before = self.ix.index.decls.len();
+        let detail = self.type_detail(ty);
         self.idx_decl(name, span, name_span, kind, detail, members);
-        if let Some(d) = self.ix.index.decls.get_mut(before) {
-            d.type_params = tps.iter().map(|t| t.name.clone()).collect();
-        }
+        self.idx_last_ty(name, ty);
     }
 
     /// The symbol `name` declares in module `m`, if `declare_names` accepted it.
@@ -432,21 +438,13 @@ impl Checker {
                             return Ok(());
                         };
                         let under = self.resolve_type(&t.ty, m, &none)?;
-                        if let TyKind::Named(n) = self.types.kind(ty).clone() {
+                        if let TyKind::Named(n) = *self.types.kind(ty) {
                             self.types.named[n as usize].underlying = under;
                         }
                         self.ix.type_spans.insert(ty, t.span);
-                        let detail = self.type_detail(ty);
                         let members = self.members_of(ty);
-                        self.idx_decl(
-                            &t.name,
-                            t.span,
-                            t.name_span,
-                            index::DeclKind::Type,
-                            detail,
-                            members,
-                        );
-                        self.idx_last_ty(&t.name, ty);
+                        let spans = (t.span, t.name_span);
+                        self.idx_type_decl(&t.name, spans, index::DeclKind::Type, ty, members);
                         // reject cycles
                         let mut seen = vec![ty];
                         let mut cur = under;
@@ -467,47 +465,24 @@ impl Checker {
                             return Ok(());
                         };
                         self.fill_struct(ty, s, m, &none)?;
-                        let detail = self.type_detail(ty);
-                        self.idx_decl(
-                            &s.name,
-                            s.span,
-                            s.name_span,
-                            index::DeclKind::Struct,
-                            detail,
-                            vec![],
-                        );
-                        self.idx_last_ty(&s.name, ty);
+                        let spans = (s.span, s.name_span);
+                        self.idx_type_decl(&s.name, spans, index::DeclKind::Struct, ty, vec![]);
                     }
                     ast::Item::Enum(e) if e.type_params.is_empty() => {
                         let Some(Sym::Enum { ty: Some(ty), .. }) = self.declared(m, &e.name) else {
                             return Ok(());
                         };
                         self.fill_enum(ty, e, m, &none)?;
-                        let detail = self.type_detail(ty);
-                        let members: Vec<(String, String)> = e
-                            .variants
-                            .iter()
-                            .map(|v| {
-                                let ps = self.types.enum_def(ty).map(|d| {
-                                    d.variants
-                                        .iter()
-                                        .find(|x| x.0 == v.0)
-                                        .map(|x| x.1.clone())
-                                        .unwrap_or_default()
-                                });
-                                let text = self.variant_text(&v.0, &ps.unwrap_or_default());
-                                (v.0.clone(), format!("{}.{text}", e.name))
+                        let members = (self.types.enum_def(ty).unwrap().variants.iter())
+                            .map(|(n, ps)| {
+                                (
+                                    n.clone(),
+                                    format!("{}.{}", e.name, self.variant_text(n, ps)),
+                                )
                             })
                             .collect();
-                        self.idx_decl(
-                            &e.name,
-                            e.span,
-                            e.name_span,
-                            index::DeclKind::Enum,
-                            detail,
-                            members,
-                        );
-                        self.idx_last_ty(&e.name, ty);
+                        let spans = (e.span, e.name_span);
+                        self.idx_type_decl(&e.name, spans, index::DeclKind::Enum, ty, members);
                     }
                     _ => {}
                 }
@@ -552,46 +527,23 @@ impl Checker {
                                 .collect(),
                             ret: f.sig.ret.clone(),
                         };
-                        for t in &f.sig.type_params {
-                            self.idx_ref(t.span, Some(t.span), t.show());
-                        }
+                        self.idx_type_params(&f.sig.type_params);
                         self.idx_fn_decl(&f.sig.name, f.sig.span, None, sig);
                     }
                     ast::Item::Struct(st) if !st.type_params.is_empty() => {
-                        let tps = ast::GenericParam::list(&st.type_params);
-                        let detail = format!("struct {}{tps}", st.name);
-                        let kind = index::DeclKind::Struct;
                         // the fields, for struct literal completions
                         let fields = (st.fields.iter())
                             .map(|(t, n, _)| (n.clone(), format!("{} {n}", t.show())))
                             .collect();
+                        let (spans, kind) = ((st.span, st.name_span), index::DeclKind::Struct);
                         let tps = &st.type_params;
-                        self.idx_generic_decl(
-                            &st.name,
-                            (st.span, st.name_span),
-                            kind,
-                            tps,
-                            detail,
-                            fields,
-                        );
-                        if let Some(d) = self.ix.index.decls.last_mut()
-                            && d.name == st.name
-                        {
+                        if let Some(d) = self.idx_generic_decl(&st.name, spans, kind, tps, fields) {
                             d.field_tys = st.fields.iter().map(|f| f.0.clone()).collect();
                         }
                     }
                     ast::Item::Enum(en) if !en.type_params.is_empty() => {
-                        let tps = ast::GenericParam::list(&en.type_params);
-                        let detail = format!("enum {}{tps}", en.name);
-                        let kind = index::DeclKind::Enum;
-                        self.idx_generic_decl(
-                            &en.name,
-                            (en.span, en.name_span),
-                            kind,
-                            &en.type_params,
-                            detail,
-                            vec![],
-                        );
+                        let (spans, kind) = ((en.span, en.name_span), index::DeclKind::Enum);
+                        self.idx_generic_decl(&en.name, spans, kind, &en.type_params, vec![]);
                     }
                     ast::Item::Extern(e) => {
                         let dir = self.mods[m].path.parent().unwrap().to_path_buf();
@@ -846,7 +798,6 @@ impl Checker {
         ctx.tspans = (p.decl.sig.type_params.iter())
             .map(|t| (t.name.clone(), t.span))
             .collect();
-        ctx.is_never = ret == NEVER;
         self.fns.push(ctx);
         self.ix.scopes.push(p.decl.body.span);
         let pids: Vec<_> = (p.decl.sig.params.iter().zip(&params))
@@ -1124,14 +1075,7 @@ impl Checker {
     }
 
     fn types_name(&self, base: &str, args: &[TyId]) -> String {
-        format!(
-            "{}<{}>",
-            base,
-            args.iter()
-                .map(|a| self.types.show(*a))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
+        format!("{base}<{}>", self.types.show_list(args))
     }
 
     fn instantiate_type(

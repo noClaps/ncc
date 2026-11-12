@@ -9,8 +9,9 @@ use crate::diag::Span;
 use crate::tir::{FuncId, GlobalId, LocalId};
 use crate::types::*;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum DeclKind {
+    #[default]
     Variable,
     Function,
     Struct,
@@ -20,7 +21,7 @@ pub enum DeclKind {
     Variant,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct SymDecl {
     pub name: String,
     /// the declaration; references point at it by this span
@@ -217,9 +218,7 @@ impl Checker {
     pub fn idx_fn_decl(&mut self, name: &str, span: Span, alias: Option<&str>, sig: Sig) {
         let shown = alias.map_or_else(|| name.to_string(), |a| format!("{a}.{name}"));
         let (detail, _) = sig.label(&shown);
-        let before = self.ix.index.decls.len();
-        self.idx_decl(name, span, span, DeclKind::Function, detail, vec![]);
-        if let Some(d) = self.ix.index.decls.get_mut(before) {
+        if let Some(d) = self.idx_decl(name, span, span, DeclKind::Function, detail, vec![]) {
             d.type_params = (sig.type_params.iter())
                 .map(|t| t.rsplit(' ').next().unwrap_or(t).to_string())
                 .collect();
@@ -246,22 +245,12 @@ impl Checker {
 
     /// `fn add(int, int) int`
     pub fn fn_detail(&self, name: &str, f: FuncId) -> String {
-        self.fn_detail_named(name, f, &[])
-    }
-
-    /// Like `fn_detail`, with the parameter names that are known (`fn add(int a, int b) int`).
-    pub fn fn_detail_named(&self, name: &str, f: FuncId, params: &[String]) -> String {
         let (ps, r) = &self.sigs[f];
-        let ps: Vec<String> = (ps.iter().enumerate())
-            .map(|(i, p)| match params.get(i) {
-                Some(n) => format!("{} {n}", self.types.show(*p)),
-                None => self.types.show(*p),
-            })
-            .collect();
+        let ps = self.types.show_list(ps);
         if *r == VOID {
-            format!("fn {name}({})", ps.join(", "))
+            format!("fn {name}({ps})")
         } else {
-            format!("fn {name}({}) {}", ps.join(", "), self.types.show(*r))
+            format!("fn {name}({ps}) {}", self.types.show(*r))
         }
     }
 
@@ -297,16 +286,11 @@ impl Checker {
         if ps.is_empty() {
             n.to_string()
         } else {
-            format!(
-                "{n}({})",
-                ps.iter()
-                    .map(|p| self.types.show(*p))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
+            format!("{n}({})", self.types.show_list(ps))
         }
     }
 
+    /// Record a declaration (unless it is unnamed), returning it to fill in the details.
     pub fn idx_decl(
         &mut self,
         name: &str,
@@ -315,33 +299,22 @@ impl Checker {
         kind: DeclKind,
         detail: String,
         members: Vec<(String, String)>,
-    ) {
+    ) -> Option<&mut SymDecl> {
         if name == "_" || name.is_empty() {
-            return;
+            return None;
         }
+        self.idx_ref(span, Some(span), detail.clone());
+        self.ix.index.refs.last_mut().unwrap().name_span = name_span;
         self.ix.index.decls.push(SymDecl {
             name: name.to_string(),
             span,
             name_span,
             kind,
-            detail: detail.clone(),
+            detail,
             members,
-            mutable: false,
-            param: false,
-            scope: None,
-            ty: None,
-            extern_alias: None,
-            type_params: vec![],
-            field_tys: vec![],
-            sig: None,
+            ..Default::default()
         });
-        self.ix.index.refs.push(SymRef {
-            span,
-            name_span,
-            def: Some(span),
-            hover: detail,
-            type_def: None,
-        });
+        self.ix.index.decls.last_mut()
     }
 
     /// Declaration of a variable: like `idx_decl`, with its type, mutability and scope.
@@ -356,15 +329,13 @@ impl Checker {
     ) {
         let detail = self.var_detail(name, ty, mutable);
         let members = self.members_of(ty);
-        let before = self.ix.index.decls.len();
+        let type_def = self.type_def_of(ty);
         // the name ends the declaration: `int x`
         let name_span = name_suffix(span, name.len());
-        self.idx_decl(name, span, name_span, DeclKind::Variable, detail, members);
-        if self.ix.index.decls.len() == before {
+        let Some(d) = self.idx_decl(name, span, name_span, DeclKind::Variable, detail, members)
+        else {
             return;
-        }
-        let type_def = self.type_def_of(ty);
-        let d = self.ix.index.decls.last_mut().unwrap();
+        };
         d.mutable = mutable;
         d.param = param;
         d.scope = scope;
@@ -395,13 +366,8 @@ impl Checker {
 
     fn idx_typed_ref(&mut self, span: Span, def: Option<Span>, hover: String, ty: TyId) {
         let type_def = self.type_def_of(ty);
-        self.ix.index.refs.push(SymRef {
-            span,
-            name_span: span,
-            def,
-            hover,
-            type_def,
-        });
+        self.idx_ref(span, def, hover);
+        self.ix.index.refs.last_mut().unwrap().type_def = type_def;
     }
 
     /// The declaration of the struct, enum or named type inside `t` (through arrays, optionals,
@@ -512,11 +478,7 @@ impl Checker {
         };
         let (n, ps) = &def.variants[i];
         let hover = format!("{}.{}", def.name, self.variant_text(n, ps));
-        let d = self
-            .ix
-            .index
-            .variant_spans
-            .get(&t)
+        let d = (self.ix.index.variant_spans.get(&t))
             .and_then(|v| v.get(i))
             .copied();
         self.idx_ref(span, d, hover);

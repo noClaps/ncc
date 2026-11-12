@@ -282,7 +282,7 @@ impl Checker {
                 if c.is_main {
                     return err(span, "`return` outside of a function");
                 }
-                if c.is_never {
+                if c.ret == NEVER {
                     return err(span, "cannot `return` from a function declared `never`");
                 }
                 let ret = c.ret;
@@ -539,7 +539,6 @@ impl Checker {
         let tspans = self.ctx_ref().tspans.clone();
         let mut ctx = FnCtx::new(fid, m, ret, tp);
         ctx.tspans = tspans;
-        ctx.is_never = ret == NEVER;
         self.fns.push(ctx);
         let r = (|| {
             if let Some(n) = name {

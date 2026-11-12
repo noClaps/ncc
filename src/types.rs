@@ -304,6 +304,12 @@ impl Types {
         s
     }
 
+    /// The types, comma separated.
+    pub fn show_list(&self, ts: &[TyId]) -> String {
+        let shown: Vec<_> = ts.iter().map(|t| self.show(*t)).collect();
+        shown.join(", ")
+    }
+
     pub fn show(&self, t: TyId) -> String {
         match self.kind(t) {
             TyKind::Void
@@ -326,19 +332,9 @@ impl Types {
             TyKind::Map(k, v) => format!("[{}]{}", self.show(*k), self.show(*v)),
             TyKind::Opt(i) => format!("{}?", self.show(*i)),
             TyKind::ErrU(i) => format!("{}!", self.show(*i)),
-            TyKind::Tuple(ts) => format!(
-                "({})",
-                ts.iter()
-                    .map(|t| self.show(*t))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
+            TyKind::Tuple(ts) => format!("({})", self.show_list(ts)),
             TyKind::Fn(ps, r) => {
-                let ps = ps
-                    .iter()
-                    .map(|t| self.show(*t))
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let ps = self.show_list(ps);
                 if *r == VOID {
                     format!("(fn({ps}))")
                 } else {
