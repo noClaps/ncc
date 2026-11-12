@@ -1120,10 +1120,13 @@ impl Server {
         if let Some(h) = self.builtin_hover(&pp) {
             return Some(h);
         }
-        if let Some((target, range)) = self.alias_target(&pp) {
+        if let Some(alias) = self.alias_at(&pp.text_document.uri, pp.position)
+            && let Some(target) = alias.target
+        {
+            let module = alias.module_path;
             return md_hover(
-                format!("```nc\nmodule {}\n```\n\n`{}`", range.0, target.display()),
-                range.1,
+                format!("```nc\nmodule {module}\n```\n\n`{}`", target.display()),
+                alias.here,
             );
         }
         if let Some((a, r)) = self.lookup(&pp.text_document.uri, pp.position) {
@@ -1163,32 +1166,6 @@ impl Server {
         )
     }
 
-    /// The module file of an import or extern alias under the cursor, with the alias's path text
-    /// and range.
-    fn alias_target(&self, pp: &TextDocumentPositionParams) -> Option<(PathBuf, (String, Range))> {
-        let (name, ranges) = self.alias_at(&pp.text_document.uri, pp.position)?;
-        let (path, text) = self.source(&pp.text_document.uri)?;
-        let off = pos_to_offset(&text, pp.position);
-        let range = ranges
-            .into_iter()
-            .find(|r| range_contains(&text, *r, off))?;
-        let module = self.module_of(&path, &text);
-        for it in &module.items {
-            match it {
-                ast::Item::Import(im) if im.alias == name => {
-                    let target = self.analyses.get(&path)?.imports.get(&name)?.clone();
-                    return Some((target, (im.path.clone(), range)));
-                }
-                ast::Item::Extern(x) if x.alias == name => {
-                    let target = path.parent()?.join(&x.path);
-                    return Some((target, (x.path.clone(), range)));
-                }
-                _ => {}
-            }
-        }
-        None
-    }
-
     /// The analysis of a document, when it was made from the document's current text: its
     /// file id and that text.
     fn fresh(&self, uri: &Uri) -> Option<(&Analysis, u32, &str)> {
@@ -1211,7 +1188,10 @@ impl Server {
 
     fn definition(&self, p: GotoDefinitionParams) -> Option<GotoDefinitionResponse> {
         let pp = p.text_document_position_params;
-        if let Some((target, _)) = self.alias_target(&pp) {
+        if let Some(target) = self
+            .alias_at(&pp.text_document.uri, pp.position)
+            .and_then(|a| a.target)
+        {
             let start = Range::new(Position::new(0, 0), Position::new(0, 0));
             return Some(GotoDefinitionResponse::Scalar(Location::new(
                 path_to_uri(&target),
@@ -1422,7 +1402,7 @@ impl Server {
     /// The import alias or symbol at a position: its name and its occurrences in the document.
     fn ranges_here(&self, uri: &Uri, pos: Position) -> Option<(String, Vec<Range>)> {
         if let Some(alias) = self.alias_at(uri, pos) {
-            return Some(alias);
+            return Some((alias.name, alias.ranges));
         }
         let path = uri_to_path(uri)?;
         let (key, name) = self.symbol_at(uri, pos)?;
@@ -1435,11 +1415,10 @@ impl Server {
 
     fn references(&self, p: ReferenceParams) -> Option<Vec<Location>> {
         let pp = p.text_document_position;
-        if let Some((_, ranges)) = self.alias_at(&pp.text_document.uri, pp.position) {
+        if let Some(alias) = self.alias_at(&pp.text_document.uri, pp.position) {
             let skip = usize::from(!p.context.include_declaration);
             return Some(
-                ranges
-                    .into_iter()
+                (alias.ranges.into_iter())
                     .skip(skip)
                     .map(|r| Location::new(pp.text_document.uri.clone(), r))
                     .collect(),
@@ -1510,8 +1489,8 @@ impl Server {
                 .or_default()
                 .push(TextEdit::new(range, new.to_string()));
         };
-        if let Some((_, ranges)) = self.alias_at(&pp.text_document.uri, pp.position) {
-            for r in ranges {
+        if let Some(alias) = self.alias_at(&pp.text_document.uri, pp.position) {
+            for r in alias.ranges {
                 rename(pp.text_document.uri.clone(), r);
             }
         } else {

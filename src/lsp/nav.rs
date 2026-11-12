@@ -13,6 +13,16 @@ use crate::ast::visit::{Node, walk};
 use crate::check::index::{Call, DeclKind};
 use crate::diag::Span;
 
+/// An import or extern alias: its name, every occurrence in the file (the declaration first),
+/// the occurrence under the cursor, the module's path as written and its file, when known.
+pub(super) struct Alias {
+    pub name: String,
+    pub ranges: Vec<Range>,
+    pub here: Range,
+    pub module_path: String,
+    pub target: Option<PathBuf>,
+}
+
 impl Server {
     pub(super) fn type_definition(
         &self,
@@ -38,30 +48,44 @@ impl Server {
         )))
     }
 
-    /// An import or extern alias at a position: its name and every occurrence in the file
-    /// (the declaration first).
-    pub(super) fn alias_at(&self, uri: &Uri, pos: Position) -> Option<(String, Vec<Range>)> {
+    /// The import or extern alias at a position.
+    pub(super) fn alias_at(&self, uri: &Uri, pos: Position) -> Option<Alias> {
         let (path, text) = self.source(uri)?;
         let off = pos_to_offset(&text, pos);
         let (s, e) = super::word_at(&text, off)?;
         let name = &text[s..e];
         let module = self.module_of(&path, &text);
-        let decl = module.items.iter().find_map(|it| match it {
-            ast::Item::Import(im) if im.alias == name => Some(im.alias_span),
-            ast::Item::Extern(x) if x.alias == name => Some(x.alias_span),
+        let (decl, module_path, target) = module.items.iter().find_map(|it| match it {
+            ast::Item::Import(im) if im.alias == name => {
+                let a = self.analyses.get(&path);
+                let target = a.and_then(|a| a.imports.get(name)).cloned();
+                Some((im.alias_span, &im.path, target))
+            }
+            ast::Item::Extern(x) if x.alias == name => Some((
+                x.alias_span,
+                &x.path,
+                path.parent().map(|d| d.join(&x.path)),
+            )),
             _ => None,
         })?;
-        let mut out = vec![span_range(&text, decl)];
+        let mut ranges = vec![span_range(&text, decl)];
         let (toks, _) = crate::lexer::lex_all(&text, 0, 0);
         qualifier_uses(&toks, &mut |n, sp| {
             if n == name {
-                out.push(span_range(&text, sp));
+                ranges.push(span_range(&text, sp));
             }
         });
         // the cursor must be on one of them
-        out.iter()
-            .any(|r| super::range_contains(&text, *r, off))
-            .then(|| (name.to_string(), out))
+        let &here = ranges
+            .iter()
+            .find(|r| super::range_contains(&text, **r, off))?;
+        Some(Alias {
+            name: name.to_string(),
+            ranges,
+            here,
+            module_path: module_path.clone(),
+            target,
+        })
     }
 
     /// Import paths to update when `.nc` files are renamed.
