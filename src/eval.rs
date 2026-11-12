@@ -281,33 +281,22 @@ impl<'p> Evaluator<'p> {
         locals: &[Local],
         consts: &mut HashMap<LocalId, Val>,
     ) -> Result<(), Diag> {
-        match &mut s.kind {
-            SK::Let(v, e) => {
-                self.fold_expr(e, locals, consts)?;
-                if let (Some(VarRef::Local(l)), EK::Lit(lit)) = (v, &e.kind)
-                    && !locals[*l].mutable
-                    && !locals[*l].boxed
-                    && locals[*l].kind == LocalKind::Normal
-                {
-                    consts.insert(*l, lit_to_val(lit));
-                }
-            }
-            SK::Destructure(_, e)
-            | SK::Expr(e)
-            | SK::Throw(e)
-            | SK::Assert(e)
-            | SK::Return(Some(e))
-            | SK::Break(_, Some(e)) => self.fold_expr(e, locals, consts)?,
-            SK::Assign(p, e) => {
-                self.fold_each(|f| place_indices(p, f), locals, consts)?;
+        // a lock's mutex stays a variable
+        if !matches!(s.kind, SK::Lock { .. }) {
+            for e in s.own_exprs_mut() {
                 self.fold_expr(e, locals, consts)?;
             }
-            SK::Return(None) | SK::Break(_, None) | SK::Continue(_) => {}
-            SK::While { cond: e, body, .. } | SK::For { iter: e, body, .. } => {
-                self.fold_expr(e, locals, consts)?;
-                self.fold_block(body, locals, consts);
-            }
-            SK::Lock { body: b, .. } | SK::Block(b) => self.fold_block(b, locals, consts),
+        }
+        if let SK::Let(v, e) = &s.kind
+            && let (Some(VarRef::Local(l)), EK::Lit(lit)) = (v, &e.kind)
+            && !locals[*l].mutable
+            && !locals[*l].boxed
+            && locals[*l].kind == LocalKind::Normal
+        {
+            consts.insert(*l, lit_to_val(lit));
+        }
+        if let Some(b) = s.body_mut() {
+            self.fold_block(b, locals, consts);
         }
         Ok(())
     }
@@ -657,28 +646,14 @@ impl<'p> Evaluator<'p> {
 
     /// Fold the expressions and nested blocks of `s` with what `env` knows on entry.
     fn prop_inside(&mut self, s: &mut Stmt, f: FuncId, env: &mut Env) {
-        match &mut s.kind {
-            SK::Let(_, e)
-            | SK::Destructure(_, e)
-            | SK::Expr(e)
-            | SK::Throw(e)
-            | SK::Assert(e)
-            | SK::Return(Some(e))
-            | SK::Break(_, Some(e)) => self.prop_expr(e, f, env),
-            SK::Assign(pl, e) => {
-                // a `$` in an index is unknown on its own, so it stays
-                place_indices(pl, &mut |i| self.prop_expr(i, f, env));
-                self.prop_expr(e, f, env);
-            }
-            SK::Return(None) | SK::Break(_, None) | SK::Continue(_) => {}
-            SK::While { cond: e, body, .. }
-            | SK::For { iter: e, body, .. }
-            | SK::Lock { mutex: e, body, .. } => {
-                // the loop changes what `env` no longer knows: every iteration starts alike
-                self.prop_expr(e, f, env);
-                self.prop_scoped(body, f, env);
-            }
-            SK::Block(b) => self.prop_block(b, f, env),
+        // a `$` in an index is unknown on its own, so it stays
+        for e in s.own_exprs_mut() {
+            self.prop_expr(e, f, env);
+        }
+        // the loop changes what `env` no longer knows: every iteration starts alike (blocks
+        // are propagated through by `prop_stmt`)
+        if let Some(body) = s.body_mut() {
+            self.prop_scoped(body, f, env);
         }
     }
 
@@ -1320,18 +1295,6 @@ impl<'p> Evaluator<'p> {
             self.str_into(s, x, ty)?;
         }
         Ok(())
-    }
-}
-
-/// Call `f` with each index expression of a place, innermost first.
-fn place_indices(p: &mut Place, f: &mut dyn FnMut(&mut Expr)) {
-    match p {
-        Place::Var(_) => {}
-        Place::Field(b, _) | Place::TupleIndex(b, _) => place_indices(b, f),
-        Place::Index(b, i) => {
-            place_indices(b, f);
-            f(i);
-        }
     }
 }
 
