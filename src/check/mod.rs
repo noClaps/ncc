@@ -602,30 +602,11 @@ impl Checker {
         }
     }
 
+    /// An error if the struct `ty` contains itself by value. Optionals that contain themselves
+    /// are boxed; arrays, maps and enums are on the heap.
     fn check_finite(&self, ty: TyId, span: Span) -> Result<()> {
-        fn walk(t: &Types, cur: TyId, target: TyId, first: bool, seen: &mut Vec<TyId>) -> bool {
-            if !first && cur == target {
-                return true;
-            }
-            if seen.contains(&cur) {
-                return false;
-            }
-            seen.push(cur);
-            let r = match t.kind(cur) {
-                TyKind::Named(_) => walk(t, t.base(cur), target, false, seen),
-                TyKind::Tuple(ts) => ts.iter().any(|x| walk(t, *x, target, false, seen)),
-                TyKind::ErrU(i) => walk(t, *i, target, false, seen),
-                TyKind::Struct(i) => t.structs[*i as usize]
-                    .fields
-                    .iter()
-                    .any(|(_, x)| walk(t, *x, target, false, seen)),
-                // optionals that contain themselves are boxed; arrays, maps and enums are on the heap
-                _ => false,
-            };
-            seen.pop();
-            r
-        }
-        if walk(&self.types, ty, ty, true, &mut vec![]) {
+        let fields = &self.types.struct_def(ty).unwrap().fields;
+        if (fields.iter()).any(|f| self.types.contains_by_value(f.1, ty, false, &mut vec![])) {
             return err(
                 span,
                 format!(
@@ -1200,26 +1181,19 @@ impl Checker {
                     .map(|a| self.resolve_targ(a, m, tp))
                     .collect::<Result<Vec<_>>>()?;
                 let resolved = match self.lookup_sym(m, module.as_deref(), name, *span)? {
-                    Some((dm, Sym::Struct { decl, ty } | Sym::Enum { decl, ty })) => {
-                        if let Some(t) = ty {
-                            if !targs.is_empty() {
-                                return err(
-                                    *span,
-                                    format!("`{name}` does not take type arguments"),
-                                );
-                            }
-                            t
-                        } else {
-                            if targs.is_empty() {
-                                return err(
-                                    *span,
-                                    format!("generic type `{name}` requires type arguments"),
-                                );
-                            }
-                            self.instantiate_type(dm, decl, targs, *span)?
+                    Some((dm, Sym::Struct { decl, ty: None } | Sym::Enum { decl, ty: None })) => {
+                        if targs.is_empty() {
+                            let msg = format!("generic type `{name}` requires type arguments");
+                            return err(*span, msg);
                         }
+                        self.instantiate_type(dm, decl, targs, *span)?
                     }
-                    Some((_, Sym::Type(t))) => {
+                    Some((
+                        _,
+                        Sym::Struct { ty: Some(t), .. }
+                        | Sym::Enum { ty: Some(t), .. }
+                        | Sym::Type(t),
+                    )) => {
                         if !targs.is_empty() {
                             return err(*span, format!("`{name}` does not take type arguments"));
                         }

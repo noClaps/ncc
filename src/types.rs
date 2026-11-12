@@ -245,13 +245,20 @@ impl Types {
     /// Optionals of a type that (by value) contains the optional itself are heap allocated.
     pub fn opt_boxed(&self, t: TyId) -> bool {
         match self.kind(t) {
-            TyKind::Opt(inner) => self.contains_by_value(*inner, t, &mut vec![]),
+            TyKind::Opt(inner) => self.contains_by_value(*inner, t, true, &mut vec![]),
             _ => false,
         }
     }
 
-    /// Does `t` contain `target` by value (not behind a heap pointer)?
-    fn contains_by_value(&self, t: TyId, target: TyId, seen: &mut Vec<TyId>) -> bool {
+    /// Does `t` contain `target` by value (not behind a heap pointer)? Optionals are only
+    /// looked into with `opts`.
+    pub fn contains_by_value(
+        &self,
+        t: TyId,
+        target: TyId,
+        opts: bool,
+        seen: &mut Vec<TyId>,
+    ) -> bool {
         if t == target {
             return true;
         }
@@ -260,13 +267,16 @@ impl Types {
         }
         seen.push(t);
         let r = match self.kind(t) {
-            TyKind::Named(_) => self.contains_by_value(self.base(t), target, seen),
-            TyKind::Tuple(ts) => ts.iter().any(|x| self.contains_by_value(*x, target, seen)),
+            TyKind::Named(_) => self.contains_by_value(self.base(t), target, opts, seen),
+            TyKind::Tuple(ts) => {
+                (ts.iter()).any(|x| self.contains_by_value(*x, target, opts, seen))
+            }
             TyKind::Struct(i) => (self.structs[*i as usize].fields.iter())
-                .any(|f| self.contains_by_value(f.1, target, seen)),
-            // a boxed optional breaks the cycle, but boxedness is what is being computed:
-            // optionals count as by-value containers here
-            TyKind::Opt(i) | TyKind::ErrU(i) => self.contains_by_value(*i, target, seen),
+                .any(|f| self.contains_by_value(f.1, target, opts, seen)),
+            // a boxed optional breaks the cycle, but boxedness is what `opt_boxed` computes:
+            // there, optionals count as by-value containers
+            TyKind::Opt(i) if opts => self.contains_by_value(*i, target, opts, seen),
+            TyKind::ErrU(i) => self.contains_by_value(*i, target, opts, seen),
             _ => false,
         };
         seen.pop();
@@ -363,6 +373,11 @@ impl Types {
             args: args.iter().map(|a| self.to_type_expr(*a)).collect(),
             span: sp,
         };
+        // an instance of a generic is written with its arguments
+        let nominal = |generic: &Option<(String, Vec<TyId>)>| match generic {
+            Some((n, args)) => named(n.clone(), args),
+            None => named(self.show(t), &[]),
+        };
         match self.kind(t) {
             TyKind::Array(e) => T::Array(b(*e), None, sp),
             TyKind::Fixed(e, n) => {
@@ -384,14 +399,8 @@ impl Types {
             ),
             TyKind::Fut(i) => T::Fut(b(*i), sp),
             TyKind::Const(_, v) => T::Const(ConstExpr::Int(*v as u128, sp)),
-            TyKind::Struct(i) => match &self.structs[*i as usize].generic {
-                Some((n, args)) => named(n.clone(), args),
-                None => named(self.show(t), &[]),
-            },
-            TyKind::Enum(i) => match &self.enums[*i as usize].generic {
-                Some((n, args)) => named(n.clone(), args),
-                None => named(self.show(t), &[]),
-            },
+            TyKind::Struct(i) => nominal(&self.structs[*i as usize].generic),
+            TyKind::Enum(i) => nominal(&self.enums[*i as usize].generic),
             // builtins, aliases and mutexes, written as they show
             _ => named(self.show(t), &[]),
         }
