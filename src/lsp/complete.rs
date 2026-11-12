@@ -371,15 +371,23 @@ impl Server {
                 }
                 _ => false,
             };
-            let postfix = if is_value && self.snippets {
-                postfix_items(&text, start, dot, off)
-            } else {
-                vec![]
+            // a receiver on one line, which some completions move into what they insert
+            let receiver = &text[start..dot];
+            let recv = (!receiver.contains('\n')).then(|| {
+                (
+                    receiver,
+                    snippet_escape(receiver),
+                    super::range(&text, start, off),
+                )
+            });
+            let postfix = match &recv {
+                Some(r) if is_value && self.snippets => postfix_items(r),
+                _ => vec![],
             };
             if let Some((mut items, ty)) = self.member_items(a, fid, dot, &chain, ins) {
                 // functions taking the value as their first argument: `v.f` -> `f(v, ...)`
-                if let Some(ty) = ty {
-                    items.extend(self.first_arg_items(a, fid, &text, start, dot, off, &ty));
+                if let (Some(ty), Some(r)) = (ty, &recv) {
+                    items.extend(self.first_arg_items(a, fid, dot, r, &ty));
                 }
                 items.extend(postfix);
                 return Some(items);
@@ -755,21 +763,14 @@ impl Server {
     /// and inserted as a call with the receiver as the first argument: `v.add` -> `add(v, ...)`.
     /// Covers functions in scope, public functions of imported modules and extern functions;
     /// a generic function's type arguments are inferred from the receiver where possible.
-    #[allow(clippy::too_many_arguments)]
     fn first_arg_items(
         &self,
         a: &Analysis,
         fid: u32,
-        text: &str,
-        start: usize,
         dot: usize,
-        off: usize,
+        (receiver, escaped, range): &Receiver,
         ty: &T,
     ) -> Vec<CompletionItem> {
-        let receiver = &text[start..dot];
-        if receiver.contains('\n') {
-            return vec![];
-        }
         // (declaration, qualifier)
         let mut cands: Vec<(&SymDecl, Option<String>)> = visible(a, fid, dot)
             .into_iter()
@@ -792,8 +793,6 @@ impl Server {
                 }
             }
         }
-        let escaped = snippet_escape(receiver);
-        let range = super::range(text, start, off);
         let mut out = Vec::new();
         for (d, qual) in cands {
             let Some(ps) = d.sig.as_ref().map(|s| &s.params) else {
@@ -840,7 +839,7 @@ impl Server {
                 filter_text: Some(format!("{receiver}.{}", d.name)),
                 sort_text: Some(format!("5{}", d.name)),
                 insert_text_format: Some(format),
-                text_edit: Some(CompletionTextEdit::Edit(TextEdit::new(range, new_text))),
+                text_edit: Some(CompletionTextEdit::Edit(TextEdit::new(*range, new_text))),
                 command: (ps.len() > 1 && self.snippets).then(param_hints),
                 ..Default::default()
             });
@@ -1225,14 +1224,12 @@ fn snippet_escape(s: &str) -> String {
         .replace('}', "\\}")
 }
 
+/// The receiver of a completion after `.`, that as snippet text, and the range of the receiver,
+/// the dot and what is typed after it.
+type Receiver<'t> = (&'t str, String, Range);
+
 /// Postfix completions replacing `receiver.` with a snippet around the receiver (`x.if`).
-fn postfix_items(text: &str, start: usize, dot: usize, off: usize) -> Vec<CompletionItem> {
-    let receiver = &text[start..dot];
-    if receiver.contains('\n') {
-        return vec![];
-    }
-    let escaped = snippet_escape(receiver);
-    let range = super::range(text, start, off);
+fn postfix_items((receiver, escaped, range): &Receiver) -> Vec<CompletionItem> {
     POSTFIX
         .iter()
         .map(|(label, tmpl, desc)| CompletionItem {
@@ -1248,8 +1245,8 @@ fn postfix_items(text: &str, start: usize, dot: usize, off: usize) -> Vec<Comple
             sort_text: Some(format!("9{label}")),
             insert_text_format: Some(InsertTextFormat::SNIPPET),
             text_edit: Some(CompletionTextEdit::Edit(TextEdit::new(
-                range,
-                tmpl.replace("{r}", &escaped),
+                *range,
+                tmpl.replace("{r}", escaped),
             ))),
             ..Default::default()
         })
