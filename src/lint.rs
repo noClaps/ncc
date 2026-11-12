@@ -6,38 +6,32 @@ use crate::check::flow;
 use crate::diag::{Diag, Span};
 use crate::tir::*;
 
-/// Shared mutable state touched by a function: (variable name, access location).
-fn shared_accesses(p: &Program, f: FuncId) -> Vec<(String, Span)> {
+/// The first shared mutable variable a function reads or assigns: a mutable global or a
+/// captured reference.
+fn shared_access(p: &Program, f: FuncId) -> Option<&str> {
     let func = &p.funcs[f];
-    // the name of a shared mutable variable: a mutable global or a captured reference
-    let shared = |v: VarRef| match v {
-        VarRef::Global(g) if p.globals[g].mutable => Some(p.globals[g].name.clone()),
-        VarRef::Local(l) if matches!(func.locals[l].kind, LocalKind::CapRef(_)) => {
-            Some(func.locals[l].name.clone())
-        }
-        _ => None,
-    };
-    let mut out = Vec::new();
+    let mut vars = Vec::new();
     for s in &func.body.stmts {
         flow::visit_stmt(s, &mut |e| {
-            if let EK::Var(v) = e.kind
-                && let Some(name) = shared(v)
-            {
-                out.push((name, e.span));
+            if let EK::Var(v) = e.kind {
+                vars.push(v);
             }
         });
     }
-    // assignment targets
     for s in &func.body.stmts {
         flow::visit_stmts(s, &mut |s| {
-            if let SK::Assign(pl, _) = &s.kind
-                && let Some(name) = flow::place_root(pl).and_then(shared)
-            {
-                out.push((name, s.span));
+            if let SK::Assign(pl, _) = &s.kind {
+                vars.extend(flow::place_root(pl));
             }
         });
     }
-    out
+    vars.into_iter().find_map(|v| match v {
+        VarRef::Global(g) if p.globals[g].mutable => Some(p.globals[g].name.as_str()),
+        VarRef::Local(l) if matches!(func.locals[l].kind, LocalKind::CapRef(_)) => {
+            Some(func.locals[l].name.as_str())
+        }
+        _ => None,
+    })
 }
 
 fn callees(p: &Program, f: FuncId) -> Vec<FuncId> {
@@ -67,15 +61,16 @@ pub fn race_warnings(p: &Program) -> Vec<Diag> {
             // transitive closure of reachable functions
             let mut stack = vec![target];
             let mut visited = HashSet::new();
-            let mut hits = Vec::new();
-            while let Some(g) = stack.pop() {
-                if !visited.insert(g) {
-                    continue;
+            let mut hit = None;
+            while hit.is_none()
+                && let Some(g) = stack.pop()
+            {
+                if visited.insert(g) {
+                    hit = shared_access(p, g);
+                    stack.extend(callees(p, g));
                 }
-                hits.extend(shared_accesses(p, g));
-                stack.extend(callees(p, g));
             }
-            if let Some((name, _)) = hits.first()
+            if let Some(name) = hit
                 && seen.insert(span)
             {
                 warnings.push(Diag::new(
