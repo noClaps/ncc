@@ -27,6 +27,7 @@ mod hints;
 pub mod nav;
 mod refactor;
 mod ssr;
+mod tyexpr;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -44,60 +45,93 @@ use lsp_types::*;
 
 use crate::ast;
 use crate::check::index::{DeclKind, Index};
-use crate::diag::{SourceMap, Span};
+use crate::diag::{SourceMap, Span, codes};
 use crate::lexer::Tok;
 /// The identifier itself within a reference or declaration span: types and `struct`/`enum`/`type`
 /// declarations put the name first (`Matrix<int>`), everything else ends with it (`p.x`).
-use crate::lint::name_in as name_span;
-
 use crate::parser::KEYWORDS;
 /// Builtin functions: name, signature and documentation.
-const BUILTINS: &[(&str, &str, &str)] = &[
-    (
-        "print",
-        "fn @print(...)",
-        "Prints its arguments to standard output, without a trailing newline.",
-    ),
-    (
-        "println",
-        "fn @println(...)",
-        "Prints its arguments to standard output, followed by a newline.",
-    ),
-    (
-        "eprint",
-        "fn @eprint(...)",
-        "Prints its arguments to standard error, without a trailing newline.",
-    ),
-    (
-        "eprintln",
-        "fn @eprintln(...)",
-        "Prints its arguments to standard error, followed by a newline.",
-    ),
-    (
-        "as",
-        "fn @as(type T, value) T",
-        "Converts `value` to the type `T`. Conversions that can lose information throw at runtime.",
-    ),
-    (
-        "args",
-        "fn @args() str[]",
-        "The command-line arguments of the program, starting with the program name.",
-    ),
-    (
-        "env",
-        "fn @env() [str]str",
-        "The environment variables of the process.",
-    ),
-    (
-        "target",
-        "fn @target() (str, str)",
-        "The `(os, arch)` the program was compiled for, with Rust-style names such as `(\"macos\", \"aarch64\")`. Decided at compile time.",
-    ),
-    (
-        "embed",
-        "fn @embed(path) byte[]",
-        "The contents of a file, read at compile time. The path is resolved like a relative import: `./`, `../` or `.../` (the project root).",
-    ),
+/// A builtin function (`@name`).
+struct Builtin {
+    name: &'static str,
+    params: &'static [&'static str],
+    /// the return type, empty for none
+    ret: &'static str,
+    doc: &'static str,
+}
+
+impl Builtin {
+    fn sig(&self) -> crate::check::index::Sig {
+        crate::check::index::Sig {
+            type_params: vec![],
+            params: (self.params.iter())
+                .map(|p| (None, p.to_string()))
+                .collect(),
+            ret: crate::parser::parse_type_text(self.ret),
+        }
+    }
+
+    /// `fn @as(type T, value) T`
+    fn label(&self) -> String {
+        self.sig().label(&format!("@{}", self.name)).0
+    }
+}
+
+const BUILTINS: &[Builtin] = &[
+    Builtin {
+        name: "print",
+        params: &["..."],
+        ret: "",
+        doc: "Prints its arguments to standard output, without a trailing newline.",
+    },
+    Builtin {
+        name: "println",
+        params: &["..."],
+        ret: "",
+        doc: "Prints its arguments to standard output, followed by a newline.",
+    },
+    Builtin {
+        name: "eprint",
+        params: &["..."],
+        ret: "",
+        doc: "Prints its arguments to standard error, without a trailing newline.",
+    },
+    Builtin {
+        name: "eprintln",
+        params: &["..."],
+        ret: "",
+        doc: "Prints its arguments to standard error, followed by a newline.",
+    },
+    Builtin {
+        name: "as",
+        params: &["type T", "value"],
+        ret: "T",
+        doc: "Converts `value` to the type `T`. Conversions that can lose information throw at runtime.",
+    },
+    Builtin {
+        name: "args",
+        params: &[],
+        ret: "str[]",
+        doc: "The command-line arguments of the program, starting with the program name.",
+    },
+    Builtin {
+        name: "env",
+        params: &[],
+        ret: "[str]str",
+        doc: "The environment variables of the process.",
+    },
+    Builtin {
+        name: "target",
+        params: &[],
+        ret: "(str, str)",
+        doc: "The `(os, arch)` the program was compiled for, with Rust-style names such as `(\"macos\", \"aarch64\")`. Decided at compile time.",
+    },
+    Builtin {
+        name: "embed",
+        params: &["path"],
+        ret: "byte[]",
+        doc: "The contents of a file, read at compile time. The path is resolved like a relative import: `./`, `../` or `.../` (the project root).",
+    },
 ];
 
 /// A document symbol, serialized like `DocumentSymbol` but without its deprecated
@@ -119,6 +153,8 @@ struct DocSymbol {
 struct Analysis {
     sm: SourceMap,
     index: Index,
+    /// the types the index refers to
+    types: crate::types::Types,
     /// import alias -> module path, from the last successful load
     imports: HashMap<String, PathBuf>,
     /// declaration index by span
@@ -128,6 +164,22 @@ struct Analysis {
 }
 
 impl Analysis {
+    fn show(&self, t: crate::types::TyId) -> String {
+        self.types.show(t)
+    }
+
+    /// The variants of the enum declared by `d`: name and number of payload values.
+    fn variants(&self, d: &crate::check::index::SymDecl) -> Vec<(String, usize)> {
+        (d.ty.and_then(|t| self.types.enum_def(t)).into_iter())
+            .flat_map(|e| e.variants.iter().map(|(n, ps)| (n.clone(), ps.len())))
+            .collect()
+    }
+
+    /// The members reachable with `.` on values of type `t`.
+    fn members(&self, t: crate::types::TyId) -> Vec<crate::check::index::Member> {
+        self.index.members(&self.types, t)
+    }
+
     /// The type of the expression spanning `start..end` in file `fid`.
     fn expr_ty(&self, fid: u32, start: u32, end: u32) -> Option<&crate::check::index::ExprTy> {
         self.index
@@ -184,10 +236,14 @@ struct Server {
     /// the diagnostics found by analysing each entry, by file; a file shows the union of what
     /// every entry found in it
     published: HashMap<PathBuf, Vec<(PathBuf, Diagnostic)>>,
+    /// for each file, the entries whose analysis found diagnostics in it (keys of `published`)
+    reported_by: HashMap<PathBuf, HashSet<PathBuf>>,
     /// workspace folders, searched for `.nc` files on workspace-wide requests
     roots: Vec<PathBuf>,
-    /// whether the workspace's files that are not open have been analysed
-    workspace_indexed: bool,
+    /// whether the workspace's files have been listed for analysis
+    workspace_queued: bool,
+    /// workspace files still to analyse, in the background
+    unindexed: Vec<PathBuf>,
     /// the client accepts snippets in completions
     snippets: bool,
     /// notifications to send after the current message
@@ -196,6 +252,12 @@ struct Server {
     versions: HashMap<PathBuf, i32>,
     /// the client pulls the diagnostics of open documents (`textDocument/diagnostic`)
     pull: bool,
+    /// modules parsed by earlier analyses
+    parses: crate::modules::ParseCache,
+    /// the syntax tree of each document, for the version (or, when not open, the text) it had
+    asts: std::cell::RefCell<HashMap<PathBuf, DocAst>>,
+    /// modules each directory's files could import, until files change
+    importable: std::cell::RefCell<HashMap<PathBuf, ImportableScan>>,
 }
 
 pub fn run() -> ExitCode {
@@ -304,11 +366,29 @@ pub fn run() -> ExitCode {
         });
         connection.initialize_finish(id, init)?;
         // (`initialize_finish` has consumed the `initialized` notification)
-        server.index_workspace();
-        for out in std::mem::take(&mut server.outbox) {
-            connection.sender.send(Message::Notification(out))?;
-        }
-        for msg in &connection.receiver {
+        // diagnostics for the whole workspace, not only open files: its files are analysed a
+        // few at a time while no message is waiting
+        server.queue_workspace();
+        let mut waiting = std::collections::VecDeque::new();
+        loop {
+            // take what has arrived, so that a burst of notifications is handled at once
+            while let Ok(m) = connection.receiver.try_recv() {
+                waiting.push_back(m);
+            }
+            if waiting.is_empty() && !server.unindexed.is_empty() {
+                server.index_some(4);
+                for out in std::mem::take(&mut server.outbox) {
+                    connection.sender.send(Message::Notification(out))?;
+                }
+                continue;
+            }
+            let msg = match waiting.pop_front() {
+                Some(m) => m,
+                None => match connection.receiver.recv() {
+                    Ok(m) => m,
+                    Err(_) => break,
+                },
+            };
             match msg {
                 Message::Request(req) => {
                     if connection.handle_shutdown(&req)? {
@@ -331,8 +411,29 @@ pub fn run() -> ExitCode {
                     connection.sender.send(Message::Response(resp))?;
                 }
                 Message::Notification(n) => {
+                    // edits arrive in bursts: take the notifications already waiting too
+                    let mut batch = vec![n];
+                    while let Some(Message::Notification(_)) = waiting.front() {
+                        let Some(Message::Notification(n)) = waiting.pop_front() else {
+                            unreachable!()
+                        };
+                        batch.push(n);
+                    }
+                    // typing sends an edit per key: wait a moment for the next one, unless a
+                    // request is waiting for the analysis
+                    while waiting.is_empty()
+                        && batch
+                            .last()
+                            .is_some_and(|n| n.method == DidChangeTextDocument::METHOD)
+                    {
+                        match connection.receiver.recv_timeout(DEBOUNCE) {
+                            Ok(Message::Notification(n)) => batch.push(n),
+                            Ok(m) => waiting.push_back(m),
+                            Err(_) => break,
+                        }
+                    }
                     let outs = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        server.notification(n)
+                        server.notifications(batch)
                     }))
                     .unwrap_or_default();
                     server.outbox.splice(0..0, outs);
@@ -377,7 +478,21 @@ fn uri_to_path(uri: &Uri) -> Option<PathBuf> {
         i += 1;
     }
     let p = PathBuf::from(String::from_utf8(out).ok()?);
-    Some(std::fs::canonicalize(&p).unwrap_or(p))
+    // a request resolves its document several times: remember the paths of files that exist
+    thread_local! {
+        static RESOLVED: std::cell::RefCell<HashMap<PathBuf, PathBuf>> =
+            std::cell::RefCell::new(HashMap::new());
+    }
+    if let Some(c) = RESOLVED.with_borrow(|r| r.get(&p).cloned()) {
+        return Some(c);
+    }
+    match std::fs::canonicalize(&p) {
+        Ok(c) => {
+            RESOLVED.with_borrow_mut(|r| r.insert(p, c.clone()));
+            Some(c)
+        }
+        Err(_) => Some(p),
+    }
 }
 
 fn path_to_uri(p: &Path) -> Uri {
@@ -402,6 +517,37 @@ fn offset_to_pos(text: &str, offset: usize) -> Position {
         .encode_utf16()
         .count();
     Position::new(line as u32, col as u32)
+}
+
+/// Converts mostly increasing byte offsets to LSP positions without rescanning the text from
+/// the start each time.
+struct Positions<'a> {
+    text: &'a str,
+    off: usize,
+    line: u32,
+}
+
+impl<'a> Positions<'a> {
+    fn new(text: &'a str) -> Self {
+        Self {
+            text,
+            off: 0,
+            line: 0,
+        }
+    }
+
+    fn at(&mut self, offset: usize) -> Position {
+        let offset = offset.min(self.text.len());
+        if offset < self.off {
+            (self.off, self.line) = (0, 0);
+        }
+        self.line += self.text[self.off..offset].matches('\n').count() as u32;
+        self.off = offset;
+        let col = self.text[line_start(self.text, offset)..offset]
+            .encode_utf16()
+            .count();
+        Position::new(self.line, col as u32)
+    }
 }
 
 /// LSP position -> byte offset.
@@ -506,45 +652,96 @@ impl Server {
             .collect();
     }
 
-    /// Analyse every `.nc` file of the workspace that is not analysed yet (once), so that
-    /// workspace-wide requests see the files that are not open.
-    fn index_workspace(&mut self) {
-        if self.workspace_indexed {
+    /// List the workspace's `.nc` files (once), to analyse so that workspace-wide requests and
+    /// diagnostics cover the files that are not open.
+    fn queue_workspace(&mut self) {
+        if self.workspace_queued {
             return;
         }
-        self.workspace_indexed = true;
+        self.workspace_queued = true;
         let mut files = Vec::new();
         for root in self.roots.clone() {
-            collect_nc_files(&root, false, &mut files, 0);
+            collect_nc_files(&root, false, &mut files, &mut vec![], 0);
         }
-        let files: Vec<PathBuf> = files
-            .into_iter()
-            .take(1000)
+        self.unindexed = (files.into_iter().take(1000))
             .map(|f| std::fs::canonicalize(&f).unwrap_or(f))
-            .filter(|f| !self.analyses.contains_key(f))
             .collect();
+    }
+
+    /// Analyse up to `n` of the workspace files not analysed yet.
+    fn index_some(&mut self, n: usize) {
+        self.queue_workspace();
+        let mut files = Vec::new();
+        while files.len() < n
+            && let Some(f) = self.unindexed.pop()
+        {
+            if !self.analyses.contains_key(&f) {
+                files.push(f);
+            }
+        }
         let out = self.refresh(files);
         self.outbox.extend(out);
     }
 
+    /// Analyse all of the workspace files not analysed yet.
+    fn index_workspace(&mut self) {
+        self.index_some(usize::MAX);
+    }
+
     /// The diagnostics of a file: the union of what every analysis found in it.
     fn diagnostics_of(&self, file: &Path) -> Vec<Diagnostic> {
-        let mut diags: Vec<Diagnostic> = self
-            .published
-            .values()
-            .flatten()
+        let diags = (self.reported_by.get(file).into_iter().flatten())
+            .flat_map(|entry| self.published.get(entry).into_iter().flatten())
             .filter(|(f, _)| f == file)
             .map(|(_, d)| d.clone())
             .collect();
-        diags.sort_by(|a, b| {
-            (a.range.start.line, a.range.start.character, &a.message).cmp(&(
-                b.range.start.line,
-                b.range.start.character,
-                &b.message,
-            ))
-        });
-        diags.dedup_by(|a, b| a.range == b.range && a.message == b.message);
-        diags
+        sort_diagnostics(diags)
+    }
+
+    /// Modules `file` could import, as (name, import path), best first.
+    fn importable_modules(&self, file: &Path) -> Importable {
+        let Some(dir) = file.parent() else {
+            return std::rc::Rc::new([]);
+        };
+        let mut cache = self.importable.borrow_mut();
+        // files appearing, going or being renamed change their directory
+        let fresh = cache
+            .get(dir)
+            .is_some_and(|c| c.dirs.iter().all(|(d, t)| modified(d) == *t));
+        if !fresh {
+            let (modules, dirs) = actions::importable_modules(dir);
+            let dirs = dirs.into_iter().map(|d| {
+                let t = modified(&d);
+                (d, t)
+            });
+            let scan = ImportableScan {
+                modules: modules.into(),
+                dirs: dirs.collect(),
+            };
+            cache.insert(dir.to_path_buf(), scan);
+        }
+        let all = std::rc::Rc::clone(&cache[dir].modules);
+        drop(cache);
+        // a file does not import itself
+        let me = file
+            .file_stem()
+            .map(|n| format!("./{}", n.to_string_lossy()));
+        if all.iter().any(|(_, p)| Some(p) == me.as_ref()) {
+            all.iter()
+                .filter(|(_, p)| Some(p) != me.as_ref())
+                .cloned()
+                .collect()
+        } else {
+            all
+        }
+    }
+
+    /// Import paths of modules named `name` that `file` could import.
+    fn find_modules(&self, file: &Path, name: &str) -> Vec<String> {
+        (self.importable_modules(file).iter())
+            .filter(|(n, _)| n == name)
+            .map(|(_, p)| p.clone())
+            .collect()
     }
 
     /// Files whose analysis includes `path` (they import it, directly or not).
@@ -564,8 +761,15 @@ impl Server {
             if !done.insert(entry.clone()) {
                 continue;
             }
-            let old = self.published.remove(&entry).unwrap_or_default();
-            touched.extend(old.into_iter().map(|(f, _)| f));
+            for (f, _) in self.published.remove(&entry).unwrap_or_default() {
+                if let Some(entries) = self.reported_by.get_mut(&f) {
+                    entries.remove(&entry);
+                    if entries.is_empty() {
+                        self.reported_by.remove(&f);
+                    }
+                }
+                touched.insert(f);
+            }
             touched.insert(entry.clone());
             if !self.docs.contains_key(&entry) && !entry.is_file() {
                 // deleted: forget it
@@ -573,52 +777,95 @@ impl Server {
                 continue;
             }
             let diags = self.analyze(&entry);
-            touched.extend(diags.iter().map(|(f, _)| f.clone()));
+            for (f, _) in &diags {
+                touched.insert(f.clone());
+                (self.reported_by.entry(f.clone()).or_default()).insert(entry.clone());
+            }
             self.published.insert(entry, diags);
         }
-        let mut out = Vec::new();
-        for file in touched {
-            let diags = self.diagnostics_of(&file);
-            if self.pull && self.docs.contains_key(&file) {
-                continue;
-            }
-            let version = self.versions.get(&file).copied();
-            out.push(publish(&file, diags, version));
-        }
-        out
+        touched.retain(|f| !(self.pull && self.docs.contains_key(f)));
+        (touched.iter())
+            .map(|file| {
+                let version = self.versions.get(file).copied();
+                publish(file, self.diagnostics_of(file), version)
+            })
+            .collect()
     }
 
-    fn text_of(&self, path: &Path) -> Option<String> {
-        self.docs
-            .get(path)
-            .cloned()
-            .or_else(|| std::fs::read_to_string(path).ok())
+    /// The syntax tree of the document at `path`, whose text is `text`: parsed once per
+    /// version of an open document (analysing it parses it), and once per text otherwise.
+    fn module_of(&self, path: &Path, text: &str) -> std::rc::Rc<ast::Module> {
+        let version = self.versions.get(path).copied();
+        let mut asts = self.asts.borrow_mut();
+        if let Some((v, t, module)) = asts.get(path)
+            && *v == version
+            && (version.is_some() || t.as_deref() == Some(text))
+        {
+            return std::rc::Rc::clone(module);
+        }
+        let module = std::rc::Rc::new(crate::parser::parse_module_recover(text, 0).0);
+        // files that are not open are kept with their text: not too many of them
+        if version.is_none() && asts.len() >= 64 {
+            asts.retain(|_, (v, ..)| v.is_some());
+        }
+        let text = version.is_none().then(|| text.to_string());
+        asts.insert(
+            path.to_path_buf(),
+            (version, text, std::rc::Rc::clone(&module)),
+        );
+        module
+    }
+
+    /// A file's text: the open document's, or what is on disk.
+    fn text_of(&self, path: &Path) -> Option<std::borrow::Cow<'_, str>> {
+        match self.docs.get(path) {
+            Some(t) => Some(std::borrow::Cow::Borrowed(t)),
+            None => std::fs::read_to_string(path)
+                .ok()
+                .map(std::borrow::Cow::Owned),
+        }
     }
 
     // ------------------------------------------------------------------ notifications
 
-    fn notification(&mut self, n: Notification) -> Vec<Notification> {
-        if n.method == "workspace/didChangeWatchedFiles" {
-            // files changed outside the editor: analyse them and what imports them again
-            let Ok(p) = serde_json::from_value::<DidChangeWatchedFilesParams>(n.params) else {
-                return vec![];
-            };
-            let mut entries = Vec::new();
-            for path in p.changes.iter().filter_map(|c| uri_to_path(&c.uri)) {
-                if !self.docs.contains_key(&path) {
-                    entries.extend(self.dependents(&path));
-                    entries.push(path);
-                }
+    /// Handle notifications that arrived together, analysing what they change once.
+    fn notifications(&mut self, ns: Vec<Notification>) -> Vec<Notification> {
+        let mut changed = Vec::new();
+        for n in ns {
+            if n.method == "workspace/didChangeWatchedFiles" {
+                // files changed outside the editor
+                let Ok(p) = serde_json::from_value::<DidChangeWatchedFilesParams>(n.params) else {
+                    continue;
+                };
+                changed.extend(
+                    (p.changes.iter().filter_map(|c| uri_to_path(&c.uri)))
+                        .filter(|p| !self.docs.contains_key(p)),
+                );
+            } else if n.method == DidSaveTextDocument::METHOD {
+                // the document was analysed as it is in the editor already
+            } else if let Some(path) = self.sync_document(n) {
+                changed.push(path);
             }
-            return self.refresh(entries);
         }
-        let Some(path) = self.sync_document(n) else {
+        if changed.is_empty() {
             return vec![];
-        };
-        // re-analyse the document, what imports it, and every open document
-        let mut entries = vec![path.clone()];
-        entries.extend(self.dependents(&path));
-        entries.extend(self.docs.keys().filter(|p| **p != path).cloned());
+        }
+        // the changed files, what imports them, and open documents with an import that did not
+        // resolve (it may resolve now)
+        let mut entries = changed.clone();
+        for path in &changed {
+            entries.extend(self.dependents(path));
+        }
+        entries.extend(
+            (self.docs.keys())
+                .filter(|d| {
+                    self.published.get(*d).is_some_and(|ds| {
+                        ds.iter()
+                            .any(|(_, d)| diag_code(d) == codes::MISSING_MODULE)
+                    })
+                })
+                .cloned(),
+        );
         self.refresh(entries)
     }
 
@@ -653,15 +900,12 @@ impl Server {
                 self.versions.insert(path.clone(), p.text_document.version);
                 path
             }
-            DidSaveTextDocument::METHOD => {
-                let p: DidSaveTextDocumentParams = params(n)?;
-                uri_to_path(&p.text_document.uri)?
-            }
             DidCloseTextDocument::METHOD => {
                 let p: DidCloseTextDocumentParams = params(n)?;
                 let path = uri_to_path(&p.text_document.uri)?;
                 self.docs.remove(&path);
                 self.versions.remove(&path);
+                self.asts.borrow_mut().remove(&path);
                 // the file is now analysed as it is on disk (or forgotten when it is not)
                 path
             }
@@ -676,28 +920,33 @@ impl Server {
         let mut index = None;
         let mut imports = HashMap::new();
         let mut clean = false;
+        let mut entry_ast = None;
+        let mut types = crate::types::Types::default();
         let mut loops = crate::lint::Loops::default();
-        let errors = match crate::modules::load_with(&mut sm, entry, &self.docs) {
-            Err(errs) => errs,
-            Ok((graph, mut errors)) => {
-                let loaded = errors.is_empty();
-                for (alias, &m) in &graph.modules[0].imports {
-                    imports.insert(alias.clone(), graph.modules[m].path.clone());
-                }
-                let (mut p, errs, ix) = crate::check::check(graph, true);
-                clean = loaded && errs.is_empty();
-                errors.extend(errs);
-                if let Err(errs) = crate::eval::Evaluator::run(&mut p, &sm, false) {
+        let errors =
+            match crate::modules::load_with(&mut sm, entry, &self.docs, Some(&mut self.parses)) {
+                Err(errs) => errs,
+                Ok((graph, mut errors)) => {
+                    let loaded = errors.is_empty();
+                    entry_ast = Some(std::rc::Rc::clone(&graph.modules[0].ast));
+                    for (alias, &m) in &graph.modules[0].imports {
+                        imports.insert(alias.clone(), graph.modules[m].path.clone());
+                    }
+                    let (mut p, errs, ix) = crate::check::check(graph, true);
+                    clean = loaded && errs.is_empty();
                     errors.extend(errs);
+                    if let Err(errs) = crate::eval::Evaluator::run(&mut p, &sm, false) {
+                        errors.extend(errs);
+                    }
+                    if clean {
+                        warnings = crate::lint::race_warnings(&p);
+                        loops = crate::lint::loops(&p, &sm);
+                    }
+                    index = Some(ix);
+                    types = std::mem::take(&mut p.types);
+                    errors
                 }
-                if clean {
-                    warnings = crate::lint::race_warnings(&p);
-                    loops = crate::lint::loops(&p, &sm);
-                }
-                index = Some(ix);
-                errors
-            }
-        };
+            };
         let diags = (errors.into_iter().map(|d| (d, DiagnosticSeverity::ERROR))).chain(
             warnings
                 .into_iter()
@@ -705,48 +954,25 @@ impl Server {
         );
         let mut out = Vec::new();
         for (d, sev) in diags.filter(|_| !sm.files.is_empty()) {
-            let f = sm.file(d.span.file);
-            out.push((
-                f.path.clone(),
-                Diagnostic {
-                    range: span_range(&f.text, d.span),
-                    severity: Some(sev),
-                    source: Some("ncc".into()),
-                    message: d.msg.clone(),
-                    ..Default::default()
-                },
-            ));
+            out.push(to_diagnostic(&sm, d, sev, None, None));
         }
         // loops that never end are information; the code after one is faded: unreachable
         // code is a warning in debug builds and an error in release builds
-        let lint = |d: crate::diag::Diag, sev, code: &str, tags| {
-            let f = sm.file(d.span.file);
-            (
-                f.path.clone(),
-                Diagnostic {
-                    range: span_range(&f.text, d.span),
-                    severity: Some(sev),
-                    code: Some(NumberOrString::String(code.into())),
-                    source: Some("ncc".into()),
-                    message: d.msg,
-                    tags,
-                    ..Default::default()
-                },
-            )
-        };
         for d in loops.infinite {
-            out.push(lint(
+            out.push(to_diagnostic(
+                &sm,
                 d,
                 DiagnosticSeverity::INFORMATION,
-                "infinite-loop",
+                Some("infinite-loop"),
                 None,
             ));
         }
         for d in loops.unreachable {
-            out.push(lint(
+            out.push(to_diagnostic(
+                &sm,
                 d,
                 DiagnosticSeverity::WARNING,
-                "unreachable-code",
+                Some("unreachable-code"),
                 Some(vec![DiagnosticTag::UNNECESSARY]),
             ));
         }
@@ -761,11 +987,18 @@ impl Server {
             let a = Analysis {
                 sm,
                 index,
+                types,
                 imports,
                 decl_at,
                 clean,
             };
-            out.extend(actions::warnings(&a, entry));
+            // the entry's syntax tree, as loaded: also what requests on this version use
+            if let (Some(ast), Some(f)) = (entry_ast, a.sm.files.first()) {
+                let version = self.versions.get(entry).copied();
+                let text = version.is_none().then(|| f.text.clone());
+                out.extend(actions::warnings(&a, entry, &ast));
+                (self.asts.borrow_mut()).insert(entry.to_path_buf(), (version, text, ast));
+            }
             self.analyses.insert(entry.to_path_buf(), a);
         }
         out
@@ -798,9 +1031,9 @@ impl Server {
             "textDocument/references" => handle(params, |p| self.references(p)),
             "textDocument/documentHighlight" => handle(params, |p| self.highlights(p)),
             "textDocument/prepareRename" => handle(params, |p| self.prepare_rename(p)),
-            "textDocument/rename" => match serde_json::from_value(params).map(|p| self.rename(p)) {
-                Ok(Err(msg)) => return invalid_params(id, msg),
-                r => r.ok().map(|r| serde_json::to_value(r.unwrap()).unwrap()),
+            "textDocument/rename" => match handle_fallible(params, |p| self.rename(p)) {
+                Ok(r) => r,
+                Err(msg) => return invalid_params(id, msg),
             },
             "textDocument/signatureHelp" => handle(params, |p| self.signature_help(p)),
             "textDocument/foldingRange" => handle(params, |p| self.folding(p)),
@@ -834,17 +1067,17 @@ impl Server {
             )
             .ok()
             .and_then(|d| uri_to_path(&d.uri))
-            .and_then(|path| self.text_of(&path))
-            .map(|text| {
-                let (module, _) = crate::parser::parse_module_recover(&text, 0);
-                serde_json::Value::String(format!("{module:#?}"))
+            .and_then(|path| {
+                let text = self.text_of(&path)?;
+                let module = self.module_of(&path, &text);
+                Some(serde_json::Value::String(format!("{module:#?}")))
             }),
             "textDocument/codeLens" => handle(params, |p| self.code_lenses(p)),
             "textDocument/diagnostic" => handle(params, |p| self.pull_diagnostics(p)),
             "experimental/joinLines" => handle(params, |p| self.join_lines(p)),
-            "experimental/ssr" => match serde_json::from_value(params).map(|p| self.ssr(p)) {
-                Ok(Err(msg)) => return invalid_params(id, msg),
-                r => r.ok().map(|r| serde_json::to_value(r.unwrap()).unwrap()),
+            "experimental/ssr" => match handle_fallible(params, |p| self.ssr(p)) {
+                Ok(r) => r,
+                Err(msg) => return invalid_params(id, msg),
             },
             "textDocument/rangeFormatting" => handle(params, |p: DocumentRangeFormattingParams| {
                 self.formatting(&p.text_document.uri, Some(p.range))
@@ -911,7 +1144,10 @@ impl Server {
         let (a, fid, text) = self.fresh(&pp.text_document.uri)?;
         let off = pos_to_offset(text, pp.position) as u32;
         let e = a.expr_around(fid, off, |_| true)?;
-        md_hover(format!("```nc\n{}\n```", e.ty), span_range(text, e.span))
+        md_hover(
+            format!("```nc\n{}\n```", a.show(e.ty)),
+            span_range(text, e.span),
+        )
     }
 
     /// The module file of an import or extern alias under the cursor, with the alias's path text
@@ -924,7 +1160,7 @@ impl Server {
         let range = ranges
             .into_iter()
             .find(|r| range_contains(&text, *r, off))?;
-        let (module, _) = crate::parser::parse_module_recover(&text, 0);
+        let module = self.module_of(&path, &text);
         for it in &module.items {
             match it {
                 ast::Item::Import(im) if im.alias == name => {
@@ -982,23 +1218,15 @@ impl Server {
     fn symbols(&self, p: DocumentSymbolParams) -> Option<Vec<DocSymbol>> {
         let path = uri_to_path(&p.text_document.uri)?;
         let text = self.text_of(&path)?;
-        let (module, _) = crate::parser::parse_module_recover(&text, 0);
+        let module = self.module_of(&path, &text);
+        // `span` is the whole declaration, `name_span` its name
         let sym = |name: &str,
                    kind: SymbolKind,
-                   span: Span,
+                   (span, name_span): (Span, Span),
                    detail: Option<String>,
                    children: Option<Vec<DocSymbol>>| {
             let range = span_range(&text, span);
-            // the name comes last in `int x` (fields, variables, imports) and first elsewhere
-            let first = !matches!(
-                kind,
-                SymbolKind::FIELD
-                    | SymbolKind::VARIABLE
-                    | SymbolKind::CONSTANT
-                    | SymbolKind::MODULE
-            );
-            let selection_range =
-                name_span(&text, span, name, first).map_or(range, |s| span_range(&text, s));
+            let selection_range = span_range(&text, name_span);
             DocSymbol {
                 name: if name.is_empty() {
                     "_".into()
@@ -1038,7 +1266,7 @@ impl Server {
                     ast::StmtKind::Fn(g) => Some(sym(
                         &g.sig.name,
                         SymbolKind::FUNCTION,
-                        g.sig.span.to(g.body.span),
+                        (g.sig.span.to(g.body.span), g.sig.span),
                         sig_detail(&g.sig),
                         None,
                     )),
@@ -1048,7 +1276,7 @@ impl Server {
             sym(
                 &f.sig.name,
                 SymbolKind::FUNCTION,
-                f.sig.span.to(f.body.span),
+                (f.sig.span.to(f.body.span), f.sig.span),
                 sig_detail(&f.sig),
                 (!nested.is_empty()).then_some(nested),
             )
@@ -1061,9 +1289,17 @@ impl Server {
                     let fields = s
                         .fields
                         .iter()
-                        .map(|(t, n, sp)| sym(n, SymbolKind::FIELD, *sp, Some(src(t.span())), None))
+                        .map(|(t, n, sp)| {
+                            sym(n, SymbolKind::FIELD, (*sp, *sp), Some(src(t.span())), None)
+                        })
                         .collect();
-                    out.push(sym(&s.name, SymbolKind::STRUCT, s.span, None, Some(fields)));
+                    out.push(sym(
+                        &s.name,
+                        SymbolKind::STRUCT,
+                        (s.span, s.name_span),
+                        None,
+                        Some(fields),
+                    ));
                 }
                 ast::Item::Enum(e) => {
                     let vs = e
@@ -1074,22 +1310,28 @@ impl Server {
                                 let ts: Vec<String> = ts.iter().map(|t| src(t.span())).collect();
                                 format!("({})", ts.join(", "))
                             });
-                            sym(n, SymbolKind::ENUM_MEMBER, *sp, detail, None)
+                            sym(n, SymbolKind::ENUM_MEMBER, (*sp, *sp), detail, None)
                         })
                         .collect();
-                    out.push(sym(&e.name, SymbolKind::ENUM, e.span, None, Some(vs)));
+                    out.push(sym(
+                        &e.name,
+                        SymbolKind::ENUM,
+                        (e.span, e.name_span),
+                        None,
+                        Some(vs),
+                    ));
                 }
                 ast::Item::Type(t) => out.push(sym(
                     &t.name,
                     SymbolKind::TYPE_PARAMETER,
-                    t.span,
+                    (t.span, t.name_span),
                     Some(src(t.ty.span())),
                     None,
                 )),
-                ast::Item::Test(name, _, span) => out.push(sym(
+                ast::Item::Test(name, _, span, name_span) => out.push(sym(
                     name,
                     SymbolKind::METHOD,
-                    *span,
+                    (*span, *name_span),
                     Some("test".into()),
                     None,
                 )),
@@ -1101,7 +1343,7 @@ impl Server {
                             sym(
                                 &f.sig.name,
                                 SymbolKind::FUNCTION,
-                                f.sig.span,
+                                (f.sig.span, f.sig.span),
                                 sig_detail(&f.sig),
                                 None,
                             )
@@ -1110,7 +1352,7 @@ impl Server {
                     out.push(sym(
                         &e.alias,
                         SymbolKind::MODULE,
-                        e.span,
+                        (e.span, e.alias_span),
                         Some(e.path.clone()),
                         Some(fs),
                     ));
@@ -1118,7 +1360,7 @@ impl Server {
                 ast::Item::Import(im) => out.push(sym(
                     &im.alias,
                     SymbolKind::MODULE,
-                    im.span,
+                    (im.span, im.alias_span),
                     Some(im.path.clone()),
                     None,
                 )),
@@ -1132,11 +1374,25 @@ impl Server {
                             } else {
                                 SymbolKind::CONSTANT
                             };
-                            out.push(sym(&t.name, kind, t.span, Some(src(t.ty.span())), None));
+                            out.push(sym(
+                                &t.name,
+                                kind,
+                                (t.span, t.name_span),
+                                Some(src(t.ty.span())),
+                                None,
+                            ));
                         }
                     }
-                    ast::StmtKind::FnVar { name, .. } => {
-                        out.push(sym(name, SymbolKind::FUNCTION, s.span, None, None));
+                    ast::StmtKind::FnVar {
+                        name, name_span, ..
+                    } => {
+                        out.push(sym(
+                            name,
+                            SymbolKind::FUNCTION,
+                            (s.span, *name_span),
+                            None,
+                            None,
+                        ));
                     }
                     ast::StmtKind::Fn(f) => out.push(fn_symbol(f)),
                     _ => {}
@@ -1172,47 +1428,44 @@ impl Server {
         (a.sm.file(def.file).path.clone(), def.start)
     }
 
-    /// The symbol at a position: its key, name and whether its name comes first in spans.
-    fn symbol_at(&self, uri: &Uri, pos: Position) -> Option<(SymKey, String, bool)> {
+    /// The symbol at a position: its key and name.
+    fn symbol_at(&self, uri: &Uri, pos: Position) -> Option<(SymKey, String)> {
         let (a, r) = self.lookup(uri, pos)?;
         let def = r.def?;
         let decl = a.decl(def)?;
-        let name_first = matches!(
-            decl.kind,
-            DeclKind::Struct | DeclKind::Enum | DeclKind::Type
-        );
-        Some((Self::key_of(a, def), decl.name.clone(), name_first))
+        Some((Self::key_of(a, def), decl.name.clone()))
     }
 
-    /// Every occurrence of a symbol (declaration and uses) in all analysed files.
-    fn occurrences(&self, key: &SymKey, name: &str, name_first: bool) -> Vec<(PathBuf, Range)> {
+    /// Every occurrence of a symbol named `name` (declaration and uses) in all analysed files.
+    fn occurrences(&self, key: &SymKey, name: &str) -> Vec<(PathBuf, Range)> {
         let mut seen = HashSet::new();
         let mut out = Vec::new();
         for a in self.analyses.values() {
             for r in &a.index.refs {
                 let Some(def) = r.def else { continue };
-                if &Self::key_of(a, def) != key {
+                if def.start != key.1 || a.sm.file(def.file).path != key.0 {
                     continue;
                 }
                 let f = a.sm.file(r.span.file);
-                // a reference to a type shows the type's declaration: its name comes first
-                let first = name_first || is_type_ref(&r.hover);
-                let Some(ns) = name_span(&f.text, r.span, name, first) else {
+                let ns = r.name_span;
+                if f.text.get(ns.start as usize..ns.end as usize) != Some(name) {
                     continue;
-                };
+                }
                 if seen.insert((f.path.clone(), ns.start)) {
                     out.push((f.path.clone(), span_range(&f.text, ns)));
                 }
             }
         }
-        out.sort_by(|a, b| {
-            (&a.0, a.1.start.line, a.1.start.character).cmp(&(
-                &b.0,
-                b.1.start.line,
-                b.1.start.character,
-            ))
-        });
+        out.sort_by(|a, b| (&a.0, a.1.start).cmp(&(&b.0, b.1.start)));
         out
+    }
+
+    /// The occurrences of a symbol in one file.
+    fn occurrences_in(&self, key: &SymKey, name: &str, path: &Path) -> Vec<Range> {
+        (self.occurrences(key, name).into_iter())
+            .filter(|(p, _)| p == path)
+            .map(|(_, r)| r)
+            .collect()
     }
 
     fn references(&self, p: ReferenceParams) -> Option<Vec<Location>> {
@@ -1227,8 +1480,8 @@ impl Server {
                     .collect(),
             );
         }
-        let (key, name, first) = self.symbol_at(&pp.text_document.uri, pp.position)?;
-        let occ = self.occurrences(&key, &name, first);
+        let (key, name) = self.symbol_at(&pp.text_document.uri, pp.position)?;
+        let occ = self.occurrences(&key, &name);
         let decl = if p.context.include_declaration {
             None
         } else {
@@ -1259,7 +1512,7 @@ impl Server {
             && let off = pos_to_offset(&text, pp.position)
             && !in_string_or_comment(&text, off)
         {
-            let (module, _) = crate::parser::parse_module_recover(&text, 0);
+            let module = self.module_of(&path, &text);
             if let Some(ranges) = refactor::exit_points(&module, &text, off) {
                 return text_highlights(ranges);
             }
@@ -1268,13 +1521,8 @@ impl Server {
             return text_highlights(ranges);
         }
         let path = uri_to_path(&pp.text_document.uri)?;
-        let (key, name, first) = self.symbol_at(&pp.text_document.uri, pp.position)?;
-        text_highlights(
-            (self.occurrences(&key, &name, first).into_iter())
-                .filter(|(p, _)| *p == path)
-                .map(|(_, range)| range)
-                .collect(),
-        )
+        let (key, name) = self.symbol_at(&pp.text_document.uri, pp.position)?;
+        text_highlights(self.occurrences_in(&key, &name, &path))
     }
 
     fn prepare_rename(&self, p: TextDocumentPositionParams) -> Option<PrepareRenameResponse> {
@@ -1282,11 +1530,8 @@ impl Server {
         let (name, ranges) = if let Some(alias) = self.alias_at(&p.text_document.uri, p.position) {
             alias
         } else {
-            let (key, name, first) = self.symbol_at(&p.text_document.uri, p.position)?;
-            let ranges = (self.occurrences(&key, &name, first).into_iter())
-                .filter(|(p, _)| *p == path)
-                .map(|(_, r)| r)
-                .collect();
+            let (key, name) = self.symbol_at(&p.text_document.uri, p.position)?;
+            let ranges = self.occurrences_in(&key, &name, &path);
             (name, ranges)
         };
         let text = self.text_of(&path)?;
@@ -1325,12 +1570,11 @@ impl Server {
                 rename(pp.text_document.uri.clone(), r);
             }
         } else {
-            let Some((key, name, first)) = self.symbol_at(&pp.text_document.uri, pp.position)
-            else {
+            let Some((key, name)) = self.symbol_at(&pp.text_document.uri, pp.position) else {
                 return Ok(None);
             };
             self.check_clash(&key, new)?;
-            for (path, range) in self.occurrences(&key, &name, first) {
+            for (path, range) in self.occurrences(&key, &name) {
                 rename(path_to_uri(&path), range);
             }
         }
@@ -1381,9 +1625,9 @@ impl Server {
         let off = pos_to_offset(&text, pp.position);
         let (s, e) = word_at(&text, off)?;
         let word = text[s..e].strip_prefix('@')?;
-        let (_, sig, doc) = BUILTINS.iter().find(|(n, ..)| *n == word)?;
+        let b = BUILTINS.iter().find(|b| b.name == word)?;
         md_hover(
-            format!("```nc\n{sig}\n```\n\n---\n\n{doc}"),
+            format!("```nc\n{}\n```\n\n---\n\n{}", b.label(), b.doc),
             range(&text, s, e),
         )
     }
@@ -1462,11 +1706,7 @@ impl Server {
                 if !seen.insert((f.path.clone(), d.span.start)) {
                     continue;
                 }
-                let first = matches!(
-                    d.kind,
-                    DeclKind::Struct | DeclKind::Enum | DeclKind::Type | DeclKind::Function
-                );
-                let span = name_span(&f.text, d.span, &d.name, first).unwrap_or(d.span);
+                let span = d.name_span;
                 out.push(WorkspaceSymbol {
                     name: d.name.clone(),
                     kind,
@@ -1614,10 +1854,17 @@ fn minimal_edits(old: &str, new: &str, range: Option<Range>) -> Vec<TextEdit> {
 
 /// `.nc` files under a directory, skipping hidden directories and build output unless `all`
 /// is set (dependencies live under `.nc/`).
-fn collect_nc_files(dir: &Path, all: bool, out: &mut Vec<PathBuf>, depth: usize) {
+fn collect_nc_files(
+    dir: &Path,
+    all: bool,
+    out: &mut Vec<PathBuf>,
+    dirs: &mut Vec<PathBuf>,
+    depth: usize,
+) {
     if depth > 12 {
         return;
     }
+    dirs.push(dir.to_path_buf());
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
     };
@@ -1629,7 +1876,7 @@ fn collect_nc_files(dir: &Path, all: bool, out: &mut Vec<PathBuf>, depth: usize)
             continue;
         }
         match e.file_type() {
-            Ok(t) if t.is_dir() => collect_nc_files(&p, all, out, depth + 1),
+            Ok(t) if t.is_dir() => collect_nc_files(&p, all, out, dirs, depth + 1),
             Ok(t) if t.is_file() && name.ends_with(".nc") => out.push(p),
             _ => {}
         }
@@ -1639,11 +1886,6 @@ fn collect_nc_files(dir: &Path, all: bool, out: &mut Vec<PathBuf>, depth: usize)
 /// Whether `range` of `text` contains the offset `off`.
 fn range_contains(text: &str, range: Range, off: usize) -> bool {
     pos_to_offset(text, range.start) <= off && off <= pos_to_offset(text, range.end)
-}
-
-/// Hover text of a reference to a type (whose spans start with the name).
-fn is_type_ref(hover: &str) -> bool {
-    hover.starts_with("struct ") || hover.starts_with("enum ") || hover.starts_with("type ")
 }
 
 fn publish(path: &Path, diagnostics: Vec<Diagnostic>, version: Option<i32>) -> Notification {
@@ -1657,6 +1899,70 @@ fn publish(path: &Path, diagnostics: Vec<Diagnostic>, version: Option<i32>) -> N
     )
 }
 
+/// How long an edit waits for the next one before the document is analysed.
+const DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// A document's syntax tree: the version it was parsed at when open, its text when not.
+type DocAst = (Option<i32>, Option<String>, std::rc::Rc<ast::Module>);
+
+/// Modules that can be imported, as (name, import path).
+type Importable = std::rc::Rc<[(String, String)]>;
+
+/// Importable modules found by scanning directories, valid while none of them changes.
+struct ImportableScan {
+    modules: Importable,
+    /// the directories scanned, with their modification times when scanned
+    dirs: Vec<(PathBuf, Option<std::time::SystemTime>)>,
+}
+
+fn modified(dir: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(dir).and_then(|m| m.modified()).ok()
+}
+
+/// Diagnostics in order of position, without repeats.
+fn sort_diagnostics(mut diags: Vec<Diagnostic>) -> Vec<Diagnostic> {
+    diags.sort_by(|a, b| (a.range.start, &a.message).cmp(&(b.range.start, &b.message)));
+    diags.dedup_by(|a, b| a.range == b.range && a.message == b.message);
+    diags
+}
+
+/// A compiler diagnostic as an LSP diagnostic, with the path of its file.
+fn to_diagnostic(
+    sm: &SourceMap,
+    d: crate::diag::Diag,
+    severity: DiagnosticSeverity,
+    code: Option<&str>,
+    tags: Option<Vec<DiagnosticTag>>,
+) -> (PathBuf, Diagnostic) {
+    let f = sm.file(d.span.file);
+    (
+        f.path.clone(),
+        Diagnostic {
+            range: span_range(&f.text, d.span),
+            severity: Some(severity),
+            code: code.or(d.code).map(|c| NumberOrString::String(c.into())),
+            source: Some("ncc".into()),
+            message: d.msg,
+            tags,
+            data: (!d.data.is_empty()).then(|| serde_json::json!(d.data)),
+            ..Default::default()
+        },
+    )
+}
+
+/// The code of a diagnostic, or "".
+fn diag_code(d: &Diagnostic) -> &str {
+    match &d.code {
+        Some(NumberOrString::String(c)) => c,
+        _ => "",
+    }
+}
+
+/// The `i`th value a compiler diagnostic is about (see `Diag::data`).
+fn diag_data(d: &Diagnostic, i: usize) -> Option<&str> {
+    d.data.as_ref()?.get(i)?.as_str()
+}
+
 /// Deserialize a request's parameters, run its handler and serialize the result.
 fn handle<P: serde::de::DeserializeOwned, R: serde::Serialize>(
     params: serde_json::Value,
@@ -1664,6 +1970,17 @@ fn handle<P: serde::de::DeserializeOwned, R: serde::Serialize>(
 ) -> Option<serde_json::Value> {
     let p = serde_json::from_value(params).ok()?;
     Some(serde_json::to_value(f(p)).unwrap())
+}
+
+/// Like `handle`, for a handler that can reject its parameters with a message.
+fn handle_fallible<P: serde::de::DeserializeOwned, R: serde::Serialize>(
+    params: serde_json::Value,
+    f: impl FnOnce(P) -> Result<R, String>,
+) -> Result<Option<serde_json::Value>, String> {
+    let Ok(p) = serde_json::from_value(params) else {
+        return Ok(None);
+    };
+    Ok(Some(serde_json::to_value(f(p)?).unwrap()))
 }
 
 fn invalid_params(id: RequestId, msg: String) -> Response {

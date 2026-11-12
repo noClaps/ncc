@@ -8,9 +8,10 @@ mod pat;
 mod stmt;
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use crate::ast;
-use crate::diag::{Diag, Result, Span, err};
+use crate::diag::{Diag, Result, Span, codes, err, err_code};
 use crate::modules::ModuleGraph;
 use crate::tir::*;
 use crate::types::*;
@@ -41,7 +42,7 @@ pub struct SymEntry {
 }
 
 pub struct ModInfo {
-    pub ast: ast::Module,
+    pub ast: Rc<ast::Module>,
     pub file: u32,
     pub path: std::path::PathBuf,
     pub imports: HashMap<String, usize>,
@@ -131,8 +132,6 @@ pub struct Checker {
     pending: Vec<PendingFn>,
     pub fns: Vec<FnCtx>,
     next_jump: JumpId,
-    /// jump ids targeted by at least one `break`
-    pub broken: HashSet<JumpId>,
     pub never_funcs: HashSet<FuncId>,
     tests: Vec<Test>,
     order: Vec<usize>,
@@ -173,7 +172,6 @@ pub fn check(graph: ModuleGraph, editor: bool) -> (Program, Vec<Diag>, index::In
         pending: vec![],
         fns: vec![],
         next_jump: 0,
-        broken: HashSet::new(),
         never_funcs: HashSet::new(),
         tests: vec![],
         order: graph.order,
@@ -185,9 +183,10 @@ pub fn check(graph: ModuleGraph, editor: bool) -> (Program, Vec<Diag>, index::In
     c.record_module_facts();
     let mut errors = std::mem::take(&mut c.errors);
     errors.retain(|d| !d.msg.is_empty());
-    errors.sort_by_key(|d| (d.span.file, d.span.start));
-    errors.dedup_by(|a, b| a.span == b.span && a.msg == b.msg);
-    (p, errors, std::mem::take(&mut c.ix.index))
+    crate::diag::sort_dedup(&mut errors);
+    let mut index = std::mem::take(&mut c.ix.index);
+    index.name_refs();
+    (p, errors, index)
 }
 
 impl Checker {
@@ -207,7 +206,7 @@ impl Checker {
                 f.public.extend(it.public_names().into_iter().cloned());
                 if let ast::Item::Import(im) = it {
                     let used = used.contains(&(m, im.alias.clone()));
-                    f.imports.push((im.alias.clone(), im.span, used));
+                    f.imports.push((im.alias.clone(), im.alias_span, used));
                 }
             }
             facts.push(f);
@@ -248,9 +247,9 @@ impl Checker {
         for &m in &order {
             self.fns.last_mut().unwrap().module = m;
             self.fns.last_mut().unwrap().scopes = vec![vec![]];
-            let items = self.mods[m].ast.items.clone();
+            let ast = Rc::clone(&self.mods[m].ast);
             let mut init = vec![];
-            for it in &items {
+            for it in &ast.items {
                 if let ast::Item::Stmt(s) = it {
                     let r = self.check_stmt(s, &mut init);
                     self.report(r);
@@ -261,9 +260,9 @@ impl Checker {
         let main_ctx = self.fns.pop().unwrap();
         // tests (entry module only are run, but all are checked)
         for m in 0..self.mods.len() {
-            let items = self.mods[m].ast.items.clone();
-            for it in &items {
-                if let ast::Item::Test(name, body, _) = it {
+            let ast = Rc::clone(&self.mods[m].ast);
+            for it in &ast.items {
+                if let ast::Item::Test(name, body, ..) = it {
                     let erru = self.types.erru(VOID);
                     let f = self.reserve_fn(vec![], erru);
                     let mut ctx = FnCtx::new(f, m, erru, HashMap::new());
@@ -310,7 +309,7 @@ impl Checker {
                 })
             })
             .collect();
-        Program {
+        let mut p = Program {
             types: std::mem::take(&mut self.types),
             funcs,
             globals: std::mem::take(&mut self.globals),
@@ -319,7 +318,9 @@ impl Checker {
             tests: std::mem::take(&mut self.tests),
             target: None,
             entry_file: None,
-        }
+        };
+        crate::shake::run(&mut p, self.mods[0].file);
+        p
     }
 
     // ------------------------------------------------------------ declarations
@@ -344,8 +345,8 @@ impl Checker {
     }
 
     fn declare_names(&mut self, m: usize) {
-        let items = self.mods[m].ast.items.clone();
-        for (i, it) in items.iter().enumerate() {
+        let ast = Rc::clone(&self.mods[m].ast);
+        for (i, it) in ast.items.iter().enumerate() {
             let item_r: Result<()> = (|| {
                 match it {
                     ast::Item::Fn(f) => self.add_sym(
@@ -398,7 +399,7 @@ impl Checker {
     fn idx_generic_decl(
         &mut self,
         name: &str,
-        span: Span,
+        (span, name_span): (Span, Span),
         kind: index::DeclKind,
         tps: &[ast::GenericParam],
         detail: String,
@@ -407,13 +408,17 @@ impl Checker {
         for t in tps {
             self.idx_ref(t.span, Some(t.span), t.show());
         }
-        self.idx_decl(name, span, kind, detail, members);
+        let before = self.ix.index.decls.len();
+        self.idx_decl(name, span, name_span, kind, detail, members);
+        if let Some(d) = self.ix.index.decls.get_mut(before) {
+            d.type_params = tps.iter().map(|t| t.name.clone()).collect();
+        }
     }
 
     fn resolve_decls(&mut self, m: usize) {
-        let items = self.mods[m].ast.items.clone();
+        let ast = Rc::clone(&self.mods[m].ast);
         let none = HashMap::new();
-        for it in &items {
+        for it in &ast.items {
             let item_r: Result<()> = (|| {
                 match it {
                     ast::Item::Type(t) => {
@@ -427,7 +432,14 @@ impl Checker {
                         self.ix.type_spans.insert(ty, t.span);
                         let detail = self.type_detail(ty);
                         let members = self.members_of(ty);
-                        self.idx_decl(&t.name, t.span, index::DeclKind::Type, detail, members);
+                        self.idx_decl(
+                            &t.name,
+                            t.span,
+                            t.name_span,
+                            index::DeclKind::Type,
+                            detail,
+                            members,
+                        );
                         self.idx_last_ty(&t.name, ty);
                         // reject cycles
                         let mut seen = vec![ty];
@@ -450,7 +462,14 @@ impl Checker {
                         };
                         self.fill_struct(ty, s, m, &none)?;
                         let detail = self.type_detail(ty);
-                        self.idx_decl(&s.name, s.span, index::DeclKind::Struct, detail, vec![]);
+                        self.idx_decl(
+                            &s.name,
+                            s.span,
+                            s.name_span,
+                            index::DeclKind::Struct,
+                            detail,
+                            vec![],
+                        );
                         self.idx_last_ty(&s.name, ty);
                     }
                     ast::Item::Enum(e) if e.type_params.is_empty() => {
@@ -474,7 +493,14 @@ impl Checker {
                                 (v.0.clone(), format!("{}.{text}", e.name))
                             })
                             .collect();
-                        self.idx_decl(&e.name, e.span, index::DeclKind::Enum, detail, members);
+                        self.idx_decl(
+                            &e.name,
+                            e.span,
+                            e.name_span,
+                            index::DeclKind::Enum,
+                            detail,
+                            members,
+                        );
                         self.idx_last_ty(&e.name, ty);
                     }
                     _ => {}
@@ -483,21 +509,14 @@ impl Checker {
             })();
             self.report(item_r);
         }
-        for it in &items {
+        for it in &ast.items {
             let item_r: Result<()> = (|| {
                 match it {
                     ast::Item::Fn(f) if f.sig.type_params.is_empty() => {
                         let (params, ret) = self.resolve_sig(&f.sig, m, &none)?;
                         let id = self.reserve_decl(&f.sig, params, ret);
-                        let names = self.ix.fn_params[&id].clone();
-                        let detail = self.fn_detail_named(&f.sig.name, id, &names);
-                        self.idx_decl(
-                            &f.sig.name,
-                            f.sig.span,
-                            index::DeclKind::Function,
-                            detail,
-                            vec![],
-                        );
+                        let sig = self.fn_sig(id);
+                        self.idx_fn_decl(&f.sig.name, f.sig.span, None, sig);
                         let ret = self.sigs[id].1;
                         self.idx_last_ty(&f.sig.name, ret);
                         if let Some(SymEntry {
@@ -518,35 +537,19 @@ impl Checker {
                     // them so that uses link to them (and unused ones are found)
                     ast::Item::Fn(f) => {
                         // `fn map<type I, type O>(I[] arr, (fn(I) O) f) O[]`
-                        let tps: Vec<String> = f
-                            .sig
-                            .type_params
-                            .iter()
-                            .map(ast::GenericParam::show)
-                            .collect();
-                        let ps: Vec<String> = f
-                            .sig
-                            .params
-                            .iter()
-                            .map(|p| format!("{} {}", p.ty.show(), p.name))
-                            .collect();
-                        let ret = f.sig.ret.as_ref().map(|r| format!(" {}", r.show()));
-                        let detail = format!(
-                            "fn {}<{}>({}){}",
-                            f.sig.name,
-                            tps.join(", "),
-                            ps.join(", "),
-                            ret.unwrap_or_default()
-                        );
-                        let (name, kind) = (&f.sig.name, index::DeclKind::Function);
-                        self.idx_generic_decl(
-                            name,
-                            f.sig.span,
-                            kind,
-                            &f.sig.type_params,
-                            detail,
-                            vec![],
-                        );
+                        let sig = index::Sig {
+                            type_params: (f.sig.type_params.iter())
+                                .map(ast::GenericParam::show)
+                                .collect(),
+                            params: (f.sig.params.iter())
+                                .map(|p| (Some(p.ty.clone()), p.name.clone()))
+                                .collect(),
+                            ret: f.sig.ret.clone(),
+                        };
+                        for t in &f.sig.type_params {
+                            self.idx_ref(t.span, Some(t.span), t.show());
+                        }
+                        self.idx_fn_decl(&f.sig.name, f.sig.span, None, sig);
                     }
                     ast::Item::Struct(st) if !st.type_params.is_empty() => {
                         let tps = ast::GenericParam::list(&st.type_params);
@@ -557,7 +560,19 @@ impl Checker {
                             .map(|(t, n, _)| (n.clone(), format!("{} {n}", t.show())))
                             .collect();
                         let tps = &st.type_params;
-                        self.idx_generic_decl(&st.name, st.span, kind, tps, detail, fields);
+                        self.idx_generic_decl(
+                            &st.name,
+                            (st.span, st.name_span),
+                            kind,
+                            tps,
+                            detail,
+                            fields,
+                        );
+                        if let Some(d) = self.ix.index.decls.last_mut()
+                            && d.name == st.name
+                        {
+                            d.field_tys = st.fields.iter().map(|f| f.0.clone()).collect();
+                        }
                     }
                     ast::Item::Enum(en) if !en.type_params.is_empty() => {
                         let tps = ast::GenericParam::list(&en.type_params);
@@ -565,7 +580,7 @@ impl Checker {
                         let kind = index::DeclKind::Enum;
                         self.idx_generic_decl(
                             &en.name,
-                            en.span,
+                            (en.span, en.name_span),
                             kind,
                             &en.type_params,
                             detail,
@@ -577,36 +592,19 @@ impl Checker {
                         for f in &e.fns {
                             let (params, ret) = self.resolve_sig(&f.sig, m, &none)?;
                             let id = self.externs.len();
-                            let ps: Vec<String> = params
-                                .iter()
-                                .zip(&f.sig.params)
-                                .map(|(t, p)| format!("{} {}", self.types.show(*t), p.name))
-                                .collect();
-                            let detail = format!(
-                                "fn {}.{}({}) {}",
-                                e.alias,
-                                f.sig.name,
-                                ps.join(", "),
-                                if ret == VOID {
-                                    String::new()
-                                } else {
-                                    self.types.show(ret)
-                                }
-                            );
-                            self.idx_decl(
-                                &f.sig.name,
-                                f.sig.span,
-                                index::DeclKind::Function,
-                                detail.trim_end().to_string(),
-                                vec![],
-                            );
+                            let sig = index::Sig {
+                                type_params: vec![],
+                                params: (params.iter().zip(&f.sig.params))
+                                    .map(|(t, p)| {
+                                        (Some(self.types.to_type_expr(*t)), p.name.clone())
+                                    })
+                                    .collect(),
+                                ret: (ret != VOID).then(|| self.types.to_type_expr(ret)),
+                            };
+                            let (detail, _) = sig.label(&format!("{}.{}", e.alias, f.sig.name));
+                            self.idx_fn_decl(&f.sig.name, f.sig.span, Some(&e.alias), sig);
                             self.idx_last_ty(&f.sig.name, ret);
-                            self.ix
-                                .extern_decls
-                                .insert(id, (f.sig.span, detail.trim_end().to_string()));
-                            if let Some(d) = self.ix.index.decls.last_mut() {
-                                d.extern_alias = Some(e.alias.clone());
-                            }
+                            self.ix.extern_decls.insert(id, (f.sig.span, detail));
                             self.externs.push(Extern {
                                 name: format!("{}.{}", e.alias, f.sig.name),
                                 symbol: f.symbol.clone(),
@@ -630,7 +628,7 @@ impl Checker {
             self.report(item_r);
         }
         // reject infinitely sized structs
-        for it in &items {
+        for it in &ast.items {
             if let ast::Item::Struct(s) = it
                 && let Some(SymEntry {
                     sym: Sym::Struct { ty: Some(ty), .. },
@@ -698,12 +696,13 @@ impl Checker {
             fields.push((name.clone(), t));
         }
         self.ix
+            .index
             .field_spans
             .insert(ty, s.fields.iter().map(|f| f.2).collect());
         self.ix.type_spans.insert(ty, s.span);
         for ((name, t), (.., sp)) in fields.iter().zip(&s.fields) {
             let detail = format!("{} {name}", self.types.show(*t));
-            self.idx_decl(name, *sp, index::DeclKind::Field, detail, vec![]);
+            self.idx_decl(name, *sp, *sp, index::DeclKind::Field, detail, vec![]);
         }
         if let TyKind::Struct(i) = *self.types.kind(ty) {
             self.types.structs[i as usize].fields = fields;
@@ -733,6 +732,7 @@ impl Checker {
             variants.push((name.clone(), ts));
         }
         self.ix
+            .index
             .variant_spans
             .insert(ty, e.variants.iter().map(|v| v.2).collect());
         self.ix.type_spans.insert(ty, e.span);
@@ -743,6 +743,7 @@ impl Checker {
         for (vn, _, sp) in &e.variants {
             self.idx_decl(
                 vn,
+                *sp,
                 *sp,
                 index::DeclKind::Variant,
                 format!("{ename}.{vn}"),
@@ -858,7 +859,7 @@ impl Checker {
     }
 
     pub fn check_fn_end(&mut self, body: &Block, ret: TyId, span: Span, name: &str) -> Result<()> {
-        let completes = self.block_completes(body);
+        let completes = flow::block_completes(body);
         if completes {
             if ret == NEVER {
                 return err(
@@ -890,9 +891,9 @@ impl Checker {
         args: Vec<TyId>,
         span: Span,
     ) -> Result<FuncId> {
-        let f = match &self.mods[m].ast.items[decl] {
-            ast::Item::Fn(f) => f.clone(),
-            _ => unreachable!(),
+        let ast = Rc::clone(&self.mods[m].ast);
+        let ast::Item::Fn(f) = &ast.items[decl] else {
+            unreachable!()
         };
         let (args, tp) = self.bind_generics(&f.sig.name, &f.sig.type_params, args, span)?;
         let key = (m, decl, args.clone());
@@ -907,7 +908,7 @@ impl Checker {
         // generic bodies are type-checked at instantiation; check right away so that errors
         // point at the instantiation that caused them.
         let inst = self.types_name(&f.sig.name, &args);
-        let mut decl = f;
+        let mut decl = f.clone();
         decl.sig.name = inst.clone();
         let before = self.errors.len();
         self.check_nested_body(PendingFn {
@@ -1134,32 +1135,37 @@ impl Checker {
         args: Vec<TyId>,
         span: Span,
     ) -> Result<TyId> {
-        let item = self.mods[m].ast.items[decl].clone();
-        let (tparams, name) = match &item {
-            ast::Item::Struct(s) => (s.type_params.clone(), s.name.clone()),
-            ast::Item::Enum(e) => (e.type_params.clone(), e.name.clone()),
+        let ast = Rc::clone(&self.mods[m].ast);
+        let item = &ast.items[decl];
+        let (tparams, name) = match item {
+            ast::Item::Struct(s) => (&s.type_params, &s.name),
+            ast::Item::Enum(e) => (&e.type_params, &e.name),
             _ => unreachable!(),
         };
-        let (args, tp) = self.bind_generics(&name, &tparams, args, span)?;
+        let (args, tp) = self.bind_generics(name, tparams, args, span)?;
         let key = (m, decl, args.clone());
         if let Some(&t) = self.type_insts.get(&key) {
             return Ok(t);
         }
-        let display = self.types_name(&name, &args);
-        let ty = match &item {
+        let display = self.types_name(name, &args);
+        let ty = match item {
             ast::Item::Struct(s) => {
                 let ty = self.types.new_struct(display);
+                let i = self.types.structs.len() - 1;
+                self.types.structs[i].generic = Some((name.clone(), args.clone()));
                 self.type_insts.insert(key, ty);
                 self.fill_struct(ty, s, m, &tp)
-                    .map_err(|d| self.in_instance(d, &name, &args))?;
+                    .map_err(|d| self.in_instance(d, name, &args))?;
                 self.check_finite(ty, span)?;
                 ty
             }
             ast::Item::Enum(e) => {
                 let ty = self.types.new_enum(display);
+                let i = self.types.enums.len() - 1;
+                self.types.enums[i].generic = Some((name.clone(), args.clone()));
                 self.type_insts.insert(key, ty);
                 self.fill_enum(ty, e, m, &tp)
-                    .map_err(|d| self.in_instance(d, &name, &args))?;
+                    .map_err(|d| self.in_instance(d, name, &args))?;
                 ty
             }
             _ => unreachable!(),
@@ -1188,7 +1194,12 @@ impl Checker {
                 };
                 match self.mods[target].syms.get(name) {
                     Some(e) if e.public => Ok(Some((target, e.sym.clone()))),
-                    Some(_) => err(span, format!("`{name}` is not public in module `{alias}`")),
+                    Some(_) => err_code(
+                        span,
+                        format!("`{name}` is not public in module `{alias}`"),
+                        codes::NOT_PUBLIC,
+                        &[name, alias],
+                    ),
                     None => err(span, format!("module `{alias}` has no member `{name}`")),
                 }
             }
@@ -1258,9 +1269,23 @@ impl Checker {
                         t
                     }
                     Some(_) => return err(*span, format!("`{name}` is not a type")),
-                    None => return err(*span, format!("unknown type `{name}`")),
+                    None => {
+                        return err_code(
+                            *span,
+                            format!("unknown type `{name}`"),
+                            codes::UNKNOWN_TYPE,
+                            &[name],
+                        );
+                    }
                 };
-                self.idx_type_ref(resolved, *span);
+                // `m.Name<T>`: the name follows the module
+                let at = span.start + module.as_ref().map_or(0, |m| m.len() as u32 + 1);
+                let name_span = Span {
+                    start: at,
+                    end: at + name.len() as u32,
+                    ..*span
+                };
+                self.idx_type_ref(resolved, *span, name_span);
                 resolved
             }
             T::Array(e, n, sp) => {
@@ -1602,67 +1627,12 @@ impl Checker {
 
     // ------------------------------------------------------------ main assembly
 
+    /// Every module's initialisers, in module order. `shake` then drops the imported ones
+    /// that initialise nothing the program uses.
     fn assemble_main(&mut self) -> Block {
-        // reachability from the entry module's top level and its tests
-        let entry = 0;
-        let mut reach_g: HashSet<GlobalId> = HashSet::new();
-        let mut reach_f: HashSet<FuncId> = HashSet::new();
-        let mut work_f: Vec<FuncId> = Vec::new();
-        // globals and functions referenced by statements
-        let refs = |stmts: &[Stmt], rg: &mut HashSet<GlobalId>, wf: &mut Vec<FuncId>| {
-            let mut fs = HashSet::new();
-            for s in stmts {
-                flow::refs_stmt(s, rg, &mut fs);
-            }
-            wf.extend(fs);
-        };
-        refs(&self.mods[entry].init, &mut reach_g, &mut work_f);
-        for t in &self.tests {
-            work_f.push(t.func);
-        }
-        let mut included: Vec<Vec<bool>> = self
-            .mods
-            .iter()
-            .map(|m| vec![false; m.init.len()])
+        let stmts = (self.order.iter())
+            .flat_map(|&m| self.mods[m].init.iter().cloned())
             .collect();
-        loop {
-            while let Some(f) = work_f.pop() {
-                if !reach_f.insert(f) {
-                    continue;
-                }
-                let func = self.funcs[f].as_ref().unwrap();
-                refs(&func.body.stmts, &mut reach_g, &mut work_f);
-            }
-            let mut changed = false;
-            for (m, (module, inc)) in self.mods.iter().zip(included.iter_mut()).enumerate() {
-                if m == entry {
-                    continue;
-                }
-                for (i, s) in module.init.iter().enumerate() {
-                    if inc[i] {
-                        continue;
-                    }
-                    let mut writes = HashSet::new();
-                    flow::writes_stmt(s, &mut writes);
-                    if writes.iter().any(|g| reach_g.contains(g)) {
-                        inc[i] = true;
-                        changed = true;
-                        refs(std::slice::from_ref(s), &mut reach_g, &mut work_f);
-                    }
-                }
-            }
-            if !changed && work_f.is_empty() {
-                break;
-            }
-        }
-        let mut stmts = Vec::new();
-        for &m in &self.order {
-            for (i, s) in self.mods[m].init.iter().enumerate() {
-                if m == entry || included[m][i] {
-                    stmts.push(s.clone());
-                }
-            }
-        }
         Block { stmts }
     }
 }

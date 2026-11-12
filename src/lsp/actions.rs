@@ -12,12 +12,16 @@ use std::path::{Path, PathBuf};
 
 use lsp_types::*;
 
-use super::nav::{Node, walk};
+use super::{diag_code, diag_data};
+use crate::diag::codes;
+use crate::types::TyKind;
+
 use super::ssr::atomic;
 use super::{
-    Analysis, Server, edit_action, indent_at, line_end, line_start, name_span, offset_to_pos,
-    pos_to_offset, range, span_range, uri_to_path,
+    Analysis, Server, edit_action, indent_at, line_end, line_start, offset_to_pos, pos_to_offset,
+    range, span_range, uri_to_path,
 };
+use crate::ast::visit::{Node, walk};
 use crate::ast::{self, ExprKind as E, StmtKind as S};
 use crate::check::index::DeclKind;
 use crate::diag::Span;
@@ -29,8 +33,7 @@ const UNREACHABLE_BRANCH: &str = "unreachable-branch";
 // ------------------------------------------------------------------ warnings
 
 /// Imports of a module whose alias is never used: (import span, alias name span, alias).
-fn unused_imports(text: &str) -> Vec<(Span, Span, String)> {
-    let (module, _) = crate::parser::parse_module_recover(text, 0);
+fn unused_imports(text: &str, module: &ast::Module) -> Vec<(Span, Span, String)> {
     let (toks, _) = crate::lexer::lex_all(text, 0, 0);
     let mut used = HashSet::new();
     super::nav::qualifier_uses(&toks, &mut |n, _| {
@@ -41,8 +44,7 @@ fn unused_imports(text: &str) -> Vec<(Span, Span, String)> {
         if let ast::Item::Import(im) = it
             && !used.contains(&im.alias)
         {
-            let ns = name_span(text, im.span, &im.alias, false).unwrap_or(im.span);
-            out.push((im.span, ns, im.alias.clone()));
+            out.push((im.span, im.alias_span, im.alias.clone()));
         }
     }
     out
@@ -51,10 +53,9 @@ fn unused_imports(text: &str) -> Vec<(Span, Span, String)> {
 /// `if` branches that can never run, because earlier branches match everything they match:
 /// branches after a catch-all (`_`, a binding, or the condition `true`), and branches whose
 /// patterns all appeared in earlier branches. Returns the spans of the branches.
-fn unreachable_arms(a: &Analysis, text: &str) -> Vec<Span> {
-    let (module, _) = crate::parser::parse_module_recover(text, 0);
+fn unreachable_arms(a: &Analysis, text: &str, module: &ast::Module) -> Vec<Span> {
     let mut out = Vec::new();
-    walk(&module, &mut |n| {
+    walk(module, &mut |n| {
         let Node::Expr(e) = n else { return };
         let E::If(ife) = &e.kind else { return };
         let mut seen: HashSet<String> = HashSet::new();
@@ -103,7 +104,11 @@ fn unreachable_arms(a: &Analysis, text: &str) -> Vec<Span> {
 }
 
 /// The language server's own warnings for an analysed entry file.
-pub(super) fn warnings(a: &Analysis, entry: &Path) -> Vec<(PathBuf, Diagnostic)> {
+pub(super) fn warnings(
+    a: &Analysis,
+    entry: &Path,
+    module: &ast::Module,
+) -> Vec<(PathBuf, Diagnostic)> {
     let Some(fid) = a.file_id(entry) else {
         return vec![];
     };
@@ -125,13 +130,13 @@ pub(super) fn warnings(a: &Analysis, entry: &Path) -> Vec<(PathBuf, Diagnostic)>
     let mut out = Vec::new();
     // unused code, as the compiler reports it (a warning in debug builds, an error in release)
     if a.clean {
-        for u in crate::lint::unused(&a.index, &a.sm) {
+        for u in crate::lint::unused(&a.index, &a.types) {
             if u.diag.span.file == fid {
                 out.push(warn(u.diag.span, u.diag.msg, u.kind.code()));
             }
         }
     }
-    for arm in unreachable_arms(a, text) {
+    for arm in unreachable_arms(a, text, module) {
         out.push(warn(
             arm,
             "unreachable branch: earlier branches match every value it matches".into(),
@@ -203,27 +208,31 @@ fn block_stmt_around(module: &ast::Module, s: u32, e: u32) -> Option<&ast::Stmt>
     stmt
 }
 
-/// Modules `file` could import, as (name, import path): siblings (`./name`), other project files
-/// (`.../dir/name`) and dependencies (`std/name`), best first.
-pub(super) fn importable_modules(file: &Path) -> Vec<(String, String)> {
+/// Modules the files of `dir` could import, as (name, import path): files of `dir` (`./name`),
+/// other project files (`.../dir/name`) and dependencies (`std/name`), best first. Also returns
+/// the directories scanned.
+pub(super) fn importable_modules(dir: &Path) -> (Vec<(String, String)>, Vec<PathBuf>) {
     let mut out = Vec::new();
-    let Some(dir) = file.parent() else {
-        return out;
-    };
+    let mut dirs = vec![dir.to_path_buf()];
     let stem = |f: &Path| f.file_stem().map(|n| n.to_string_lossy().into_owned());
     if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {
             let f = e.path();
-            if f.extension().is_some_and(|x| x == "nc") && f != file && f.is_file() {
+            if f.extension().is_some_and(|x| x == "nc") && f.is_file() {
                 let n = stem(&f).unwrap_or_default();
                 out.push((n.clone(), format!("./{n}")));
             }
         }
     }
     // dependency modules in `scan`, imported by their path from `base`
-    fn add_deps(scan: &Path, base: &Path, out: &mut Vec<(String, String)>) {
+    fn add_deps(
+        scan: &Path,
+        base: &Path,
+        out: &mut Vec<(String, String)>,
+        dirs: &mut Vec<PathBuf>,
+    ) {
         let mut files = Vec::new();
-        super::collect_nc_files(scan, true, &mut files, 0);
+        super::collect_nc_files(scan, true, &mut files, dirs, 0);
         for f in files {
             if let Ok(rel) = f.with_extension("").strip_prefix(base) {
                 let name = f.file_stem().unwrap_or_default().to_string_lossy();
@@ -233,12 +242,12 @@ pub(super) fn importable_modules(file: &Path) -> Vec<(String, String)> {
     }
     if let Some(home) = crate::modules::nc_home() {
         for lib in crate::modules::SYSTEM_LIBS {
-            add_deps(&home.join(lib), &home, &mut out);
+            add_deps(&home.join(lib), &home, &mut out, &mut dirs);
         }
     }
     if let Some(root) = crate::modules::find_root(dir) {
         let mut files = Vec::new();
-        super::collect_nc_files(&root, false, &mut files, 0);
+        super::collect_nc_files(&root, false, &mut files, &mut dirs, 0);
         for f in files {
             if f.parent() != Some(dir)
                 && let Ok(rel) = f.with_extension("").strip_prefix(&root)
@@ -250,7 +259,7 @@ pub(super) fn importable_modules(file: &Path) -> Vec<(String, String)> {
             }
         }
         let deps = root.join(".nc").join("deps");
-        add_deps(&deps, &deps, &mut out);
+        add_deps(&deps, &deps, &mut out, &mut dirs);
     }
     out.sort_by_key(|(n, p)| {
         (
@@ -267,16 +276,7 @@ pub(super) fn importable_modules(file: &Path) -> Vec<(String, String)> {
             && n.bytes().all(is_ident_byte)
             && !crate::parser::is_keyword(n)
     });
-    out
-}
-
-/// Import paths of modules named `name` that `file` could import.
-fn find_modules(file: &Path, name: &str) -> Vec<String> {
-    importable_modules(file)
-        .into_iter()
-        .filter(|(n, _)| n == name)
-        .map(|(_, p)| p)
-        .collect()
+    (out, dirs)
 }
 
 /// An edit adding `import { "path" as alias }` after the last import (or at the top).
@@ -324,16 +324,16 @@ fn levenshtein(a: &str, b: &str) -> usize {
 }
 
 /// A default value for a field of the given type, for "add missing fields".
-fn default_value(ty: &str) -> String {
-    match ty {
-        "int" | "uint" | "byte" => "0".into(),
-        "float" => "0.0".into(),
-        "bool" => "false".into(),
-        "str" => "\"\"".into(),
-        "char" => "' '".into(),
-        t if t.ends_with('?') => "none".into(),
-        t if t.ends_with("[]") => "[]".into(),
-        t if t.starts_with('[') && !t.ends_with(']') => "[:]".into(),
+fn default_value(types: &crate::types::Types, ty: crate::types::TyId) -> String {
+    match types.kind(types.base(ty)) {
+        TyKind::Int | TyKind::UInt | TyKind::Byte => "0".into(),
+        TyKind::Float => "0.0".into(),
+        TyKind::Bool => "false".into(),
+        TyKind::Str => "\"\"".into(),
+        TyKind::Char => "' '".into(),
+        TyKind::Opt(_) => "none".into(),
+        TyKind::Array(_) => "[]".into(),
+        TyKind::Map(..) => "[:]".into(),
         _ => "_".into(),
     }
 }
@@ -357,16 +357,12 @@ impl Server {
             a
         };
         let insert = |at: Position, s: &str| TextEdit::new(Range::new(at, at), s.to_string());
-        let (module, _) = crate::parser::parse_module_recover(&text, 0);
+        let module = self.module_of(&path, &text);
         let fresh = self.fresh(&uri);
 
         for d in &p.context.diagnostics {
-            let code = match &d.code {
-                Some(NumberOrString::String(c)) => c.as_str(),
-                _ => "",
-            };
-            let msg = d.message.as_str();
-            if msg.contains("declare it with `mut`") && msg.contains("immutable variable") {
+            let code = diag_code(d);
+            if code == codes::IMMUTABLE {
                 if let Some((a, r)) = self.lookup(&uri, d.range.start)
                     && let Some(def) = r.def
                     && a.sm.file(def.file).path == path
@@ -379,7 +375,7 @@ impl Server {
                         true,
                     ));
                 }
-            } else if msg.contains("not used") || msg.starts_with("unused value") {
+            } else if code == codes::UNUSED_VALUE {
                 out.push(fix(
                     "Discard the value with `_ =`".into(),
                     d,
@@ -421,7 +417,7 @@ impl Server {
                 ));
             } else if code == UNUSED_IMPORT {
                 let off = pos_to_offset(&text, d.range.start) as u32;
-                if let Some((span, ..)) = unused_imports(&text)
+                if let Some((span, ..)) = unused_imports(&text, &module)
                     .into_iter()
                     .find(|(s, ..)| s.start <= off && off <= s.end)
                 {
@@ -432,10 +428,8 @@ impl Server {
                         true,
                     ));
                 }
-            } else if let Some(name) = msg
-                .strip_prefix("unknown name `")
-                .or_else(|| msg.strip_prefix("unknown variable `"))
-                .and_then(|r| r.strip_suffix('`'))
+            } else if code == codes::UNKNOWN_NAME
+                && let Some(name) = diag_data(d, 0)
             {
                 // names in scope (or imported) that are close to the misspelt one
                 if let Some(a) = self.analyses.get(&path)
@@ -461,7 +455,7 @@ impl Server {
                         // a module used as `name.x` that is not imported yet
                         let used_as_module = text[s + i + name.len()..].starts_with('.');
                         if used_as_module {
-                            for m in find_modules(&path, name).into_iter().take(3) {
+                            for m in self.find_modules(&path, name).into_iter().take(3) {
                                 out.push(fix(
                                     format!("Import `{m}` as `{name}`"),
                                     d,
@@ -490,7 +484,7 @@ impl Server {
                         }
                     }
                 }
-            } else if msg.contains("requires the enclosing function to be throwing") {
+            } else if code == codes::NEEDS_THROWING {
                 // the innermost function around the error with a return type
                 let off = pos_to_offset(&text, d.range.start) as u32;
                 let mut best: Option<&ast::FnSig> = None;
@@ -524,7 +518,7 @@ impl Server {
                         ));
                     }
                 }
-            } else if msg.starts_with("missing field `") && msg.contains("` in `") {
+            } else if code == codes::MISSING_FIELD {
                 if let Some(a) = fresh.map(|f| f.0)
                     && let Some(edit) = add_missing_fields(
                         a,
@@ -536,7 +530,7 @@ impl Server {
                 {
                     out.push(fix("Add missing fields".into(), d, vec![edit], true));
                 }
-            } else if msg.starts_with("`if` branches are not exhaustive") {
+            } else if code == codes::NOT_EXHAUSTIVE {
                 let off = pos_to_offset(&text, d.range.start) as u32;
                 let mut target: Option<&ast::IfExpr> = None;
                 walk(&module, &mut |n| {
@@ -591,7 +585,7 @@ impl Server {
         }
 
         // remove every unused import
-        let unused = unused_imports(&text);
+        let unused = unused_imports(&text, &module);
         if !unused.is_empty() {
             let mut edits: Vec<TextEdit> = Vec::new();
             for (span, ..) in &unused {
@@ -647,7 +641,7 @@ pub(super) fn add_missing_fields(
     module: &ast::Module,
     text: &str,
     off: u32,
-    value: impl Fn(&str) -> String,
+    value: impl Fn(&crate::types::Types, crate::types::TyId) -> String,
 ) -> Option<TextEdit> {
     let mut lit: Option<&ast::Expr> = None;
     walk(module, &mut |n| {
@@ -678,12 +672,12 @@ pub(super) fn add_missing_fields(
         .iter()
         .filter(|d| &d.name == name && d.kind == DeclKind::Struct)
         .max_by_key(|d| d.span.file == lit.span.file)?;
-    let members = a.index.types.get(decl.ty.as_ref()?)?;
+    let members = a.members(decl.ty?);
     let present: HashSet<&str> = fields.iter().map(|f| f.0.as_str()).collect();
     let missing: Vec<String> = members
         .iter()
         .filter(|m| !present.contains(m.name.as_str()))
-        .map(|m| format!(".{} = {}", m.name, value(&m.ty)))
+        .map(|m| format!(".{} = {}", m.name, value(&a.types, m.ty)))
         .collect();
     if missing.is_empty() {
         return None;
@@ -723,7 +717,7 @@ fn missing_variants(a: &Analysis, fid: u32, ife: &ast::IfExpr, text: &str) -> Op
     let ty = a.expr_ty(fid, scrut.span.start, scrut.span.end)?;
     let def = ty.type_def?;
     let decl = a.decl(def)?;
-    if decl.kind != DeclKind::Enum || ty.ty.ends_with("[]") {
+    if decl.kind != DeclKind::Enum || matches!(a.types.kind(ty.ty), TyKind::Array(_)) {
         return None;
     }
     // variant names a branch matches with `Enum.Variant` or `Enum.Variant(...)`
@@ -757,16 +751,14 @@ fn missing_variants(a: &Analysis, fid: u32, ife: &ast::IfExpr, text: &str) -> Op
         })
         .unwrap_or_else(|| decl.name.clone());
     Some(
-        decl.members
-            .iter()
+        (a.variants(decl).into_iter())
             .filter(|(m, _)| !named.contains(m))
-            .map(|(m, detail)| super::refactor::variant_pattern(&prefix, m, detail))
+            .map(|(m, arity)| super::refactor::variant_pattern(&prefix, &m, arity))
             .collect(),
     )
 }
 
 /// "Extract into a variable" for a selection that is exactly a typed expression.
-#[allow(clippy::too_many_arguments)]
 fn extract_variable(
     a: &Analysis,
     fid: u32,
@@ -780,7 +772,10 @@ fn extract_variable(
         return None;
     }
     let x = a.expr_ty(fid, s, e)?;
-    if matches!(x.ty.as_str(), "void" | "never") || x.ty.starts_with("fn") {
+    if matches!(
+        a.types.kind(x.ty),
+        TyKind::Void | TyKind::Never | TyKind::Fn(..)
+    ) {
         return None;
     }
     let st = block_stmt_around(module, s, e)?;
@@ -803,7 +798,7 @@ fn extract_variable(
     let at = line_start(text, st.span.start as usize);
     let indent = indent_at(text, st.span.start as usize);
     let expr = &text[s as usize..e as usize];
-    let decl = format!("{indent}{} {name} = {expr}\n", x.ty);
+    let decl = format!("{indent}{} {name} = {expr}\n", a.show(x.ty));
     Some(edit_action(
         "Extract into a variable".into(),
         CodeActionKind::REFACTOR_EXTRACT,
@@ -820,7 +815,6 @@ fn extract_variable(
 
 /// "Generate function" for a call to an unknown name: a function after the current item,
 /// with parameters typed from the arguments and the return type from the context.
-#[allow(clippy::too_many_arguments)]
 fn generate_function(
     a: &Analysis,
     fid: u32,
@@ -858,12 +852,13 @@ fn generate_function(
             E::Ident(n) => visible
                 .iter()
                 .find(|d| &d.name == n)
-                .and_then(|d| d.ty.clone()),
+                .and_then(|d| d.ty)
+                .map(|t| a.show(t)),
             _ => None,
         }
         .or_else(|| {
             a.expr_ty(fid, arg.span.start, arg.span.end)
-                .map(|x| x.ty.clone())
+                .map(|x| a.show(x.ty))
         })
         .unwrap_or_else(|| "int".into());
         let mut pname = match &arg.kind {
@@ -950,7 +945,10 @@ fn match_on_value(
     }
     let edecl = a.decl(r.type_def?)?;
     // only plain enum values (not arrays or optionals of them)
-    if edecl.kind != DeclKind::Enum || d.ty.as_deref() != Some(edecl.name.as_str()) {
+    if edecl.kind != DeclKind::Enum
+        || d.ty
+            .is_none_or(|t| !matches!(a.types.kind(t), TyKind::Enum(_)))
+    {
         return None;
     }
     let st = block_stmt_around(module, off, off)?;
@@ -1044,6 +1042,8 @@ mod tests {
 
     #[test]
     fn finds_unused_imports() {
+        let unused_imports =
+            |src: &str| super::unused_imports(src, &crate::parser::parse_module_recover(src, 0).0);
         let src = "import {\n  \"./a\" as a\n  \"./b\" as b\n}\nb.f()\n";
         let u = unused_imports(src);
         assert_eq!(u.len(), 1);

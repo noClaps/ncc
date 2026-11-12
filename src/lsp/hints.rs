@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use lsp_types::*;
 
-use super::{KEYWORDS, Server, offset_to_pos, pos_to_offset};
+use super::{KEYWORDS, Positions, Server, offset_to_pos, pos_to_offset};
 use crate::ast;
 use crate::check::index::{DeclKind, HintKind};
 use crate::lexer::{StrPart, Tok};
@@ -71,6 +71,7 @@ pub fn legend() -> SemanticTokensLegend {
 impl Server {
     pub(super) fn inlay_hints(&self, p: InlayHintParams) -> Option<Vec<InlayHint>> {
         let (a, fid, text) = self.fresh(&p.text_document.uri)?;
+        let path = super::uri_to_path(&p.text_document.uri)?;
         let (rs, re) = (
             pos_to_offset(text, p.range.start) as u32,
             pos_to_offset(text, p.range.end) as u32,
@@ -107,7 +108,7 @@ impl Server {
             })
             .collect();
         // `} // fn name` after long blocks
-        let (module, _) = crate::parser::parse_module_recover(text, 0);
+        let module = self.module_of(&path, text);
         let mut closing = |label: String, body: crate::diag::Span| {
             let (s, e) = (body.start as usize, body.end as usize);
             if e == 0 || e > text.len() || !text[..e].ends_with('}') {
@@ -132,11 +133,11 @@ impl Server {
                 ast::Item::Fn(f) => closing(format!("fn {}", f.sig.name), f.body.span),
                 ast::Item::Struct(s) => closing(format!("struct {}", s.name), s.span),
                 ast::Item::Enum(e) => closing(format!("enum {}", e.name), e.span),
-                ast::Item::Test(name, b, _) => closing(format!("test \"{name}\""), b.span),
+                ast::Item::Test(name, b, ..) => closing(format!("test \"{name}\""), b.span),
                 _ => {}
             }
         }
-        out.sort_by_key(|h| (h.position.line, h.position.character));
+        out.sort_by_key(|h| h.position);
         Some(out)
     }
 
@@ -173,34 +174,15 @@ impl Server {
                 if r.span == def {
                     mods |= M_DECLARATION;
                 }
-                let (s, e) = (r.span.start as usize, r.span.end as usize);
-                let Some(seg) = text.get(s..e) else { continue };
-                let first = matches!(d.kind, DeclKind::Struct | DeclKind::Enum | DeclKind::Type)
-                    || super::is_type_ref(&r.hover);
-                let at = if first && seg.starts_with(&d.name) {
-                    s
-                } else if seg.ends_with(&d.name) {
-                    e - d.name.len()
-                } else if seg.starts_with(&d.name) {
-                    s
-                } else if let Some(ns) = seg.find('<').and_then(|lt| {
-                    super::name_span(
-                        &text,
-                        crate::diag::Span::new(r.span.file, s, s + lt),
-                        &d.name,
-                        false,
-                    )
-                }) {
-                    // a generic reference: `m.map<int, str>`
-                    ns.start as usize
-                } else {
+                let ns = r.name_span;
+                if text.get(ns.start as usize..ns.end as usize) != Some(d.name.as_str()) {
                     continue;
-                };
+                }
                 // the smallest reference wins (a field inside a larger expression)
-                resolved.entry(at as u32).or_insert((ty, mods));
+                resolved.entry(ns.start).or_insert((ty, mods));
             }
         }
-        let (module, _) = crate::parser::parse_module_recover(&text, 0);
+        let module = self.module_of(&path, &text);
         let mut aliases: HashSet<&str> = HashSet::new();
         for it in &module.items {
             match it {
@@ -227,6 +209,7 @@ impl Server {
             None => (0, text.len()),
         };
         let mut data = Vec::new();
+        let mut positions = Positions::new(&text);
         let (mut pl, mut pc) = (0u32, 0u32);
         for (s, e, ty, mods) in toks {
             if e < rs || s > re {
@@ -236,7 +219,7 @@ impl Server {
             let mut start = s;
             for piece in text[s..e].split_inclusive('\n') {
                 let len = piece.trim_end_matches('\n').encode_utf16().count() as u32;
-                let pos = offset_to_pos(&text, start);
+                let pos = positions.at(start);
                 start += piece.len();
                 if len == 0 {
                     continue;

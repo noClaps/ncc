@@ -1,122 +1,22 @@
-//! The call around the cursor, shared by signature help and completion, and helpers for
-//! function signature labels (`fn name<type T>(T a, (fn(T) int) f) (int, str)`).
+//! The call around the cursor, shared by signature help and completion.
 
 use lsp_types::*;
 
 use super::{BUILTINS, DeclKind, Server, docs, is_ident_byte, markdown, uri_to_path};
+use std::collections::HashMap;
 
-/// The byte range inside the parentheses of a signature label's parameter list: from the first
-/// `(` to its matching `)` (a tuple return type has parentheses too).
-pub fn params_range(label: &str) -> Option<(usize, usize)> {
-    let lp = label.find('(')?;
-    let mut depth = 0;
-    for (i, c) in label[lp..].char_indices() {
-        match c {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some((lp + 1, lp + i));
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// Split a comma-separated list at the top level (not inside brackets).
-pub fn split_top(s: &str) -> Vec<(usize, usize)> {
-    let mut out = Vec::new();
-    let mut depth = 0i32;
-    let mut start = 0;
-    for (i, c) in s.char_indices() {
-        match c {
-            '(' | '[' | '<' => depth += 1,
-            ')' | ']' | '>' => depth -= 1,
-            ',' if depth == 0 => {
-                out.push((start, i));
-                start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    if !s[start..].trim().is_empty() || !out.is_empty() {
-        out.push((start, s.len()));
-    }
-    out.into_iter()
-        .map(|(a, b)| {
-            let t = &s[a..b];
-            let a = a + (t.len() - t.trim_start().len());
-            (a, a + t.trim().len())
-        })
-        .filter(|(a, b)| b > a)
-        .collect()
-}
-
-/// The parameters of a signature label: (type, name) pairs.
-pub fn params(label: &str) -> Vec<(String, String)> {
-    let Some((l, r)) = params_range(label) else {
-        return vec![];
-    };
-    split_top(&label[l..r])
-        .into_iter()
-        .map(|(a, b)| {
-            let p = &label[l + a..l + b];
-            match p.rsplit_once(' ') {
-                Some((t, n)) => (t.trim().to_string(), n.to_string()),
-                None => (p.to_string(), String::new()),
-            }
-        })
-        .collect()
-}
-
-/// The generic parameters of a signature label (`fn map<type I, type O>(` -> `I`, `O`;
-/// `fn f<type T, uint N>(` -> `T`, `N`).
-pub fn type_params(label: &str) -> Vec<String> {
-    let Some(lp) = label.find('(') else {
-        return vec![];
-    };
-    let head = &label[..lp];
-    let (Some(a), Some(b)) = (head.find('<'), head.rfind('>')) else {
-        return vec![];
-    };
-    head[a + 1..b]
-        .split(',')
-        .map(|t| t.trim().rsplit(' ').next().unwrap_or("").to_string())
-        .filter(|t| !t.is_empty())
-        .collect()
-}
-
-/// Replace whole-word type names (`I` -> `int`) in a label or type.
-pub fn substitute(s: &str, names: &[String], with: &[String]) -> String {
-    let mut out = String::new();
-    let b = s.as_bytes();
-    let mut i = 0;
-    while i < s.len() {
-        if is_ident_byte(b[i]) {
-            let start = i;
-            while i < s.len() && is_ident_byte(b[i]) {
-                i += 1;
-            }
-            let w = &s[start..i];
-            match names.iter().position(|n| n == w).and_then(|k| with.get(k)) {
-                Some(t) => out.push_str(t),
-                None => out.push_str(w),
-            }
-        } else {
-            let c = s[i..].chars().next().unwrap();
-            out.push(c);
-            i += c.len_utf8();
-        }
-    }
-    out
-}
+use super::tyexpr;
+use crate::ast::TypeExpr;
+use crate::check::index::Sig;
 
 /// The call around a position.
 pub struct CallCtx {
+    /// the callee's name as its signature shows it (`@as`, `c.read`, `add`)
+    pub name: String,
     /// the callee's signature, with explicit generic arguments substituted
-    pub label: String,
+    pub sig: Sig,
+    /// the generic parameters still to infer (none when the call gives them)
+    pub open_tps: Vec<String>,
     /// index of the argument the cursor is in
     pub arg: u32,
     pub documentation: Option<String>,
@@ -168,7 +68,7 @@ impl Server {
             e -= 1;
         }
         // explicit generic arguments: `map<int, str>(`
-        let generic_args: Vec<String> = if e > 0 && b[e - 1] == b'>' {
+        let generic_args: Vec<TypeExpr> = if e > 0 && b[e - 1] == b'>' {
             let close = e - 1;
             let mut d = 0;
             while e > 0 {
@@ -184,11 +84,7 @@ impl Server {
                     _ => {}
                 }
             }
-            let inner = &text[e + 1..close];
-            split_top(inner)
-                .into_iter()
-                .map(|(a, b)| inner[a..b].to_string())
-                .collect()
+            crate::parser::parse_generic_args_text(&text[e..=close]).unwrap_or_default()
         } else {
             vec![]
         };
@@ -205,10 +101,10 @@ impl Server {
         };
         let mut documentation = None;
         let mut param_docs: Vec<String> = Vec::new();
-        let label = if is_builtin {
-            let b = BUILTINS.iter().find(|(n, ..)| *n == name)?;
-            documentation = Some(b.2.to_string());
-            b.1.to_string()
+        let (shown, sig, tps) = if is_builtin {
+            let b = BUILTINS.iter().find(|b| b.name == name)?;
+            documentation = Some(b.doc.to_string());
+            (format!("@{name}"), b.sig(), vec![])
         } else {
             let a = self.analyses.get(&path)?;
             let fid = a.file_id(&path);
@@ -237,25 +133,36 @@ impl Server {
                 param_docs = docs::param_docs(&doc);
                 documentation = Some(doc);
             }
-            d.detail.clone()
+            let shown = match &d.extern_alias {
+                Some(x) => format!("{x}.{}", d.name),
+                None => d.name.clone(),
+            };
+            (shown, d.sig.clone()?, d.type_params.clone())
         };
         // `fn map<type I, type O>(I[] arr, ...)` called as `map<int, str>(` shows
         // `fn map<int, str>(int[] arr, ...)`
-        let tps = type_params(&label);
-        let label = if !tps.is_empty() && tps.len() == generic_args.len() {
-            let lp = label.find('<').unwrap_or(0);
-            let head = &label[..lp];
-            let rest = &label[label.find('(').unwrap_or(label.len())..];
-            format!(
-                "{head}<{}>{}",
-                generic_args.join(", "),
-                substitute(rest, &tps, &generic_args)
-            )
+        let (sig, open_tps) = if !tps.is_empty() && tps.len() == generic_args.len() {
+            let binds: HashMap<String, TypeExpr> = tps
+                .iter()
+                .cloned()
+                .zip(generic_args.iter().cloned())
+                .collect();
+            let sub = |t: &TypeExpr| tyexpr::substitute(t, &binds);
+            let sig = Sig {
+                params: (sig.params.iter())
+                    .map(|(t, n)| (t.as_ref().map(sub), n.clone()))
+                    .collect(),
+                ret: sig.ret.as_ref().map(sub),
+                type_params: generic_args.iter().map(TypeExpr::show).collect(),
+            };
+            (sig, vec![])
         } else {
-            label
+            (sig, tps)
         };
         Some(CallCtx {
-            label,
+            name: shown,
+            sig,
+            open_tps,
             arg: commas,
             documentation,
             param_docs,
@@ -268,15 +175,12 @@ impl Server {
         let text = self.text_of(&path)?;
         let off = super::pos_to_offset(&text, pp.position);
         let c = self.call_at(&pp.text_document.uri, off)?;
-        let (l, r) = params_range(&c.label)?;
-        let label = &c.label;
-        let parameters = split_top(&label[l..r])
-            .into_iter()
-            .enumerate()
+        let (label, ranges) = c.sig.label(&c.name);
+        let parameters = (ranges.into_iter().enumerate())
             .map(|(i, (s, e))| ParameterInformation {
                 label: ParameterLabel::LabelOffsets([
-                    label[..l + s].encode_utf16().count() as u32,
-                    label[..l + e].encode_utf16().count() as u32,
+                    label[..s].encode_utf16().count() as u32,
+                    label[..e].encode_utf16().count() as u32,
                 ]),
                 documentation: c
                     .param_docs
@@ -286,7 +190,7 @@ impl Server {
             .collect();
         Some(SignatureHelp {
             signatures: vec![SignatureInformation {
-                label: c.label.clone(),
+                label,
                 documentation: c
                     .documentation
                     .map(|d| Documentation::MarkupContent(markdown(d))),
@@ -304,29 +208,22 @@ impl Server {
         let Some(c) = self.call_at(uri, off) else {
             return vec![];
         };
-        let ps = params(&c.label);
-        let Some((ty, _)) = ps.get(c.arg as usize) else {
+        let Some((ty, _)) = c.sig.params.get(c.arg as usize) else {
             return vec![];
         };
-        let Some(inner) = ty.strip_prefix("(fn").and_then(|t| t.strip_suffix(')')) else {
+        let Some(TypeExpr::Fn(ps, ret, _)) = ty else {
             return vec![];
         };
-        // `(int, str) bool` -> parameters and return type
-        let Some((l, r)) = params_range(inner) else {
-            return vec![];
-        };
-        let ret = inner[r + 1..].trim();
+        let ty = ty.as_ref().map(TypeExpr::show).unwrap_or_default();
+        let ret = ret.as_ref().map(|r| r.show()).unwrap_or_default();
         let names = ["a", "b", "c", "d", "e", "f", "g", "h"];
-        let args: Vec<(String, String)> = split_top(&inner[l..r])
-            .into_iter()
-            .enumerate()
-            .map(|(i, (a, b))| {
-                let t = inner[l + a..l + b].to_string();
+        let args: Vec<(String, String)> = (ps.iter().enumerate())
+            .map(|(i, t)| {
                 let n = names
                     .get(i)
                     .map(ToString::to_string)
                     .unwrap_or(format!("a{i}"));
-                (t, n)
+                (t.show(), n)
             })
             .collect();
         let plain: Vec<String> = args.iter().map(|(t, n)| format!("{t} {n}")).collect();
@@ -361,38 +258,16 @@ mod tests {
 
     #[test]
     fn signature_labels() {
-        let l = "fn pair(int a, (fn(int) str) f) (int, str)";
-        assert_eq!(
-            params_range(l).map(|(a, b)| &l[a..b]),
-            Some("int a, (fn(int) str) f")
-        );
-        assert_eq!(
-            params(l),
-            [
-                ("int".to_string(), "a".to_string()),
-                ("(fn(int) str)".to_string(), "f".to_string())
-            ]
-        );
-        let g = "fn map<type I, type O>(I[] arr, (fn(I) O) f) O[]";
-        assert_eq!(type_params(g), ["I", "O"]);
-        assert_eq!(
-            substitute(
-                "(I[] arr, (fn(I) O) f) O[]",
-                &type_params(g),
-                &["int".into(), "str".into()]
-            ),
-            "(int[] arr, (fn(int) str) f) str[]"
-        );
-        assert_eq!(params("fn f()"), vec![]);
-        let c = "fn split<type T, uint N, uint M>(T[N + M] arr) (T[N], T[M])";
-        assert_eq!(type_params(c), ["T", "N", "M"]);
-        assert_eq!(
-            substitute(
-                "(T[N + M] arr) (T[N], T[M])",
-                &type_params(c),
-                &["int".into(), "2".into(), "3".into()]
-            ),
-            "(int[2 + 3] arr) (int[2], int[3])"
-        );
+        let ty = crate::parser::parse_type_text;
+        let sig = Sig {
+            type_params: vec!["type I".into(), "type O".into()],
+            params: vec![(ty("I[]"), "arr".into()), (ty("(fn(I) O)"), "f".into())],
+            ret: ty("O[]"),
+        };
+        let (label, ranges) = sig.label("map");
+        assert_eq!(label, "fn map<type I, type O>(I[] arr, (fn(I) O) f) O[]");
+        let ps: Vec<&str> = ranges.iter().map(|&(a, b)| &label[a..b]).collect();
+        assert_eq!(ps, ["I[] arr", "(fn(I) O) f"]);
+        assert_eq!(sig.value_ty().unwrap().show(), "(fn(I[], (fn(I) O)) O[])");
     }
 }

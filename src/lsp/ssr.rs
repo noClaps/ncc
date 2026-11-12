@@ -12,8 +12,8 @@ use std::path::PathBuf;
 use lsp_types::*;
 use serde::Deserialize;
 
-use super::nav::{Node, walk};
 use super::{Server, line_end, offset_to_pos, path_to_uri, pos_to_offset, range, uri_to_path};
+use crate::ast::visit::{Node, walk};
 use crate::ast::{self, ExprKind as E};
 use crate::lexer::Tok;
 

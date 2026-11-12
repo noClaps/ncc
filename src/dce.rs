@@ -12,7 +12,6 @@
 //! reads it. Reads inside a store to `x` only matter once `x` itself is live, so
 //! self-referencing chains such as `a = a <> [4]` are removed together.
 
-use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::{BinOp, UnOp};
@@ -52,14 +51,14 @@ fn pass(p: &mut Program) -> bool {
     let mut changed = false;
     for f in 0..p.funcs.len() {
         let mut body = std::mem::replace(&mut p.funcs[f].body, Block { stmts: vec![] });
-        let pr = Prune {
+        let mut pr = Prune {
             p,
             func: f,
             live: &live,
-            changed: Cell::new(false),
+            changed: false,
         };
         pr.block(&mut body);
-        changed |= pr.changed.get();
+        changed |= pr.changed;
         p.funcs[f].body = body;
     }
     changed
@@ -313,60 +312,12 @@ fn pat_pure(p: &Program, pt: &Pat) -> bool {
 /// The expressions directly inside `e`, including those in `if` patterns but not the
 /// statements of its nested blocks.
 fn children(e: &Expr) -> Vec<&Expr> {
-    fn pat<'a>(pt: &'a Pat, out: &mut Vec<&'a Expr>) {
-        match pt {
-            Pat::Wild | Pat::Bind(_) => {}
-            Pat::Value(e) | Pat::Cond(e) => out.push(e),
-            Pat::Tuple(ps) | Pat::Struct(ps) | Pat::Array(ps) | Pat::Variant(_, ps) => {
-                ps.iter().for_each(|pt| pat(pt, out));
-            }
-        }
-    }
     let mut out: Vec<&Expr> = vec![];
-    match &e.kind {
-        EK::Lit(_)
-        | EK::None
-        | EK::Var(_)
-        | EK::FnRef(_)
-        | EK::Closure(_)
-        | EK::Dollar
-        | EK::Args
-        | EK::Env
-        | EK::Target
-        | EK::Embed(..) => {}
-        EK::Unary(_, a)
-        | EK::Cast(a)
-        | EK::ToStr(a)
-        | EK::Field(a, _)
-        | EK::TupleIndex(a, _)
-        | EK::Len(a)
-        | EK::Some(a)
-        | EK::Retype(a)
-        | EK::Try(a)
-        | EK::Await(a)
-        | EK::Catch(a, ..)
-        | EK::Else(a, Fallback::Block(..)) => out.push(&**a),
-        EK::Binary(_, a, b) | EK::Index(a, b) | EK::Else(a, Fallback::Expr(b)) => {
-            out.extend([&**a, &**b]);
-        }
-        EK::Slice(a, lo, hi) => out.extend([&**a, &**lo, &**hi]),
-        EK::Call(c, xs) | EK::Async(c, xs) => {
-            if let Callee::Value(f) = c {
-                out.push(&**f);
-            }
-            out.extend(xs.iter());
-        }
-        EK::Print(_, _, xs)
-        | EK::Format(xs)
-        | EK::Tuple(xs)
-        | EK::Array(xs)
-        | EK::Struct(xs)
-        | EK::Variant(_, xs) => out.extend(xs.iter()),
-        EK::Map(es) => es.iter().for_each(|(k, v)| out.extend([k, v])),
-        EK::If(i) => {
-            out.extend(&i.scrutinee);
-            for a in &i.arms {
-                a.patterns.iter().for_each(|pt| pat(pt, &mut out));
+    e.for_each_child(&mut |c| out.push(c));
+    if let EK::If(i) = &e.kind {
+        for a in &i.arms {
+            for pt in &a.patterns {
+                pt.for_each_expr(&mut |x| out.push(x));
             }
         }
     }
@@ -377,11 +328,11 @@ struct Prune<'a> {
     p: &'a Program,
     func: FuncId,
     live: &'a HashSet<Key>,
-    changed: Cell<bool>,
+    changed: bool,
 }
 
 impl Prune<'_> {
-    fn block(&self, b: &mut Block) {
+    fn block(&mut self, b: &mut Block) {
         // blocks that declare nothing need no scope of their own
         if b.stmts
             .iter()
@@ -395,7 +346,7 @@ impl Prune<'_> {
                 }
             }
             b.stmts = out;
-            self.changed.set(true);
+            self.changed = true;
         }
         let before = b.stmts.len();
         b.stmts.retain(|s| match removable(self.p, self.func, s) {
@@ -405,7 +356,7 @@ impl Prune<'_> {
         });
         self.overwritten(b);
         if b.stmts.len() != before {
-            self.changed.set(true);
+            self.changed = true;
         }
         for s in &mut b.stmts {
             self.stmt(s);
@@ -423,7 +374,7 @@ impl Prune<'_> {
         let mut declare = vec![];
         for (i, s) in b.stmts.iter().enumerate().rev() {
             let simple = matches!(s.kind, SK::Let(..) | SK::Assign(..) | SK::Expr(_))
-                && !has_nested_blocks(s);
+                && !crate::check::flow::has_nested_blocks(s);
             if !simple {
                 over.clear();
                 continue;
@@ -495,14 +446,11 @@ impl Prune<'_> {
                 s.kind = SK::Let(Some(*v), e);
             }
         }
-        let mut i = 0;
-        b.stmts.retain(|_| {
-            i += 1;
-            keep[i - 1]
-        });
+        let mut k = keep.iter();
+        b.stmts.retain(|_| *k.next().unwrap());
     }
 
-    fn stmt(&self, s: &mut Stmt) {
+    fn stmt(&mut self, s: &mut Stmt) {
         match &mut s.kind {
             SK::Let(_, e) | SK::Destructure(_, e) | SK::Expr(e) | SK::Throw(e) | SK::Assert(e) => {
                 self.expr(e)
@@ -527,7 +475,7 @@ impl Prune<'_> {
         }
     }
 
-    fn place(&self, pl: &mut Place) {
+    fn place(&mut self, pl: &mut Place) {
         match pl {
             Place::Var(_) => {}
             Place::Field(b, _) | Place::TupleIndex(b, _) => self.place(b),
@@ -538,97 +486,22 @@ impl Prune<'_> {
         }
     }
 
-    fn pat(&self, pt: &mut Pat) {
-        match pt {
-            Pat::Wild | Pat::Bind(_) => {}
-            Pat::Value(e) | Pat::Cond(e) => self.expr(e),
-            Pat::Tuple(ps) | Pat::Struct(ps) | Pat::Array(ps) | Pat::Variant(_, ps) => {
-                ps.iter_mut().for_each(|p| self.pat(p));
-            }
-        }
-    }
-
     /// Prune the blocks nested in `e`.
-    fn expr(&self, e: &mut Expr) {
+    fn expr(&mut self, e: &mut Expr) {
+        e.for_each_child_mut(&mut |c| self.expr(c));
         match &mut e.kind {
             EK::If(i) => {
-                if let Some(s) = &mut i.scrutinee {
-                    self.expr(s);
-                }
                 for a in &mut i.arms {
-                    a.patterns.iter_mut().for_each(|p| self.pat(p));
+                    for pt in &mut a.patterns {
+                        pt.for_each_expr_mut(&mut |x| self.expr(x));
+                    }
                     self.block(&mut a.body);
                 }
             }
-            EK::Catch(a, _, b, _) => {
-                self.expr(a);
-                self.block(b);
-            }
-            EK::Else(a, fb) => {
-                self.expr(a);
-                match fb {
-                    Fallback::Expr(b) => self.expr(b),
-                    Fallback::Block(b, _) => self.block(b),
-                }
-            }
-            EK::Unary(_, a)
-            | EK::Cast(a)
-            | EK::ToStr(a)
-            | EK::Field(a, _)
-            | EK::TupleIndex(a, _)
-            | EK::Len(a)
-            | EK::Some(a)
-            | EK::Retype(a)
-            | EK::Try(a)
-            | EK::Await(a) => self.expr(a),
-            EK::Binary(_, a, b) | EK::Index(a, b) => {
-                self.expr(a);
-                self.expr(b);
-            }
-            EK::Slice(a, lo, hi) => {
-                self.expr(a);
-                self.expr(lo);
-                self.expr(hi);
-            }
-            EK::Call(c, xs) | EK::Async(c, xs) => {
-                if let Callee::Value(f) = c {
-                    self.expr(f);
-                }
-                xs.iter_mut().for_each(|x| self.expr(x));
-            }
-            EK::Print(_, _, xs)
-            | EK::Format(xs)
-            | EK::Tuple(xs)
-            | EK::Array(xs)
-            | EK::Struct(xs)
-            | EK::Variant(_, xs) => xs.iter_mut().for_each(|x| self.expr(x)),
-            EK::Map(es) => es.iter_mut().for_each(|(k, v)| {
-                self.expr(k);
-                self.expr(v);
-            }),
-            EK::Lit(_)
-            | EK::None
-            | EK::Var(_)
-            | EK::FnRef(_)
-            | EK::Closure(_)
-            | EK::Dollar
-            | EK::Args
-            | EK::Env
-            | EK::Target
-            | EK::Embed(..) => {}
+            EK::Catch(_, _, b, _) | EK::Else(_, Fallback::Block(b, _)) => self.block(b),
+            _ => {}
         }
     }
-}
-
-fn has_nested_blocks(s: &Stmt) -> bool {
-    let mut found = false;
-    crate::check::flow::visit_stmt(s, &mut |e| {
-        found |= matches!(
-            e.kind,
-            EK::If(_) | EK::Catch(..) | EK::Else(_, Fallback::Block(..))
-        );
-    });
-    found
 }
 
 fn flat(b: &Block) -> bool {

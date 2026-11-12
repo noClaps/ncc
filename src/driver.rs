@@ -28,57 +28,55 @@ pub struct Options {
 /// `codegen` is set when the program will be compiled to C (not just checked): the
 /// compilation target is then needed for `@target`.
 fn frontend(file: &Path, sm: &mut SourceMap, release: bool, codegen: bool) -> Option<Program> {
-    let r = crate::modules::load_with(sm, file, &Default::default()).map(|(graph, load_errors)| {
-        let entry_file = graph.modules[0].file;
-        let (mut p, mut errors, index) = crate::check::check(graph, false);
-        errors.extend(load_errors);
-        if codegen && errors.is_empty() && uses_target(&p) {
-            match detect_target() {
-                Ok(t) => p.target = Some(t),
-                Err(e) => errors.push(crate::diag::Diag::new(Default::default(), e)),
-            }
-        }
-        // loops are checked before release folding rewrites them, so both modes agree
-        let loops = errors.is_empty().then(|| crate::lint::loops(&p, sm));
-        // compile-time panics are reported alongside type errors
-        if let Err(more) = crate::eval::Evaluator::run(&mut p, sm, release && errors.is_empty()) {
-            errors.extend(more);
-        }
-        errors.sort_by_key(|d| (d.span.file, d.span.start));
-        errors.dedup_by(|a, b| a.span == b.span && a.msg == b.msg);
-        if errors.is_empty() {
-            for w in crate::lint::race_warnings(&p) {
-                eprintln!("{}", w.render_as("warning", sm));
-            }
-            // unreachable code after a loop that never finishes: like unused code below
-            let unreachable = loops.map(|l| l.unreachable).unwrap_or_default();
-            if release {
-                errors.extend(unreachable);
-            } else {
-                for d in unreachable {
-                    eprintln!("{}", d.render_as("warning", sm));
+    let r = crate::modules::load_with(sm, file, &Default::default(), None).map(
+        |(graph, load_errors)| {
+            let entry_file = graph.modules[0].file;
+            let (mut p, mut errors, index) = crate::check::check(graph, false);
+            errors.extend(load_errors);
+            if codegen && errors.is_empty() && uses_target(&p) {
+                match detect_target() {
+                    Ok(t) => p.target = Some(t),
+                    Err(e) => errors.push(crate::diag::Diag::new(Default::default(), e)),
                 }
             }
-            // unused code: warnings in debug mode, errors in release mode
-            let unused = crate::lint::unused(&index, sm);
-            if release {
-                errors.extend(unused.into_iter().map(|u| u.diag));
-            } else {
-                for u in unused {
-                    eprintln!("{}", u.diag.render_as("warning", sm));
+            // loops are checked before release folding rewrites them, so both modes agree
+            let loops = errors.is_empty().then(|| crate::lint::loops(&p, sm));
+            // compile-time panics are reported alongside type errors
+            if let Err(more) = crate::eval::Evaluator::run(&mut p, sm, release && errors.is_empty())
+            {
+                errors.extend(more);
+            }
+            crate::diag::sort_dedup(&mut errors);
+            if errors.is_empty() {
+                for w in crate::lint::race_warnings(&p) {
+                    eprintln!("{}", w.render_as("warning", sm));
+                }
+                // unreachable code after a loop that never finishes, and unused code: warnings in
+                // debug mode, errors in release mode
+                let unreachable = loops.map(|l| l.unreachable).unwrap_or_default();
+                let unused = crate::lint::unused(&index, &p.types)
+                    .into_iter()
+                    .map(|u| u.diag);
+                let found = unreachable.into_iter().chain(unused);
+                if release {
+                    errors.extend(found);
+                } else {
+                    for d in found {
+                        eprintln!("{}", d.render_as("warning", sm));
+                    }
                 }
             }
-        }
-        if release && errors.is_empty() {
-            // dropping unused imported initialisers can make more code dead, and the reverse
-            crate::dce::run(&mut p);
-            while crate::shake::run(&mut p, entry_file) {
+            if release && errors.is_empty() {
+                // dropping unused imported initialisers can make more code dead, and the reverse
                 crate::dce::run(&mut p);
+                while crate::shake::run(&mut p, entry_file) {
+                    crate::dce::run(&mut p);
+                }
+                p.entry_file = Some(entry_file);
             }
-            p.entry_file = Some(entry_file);
-        }
-        (p, errors)
-    });
+            (p, errors)
+        },
+    );
     let errors = match r {
         Ok((p, errors)) if errors.is_empty() => return Some(p),
         Ok((_, errors)) | Err(errors) => errors,

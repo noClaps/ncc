@@ -14,6 +14,9 @@ pub fn is_keyword(s: &str) -> bool {
     KEYWORDS.contains(&s)
 }
 
+/// A struct or enum body: the name and its span, type parameters, members and closing brace.
+type TypeBody<T> = ((String, Span), Vec<GenericParam>, Vec<T>, Span);
+
 pub struct Parser {
     toks: Vec<Token>,
     pos: usize,
@@ -40,6 +43,48 @@ pub fn parse_module_recover(src: &str, file: u32) -> (Module, Vec<Diag>) {
     let mut errors = p.errors;
     errors.dedup_by(|a, b| a.span == b.span && a.msg == b.msg);
     (m, errors)
+}
+
+/// Run `f` on a parser over `src`; its result when it reads all of `src`. For the language
+/// server, which reads types and signatures out of code being written.
+fn parse_all<T>(src: &str, f: impl FnOnce(&mut Parser) -> Result<T>) -> Option<T> {
+    let (toks, errors) = crate::lexer::lex_all(src, 0, 0);
+    if !errors.is_empty() {
+        return None;
+    }
+    let mut p = Parser::new(toks, 0, src.to_string());
+    let out = f(&mut p).ok()?;
+    p.skip_nl();
+    p.at(&Tok::Eof).then_some(out)
+}
+
+/// `src` as a type: `int[]`, `(fn(T) str)`, `Box<int>`.
+pub fn parse_type_text(src: &str) -> Option<TypeExpr> {
+    parse_all(src, Parser::parse_type)
+}
+
+/// `src` as generic arguments in their brackets: `<int, 3>`.
+pub fn parse_generic_args_text(src: &str) -> Option<Vec<TypeExpr>> {
+    parse_all(src, Parser::generic_args)
+}
+
+/// `src` as a function header: `fn name<type T>(T a) int`, or `fn(int a) str` for a literal.
+pub fn parse_fn_header_text(src: &str) -> Option<FnSig> {
+    parse_all(src, |p| {
+        p.expect_kw("fn")?;
+        if matches!(p.peek(), Tok::Ident(_)) {
+            return p.fn_sig(false);
+        }
+        let start = p.span();
+        let (params, ret) = p.params_and_ret()?;
+        Ok(FnSig {
+            name: String::new(),
+            type_params: vec![],
+            params,
+            ret,
+            span: start,
+        })
+    })
 }
 
 impl Parser {
@@ -356,6 +401,7 @@ impl Parser {
                     path,
                     alias,
                     span: sp.to(asp),
+                    alias_span: asp,
                 }));
                 self.eat(&Tok::Comma);
                 self.skip_nl();
@@ -370,7 +416,7 @@ impl Parser {
             self.bump();
             let path = self.plain_string("extern path")?;
             self.expect_kw("as")?;
-            let (alias, _) = self.ident()?;
+            let (alias, alias_span) = self.ident()?;
             self.expect(&Tok::LBrace)?;
             self.skip_nl();
             let mut fns = Vec::new();
@@ -391,11 +437,12 @@ impl Parser {
                 alias,
                 fns,
                 span: start.to(end),
+                alias_span,
             }));
             return Ok(());
         }
         if self.at_kw("struct") {
-            let (name, type_params, fields, end) = self.type_body(|p| {
+            let ((name, name_span), type_params, fields, end) = self.type_body(|p| {
                 let ty = p.parse_type()?;
                 let (fname, fsp) = p.ident()?;
                 Ok((ty, fname, fsp))
@@ -406,11 +453,12 @@ impl Parser {
                 fields,
                 public,
                 span: start.to(end),
+                name_span,
             }));
             return Ok(());
         }
         if self.at_kw("enum") {
-            let (name, type_params, variants, end) = self.type_body(|p| {
+            let ((name, name_span), type_params, variants, end) = self.type_body(|p| {
                 let (vname, vsp) = p.ident()?;
                 let tys = if p.eat(&Tok::LParen) {
                     p.list(&Tok::RParen, Self::parse_type)?
@@ -425,12 +473,13 @@ impl Parser {
                 variants,
                 public,
                 span: start.to(end),
+                name_span,
             }));
             return Ok(());
         }
         if self.at_kw("type") {
             self.bump();
-            let (name, _) = self.ident()?;
+            let (name, name_span) = self.ident()?;
             self.expect(&Tok::Assign)?;
             let ty = self.parse_type()?;
             items.push(Item::Type(TypeDecl {
@@ -438,6 +487,7 @@ impl Parser {
                 ty,
                 public,
                 span: start.to(self.prev_span()),
+                name_span,
             }));
             return Ok(());
         }
@@ -456,9 +506,15 @@ impl Parser {
                 return err(start, "tests cannot be `pub`");
             }
             self.bump();
+            let name_span = self.span();
             let name = self.plain_string("test name")?;
             let body = self.block()?;
-            items.push(Item::Test(name, body, start.to(self.prev_span())));
+            items.push(Item::Test(
+                name,
+                body,
+                start.to(self.prev_span()),
+                name_span,
+            ));
             return Ok(());
         }
         let stmt = self.stmt(public)?;
@@ -474,9 +530,9 @@ impl Parser {
     fn type_body<T>(
         &mut self,
         mut member: impl FnMut(&mut Self) -> Result<T>,
-    ) -> Result<(String, Vec<GenericParam>, Vec<T>, Span)> {
+    ) -> Result<TypeBody<T>> {
         self.bump();
-        let (name, _) = self.ident()?;
+        let name = self.ident()?;
         let type_params = self.type_params()?;
         self.expect(&Tok::LBrace)?;
         self.skip_nl();
@@ -951,10 +1007,14 @@ impl Parser {
             Tok::Ident(k) if k == "fn" && matches!(self.peek_n(1), Tok::Ident(_)) => {
                 if matches!(self.peek_n(2), Tok::Assign) {
                     self.bump();
-                    let (name, _) = self.ident()?;
+                    let (name, name_span) = self.ident()?;
                     self.bump();
                     let value = self.expr()?;
-                    StmtKind::FnVar { name, value }
+                    StmtKind::FnVar {
+                        name,
+                        name_span,
+                        value,
+                    }
                 } else {
                     self.bump();
                     let sig = self.fn_sig(false)?;
@@ -1032,6 +1092,7 @@ impl Parser {
                 ty,
                 name,
                 span: start.to(nsp),
+                name_span: nsp,
             });
             if !self.eat(&Tok::Comma) {
                 break;

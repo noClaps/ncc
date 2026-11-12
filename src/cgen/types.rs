@@ -604,9 +604,7 @@ fn in_header(kind: &TyKind, inner: TyId, name: &str) -> bool {
 
 /// `(void)p; ` for each parameter `p` the body never mentions, to keep C compilers quiet.
 fn unused(body: &str, params: &[&str]) -> String {
-    let words: std::collections::HashSet<&str> = body
-        .split(|c: char| !(c == '_' || c.is_ascii_alphanumeric()))
-        .collect();
+    let words: std::collections::HashSet<&str> = super::idents(body).collect();
     (params.iter())
         .filter(|p| !words.contains(**p))
         .map(|p| format!("(void){p}; "))

@@ -1,12 +1,12 @@
-//! Release-mode tree shaking of imports.
+//! Tree shaking of imports.
 //!
 //! An imported module's top-level statements only run when they initialise a global that the
-//! program uses (see `assemble_main` in the checker). The checker decides this before release
-//! folding and dead code elimination, which can remove the only uses of an imported global or
-//! function. This pass decides it again on the final program: starting from the entry module's
-//! code and its tests, it follows the functions and globals that kept code references, keeps the
-//! imported initialisers writing a reached global, and drops the rest. Extern functions are
-//! reached the same way, so only extern files whose functions are called are compiled in.
+//! program uses. Starting from the entry module's code and its tests, this pass follows the
+//! functions and globals that kept code references, keeps the imported initialisers writing a
+//! reached global, and drops the rest. The checker runs it once on the program it builds; release
+//! builds run it again after folding and dead code elimination, which can remove the only uses of
+//! an imported global or function. Extern functions are reached the same way, so only extern
+//! files whose functions are called are compiled in.
 
 use std::collections::HashSet;
 
@@ -26,13 +26,9 @@ pub struct Reach {
 pub fn run(p: &mut Program, entry_file: u32) -> bool {
     let (_, keep) = analyse(p, entry_file);
     let main = &mut p.funcs[p.main];
-    let before = main.body.stmts.len();
-    let mut i = 0;
-    main.body.stmts.retain(|_| {
-        i += 1;
-        keep[i - 1]
-    });
-    main.body.stmts.len() != before
+    let mut k = keep.iter();
+    main.body.stmts.retain(|_| *k.next().unwrap());
+    keep.contains(&false)
 }
 
 /// What the program reaches from its entry module's code and tests.

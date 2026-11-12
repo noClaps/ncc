@@ -2,7 +2,6 @@
 
 use std::collections::HashSet;
 
-use super::Checker;
 use crate::tir::*;
 use crate::types::NEVER;
 
@@ -55,82 +54,15 @@ fn visit_block<'a>(b: &'a Block, f: &mut dyn FnMut(&'a Expr)) {
     }
 }
 
-fn visit_callee<'a>(c: &'a Callee, f: &mut dyn FnMut(&'a Expr)) {
-    if let Callee::Value(e) = c {
-        visit_expr(e, f);
-    }
-}
-
 fn visit_pat<'a>(p: &'a Pat, f: &mut dyn FnMut(&'a Expr)) {
-    match p {
-        Pat::Wild | Pat::Bind(_) => {}
-        Pat::Value(e) | Pat::Cond(e) => visit_expr(e, f),
-        Pat::Tuple(ps) | Pat::Struct(ps) | Pat::Array(ps) | Pat::Variant(_, ps) => {
-            for p in ps {
-                visit_pat(p, f);
-            }
-        }
-    }
+    p.for_each_expr(&mut |e| visit_expr(e, f));
 }
 
 pub fn visit_expr<'a>(e: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
     f(e);
+    e.for_each_child(&mut |c| visit_expr(c, f));
     match &e.kind {
-        EK::Lit(_)
-        | EK::None
-        | EK::Var(_)
-        | EK::FnRef(_)
-        | EK::Closure(_)
-        | EK::Dollar
-        | EK::Args
-        | EK::Env
-        | EK::Target
-        | EK::Embed(..) => {}
-        EK::Unary(_, a)
-        | EK::Cast(a)
-        | EK::ToStr(a)
-        | EK::Field(a, _)
-        | EK::TupleIndex(a, _)
-        | EK::Len(a)
-        | EK::Some(a)
-        | EK::Retype(a)
-        | EK::Try(a)
-        | EK::Await(a) => visit_expr(a, f),
-        EK::Binary(_, a, b) | EK::Index(a, b) => {
-            visit_expr(a, f);
-            visit_expr(b, f);
-        }
-        EK::Slice(a, lo, hi) => {
-            visit_expr(a, f);
-            visit_expr(lo, f);
-            visit_expr(hi, f);
-        }
-        EK::Call(c, args) | EK::Async(c, args) => {
-            visit_callee(c, f);
-            for a in args {
-                visit_expr(a, f);
-            }
-        }
-        EK::Print(_, _, args)
-        | EK::Format(args)
-        | EK::Tuple(args)
-        | EK::Array(args)
-        | EK::Struct(args)
-        | EK::Variant(_, args) => {
-            for a in args {
-                visit_expr(a, f);
-            }
-        }
-        EK::Map(es) => {
-            for (k, v) in es {
-                visit_expr(k, f);
-                visit_expr(v, f);
-            }
-        }
         EK::If(i) => {
-            if let Some(s) = &i.scrutinee {
-                visit_expr(s, f);
-            }
             for arm in &i.arms {
                 for p in &arm.patterns {
                     visit_pat(p, f);
@@ -138,17 +70,8 @@ pub fn visit_expr<'a>(e: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
                 visit_block(&arm.body, f);
             }
         }
-        EK::Else(a, fb) => {
-            visit_expr(a, f);
-            match fb {
-                Fallback::Expr(b) => visit_expr(b, f),
-                Fallback::Block(b, _) => visit_block(b, f),
-            }
-        }
-        EK::Catch(a, _, b, _) => {
-            visit_expr(a, f);
-            visit_block(b, f);
-        }
+        EK::Else(_, Fallback::Block(b, _)) | EK::Catch(_, _, b, _) => visit_block(b, f),
+        _ => {}
     }
 }
 
@@ -183,12 +106,24 @@ pub fn place_root(p: &Place) -> Option<VarRef> {
 }
 
 /// The blocks directly inside an expression: `if` arms, `catch` and `else` blocks.
-fn nested_blocks(e: &Expr) -> Vec<&Block> {
+pub fn nested_blocks(e: &Expr) -> Vec<&Block> {
     match &e.kind {
         EK::If(i) => i.arms.iter().map(|a| &a.body).collect(),
         EK::Catch(_, _, b, _) | EK::Else(_, Fallback::Block(b, _)) => vec![b],
         _ => vec![],
     }
+}
+
+/// Whether a statement's expressions contain blocks (`if` arms, `catch` and `else` blocks).
+pub fn has_nested_blocks(s: &Stmt) -> bool {
+    let mut found = false;
+    visit_stmt(s, &mut |e| {
+        found |= matches!(
+            e.kind,
+            EK::If(_) | EK::Catch(..) | EK::Else(_, Fallback::Block(..))
+        );
+    });
+    found
 }
 
 /// Visit a statement and every statement nested in it, in the blocks of statements and of
@@ -238,38 +173,47 @@ pub fn writes_stmt(s: &Stmt, out: &mut HashSet<GlobalId>) {
     });
 }
 
-impl Checker {
-    /// Whether execution can fall off the end of the block.
-    pub fn block_completes(&self, b: &Block) -> bool {
-        b.stmts.iter().all(|s| self.stmt_completes(s))
+/// Whether execution can fall off the end of the block.
+pub fn block_completes(b: &Block) -> bool {
+    // the constructs some `break` leaves, with or without a value
+    let mut broken = HashSet::new();
+    for s in &b.stmts {
+        visit_stmts(s, &mut |s| {
+            if let SK::Break(id, _) = &s.kind {
+                broken.insert(*id);
+            }
+        });
     }
+    completes(b, &broken)
+}
 
-    fn stmt_completes(&self, s: &Stmt) -> bool {
-        match &s.kind {
-            SK::Return(_) | SK::Throw(_) | SK::Break(..) | SK::Continue(_) => false,
-            SK::Expr(e) | SK::Let(_, e) | SK::Destructure(_, e) | SK::Assign(_, e) => {
-                self.expr_completes(e)
-            }
-            SK::Block(b) => self.block_completes(b),
-            SK::While { id, cond, .. } => {
-                let infinite = matches!(cond.kind, EK::Lit(Lit::Bool(true)));
-                !infinite || self.broken.contains(id)
-            }
-            SK::For { .. } | SK::Assert(_) => true,
-            SK::Lock { id, body, .. } => self.block_completes(body) || self.broken.contains(id),
+fn completes(b: &Block, broken: &HashSet<JumpId>) -> bool {
+    b.stmts.iter().all(|s| stmt_completes(s, broken))
+}
+
+fn stmt_completes(s: &Stmt, broken: &HashSet<JumpId>) -> bool {
+    match &s.kind {
+        SK::Return(_) | SK::Throw(_) | SK::Break(..) | SK::Continue(_) => false,
+        SK::Expr(e) | SK::Let(_, e) | SK::Destructure(_, e) | SK::Assign(_, e) => {
+            expr_completes(e, broken)
         }
+        SK::Block(b) => completes(b, broken),
+        SK::While { id, cond, .. } => {
+            let infinite = matches!(cond.kind, EK::Lit(Lit::Bool(true)));
+            !infinite || broken.contains(id)
+        }
+        SK::For { .. } | SK::Assert(_) => true,
+        SK::Lock { id, body, .. } => completes(body, broken) || broken.contains(id),
     }
+}
 
-    fn expr_completes(&self, e: &Expr) -> bool {
-        if e.ty == NEVER {
-            return false;
-        }
-        match &e.kind {
-            // an `if` completes when an arm does, or one breaks out of it (with its value)
-            EK::If(i) => {
-                self.broken.contains(&i.id) || i.arms.iter().any(|a| self.block_completes(&a.body))
-            }
-            _ => true,
-        }
+fn expr_completes(e: &Expr, broken: &HashSet<JumpId>) -> bool {
+    if e.ty == NEVER {
+        return false;
+    }
+    match &e.kind {
+        // an `if` completes when an arm does, or one breaks out of it (with its value)
+        EK::If(i) => broken.contains(&i.id) || i.arms.iter().any(|a| completes(&a.body, broken)),
+        _ => true,
     }
 }

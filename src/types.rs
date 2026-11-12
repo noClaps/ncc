@@ -37,12 +37,16 @@ pub enum TyKind {
 pub struct StructDef {
     pub name: String,
     pub fields: Vec<(String, TyId)>,
+    /// for an instance of a generic struct: the generic's name and the arguments
+    pub generic: Option<(String, Vec<TyId>)>,
 }
 
 #[derive(Clone, Debug)]
 pub struct EnumDef {
     pub name: String,
     pub variants: Vec<(String, Vec<TyId>)>,
+    /// for an instance of a generic enum: the generic's name and the arguments
+    pub generic: Option<(String, Vec<TyId>)>,
 }
 
 #[derive(Clone, Debug)]
@@ -157,6 +161,7 @@ impl Types {
         self.structs.push(StructDef {
             name,
             fields: vec![],
+            generic: None,
         });
         self.intern(TyKind::Struct(self.structs.len() as u32 - 1))
     }
@@ -164,6 +169,7 @@ impl Types {
         self.enums.push(EnumDef {
             name,
             variants: vec![],
+            generic: None,
         });
         self.intern(TyKind::Enum(self.enums.len() as u32 - 1))
     }
@@ -345,6 +351,53 @@ impl Types {
             TyKind::Enum(i) => self.enums[*i as usize].name.clone(),
             TyKind::Named(i) => self.named[*i as usize].name.clone(),
             TyKind::Const(_, v) => v.to_string(),
+        }
+    }
+}
+
+impl Types {
+    /// The type as a syntax tree, as it would be written (`Box<int>[]`, `(fn(int) str)`).
+    pub fn to_type_expr(&self, t: TyId) -> crate::ast::TypeExpr {
+        use crate::ast::{ConstExpr, TypeExpr as T};
+        let sp = crate::diag::Span::default();
+        let b = |t: TyId| Box::new(self.to_type_expr(t));
+        let named = |name: String, args: &[TyId]| T::Named {
+            module: None,
+            name,
+            args: args.iter().map(|a| self.to_type_expr(*a)).collect(),
+            span: sp,
+        };
+        match self.kind(t) {
+            TyKind::Array(e) => T::Array(b(*e), None, sp),
+            TyKind::Fixed(e, n) => {
+                let size = match self.show_size(*n).parse() {
+                    Ok(n) => ConstExpr::Int(n, sp),
+                    // a size in terms of generic constants
+                    Err(_) => ConstExpr::Name(self.show_size(*n), sp),
+                };
+                T::Array(b(*e), Some(size), sp)
+            }
+            TyKind::Map(k, v) => T::Map(b(*k), b(*v), sp),
+            TyKind::Opt(i) => T::Optional(b(*i), sp),
+            TyKind::ErrU(i) => T::ErrorUnion(b(*i), sp),
+            TyKind::Tuple(ts) => T::Tuple(ts.iter().map(|t| self.to_type_expr(*t)).collect(), sp),
+            TyKind::Fn(ps, r) => T::Fn(
+                ps.iter().map(|t| self.to_type_expr(*t)).collect(),
+                (*r != VOID).then(|| b(*r)),
+                sp,
+            ),
+            TyKind::Fut(i) => T::Fut(b(*i), sp),
+            TyKind::Const(_, v) => T::Const(ConstExpr::Int(*v as u128, sp)),
+            TyKind::Struct(i) => match &self.structs[*i as usize].generic {
+                Some((n, args)) => named(n.clone(), args),
+                None => named(self.show(t), &[]),
+            },
+            TyKind::Enum(i) => match &self.enums[*i as usize].generic {
+                Some((n, args)) => named(n.clone(), args),
+                None => named(self.show(t), &[]),
+            },
+            // builtins, aliases and mutexes, written as they show
+            _ => named(self.show(t), &[]),
         }
     }
 }

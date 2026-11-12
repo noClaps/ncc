@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use crate::ast::{Item, Module};
 use crate::diag::{Diag, Result, Results, SourceMap, Span};
@@ -10,7 +11,7 @@ use crate::parser::parse_module_recover;
 pub struct LoadedModule {
     pub path: PathBuf,
     pub file: u32,
-    pub ast: Module,
+    pub ast: Rc<Module>,
     /// import alias -> module index
     pub imports: HashMap<String, usize>,
 }
@@ -91,10 +92,24 @@ pub fn import_file(
 /// Every parse and import error across all modules is reported.
 /// Returns the graph of everything that could be loaded together with those errors; fails
 /// outright only when the entry file itself cannot be read.
+/// Parsed modules kept between loads (by the language server): a module is parsed again only
+/// when its text or its source file id changes.
+#[derive(Default)]
+pub struct ParseCache {
+    /// by path and file id
+    modules: HashMap<(PathBuf, u32), Parsed>,
+}
+
+/// A module's text, its syntax tree and the parse errors.
+type Parsed = (String, Rc<Module>, Vec<Diag>);
+
+/// Load the module graph of `entry`, reading open documents from `overlay` instead of disk,
+/// and reusing (and filling) `cache` when given.
 pub fn load_with(
     sm: &mut SourceMap,
     entry: &Path,
     overlay: &HashMap<PathBuf, String>,
+    cache: Option<&mut ParseCache>,
 ) -> Results<(ModuleGraph, Vec<Diag>)> {
     let entry = std::fs::canonicalize(entry).map_err(|e| {
         vec![Diag::new(
@@ -113,6 +128,7 @@ pub fn load_with(
         by_path: HashMap::new(),
         root: None,
         overlay,
+        cache,
         errors: Vec::new(),
     };
     loader.load_one(&entry, None).map_err(|d| vec![d])?;
@@ -151,6 +167,7 @@ struct Loader<'a> {
     /// project root (directory holding `.nc/config.toml`), looked up on first use
     root: Option<Option<PathBuf>>,
     overlay: &'a HashMap<PathBuf, String>,
+    cache: Option<&'a mut ParseCache>,
     errors: Vec<Diag>,
 }
 
@@ -169,8 +186,25 @@ impl Loader<'_> {
                 format!("cannot read module `{}`: {e}", path.display()),
             )
         })?;
-        let file = self.sm.add(path.to_path_buf(), text.clone());
-        let (ast, parse_errors) = parse_module_recover(&text, file);
+        let file = self.sm.add(path.to_path_buf(), text);
+        let text = &self.sm.file(file).text;
+        let key = (path.to_path_buf(), file);
+        let (ast, parse_errors) = match self.cache.as_deref_mut() {
+            Some(c) => match c.modules.get(&key) {
+                Some((t, ast, errs)) if t == text => (Rc::clone(ast), errs.clone()),
+                _ => {
+                    let (ast, errs) = parse_module_recover(text, file);
+                    let ast = Rc::new(ast);
+                    c.modules
+                        .insert(key, (text.clone(), Rc::clone(&ast), errs.clone()));
+                    (ast, errs)
+                }
+            },
+            None => {
+                let (ast, errs) = parse_module_recover(text, file);
+                (Rc::new(ast), errs)
+            }
+        };
         self.errors.extend(parse_errors);
         let idx = self.graph.modules.len();
         self.by_path.insert(path.to_path_buf(), idx);
@@ -213,14 +247,20 @@ impl Loader<'_> {
                 continue;
             };
             let Ok(target) = std::fs::canonicalize(&target) else {
-                self.errors.push(Diag::new(
-                    im.span,
-                    format!(
-                        "cannot find module `{}` (looked for `{}`)",
-                        im.path,
-                        target.display()
+                self.errors.push(
+                    Diag::new(
+                        im.span,
+                        format!(
+                            "cannot find module `{}` (looked for `{}`)",
+                            im.path,
+                            target.display()
+                        ),
+                    )
+                    .with_code(
+                        crate::diag::codes::MISSING_MODULE,
+                        &[&im.path, &target.to_string_lossy()],
                     ),
-                ));
+                );
                 continue;
             };
             if self.graph.modules[idx].imports.contains_key(&im.alias) {

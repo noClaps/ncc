@@ -100,6 +100,10 @@ impl SourceMap {
 pub struct Diag {
     pub span: Span,
     pub msg: String,
+    /// A stable name for the kind of error, for tools that act on it (such as quick fixes).
+    pub code: Option<&'static str>,
+    /// Values the error is about (names, paths), in an order fixed by `code`.
+    pub data: Vec<String>,
 }
 
 impl Diag {
@@ -107,7 +111,16 @@ impl Diag {
         Self {
             span,
             msg: msg.into(),
+            code: None,
+            data: vec![],
         }
+    }
+
+    /// Tag the error with a code and the values it is about.
+    pub fn with_code(mut self, code: &'static str, data: &[&str]) -> Self {
+        self.code = Some(code);
+        self.data = data.iter().map(|s| s.to_string()).collect();
+        self
     }
     pub fn render(&self, sm: &SourceMap) -> String {
         self.render_as("error", sm)
@@ -136,6 +149,36 @@ impl Diag {
     }
 }
 
+/// Codes of the errors tools act on. `data` lists what each error carries.
+pub mod codes {
+    /// assignment to an immutable variable
+    pub const IMMUTABLE: &str = "immutable";
+    /// a value computed and dropped
+    pub const UNUSED_VALUE: &str = "unused-value";
+    /// `[name]`: an unknown name or variable
+    pub const UNKNOWN_NAME: &str = "unknown-name";
+    /// `[name]`: an unknown type
+    pub const UNKNOWN_TYPE: &str = "unknown-type";
+    /// `try` or `throw` outside a throwing function
+    pub const NEEDS_THROWING: &str = "needs-throwing";
+    /// `[field]`: a struct literal leaves out a field
+    pub const MISSING_FIELD: &str = "missing-field";
+    /// `[field]`: a struct pattern leaves out a field
+    pub const MISSING_PATTERN_FIELD: &str = "missing-pattern-field";
+    /// `if` branches that do not cover every value
+    pub const NOT_EXHAUSTIVE: &str = "not-exhaustive";
+    /// `[import path, file looked for]`: an import whose file does not exist
+    pub const MISSING_MODULE: &str = "missing-module";
+    /// `[name, module alias]`: a use of a private declaration of another module
+    pub const NOT_PUBLIC: &str = "not-public";
+}
+
+/// Sort diagnostics by position and drop exact repeats.
+pub fn sort_dedup(v: &mut Vec<Diag>) {
+    v.sort_by_key(|d| (d.span.file, d.span.start));
+    v.dedup_by(|a, b| a.span == b.span && a.msg == b.msg);
+}
+
 pub type Result<T> = std::result::Result<T, Diag>;
 
 /// Result carrying every error found.
@@ -143,4 +186,14 @@ pub type Results<T> = std::result::Result<T, Vec<Diag>>;
 
 pub fn err<T>(span: Span, msg: impl Into<String>) -> Result<T> {
     Err(Diag::new(span, msg))
+}
+
+/// `err` with a code and the values the error is about (see `Diag::with_code`).
+pub fn err_code<T>(
+    span: Span,
+    msg: impl Into<String>,
+    code: &'static str,
+    data: &[&str],
+) -> Result<T> {
+    Err(Diag::new(span, msg).with_code(code, data))
 }

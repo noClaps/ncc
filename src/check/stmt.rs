@@ -25,8 +25,8 @@ impl Checker {
     /// with placeholder types, where `value.x` on a `T` fails.
     fn index_failed_stmt(&mut self, s: &ast::Stmt) {
         let mut names: Vec<(String, Span)> = Vec::new();
-        crate::lsp::nav::stmt_spans(s, &mut |n| {
-            if let crate::lsp::nav::Node::Expr(e) = n
+        crate::ast::visit::stmt_spans(s, &mut |n| {
+            if let crate::ast::visit::Node::Expr(e) = n
                 && let ast::ExprKind::Ident(name) = &e.kind
             {
                 names.push((name.clone(), e.span));
@@ -62,11 +62,13 @@ impl Checker {
 
     pub fn require_throwing(&self, span: Span, what: &str) -> Result<()> {
         if !self.in_throwing_ctx() {
-            return err(
+            return err_code(
                 span,
                 format!(
                     "{what} requires the enclosing function to be throwing (add `!` to its return type)"
                 ),
+                codes::NEEDS_THROWING,
+                &[],
             );
         }
         Ok(())
@@ -220,12 +222,16 @@ impl Checker {
                     push(out, SK::Destructure(tgts, v));
                 }
             }
-            S::FnVar { name, value } => {
+            S::FnVar {
+                name,
+                name_span,
+                value,
+            } => {
                 let ast::ExprKind::FnLit(sig, body) = &value.kind else {
                     return err(value.span, "expected a function literal `fn(...) { ... }`");
                 };
                 let (fid, fty) = self.check_nested_fn(sig, body, None)?;
-                let var = self.declare_var(name, fty, false, false, span)?;
+                let var = self.declare_var(name, fty, false, false, *name_span)?;
                 push(out, SK::Let(var, closure(fid, fty, value.span)));
             }
             S::Assign { target, value } => {
@@ -260,7 +266,11 @@ impl Checker {
                         ),
                         _ => format!("unused value of type `{}`", self.types.show(x.ty)),
                     };
-                    return err(e.span, msg);
+                    let d = Diag::new(e.span, msg);
+                    return Err(match self.types.kind(x.ty) {
+                        TyKind::ErrU(_) => d,
+                        _ => d.with_code(codes::UNUSED_VALUE, &[]),
+                    });
                 }
                 push(out, SK::Expr(x));
             }
@@ -346,7 +356,6 @@ impl Checker {
                     };
                     (j.id, None)
                 };
-                self.broken.insert(id);
                 push(out, SK::Break(id, value));
             }
             S::Continue(label) => {
@@ -426,7 +435,12 @@ impl Checker {
                 body,
             } => {
                 let Some((vr, ty)) = self.resolve_var(name, *name_span)? else {
-                    return err(*name_span, format!("unknown variable `{name}`"));
+                    return err_code(
+                        *name_span,
+                        format!("unknown variable `{name}`"),
+                        codes::UNKNOWN_NAME,
+                        &[name],
+                    );
                 };
                 self.idx_var_ref(vr, *name_span);
                 let TyKind::Mutex(inner) = *self.types.kind(ty) else {
@@ -579,7 +593,12 @@ impl Checker {
         match &e.kind {
             E::Ident(name) => {
                 let Some((v, ty)) = self.resolve_var(name, e.span)? else {
-                    return err(e.span, format!("unknown variable `{name}`"));
+                    return err_code(
+                        e.span,
+                        format!("unknown variable `{name}`"),
+                        codes::UNKNOWN_NAME,
+                        &[name],
+                    );
                 };
                 self.idx_var_ref(v, e.span);
                 if matches!(self.types.kind(ty), TyKind::Mutex(_)) {
@@ -595,10 +614,14 @@ impl Checker {
                         }
                         _ => "immutable variable",
                     };
-                    return err(
+                    let d = Diag::new(
                         e.span,
                         format!("cannot assign to {what} `{name}`; declare it with `mut`"),
                     );
+                    return Err(match v {
+                        VarRef::Local(l) if self.ctx_ref().locals[l].kind == LocalKind::Param => d,
+                        _ => d.with_code(codes::IMMUTABLE, &[]),
+                    });
                 }
                 Ok((Place::Var(v), ty))
             }

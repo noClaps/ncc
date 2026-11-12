@@ -154,31 +154,12 @@ pub struct Unused {
     pub kind: UnusedKind,
 }
 
-/// The span of `name` as a whole word inside `span` (the first or the last occurrence).
-pub fn name_in(text: &str, span: Span, name: &str, first: bool) -> Option<Span> {
-    let (s, e) = (span.start as usize, (span.end as usize).min(text.len()));
-    let seg = text.get(s..e)?;
-    let ident = |c: char| c.is_alphanumeric() || c == '_';
-    let mut found = None;
-    for (i, _) in seg.match_indices(name) {
-        let before = seg[..i].chars().next_back();
-        let after = seg[i + name.len()..].chars().next();
-        if before.is_some_and(ident) || after.is_some_and(ident) {
-            continue;
-        }
-        found = Some(i);
-        if first {
-            break;
-        }
-    }
-    found.map(|i| Span::new(span.file, s + i, s + i + name.len()))
-}
-
 /// Unused local variables, parameters, private items and imports of the project's modules
 /// (not dependencies). Names starting with `_` and `pub` items are never reported. Uses
 /// anywhere, including tests, count.
-pub fn unused(ix: &crate::check::index::Index, sm: &crate::diag::SourceMap) -> Vec<Unused> {
+pub fn unused(ix: &crate::check::index::Index, types: &crate::types::Types) -> Vec<Unused> {
     use crate::check::index::DeclKind;
+    use crate::types::TyKind;
     let facts: HashMap<u32, &crate::check::index::ModFacts> =
         ix.modules.iter().map(|m| (m.file, m)).collect();
     let mut used: HashSet<Span> = HashSet::new();
@@ -213,14 +194,13 @@ pub fn unused(ix: &crate::check::index::Index, sm: &crate::diag::SourceMap) -> V
         {
             continue;
         }
-        let text = &sm.file(d.span.file).text;
         let (kind, what) = match d.kind {
             DeclKind::Variable if d.param => (UnusedKind::Parameter, "parameter"),
             // a function declared inside another one (its span is just the name)
             DeclKind::Variable
-                if text.get(d.span.start as usize..d.span.end as usize)
-                    == Some(d.name.as_str())
-                    && d.detail.starts_with("(fn") =>
+                if d.span == d.name_span
+                    && d.ty
+                        .is_some_and(|t| matches!(types.kind(t), TyKind::Fn(..))) =>
             {
                 (UnusedKind::Function, "function")
             }
@@ -234,13 +214,9 @@ pub fn unused(ix: &crate::check::index::Index, sm: &crate::diag::SourceMap) -> V
             DeclKind::Type => (UnusedKind::Type, "type"),
             DeclKind::Field | DeclKind::Variant => continue,
         };
-        let first = !matches!(d.kind, DeclKind::Variable);
-        let Some(at) = name_in(text, d.span, &d.name, first) else {
-            continue;
-        };
         out.push(Unused {
             diag: Diag::new(
-                at,
+                d.name_span,
                 format!(
                     "unused {what} `{}`; prefix the name with `_` if this is intended",
                     d.name
@@ -250,14 +226,12 @@ pub fn unused(ix: &crate::check::index::Index, sm: &crate::diag::SourceMap) -> V
         });
     }
     for f in ix.modules.iter().filter(|f| f.project) {
-        let text = &sm.file(f.file).text;
         for (alias, span, is_used) in &f.imports {
             if *is_used || alias.starts_with('_') {
                 continue;
             }
-            let at = name_in(text, *span, alias, false).unwrap_or(*span);
             out.push(Unused {
-                diag: Diag::new(at, format!("unused import `{alias}`")),
+                diag: Diag::new(*span, format!("unused import `{alias}`")),
                 kind: UnusedKind::Import,
             });
         }
@@ -360,11 +334,7 @@ impl LoopCx<'_, '_> {
     fn stmt(&mut self, s: &Stmt) -> bool {
         // blocks inside expressions (those in loop bodies are seen again: reports are deduplicated)
         let mut nested = vec![];
-        flow::visit_stmt(s, &mut |e| match &e.kind {
-            EK::If(i) => nested.extend(i.arms.iter().map(|a| &a.body)),
-            EK::Catch(_, _, b, _) | EK::Else(_, Fallback::Block(b, _)) => nested.push(b),
-            _ => {}
-        });
+        flow::visit_stmt(s, &mut |e| nested.extend(flow::nested_blocks(e)));
         for b in nested {
             self.block(b);
         }

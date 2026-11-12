@@ -264,7 +264,7 @@ fn language_server() {
     let actions = c.request(
         "textDocument/codeAction",
         json!({"textDocument": doc, "range": {"start": pos(11, 0), "end": pos(11, 1)}, "context": {"diagnostics": [
-            {"range": {"start": pos(11, 0), "end": pos(11, 5)}, "message": "return value of function not used (type `int`); assign it to `_` to discard it"}
+            {"range": {"start": pos(11, 0), "end": pos(11, 5)}, "message": "return value of function not used (type `int`); assign it to `_` to discard it", "code": "unused-value"}
         ]}}),
     );
     assert_eq!(

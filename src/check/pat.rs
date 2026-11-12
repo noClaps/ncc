@@ -112,9 +112,9 @@ impl Checker {
                     sty,
                     fields,
                     "appears more than once",
-                    |name| {
+                    (codes::MISSING_PATTERN_FIELD, |name| {
                         format!("missing field `{name}` in pattern; use `.{name} = _` to ignore it")
-                    },
+                    }),
                     span,
                     |c, v, t| c.check_pattern(v, t, multi),
                 )?;

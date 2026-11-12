@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 
 use super::Checker;
+use crate::ast::TypeExpr;
 use crate::diag::Span;
 use crate::tir::{FuncId, GlobalId, LocalId};
 use crate::types::*;
@@ -22,7 +23,10 @@ pub enum DeclKind {
 #[derive(Clone, Debug)]
 pub struct SymDecl {
     pub name: String,
+    /// the declaration; references point at it by this span
     pub span: Span,
+    /// the declared name
+    pub name_span: Span,
     pub kind: DeclKind,
     /// hover text
     pub detail: String,
@@ -32,15 +36,74 @@ pub struct SymDecl {
     pub param: bool,
     /// the block a local variable is visible in (None for module-level declarations)
     pub scope: Option<Span>,
-    /// the variable's type, a key into `Index::types`
-    pub ty: Option<String>,
+    /// the variable's type; a function's return type; a type's own
+    pub ty: Option<TyId>,
     /// for a function of an `extern` block: the block's alias (`alias.name(...)`)
     pub extern_alias: Option<String>,
+    /// the names of a generic declaration's parameters (`T`, `N`)
+    pub type_params: Vec<String>,
+    /// for a generic struct: its fields' types as declared, in the order of `members`
+    pub field_tys: Vec<TypeExpr>,
+    /// a function's signature
+    pub sig: Option<Sig>,
+}
+
+/// A function's signature, as editor features show and fill in calls.
+#[derive(Clone, Debug, Default)]
+pub struct Sig {
+    /// the generic parameters as declared (`type T`, `uint N`)
+    pub type_params: Vec<String>,
+    /// (type, name); a builtin's parameters have only a name (`value`, `type T`, `...`)
+    pub params: Vec<(Option<TypeExpr>, String)>,
+    /// the return type, if any
+    pub ret: Option<TypeExpr>,
+}
+
+impl Sig {
+    /// `fn name<type T>(T a, int b) int`, and the range of each parameter in it.
+    pub fn label(&self, name: &str) -> (String, Vec<(usize, usize)>) {
+        let mut s = format!("fn {name}");
+        if !self.type_params.is_empty() {
+            s.push_str(&format!("<{}>", self.type_params.join(", ")));
+        }
+        s.push('(');
+        let mut ranges = Vec::new();
+        for (i, (t, n)) in self.params.iter().enumerate() {
+            if i > 0 {
+                s.push_str(", ");
+            }
+            let start = s.len();
+            let part = match t {
+                Some(t) if n.is_empty() => t.show(),
+                Some(t) => format!("{} {n}", t.show()),
+                None => n.clone(),
+            };
+            s.push_str(&part);
+            ranges.push((start, s.len()));
+        }
+        s.push(')');
+        if let Some(r) = &self.ret {
+            s.push(' ');
+            s.push_str(&r.show());
+        }
+        (s, ranges)
+    }
+
+    /// The function's type as a value: `(fn(int, int) int)`.
+    pub fn value_ty(&self) -> Option<TypeExpr> {
+        let ps = (self.params.iter())
+            .map(|(t, _)| t.clone())
+            .collect::<Option<_>>()?;
+        let ret = self.ret.clone().map(Box::new);
+        Some(TypeExpr::Fn(ps, ret, Span::default()))
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct SymRef {
     pub span: Span,
+    /// the referenced name inside `span`
+    pub name_span: Span,
     pub def: Option<Span>,
     pub hover: String,
     /// declaration of the referenced value's type (for go-to-type-definition)
@@ -51,7 +114,7 @@ pub struct SymRef {
 #[derive(Clone, Debug)]
 pub struct ExprTy {
     pub span: Span,
-    pub ty: String,
+    pub ty: TyId,
     pub type_def: Option<Span>,
 }
 
@@ -60,7 +123,7 @@ pub struct ExprTy {
 pub struct Member {
     pub name: String,
     pub detail: String,
-    pub ty: String,
+    pub ty: TyId,
     pub def: Option<Span>,
 }
 
@@ -93,12 +156,10 @@ pub struct Index {
     pub decls: Vec<SymDecl>,
     pub refs: Vec<SymRef>,
     pub exprs: Vec<ExprTy>,
-    /// members by type name
-    pub types: HashMap<String, Vec<Member>>,
-    /// element (or map value) type by type name, for indexing with `[...]`
-    pub elems: HashMap<String, String>,
-    /// return type by function type name
-    pub returns: HashMap<String, String>,
+    /// the declarations of each struct's fields
+    pub field_spans: HashMap<TyId, Vec<Span>>,
+    /// the declarations of each enum's variants
+    pub variant_spans: HashMap<TyId, Vec<Span>>,
     pub hints: Vec<Hint>,
     pub calls: Vec<Call>,
     /// per module, for the unused-code lint
@@ -117,7 +178,7 @@ pub struct ModFacts {
     pub project: bool,
     /// names of the module's `pub` items
     pub public: std::collections::HashSet<String>,
-    /// imports: alias, the import's span, and whether the alias is used
+    /// imports: alias, the alias's span, and whether the alias is used
     pub imports: Vec<(String, Span, bool)>,
 }
 
@@ -128,8 +189,6 @@ pub struct IndexState {
     pub global_spans: HashMap<GlobalId, Span>,
     pub fn_spans: HashMap<FuncId, Span>,
     pub type_spans: HashMap<TyId, Span>,
-    pub field_spans: HashMap<TyId, Vec<Span>>,
-    pub variant_spans: HashMap<TyId, Vec<Span>>,
     pub fn_params: HashMap<FuncId, Vec<String>>,
     /// import aliases used in each module: (module, alias)
     pub used_aliases: std::cell::RefCell<std::collections::HashSet<(usize, String)>>,
@@ -151,6 +210,37 @@ impl Checker {
                 vec![("len".into(), "uint len".into())]
             }
             _ => vec![],
+        }
+    }
+
+    /// Declare a function (one of an `extern` block when `alias` is given) with its signature.
+    pub fn idx_fn_decl(&mut self, name: &str, span: Span, alias: Option<&str>, sig: Sig) {
+        let shown = alias.map_or_else(|| name.to_string(), |a| format!("{a}.{name}"));
+        let (detail, _) = sig.label(&shown);
+        let before = self.ix.index.decls.len();
+        self.idx_decl(name, span, span, DeclKind::Function, detail, vec![]);
+        if let Some(d) = self.ix.index.decls.get_mut(before) {
+            d.type_params = (sig.type_params.iter())
+                .map(|t| t.rsplit(' ').next().unwrap_or(t).to_string())
+                .collect();
+            d.extern_alias = alias.map(String::from);
+            d.sig = Some(sig);
+        }
+    }
+
+    /// The signature of the declared function `f`, with its parameter names.
+    pub fn fn_sig(&self, f: FuncId) -> Sig {
+        let (ps, r) = &self.sigs[f];
+        let names = self.ix.fn_params.get(&f).cloned().unwrap_or_default();
+        Sig {
+            type_params: vec![],
+            params: (ps.iter().enumerate())
+                .map(|(i, p)| {
+                    let name = names.get(i).cloned().unwrap_or_default();
+                    (Some(self.types.to_type_expr(*p)), name)
+                })
+                .collect(),
+            ret: (*r != VOID).then(|| self.types.to_type_expr(*r)),
         }
     }
 
@@ -221,6 +311,7 @@ impl Checker {
         &mut self,
         name: &str,
         span: Span,
+        name_span: Span,
         kind: DeclKind,
         detail: String,
         members: Vec<(String, String)>,
@@ -231,6 +322,7 @@ impl Checker {
         self.ix.index.decls.push(SymDecl {
             name: name.to_string(),
             span,
+            name_span,
             kind,
             detail: detail.clone(),
             members,
@@ -239,9 +331,13 @@ impl Checker {
             scope: None,
             ty: None,
             extern_alias: None,
+            type_params: vec![],
+            field_tys: vec![],
+            sig: None,
         });
         self.ix.index.refs.push(SymRef {
             span,
+            name_span,
             def: Some(span),
             hover: detail,
             type_def: None,
@@ -261,17 +357,18 @@ impl Checker {
         let detail = self.var_detail(name, ty, mutable);
         let members = self.members_of(ty);
         let before = self.ix.index.decls.len();
-        self.idx_decl(name, span, DeclKind::Variable, detail, members);
+        // the name ends the declaration: `int x`
+        let name_span = name_suffix(span, name.len());
+        self.idx_decl(name, span, name_span, DeclKind::Variable, detail, members);
         if self.ix.index.decls.len() == before {
             return;
         }
-        let key = self.idx_type(ty);
         let type_def = self.type_def_of(ty);
         let d = self.ix.index.decls.last_mut().unwrap();
         d.mutable = mutable;
         d.param = param;
         d.scope = scope;
-        d.ty = Some(key);
+        d.ty = Some(ty);
         self.ix.index.refs.last_mut().unwrap().type_def = type_def;
     }
 
@@ -280,15 +377,16 @@ impl Checker {
         if name == "_" || name.is_empty() {
             return;
         }
-        let key = self.idx_type(t);
         if let Some(d) = self.ix.index.decls.last_mut() {
-            d.ty = Some(key);
+            d.ty = Some(t);
         }
     }
 
+    /// A reference ending with the referenced name (`x`, `m.x`, `.x`); see `name_refs`.
     pub fn idx_ref(&mut self, span: Span, def: Option<Span>, hover: String) {
         self.ix.index.refs.push(SymRef {
             span,
+            name_span: span,
             def,
             hover,
             type_def: None,
@@ -299,6 +397,7 @@ impl Checker {
         let type_def = self.type_def_of(ty);
         self.ix.index.refs.push(SymRef {
             span,
+            name_span: span,
             def,
             hover,
             type_def,
@@ -325,77 +424,13 @@ impl Checker {
         }
     }
 
-    /// Record the members of a type (and of their types) and return its key.
-    pub fn idx_type(&mut self, t: TyId) -> String {
-        let key = self.types.show(t);
-        if self.ix.index.types.contains_key(&key) {
-            return key;
-        }
-        self.ix.index.types.insert(key.clone(), vec![]);
-        let base = self.types.base(t);
-        let elem = match self.types.kind(base).clone() {
-            TyKind::Array(e) | TyKind::Fixed(e, _) | TyKind::Map(_, e) => Some(e),
-            TyKind::Str => Some(CHAR),
-            TyKind::Opt(e) | TyKind::Mutex(e) | TyKind::Fut(e) => {
-                // members of the inner type are reachable after unwrapping
-                let inner = self.idx_type(e);
-                let ms = self.ix.index.types.get(&inner).cloned().unwrap_or_default();
-                self.ix.index.types.insert(key.clone(), ms);
-                None
-            }
-            _ => None,
-        };
-        if let Some(e) = elem {
-            let ek = self.idx_type(e);
-            self.ix.index.elems.insert(key.clone(), ek);
-        }
-        if let TyKind::Fn(_, r) = self.types.kind(base).clone() {
-            let rk = self.idx_type(r);
-            self.ix.index.returns.insert(key.clone(), rk);
-        }
-        if !self.ix.index.types[&key].is_empty() {
-            return key;
-        }
-        let mut members = Vec::new();
-        match self.types.kind(base).clone() {
-            TyKind::Struct(i) => {
-                let fields = self.types.structs[i as usize].fields.clone();
-                for (k, (n, ft)) in fields.iter().enumerate() {
-                    let fty = self.idx_type(*ft);
-                    members.push(Member {
-                        name: n.clone(),
-                        detail: format!("{fty} {n}"),
-                        ty: fty,
-                        def: self
-                            .ix
-                            .field_spans
-                            .get(&base)
-                            .and_then(|v| v.get(k))
-                            .copied(),
-                    });
-                }
-            }
-            TyKind::Array(_) | TyKind::Fixed(..) | TyKind::Str | TyKind::Map(..) => {
-                members.push(Member {
-                    name: "len".into(),
-                    detail: "uint len".into(),
-                    ty: "uint".into(),
-                    def: None,
-                });
-            }
-            _ => {}
-        }
-        self.ix.index.types.insert(key.clone(), members);
-        key
-    }
-
     /// Record the type of a checked expression.
-    pub fn idx_expr(&mut self, span: Span, t: TyId) {
-        if span.end <= span.start {
+    pub fn idx_expr(&mut self, span: Span, ty: TyId) {
+        // only the editor asks for the types of expressions
+        if !self.editor || span.end <= span.start {
             return;
         }
-        let ty = self.idx_type(t);
-        let type_def = self.type_def_of(t);
+        let type_def = self.type_def_of(ty);
         self.ix.index.exprs.push(ExprTy { span, ty, type_def });
     }
 
@@ -450,10 +485,12 @@ impl Checker {
         self.idx_ref(span, def, hover);
     }
 
-    pub fn idx_type_ref(&mut self, t: TyId, span: Span) {
+    /// A reference to a type, written `span` with its name at `name_span` (`m.Name<T>`).
+    pub fn idx_type_ref(&mut self, t: TyId, span: Span, name_span: Span) {
         let hover = self.type_detail(t);
         let def = self.ix.type_spans.get(&t).copied();
         self.idx_typed_ref(span, def, hover, t);
+        self.ix.index.refs.last_mut().unwrap().name_span = name_span;
     }
 
     pub fn idx_field_ref(&mut self, t: TyId, i: usize, span: Span) {
@@ -463,7 +500,9 @@ impl Checker {
         let (n, ft) = &def.fields[i];
         let ft = *ft;
         let hover = format!("{} {n}", self.types.show(ft));
-        let d = self.ix.field_spans.get(&t).and_then(|v| v.get(i)).copied();
+        let d = (self.ix.index.field_spans.get(&t))
+            .and_then(|v| v.get(i))
+            .copied();
         self.idx_typed_ref(span, d, hover, ft);
     }
 
@@ -475,6 +514,7 @@ impl Checker {
         let hover = format!("{}.{}", def.name, self.variant_text(n, ps));
         let d = self
             .ix
+            .index
             .variant_spans
             .get(&t)
             .and_then(|v| v.get(i))
@@ -522,5 +562,75 @@ impl Checker {
             }
             self.idx_hint(a.span.start, a.span.file, format!("{n}:"), HintKind::Param);
         }
+    }
+}
+
+/// The last `len` bytes of `span`.
+pub fn name_suffix(span: Span, len: usize) -> Span {
+    Span {
+        start: span.end.saturating_sub(len as u32).max(span.start),
+        ..span
+    }
+}
+
+impl Index {
+    /// Narrow the name spans of references recorded with their whole span to the referenced
+    /// declaration's name, which ends them.
+    pub fn name_refs(&mut self) {
+        let lens: HashMap<Span, usize> = (self.decls.iter())
+            .map(|d| (d.span, d.name.len()))
+            .collect();
+        for r in &mut self.refs {
+            if r.name_span == r.span
+                && let Some(len) = r.def.and_then(|d| lens.get(&d))
+            {
+                r.name_span = name_suffix(r.span, *len);
+            }
+        }
+    }
+}
+
+impl Index {
+    /// The members reachable with `.` on values of type `t` (through optionals, mutexes and
+    /// futures, which are unwrapped first).
+    pub fn members(&self, types: &Types, t: TyId) -> Vec<Member> {
+        let base = types.base(t);
+        match types.kind(base) {
+            TyKind::Opt(e) | TyKind::Mutex(e) | TyKind::Fut(e) => self.members(types, *e),
+            TyKind::Struct(i) => (types.structs[*i as usize].fields.iter().enumerate())
+                .map(|(k, (n, ft))| Member {
+                    name: n.clone(),
+                    detail: format!("{} {n}", types.show(*ft)),
+                    ty: *ft,
+                    def: (self.field_spans.get(&base))
+                        .and_then(|v| v.get(k))
+                        .copied(),
+                })
+                .collect(),
+            TyKind::Array(_) | TyKind::Fixed(..) | TyKind::Str | TyKind::Map(..) => vec![Member {
+                name: "len".into(),
+                detail: "uint len".into(),
+                ty: UINT,
+                def: None,
+            }],
+            _ => vec![],
+        }
+    }
+}
+
+/// The element (or map value) type of `t`, for indexing with `[...]`.
+pub fn elem_of(types: &Types, t: TyId) -> Option<TyId> {
+    match types.kind(types.base(t)) {
+        TyKind::Array(e) | TyKind::Fixed(e, _) | TyKind::Map(_, e) => Some(*e),
+        TyKind::Str => Some(CHAR),
+        _ => None,
+    }
+}
+
+/// The return type of the function type `t`.
+pub fn return_of(types: &Types, t: TyId) -> Option<TyId> {
+    match types.kind(types.base(t)) {
+        TyKind::Fn(_, r) => Some(*r),
+        _ => None,
     }
 }

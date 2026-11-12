@@ -282,3 +282,113 @@ pub struct Program {
     /// Source file of the entry module, once release tree shaking has run (see `shake`)
     pub entry_file: Option<u32>,
 }
+
+/// The sub-expressions of an expression kind, outside its nested blocks and `if` patterns.
+/// `$opt` is `as_ref` or `as_mut`, matching how `$kind` is borrowed.
+macro_rules! for_each_child {
+    ($kind:expr, $f:ident, $opt:ident) => {
+        match $kind {
+            EK::Lit(_)
+            | EK::None
+            | EK::Var(_)
+            | EK::FnRef(_)
+            | EK::Closure(_)
+            | EK::Dollar
+            | EK::Args
+            | EK::Env
+            | EK::Target
+            | EK::Embed(..) => {}
+            EK::Unary(_, a)
+            | EK::Cast(a)
+            | EK::ToStr(a)
+            | EK::Field(a, _)
+            | EK::TupleIndex(a, _)
+            | EK::Len(a)
+            | EK::Some(a)
+            | EK::Retype(a)
+            | EK::Try(a)
+            | EK::Await(a)
+            | EK::Catch(a, ..) => $f(a),
+            EK::Binary(_, a, b) | EK::Index(a, b) => {
+                $f(a);
+                $f(b);
+            }
+            EK::Slice(a, lo, hi) => {
+                $f(a);
+                $f(lo);
+                $f(hi);
+            }
+            EK::Call(c, xs) | EK::Async(c, xs) => {
+                if let Callee::Value(x) = c {
+                    $f(x);
+                }
+                for x in xs {
+                    $f(x);
+                }
+            }
+            EK::Print(_, _, xs)
+            | EK::Format(xs)
+            | EK::Tuple(xs)
+            | EK::Array(xs)
+            | EK::Struct(xs)
+            | EK::Variant(_, xs) => {
+                for x in xs {
+                    $f(x);
+                }
+            }
+            EK::Map(es) => {
+                for (k, v) in es {
+                    $f(k);
+                    $f(v);
+                }
+            }
+            EK::If(i) => {
+                if let Some(s) = i.scrutinee.$opt() {
+                    $f(s);
+                }
+            }
+            EK::Else(a, fb) => {
+                $f(a);
+                if let Fallback::Expr(b) = fb {
+                    $f(b);
+                }
+            }
+        }
+    };
+}
+
+impl Expr {
+    /// Apply `f` to each direct sub-expression, not those in nested blocks or `if` patterns.
+    pub fn for_each_child<'a>(&'a self, f: &mut dyn FnMut(&'a Expr)) {
+        for_each_child!(&self.kind, f, as_ref)
+    }
+
+    /// Like `for_each_child`, with mutable access.
+    pub fn for_each_child_mut(&mut self, f: &mut dyn FnMut(&mut Expr)) {
+        for_each_child!(&mut self.kind, f, as_mut)
+    }
+}
+
+impl Pat {
+    /// Apply `f` to each expression in the pattern.
+    pub fn for_each_expr<'a>(&'a self, f: &mut dyn FnMut(&'a Expr)) {
+        match self {
+            Pat::Wild | Pat::Bind(_) => {}
+            Pat::Value(e) | Pat::Cond(e) => f(e),
+            Pat::Tuple(ps) | Pat::Struct(ps) | Pat::Array(ps) | Pat::Variant(_, ps) => {
+                ps.iter().for_each(|p| p.for_each_expr(f));
+            }
+        }
+    }
+
+    /// Like `for_each_expr`, with mutable access.
+    pub fn for_each_expr_mut(&mut self, f: &mut dyn FnMut(&mut Expr)) {
+        match self {
+            Pat::Wild | Pat::Bind(_) => {}
+            Pat::Value(e) | Pat::Cond(e) => f(e),
+            Pat::Tuple(ps) | Pat::Struct(ps) | Pat::Array(ps) | Pat::Variant(_, ps) => {
+                ps.iter_mut().for_each(|p| p.for_each_expr_mut(f));
+            }
+        }
+    }
+}

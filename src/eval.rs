@@ -190,8 +190,7 @@ impl<'p> Evaluator<'p> {
             (funcs, ev.errs)
         };
         if !errs.is_empty() {
-            errs.sort_by_key(|d| (d.span.file, d.span.start));
-            errs.dedup_by(|a, b| a.span == b.span && a.msg == b.msg);
+            crate::diag::sort_dedup(&mut errs);
             return Err(errs);
         }
         if fold {
@@ -364,7 +363,7 @@ impl<'p> Evaluator<'p> {
                     res = self.fold_expr(c, locals, consts);
                 }
             };
-            for_children(e, &mut f);
+            e.for_each_child_mut(&mut f);
         }
         res?;
         // nested blocks
@@ -504,12 +503,17 @@ impl<'p> Evaluator<'p> {
     fn forget_untracked(&self, f: FuncId, env: &mut Env) {
         for l in 0..env.locals.len() {
             if env.locals[l].is_some() && !self.trackable(f, VarRef::Local(l), true) {
-                env.locals[l] = None;
+                env.forget(VarRef::Local(l));
             }
         }
         let tg = env.track_globals;
-        env.globals
-            .retain(|g, _| self.trackable(f, VarRef::Global(*g), tg));
+        let gone: Vec<GlobalId> = (env.globals.keys())
+            .filter(|g| !self.trackable(f, VarRef::Global(**g), tg))
+            .copied()
+            .collect();
+        for g in gone {
+            env.forget(VarRef::Global(g));
+        }
     }
 
     fn var_ty(&self, f: FuncId, v: VarRef) -> TyId {
@@ -559,6 +563,13 @@ impl<'p> Evaluator<'p> {
         }
     }
 
+    /// `prop_block`, leaving `env` as it was.
+    fn prop_scoped(&mut self, b: &mut Block, f: FuncId, env: &mut Env) {
+        env.checkpoint();
+        self.prop_block(b, f, env);
+        env.rollback();
+    }
+
     fn prop_stmt(&mut self, s: &mut Stmt, f: FuncId, env: &mut Env) {
         if let SK::Block(b) = &mut s.kind {
             return self.prop_block(b, f, env);
@@ -569,51 +580,61 @@ impl<'p> Evaluator<'p> {
             SK::Let(..) | SK::Assign(..) | SK::While { .. } | SK::For { .. } | SK::Expr(_)
         );
         if runnable {
-            let mut trial = env.clone();
+            // a trial run, undone unless it completes
+            env.checkpoint();
             self.start_fuel();
-            let r = self.stmt(s, &mut trial);
+            let r = self.stmt(s, env);
             self.end_fuel();
             if let Ok(Flow::Normal) = r {
-                trial.dollar.clear();
-                let replaced = self.replacement(s, f, &trial, &assigned, &declared);
-                self.forget_untracked(f, &mut trial);
+                env.dollar.clear();
+                let replaced = self.replacement(s, f, env, &assigned, &declared);
+                self.forget_untracked(f, env);
                 match replaced {
-                    Some(kind) => s.kind = kind,
+                    Some(kind) => {
+                        s.kind = kind;
+                        env.commit();
+                    }
                     None => {
-                        // the result is known but has no literal form: fold inside
-                        let mut inner = env.clone();
+                        // the result is known but has no literal form: fold inside with what
+                        // was known before the statement, then keep the result
+                        let after = env.undo();
+                        env.checkpoint();
                         for v in assigned.iter().chain(&declared) {
-                            inner.forget(*v);
+                            env.forget(*v);
                         }
-                        self.prop_inside(s, f, &mut inner);
+                        self.prop_inside(s, f, env);
+                        env.rollback();
+                        env.redo(after);
                     }
                 }
-                *env = trial;
                 return;
             }
+            env.rollback();
         }
         let clobbers = self.clobbers(s, &self.gwrites);
         let nested = matches!(s.kind, SK::While { .. } | SK::For { .. } | SK::Lock { .. })
-            || has_nested_blocks(s);
-        let mut inner = env.clone();
+            || flow::has_nested_blocks(s);
+        // what is known inside, undone afterwards
+        env.checkpoint();
         if nested {
             for v in assigned.iter().chain(&declared) {
-                inner.forget(*v);
+                env.forget(*v);
             }
         }
-        forget_globals(&mut inner, &clobbers);
-        // `inner` holds what is true at the start of every iteration of a loop: a condition
-        // that is true from that alone never becomes false
+        forget_globals(env, &clobbers);
+        // this holds what is true at the start of every iteration of a loop: a condition that
+        // is true from that alone never becomes false
         if let SK::While { id, cond, .. } = &s.kind {
             self.start_fuel();
-            let r = self.expr(cond, &mut inner, false);
+            let r = self.expr(cond, env, false);
             self.end_fuel();
-            inner.dollar.clear();
+            env.dollar.clear();
             if let Ok(Val::Bool(true)) = r {
                 self.endless.insert((f, *id));
             }
         }
-        self.prop_inside(s, f, &mut inner);
+        self.prop_inside(s, f, env);
+        env.rollback();
         for v in assigned.iter().chain(&declared) {
             env.forget(*v);
         }
@@ -683,7 +704,7 @@ impl<'p> Evaluator<'p> {
             | SK::Lock { mutex: e, body, .. } => {
                 // the loop changes what `env` no longer knows: every iteration starts alike
                 self.prop_expr(e, f, env);
-                self.prop_block(body, f, &mut env.clone());
+                self.prop_scoped(body, f, env);
             }
             SK::Block(b) => self.prop_block(b, f, env),
         }
@@ -721,34 +742,26 @@ impl<'p> Evaluator<'p> {
                 return;
             }
         }
-        for_children(e, &mut |c: &mut Expr| self.prop_expr(c, f, env));
+        e.for_each_child_mut(&mut |c: &mut Expr| self.prop_expr(c, f, env));
         match &mut e.kind {
             EK::If(i) => {
                 for arm in &mut i.arms {
                     for pt in &mut arm.patterns {
                         self.prop_pat(pt, f, env);
                     }
-                    self.prop_block(&mut arm.body, f, &mut env.clone());
+                    self.prop_scoped(&mut arm.body, f, env);
                 }
                 self.select_arm(i);
             }
             EK::Else(_, Fallback::Block(b, _)) | EK::Catch(_, _, b, _) => {
-                self.prop_block(b, f, &mut env.clone());
+                self.prop_scoped(b, f, env);
             }
             _ => {}
         }
     }
 
     fn prop_pat(&mut self, pt: &mut Pat, f: FuncId, env: &mut Env) {
-        match pt {
-            Pat::Wild | Pat::Bind(_) => {}
-            Pat::Value(e) | Pat::Cond(e) => self.prop_expr(e, f, env),
-            Pat::Tuple(ps) | Pat::Struct(ps) | Pat::Array(ps) | Pat::Variant(_, ps) => {
-                for p in ps {
-                    self.prop_pat(p, f, env);
-                }
-            }
-        }
+        pt.for_each_expr_mut(&mut |e| self.prop_expr(e, f, env));
     }
 
     // ------------------------------------------------------------ interpreter
@@ -1378,7 +1391,6 @@ fn seq_len(v: &Val) -> R<usize> {
     }
 }
 
-#[derive(Clone)]
 struct Env {
     locals: Vec<Option<Val>>,
     dollar: Vec<Val>,
@@ -1386,7 +1398,13 @@ struct Env {
     globals: HashMap<GlobalId, Val>,
     /// whether declarations and assignments of globals are tracked in `globals`
     track_globals: bool,
+    /// open checkpoints, innermost last: the length of `dollar` and the value each variable
+    /// had before its first change since
+    checkpoints: Vec<(usize, HashMap<VarRef, Option<Val>>)>,
 }
+
+/// Changes to an environment, to apply again with `Env::redo`.
+type Redo = Vec<(VarRef, Option<Val>)>;
 
 impl Env {
     fn new(locals: usize) -> Self {
@@ -1395,7 +1413,89 @@ impl Env {
             dollar: vec![],
             globals: HashMap::new(),
             track_globals: false,
+            checkpoints: vec![],
         }
+    }
+
+    /// Start recording changes, to undo them with `rollback` or keep them with `commit`.
+    fn checkpoint(&mut self) {
+        self.checkpoints.push((self.dollar.len(), HashMap::new()));
+    }
+
+    /// Keep the changes since the innermost checkpoint.
+    fn commit(&mut self) {
+        let (_, saved) = self.checkpoints.pop().unwrap();
+        if let Some((_, outer)) = self.checkpoints.last_mut() {
+            for (r, old) in saved {
+                outer.entry(r).or_insert(old);
+            }
+        }
+    }
+
+    /// Undo the changes since the innermost checkpoint.
+    fn rollback(&mut self) {
+        self.undo();
+    }
+
+    /// Undo the changes since the innermost checkpoint, returning them.
+    fn undo(&mut self) -> Redo {
+        let (dollar, saved) = self.checkpoints.pop().unwrap();
+        self.dollar.truncate(dollar);
+        (saved.into_iter())
+            .map(|(r, old)| {
+                let now = self.raw(r);
+                self.put(r, old);
+                (r, now)
+            })
+            .collect()
+    }
+
+    /// Apply changes undone by `undo` again.
+    fn redo(&mut self, changes: Redo) {
+        for (r, v) in changes {
+            self.write(r, v);
+        }
+    }
+
+    fn raw(&self, r: VarRef) -> Option<Val> {
+        match r {
+            VarRef::Local(l) => self.locals.get(l).cloned().flatten(),
+            VarRef::Global(g) => self.globals.get(&g).cloned(),
+        }
+    }
+
+    /// Set a variable without recording the change.
+    fn put(&mut self, r: VarRef, v: Option<Val>) {
+        match (r, v) {
+            (VarRef::Local(l), v) => {
+                if l >= self.locals.len() {
+                    self.locals.resize(l + 1, None);
+                }
+                self.locals[l] = v;
+            }
+            (VarRef::Global(g), Some(v)) => {
+                self.globals.insert(g, v);
+            }
+            (VarRef::Global(g), None) => {
+                self.globals.remove(&g);
+            }
+        }
+    }
+
+    /// Note that `r` is about to change.
+    fn record(&mut self, r: VarRef) {
+        if let Some((_, saved)) = self.checkpoints.last()
+            && !saved.contains_key(&r)
+        {
+            let old = self.raw(r);
+            self.checkpoints.last_mut().unwrap().1.insert(r, old);
+        }
+    }
+
+    /// Set a variable, recording the change.
+    fn write(&mut self, r: VarRef, v: Option<Val>) {
+        self.record(r);
+        self.put(r, v);
     }
 
     fn var(&self, r: VarRef) -> R<Val> {
@@ -1406,6 +1506,7 @@ impl Env {
     }
 
     fn slot(&mut self, r: VarRef) -> R<&mut Val> {
+        self.record(r);
         match r {
             VarRef::Local(l) => self.locals.get_mut(l).and_then(|x| x.as_mut()),
             VarRef::Global(g) => self.globals.get_mut(&g),
@@ -1414,15 +1515,8 @@ impl Env {
     }
 
     fn forget(&mut self, r: VarRef) {
-        match r {
-            VarRef::Local(l) => {
-                if let Some(x) = self.locals.get_mut(l) {
-                    *x = None;
-                }
-            }
-            VarRef::Global(g) => {
-                self.globals.remove(&g);
-            }
+        if self.raw(r).is_some() {
+            self.write(r, None);
         }
     }
 
@@ -1431,10 +1525,7 @@ impl Env {
     }
 
     fn set(&mut self, l: LocalId, v: Val) {
-        if l >= self.locals.len() {
-            self.locals.resize(l + 1, None);
-        }
-        self.locals[l] = Some(v);
+        self.write(VarRef::Local(l), Some(v));
     }
 
     /// Bind a declaration target: globals are only known through `gconst`, unless tracked.
@@ -1442,7 +1533,7 @@ impl Env {
         match target {
             Some(VarRef::Local(l)) => self.set(l, v),
             Some(VarRef::Global(g)) if self.track_globals => {
-                self.globals.insert(g, v);
+                self.write(VarRef::Global(g), Some(v));
             }
             Some(VarRef::Global(_)) => return Err(Stop::Unknown),
             None => {}
@@ -1566,32 +1657,10 @@ fn is_lit_tree(e: &Expr) -> bool {
     }
 }
 
+/// Whether the operands of an operator expression are all literals (or `$`).
 fn all_children_lit(e: &Expr) -> bool {
     let mut ok = true;
-    let mut f = |c: &Expr| {
-        if !is_lit_tree(c) && !matches!(c.kind, EK::Dollar) {
-            ok = false;
-        }
-    };
-    match &e.kind {
-        EK::Unary(_, a)
-        | EK::Cast(a)
-        | EK::ToStr(a)
-        | EK::Len(a)
-        | EK::Field(a, _)
-        | EK::TupleIndex(a, _) => f(a),
-        EK::Binary(_, a, b) | EK::Index(a, b) => {
-            f(a);
-            f(b);
-        }
-        EK::Slice(a, lo, hi) => {
-            f(a);
-            f(lo);
-            f(hi);
-        }
-        EK::Format(ps) => ps.iter().for_each(&mut f),
-        _ => ok = false,
-    }
+    e.for_each_child(&mut |c| ok &= is_lit_tree(c) || matches!(c.kind, EK::Dollar));
     ok
 }
 
@@ -1604,71 +1673,6 @@ fn contains_control(e: &Expr) -> bool {
         );
     });
     found
-}
-
-/// Apply `f` to each direct sub-expression (not inside nested blocks).
-fn for_children(e: &mut Expr, f: &mut dyn FnMut(&mut Expr)) {
-    match &mut e.kind {
-        EK::Lit(_)
-        | EK::None
-        | EK::Var(_)
-        | EK::FnRef(_)
-        | EK::Closure(_)
-        | EK::Dollar
-        | EK::Args
-        | EK::Env
-        | EK::Target
-        | EK::Embed(..) => {}
-        EK::Unary(_, a)
-        | EK::Cast(a)
-        | EK::ToStr(a)
-        | EK::Field(a, _)
-        | EK::TupleIndex(a, _)
-        | EK::Len(a)
-        | EK::Some(a)
-        | EK::Retype(a)
-        | EK::Try(a)
-        | EK::Await(a)
-        | EK::Catch(a, _, _, _) => f(a),
-        EK::Binary(_, a, b) | EK::Index(a, b) => {
-            f(a);
-            f(b);
-        }
-        EK::Slice(a, lo, hi) => {
-            f(a);
-            f(lo);
-            f(hi);
-        }
-        EK::Call(c, args) | EK::Async(c, args) => {
-            if let Callee::Value(x) = c {
-                f(x);
-            }
-            args.iter_mut().for_each(f);
-        }
-        EK::Print(_, _, xs)
-        | EK::Format(xs)
-        | EK::Tuple(xs)
-        | EK::Array(xs)
-        | EK::Struct(xs)
-        | EK::Variant(_, xs) => xs.iter_mut().for_each(f),
-        EK::Map(es) => {
-            for (k, v) in es.iter_mut() {
-                f(k);
-                f(v);
-            }
-        }
-        EK::If(i) => {
-            if let Some(s) = &mut i.scrutinee {
-                f(s);
-            }
-        }
-        EK::Else(a, fb) => {
-            f(a);
-            if let Fallback::Expr(b) = fb {
-                f(b);
-            }
-        }
-    }
 }
 
 /// Convert a value back into an IR expression (literals only).
@@ -2040,18 +2044,6 @@ fn is_place_expr(e: &Expr) -> bool {
     }
 }
 
-/// Whether a statement's expressions contain blocks (`if` arms, `catch` and `else` blocks).
-fn has_nested_blocks(s: &Stmt) -> bool {
-    let mut found = false;
-    flow::visit_stmt(s, &mut |e| {
-        found |= matches!(
-            e.kind,
-            EK::If(_) | EK::Catch(..) | EK::Else(_, Fallback::Block(..))
-        );
-    });
-    found
-}
-
 /// The variables a statement assigns, and those it declares (including in nested blocks).
 fn written(s: &Stmt) -> (HashSet<VarRef>, HashSet<VarRef>) {
     let mut assigned = HashSet::new();
@@ -2100,9 +2092,12 @@ fn written(s: &Stmt) -> (HashSet<VarRef>, HashSet<VarRef>) {
 }
 
 fn forget_globals(env: &mut Env, which: &Option<HashSet<GlobalId>>) {
-    match which {
-        None => env.globals.clear(),
-        Some(gs) => env.globals.retain(|g, _| !gs.contains(g)),
+    let gone: Vec<GlobalId> = (env.globals.keys())
+        .filter(|g| which.as_ref().is_none_or(|gs| gs.contains(g)))
+        .copied()
+        .collect();
+    for g in gone {
+        env.forget(VarRef::Global(g));
     }
 }
 
@@ -2151,4 +2146,92 @@ fn global_writes(p: &Program) -> Vec<Option<HashSet<GlobalId>>> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What a copy of the environment would hold.
+    type Snapshot = (Vec<Option<Val>>, Vec<(GlobalId, Val)>, usize);
+
+    fn snapshot(env: &Env) -> Snapshot {
+        let mut globals: Vec<(GlobalId, Val)> =
+            env.globals.iter().map(|(g, v)| (*g, v.clone())).collect();
+        globals.sort_by_key(|(g, _)| *g);
+        // trailing unset locals do not matter: `set` grows the list as needed
+        let mut locals = env.locals.clone();
+        while locals.last() == Some(&None) {
+            locals.pop();
+        }
+        (locals, globals, env.dollar.len())
+    }
+
+    /// Checkpoints behave like copies: `rollback` (and `undo`) restore exactly what a copy made
+    /// at the checkpoint would hold, `commit` keeps the changes for the checkpoint outside, and
+    /// `redo` brings back what `undo` took away.
+    #[test]
+    fn checkpoints_match_copies() {
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut rand = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        for _ in 0..200 {
+            let mut env = Env::new(4);
+            env.track_globals = true;
+            // copies made at the open checkpoints, innermost last
+            let mut copies: Vec<Snapshot> = Vec::new();
+            for _ in 0..300 {
+                let var = match rand(2) {
+                    0 => VarRef::Local(rand(8) as usize),
+                    _ => VarRef::Global(rand(4) as usize),
+                };
+                let val = Val::Int(rand(1000) as i64);
+                match rand(12) {
+                    0..=2 => env.declare(Some(var), val).unwrap_or(()),
+                    3 => env.forget(var),
+                    4 => {
+                        if let Ok(slot) = env.slot(var) {
+                            *slot = val;
+                        }
+                    }
+                    5 => env.dollar.push(val),
+                    6 | 7 => {
+                        copies.push(snapshot(&env));
+                        env.checkpoint();
+                    }
+                    8 if !copies.is_empty() => {
+                        env.rollback();
+                        assert_eq!(snapshot(&env), copies.pop().unwrap());
+                    }
+                    9 if !copies.is_empty() => {
+                        let kept = snapshot(&env);
+                        env.commit();
+                        copies.pop();
+                        assert_eq!(snapshot(&env), kept);
+                    }
+                    10 if !copies.is_empty() => {
+                        // undo, then put the changes back inside the same checkpoint
+                        let after = snapshot(&env);
+                        let changes = env.undo();
+                        let before = copies.last().unwrap().clone();
+                        assert_eq!(snapshot(&env), before);
+                        env.checkpoint();
+                        env.redo(changes);
+                        let again = snapshot(&env);
+                        assert_eq!((again.0, again.1), (after.0, after.1));
+                    }
+                    _ => {}
+                }
+            }
+            // leaving every checkpoint by rolling back ends where the first copy was made
+            while let Some(copy) = copies.pop() {
+                env.rollback();
+                assert_eq!(snapshot(&env), copy);
+            }
+        }
+    }
 }

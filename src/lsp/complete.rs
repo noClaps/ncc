@@ -6,6 +6,10 @@ use std::path::Path;
 
 use lsp_types::*;
 
+use super::tyexpr;
+use crate::ast::TypeExpr as T;
+use crate::types::TyId;
+
 use super::{Analysis, BUILTINS, KEYWORDS, Server, docs, pos_to_offset, uri_to_path};
 use crate::ast;
 use crate::check::index::{DeclKind, SymDecl};
@@ -188,14 +192,6 @@ pub(super) fn visible_names(a: &Analysis, fid: u32, off: usize) -> Vec<String> {
         .collect()
 }
 
-/// Parameter names from a function detail (`fn add(int a, int b) (int, int)` -> `a`, `b`).
-fn param_names(detail: &str) -> Vec<String> {
-    super::calls::params(detail)
-        .into_iter()
-        .map(|(_, n)| n)
-        .collect()
-}
-
 impl Server {
     /// A completion for a declaration; with a qualifier (`alias`), the item inserts
     /// `alias.name` and is found by typing the name.
@@ -247,7 +243,7 @@ impl Server {
             let names: Vec<String> = struct_fields(a, d).into_iter().map(|f| f.0).collect();
             // its type arguments come from the expected type (`Box<int> b = B`) or are
             // placeholders: `Box<${1:T}>{.value = $2}`
-            let tps = super::calls::type_params(&format!("{}(", d.detail));
+            let tps = &d.type_params;
             let mut k = 0;
             let mut slot = |name: Option<&str>| {
                 k += 1;
@@ -256,9 +252,18 @@ impl Server {
                     None => format!("${k}"),
                 }
             };
-            let targs = match expected.and_then(|t| t.trim().strip_prefix(full.as_str())) {
-                Some(args) if args.starts_with('<') && args.ends_with('>') && !tps.is_empty() => {
-                    args.to_string()
+            let targs = match expected {
+                Some(T::Named {
+                    module, name, args, ..
+                }) if !args.is_empty()
+                    && !tps.is_empty()
+                    && full
+                        == format!(
+                            "{}{name}",
+                            module.iter().map(|m| format!("{m}.")).collect::<String>()
+                        ) =>
+                {
+                    generic_args(&args.iter().map(T::show).collect::<Vec<_>>())
                 }
                 _ => generic_args(&tps.iter().map(|t| slot(Some(t))).collect::<Vec<_>>()),
             };
@@ -272,9 +277,11 @@ impl Server {
             }
         }
         if d.kind == DeclKind::Function && ins.call_parens && self.snippets {
-            let ps = param_names(&d.detail);
+            let ps: Vec<&str> = (d.sig.iter().flat_map(|s| &s.params))
+                .map(|(_, n)| n.as_str())
+                .collect();
             // a generic function takes its type arguments first: `map<${1:I}, ${2:O}>(...)`
-            let tps = super::calls::type_params(&d.detail);
+            let tps = &d.type_params;
             let mut k = 0;
             let mut slot = |name: &str| {
                 k += 1;
@@ -306,11 +313,11 @@ impl Server {
         let after = &text[off..];
         // no `()` where a function value is expected (`apply(f|`) or already follows
         let call_parens =
-            !after.starts_with('(') && !matches!(&slot, Slot::Value(Some(t)) if is_fn_ty(t));
+            !after.starts_with('(') && !matches!(&slot, Slot::Value(Some(t)) if tyexpr::is_fn(t));
         let ins = Insert {
             call_parens,
             literal: match &slot {
-                Slot::Value(t) if !after.starts_with('{') => Some(t.as_deref()),
+                Slot::Value(t) if !after.starts_with('{') => Some(t.as_ref()),
                 _ => None,
             },
         };
@@ -349,11 +356,12 @@ impl Server {
 
         // `@builtin`
         if prefix_char == Some('@') {
-            for (n, sig, doc) in BUILTINS {
-                let mut it = item(n, CompletionItemKind::FUNCTION, Some(sig.to_string()));
-                it.documentation = Some(Documentation::String(doc.to_string()));
+            for b in BUILTINS {
+                let n = b.name;
+                let mut it = item(n, CompletionItemKind::FUNCTION, Some(b.label()));
+                it.documentation = Some(Documentation::String(b.doc.to_string()));
                 if self.snippets && call_parens {
-                    let has_args = builtin_has_args(sig);
+                    let has_args = !b.params.is_empty();
                     it.insert_text = Some(format!("{n}{}", call_snippet(has_args)));
                     it.insert_text_format = Some(InsertTextFormat::SNIPPET);
                     it.command = has_args.then(param_hints);
@@ -408,16 +416,15 @@ impl Server {
             // the import
             if let [Seg::Name(name)] = chain.as_slice()
                 && !a.imports.contains_key(name)
-                && let Some((_, ipath)) = super::actions::importable_modules(&path)
-                    .into_iter()
-                    .find(|(n, _)| n == name)
+                && let Some(ipath) = self.find_modules(&path, name).into_iter().next()
             {
                 let dir = path.parent()?;
                 let file =
                     crate::modules::import_file(dir, &ipath, || crate::modules::find_root(dir))?;
-                let (module, _) = crate::parser::parse_module_recover(&text, 0);
+                let module = self.module_of(&path, &text);
                 let edit = super::actions::add_import(&text, &module, &ipath, name);
-                let mut names: Vec<String> = public_names(&std::fs::read_to_string(file).ok()?)
+                let ftext = self.text_of(&file)?;
+                let mut names: Vec<String> = public_names(&self.module_of(&file, &ftext))
                     .into_iter()
                     .collect();
                 names.sort();
@@ -445,7 +452,7 @@ impl Server {
                 ));
             }
             // extern blocks
-            let (module, _) = crate::parser::parse_module_recover(&text, 0);
+            let module = self.module_of(&path, &text);
             let externs: Vec<(&str, &str)> = module
                 .items
                 .iter()
@@ -485,11 +492,11 @@ impl Server {
                 .chain(visible(a, fid, off).into_iter().map(|d| d.name.clone()))
                 .collect();
             let mut offered = HashSet::new();
-            for (name, ipath) in super::actions::importable_modules(&path) {
-                if taken.contains(&name) || !offered.insert(name.clone()) {
+            for (name, ipath) in self.importable_modules(&path).iter() {
+                if taken.contains(name) || !offered.insert(name.clone()) {
                     continue;
                 }
-                let edit = super::actions::add_import(&text, &module, &ipath, &name);
+                let edit = super::actions::add_import(&text, &module, ipath, name);
                 items.push(CompletionItem {
                     label: name.clone(),
                     kind: Some(CompletionItemKind::MODULE),
@@ -501,14 +508,15 @@ impl Server {
             }
         }
         // builtins, found without typing `@`
-        for (n, sig, doc) in BUILTINS {
+        for b in BUILTINS {
+            let n = b.name;
             let snippet = self.snippets && call_parens;
-            let has_args = builtin_has_args(sig);
+            let has_args = !b.params.is_empty();
             items.push(CompletionItem {
                 label: format!("@{n}"),
                 kind: Some(CompletionItemKind::FUNCTION),
-                detail: Some(sig.to_string()),
-                documentation: Some(Documentation::String(doc.to_string())),
+                detail: Some(b.label()),
+                documentation: Some(Documentation::String(b.doc.to_string())),
                 filter_text: Some(n.to_string()),
                 insert_text: Some(if snippet {
                     format!("@{n}{}", call_snippet(has_args))
@@ -606,7 +614,9 @@ impl Server {
                         Some(Tok::RParen | Tok::RBracket) => Slot::Value(None),
                         // an array element: of the array's element type
                         _ => match self.slot_at(uri, text, a, fid, open_off) {
-                            Slot::Value(t) => Slot::Value(t.as_deref().and_then(elem_ty)),
+                            Slot::Value(t) => {
+                                Slot::Value(t.as_ref().and_then(tyexpr::elem).cloned())
+                            }
                             Slot::Other => Slot::Other,
                         },
                     };
@@ -619,13 +629,8 @@ impl Server {
                 }
                 // a tuple's element or a parenthesized value: where the `(` is
                 match self.slot_at(uri, text, a, fid, open_off) {
-                    Slot::Value(Some(t)) if !is_fn_ty(&t) && t.starts_with('(') => {
-                        let inner = &t[1..t.len() - 1];
-                        let elems = super::calls::split_top(inner);
-                        Slot::Value(match elems.len() {
-                            0 | 1 if commas == 0 => Some(inner.trim().to_string()),
-                            _ => elems.get(commas).map(|&(x, y)| inner[x..y].to_string()),
-                        })
+                    Slot::Value(Some(T::Tuple(elems, _))) => {
+                        Slot::Value(elems.get(commas).cloned())
                     }
                     Slot::Value(t) if commas == 0 => Slot::Value(t),
                     Slot::Value(_) => Slot::Value(None),
@@ -667,7 +672,7 @@ impl Server {
                 if let Some((ty, name)) = lhs.rsplit_once(' ')
                     && name.bytes().all(is_ident_byte)
                 {
-                    return Slot::Value(Some(ty.trim().to_string()));
+                    return Slot::Value(crate::parser::parse_type_text(ty));
                 }
                 let (Some(a), Some(fid)) = (a, fid) else {
                     return Slot::Value(None);
@@ -676,7 +681,7 @@ impl Server {
                 if let Some(field) = lhs.strip_prefix('.') {
                     let ty = literal_struct(a, text, lstart).and_then(|(d, _)| {
                         let fields = struct_fields(a, d);
-                        Some(fields.into_iter().find(|(n, ..)| n == field)?.1)
+                        fields.into_iter().find(|(n, ..)| n == field)?.1
                     });
                     return Slot::Value(ty);
                 }
@@ -684,13 +689,12 @@ impl Server {
                 Slot::Value(
                     receiver_chain(lhs)
                         .filter(|(_, start)| *start == 0)
-                        .and_then(|(chain, _)| chain_ty(a, fid, s, &chain)),
+                        .and_then(|(chain, _)| chain_ty(a, fid, s, &chain))
+                        .map(|t| a.types.to_type_expr(t)),
                 )
             }
             // the enclosing function's return value
-            Some(Tok::Ident(k)) if k == "return" => {
-                Slot::Value(enclosing_fn_return(text, &toks).map(str::to_string))
-            }
+            Some(Tok::Ident(k)) if k == "return" => Slot::Value(enclosing_fn_return(text, &toks)),
             _ => Slot::Other,
         }
     }
@@ -704,12 +708,12 @@ impl Server {
         off: usize,
         chain: &[Seg],
         ins: Insert<'_>,
-    ) -> Option<(Vec<CompletionItem>, Option<String>)> {
+    ) -> Option<(Vec<CompletionItem>, Option<T>)> {
         let Seg::Name(first) = &chain[0] else {
             return None;
         };
         let mut rest = &chain[1..];
-        let ty: String;
+        let ty: TyId;
         // the functions of an extern block
         let externs: Vec<&SymDecl> = a
             .index
@@ -731,7 +735,7 @@ impl Server {
             if rest.get(1) != Some(&Seg::Call) {
                 return None;
             }
-            ty = d.ty.clone()?;
+            ty = d.ty?;
             rest = &rest[2..];
         } else if let Some(mpath) = a.imports.get(first) {
             let mfid = a.file_id(mpath)?;
@@ -751,7 +755,7 @@ impl Server {
             if matches!(d.kind, DeclKind::Enum) && rest.len() == 1 {
                 return Some((self.variant_items(a, d), None));
             }
-            ty = d.ty.clone()?;
+            ty = d.ty?;
             rest = &rest[1..];
             if d.kind == DeclKind::Function {
                 // the decl's type is its return type: skip the call
@@ -777,12 +781,10 @@ impl Server {
                 }
                 _ => {}
             }
-            ty = d.ty.clone()?;
+            ty = d.ty?;
         }
         let ty = follow(a, ty, rest)?;
-        let members = a.index.types.get(&ty)?;
-        let fields = members
-            .iter()
+        let fields = (a.members(ty).into_iter())
             .map(|m| CompletionItem {
                 label: m.name.clone(),
                 kind: Some(CompletionItemKind::FIELD),
@@ -792,7 +794,7 @@ impl Server {
                 ..Default::default()
             })
             .collect();
-        Some((fields, Some(ty)))
+        Some((fields, Some(a.types.to_type_expr(ty))))
     }
 
     /// Functions whose first parameter accepts a value of type `ty`, offered after `receiver.`
@@ -808,7 +810,7 @@ impl Server {
         start: usize,
         dot: usize,
         off: usize,
-        ty: &str,
+        ty: &T,
     ) -> Vec<CompletionItem> {
         let receiver = &text[start..dot];
         if receiver.contains('\n') {
@@ -840,12 +842,14 @@ impl Server {
         let range = super::range(text, start, off);
         let mut out = Vec::new();
         for (d, qual) in cands {
-            let ps = super::calls::params(&d.detail);
-            let Some((first, _)) = ps.first() else {
+            let Some(ps) = d.sig.as_ref().map(|s| &s.params) else {
                 continue;
             };
-            let tps = super::calls::type_params(&d.detail);
-            let Some(binds) = accepts(first, ty, &tps) else {
+            let Some((Some(first), _)) = ps.first() else {
+                continue;
+            };
+            let tps = &d.type_params;
+            let Some(binds) = tyexpr::accepts(first, ty, tps) else {
                 continue;
             };
             let full = match &qual {
@@ -860,7 +864,7 @@ impl Server {
             let targs: Vec<String> = tps
                 .iter()
                 .map(|t| match binds.get(t) {
-                    Some(b) => b.clone(),
+                    Some(b) => b.show(),
                     None => slot(t),
                 })
                 .collect();
@@ -874,7 +878,7 @@ impl Server {
             } else {
                 let plain: Vec<String> = tps
                     .iter()
-                    .map(|t| binds.get(t).cloned().unwrap_or_else(|| t.clone()))
+                    .map(|t| binds.get(t).map_or_else(|| t.clone(), T::show))
                     .collect();
                 (
                     format!("{full}{}({receiver})", generic_args(&plain)),
@@ -898,20 +902,17 @@ impl Server {
     }
 
     fn variant_items(&self, a: &Analysis, d: &SymDecl) -> Vec<CompletionItem> {
-        d.members
-            .iter()
-            .map(|(m, detail)| {
-                let variant = a.index.decls.iter().find(|v| {
-                    v.kind == DeclKind::Variant
-                        && v.detail.starts_with(&format!("{}.{m}", d.name))
-                        && v.span.file == d.span.file
-                });
-                let payload = detail.ends_with(')');
+        let spans = d.ty.and_then(|t| a.index.variant_spans.get(&t));
+        let arity = a.variants(d);
+        (d.members.iter().enumerate())
+            .map(|(i, (m, detail))| {
+                let span = spans.and_then(|s| s.get(i)).copied();
+                let payload = arity.get(i).is_some_and(|(_, n)| *n > 0);
                 let mut it = CompletionItem {
                     label: m.clone(),
                     kind: Some(CompletionItemKind::ENUM_MEMBER),
                     detail: Some(detail.clone()),
-                    documentation: variant.and_then(|v| doc_at(a, v.span)),
+                    documentation: span.and_then(|s| doc_at(a, s)),
                     ..Default::default()
                 };
                 if payload && self.snippets {
@@ -962,52 +963,22 @@ struct Insert<'a> {
     /// functions as calls: `f(...)`
     call_parens: bool,
     /// structs as literals (`S{.x = ...}`), with the type expected there when known
-    literal: Option<Option<&'a str>>,
+    literal: Option<Option<&'a T>>,
 }
 
 /// Where the expression being completed goes.
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 enum Slot {
     /// a value, with its expected type when known
-    Value(Option<String>),
+    Value(Option<T>),
     /// a statement, a type, a field name, ...
     Other,
-}
-
-/// Whether a type is a function type (`(fn(int) str)`).
-fn is_fn_ty(t: &str) -> bool {
-    t.trim().starts_with("(fn")
 }
 
 /// The innermost unclosed `(` at the end of `toks` (not inside `[...]` or `{...}`), with the
 /// number of commas after it at its level.
 fn unclosed_paren(toks: &[&crate::lexer::Token]) -> Option<(usize, usize)> {
     unclosed(toks).filter(|&(i, _)| toks[i].tok == crate::lexer::Tok::LParen)
-}
-
-/// The generic parameters a signature label declares (`fn map<type I, type O>(` -> `I`, `O`);
-/// none when the call gave them (`fn map<int, str>(`).
-fn declared_generics(label: &str) -> Vec<String> {
-    let head = &label[..label.find('(').unwrap_or(label.len())];
-    let (Some(l), Some(r)) = (head.find('<'), head.rfind('>')) else {
-        return vec![];
-    };
-    let list = &head[l + 1..r];
-    // declared parameters are `kind name`; given arguments are types (`int`, `(fn() int)`)
-    super::calls::split_top(list)
-        .into_iter()
-        .filter_map(|(x, y)| {
-            let (kind, name) = list[x..y].split_once(' ')?;
-            (kind.bytes().all(is_ident_byte) && name.bytes().all(is_ident_byte))
-                .then(|| name.to_string())
-        })
-        .collect()
-}
-
-/// Whether `ty` names one of the generic parameters `tps`.
-fn mentions(ty: &str, tps: &[String]) -> bool {
-    ty.split(|c: char| !c.is_ascii() || !is_ident_byte(c as u8))
-        .any(|w| tps.iter().any(|t| t == w))
 }
 
 /// The type expected for argument `c.arg` of the call whose `(` is `toks[open]`. A generic
@@ -1020,12 +991,12 @@ fn arg_ty(
     toks: &[&crate::lexer::Token],
     open: usize,
     c: &super::calls::CallCtx,
-) -> Option<String> {
+) -> Option<T> {
     use crate::lexer::Tok;
-    let ps = super::calls::params(&c.label);
-    let ty = ps.get(c.arg as usize)?.0.clone();
-    let tps = declared_generics(&c.label);
-    if !mentions(&ty, &tps) {
+    let ps = &c.sig.params;
+    let ty = ps.get(c.arg as usize)?.0.clone()?;
+    let tps = &c.open_tps;
+    if !tyexpr::mentions(&ty, tps) {
         return Some(ty);
     }
     // the arguments' spans: (first token, last token)
@@ -1045,50 +1016,49 @@ fn arg_ty(
         }
         first.get_or_insert(i);
     }
-    let mut binds: HashMap<String, String> = HashMap::new();
+    let mut binds: HashMap<String, T> = HashMap::new();
     if let Some((a, fid)) = a {
         for (k, &(f, l)) in args.iter().enumerate().take(c.arg as usize) {
             let (start, end) = (toks[f].span.start, toks[l].span.end);
             // the checked type, or (on the line being typed, which does not parse yet) the
             // type of a simple expression
             let x = match a.expr_ty(fid, start, end) {
-                Some(x) => Some(x.ty.clone()),
+                Some(x) => Some(a.types.to_type_expr(x.ty)),
                 None => text_ty(a, fid, text, &toks[f..=l]),
             };
-            let (Some(x), Some((p, _))) = (x, ps.get(k)) else {
+            let (Some(x), Some((Some(p), _))) = (x, ps.get(k)) else {
                 continue;
             };
-            for (n, t) in accepts(p, &x, &tps).unwrap_or_default() {
+            for (n, t) in tyexpr::accepts(p, &x, tps).unwrap_or_default() {
                 binds.entry(n).or_insert(t);
             }
         }
     }
-    let (names, with): (Vec<String>, Vec<String>) = binds.into_iter().unzip();
-    let ty = super::calls::substitute(&ty, &names, &with);
-    (is_fn_ty(&ty) || !mentions(&ty, &tps)).then_some(ty)
+    let ty = tyexpr::substitute(&ty, &binds);
+    (tyexpr::is_fn(&ty) || !tyexpr::mentions(&ty, tps)).then_some(ty)
 }
 
 /// The type of a simple expression from its tokens: a literal, a name, a chain (`p.x`,
 /// `f().y`), an array literal or a struct literal.
-fn text_ty(a: &Analysis, fid: u32, text: &str, toks: &[&crate::lexer::Token]) -> Option<String> {
+fn text_ty(a: &Analysis, fid: u32, text: &str, toks: &[&crate::lexer::Token]) -> Option<T> {
     use crate::lexer::Tok;
     let (first, last) = (toks.first()?, toks.last()?);
     let src = &text[first.span.start as usize..last.span.end as usize];
     if let [t] = toks {
         match &t.tok {
-            Tok::Int(_, false) => return Some("int".into()),
-            Tok::Int(_, true) => return Some("uint".into()),
-            Tok::Float(_) => return Some("float".into()),
-            Tok::Str(_) => return Some("str".into()),
-            Tok::Char(_) => return Some("char".into()),
-            Tok::Ident(b) if b == "true" || b == "false" => return Some("bool".into()),
+            Tok::Int(_, false) => return Some(tyexpr::named("int")),
+            Tok::Int(_, true) => return Some(tyexpr::named("uint")),
+            Tok::Float(_) => return Some(tyexpr::named("float")),
+            Tok::Str(_) => return Some(tyexpr::named("str")),
+            Tok::Char(_) => return Some(tyexpr::named("char")),
+            Tok::Ident(b) if b == "true" || b == "false" => return Some(tyexpr::named("bool")),
             Tok::Ident(n) => {
                 let d = visible(a, fid, first.span.start as usize)
                     .into_iter()
                     .find(|d| &d.name == n)?;
                 return match d.kind {
-                    DeclKind::Variable => d.ty.clone(),
-                    DeclKind::Function => fn_value_ty(&d.detail),
+                    DeclKind::Variable => d.ty.map(|t| a.types.to_type_expr(t)),
+                    DeclKind::Function => d.sig.as_ref().and_then(|s| s.value_ty()),
                     _ => None,
                 };
             }
@@ -1113,7 +1083,7 @@ fn text_ty(a: &Analysis, fid: u32, text: &str, toks: &[&crate::lexer::Token]) ->
         return (end > 1)
             .then(|| text_ty(a, fid, text, &toks[1..end]))
             .flatten()
-            .map(|t| format!("{t}[]"));
+            .map(|t| T::Array(Box::new(t), None, Span::default()));
     }
     // `Name{...}`, `Name<int>{...}`
     if last.tok == Tok::RBrace
@@ -1122,50 +1092,12 @@ fn text_ty(a: &Analysis, fid: u32, text: &str, toks: &[&crate::lexer::Token]) ->
             .trim()
             .starts_with(|c: char| c.is_ascii_uppercase())
     {
-        return Some(src[..b].trim().to_string());
+        return crate::parser::parse_type_text(src[..b].trim());
     }
     receiver_chain(src)
         .filter(|(_, start)| *start == 0)
         .and_then(|(chain, _)| chain_ty(a, fid, first.span.start as usize, &chain))
-}
-
-/// The type of a function as a value, from its signature label:
-/// `fn add(int a, int b) int` -> `(fn(int, int) int)`.
-fn fn_value_ty(detail: &str) -> Option<String> {
-    let (_, r) = super::calls::params_range(detail)?;
-    let ps: Vec<String> = super::calls::params(detail)
-        .into_iter()
-        .map(|(t, _)| t)
-        .collect();
-    let ret = detail[r + 1..].trim();
-    Some(if ret.is_empty() {
-        format!("(fn({}))", ps.join(", "))
-    } else {
-        format!("(fn({}) {ret})", ps.join(", "))
-    })
-}
-
-/// The element type of an array type (`int[]`, `P[3]` -> `int`, `P`); not of a map.
-fn elem_ty(t: &str) -> Option<String> {
-    let t = t.trim();
-    if t.starts_with('[') || !t.ends_with(']') {
-        return None;
-    }
-    let mut depth = 0;
-    for (i, c) in t.char_indices().rev() {
-        match c {
-            ']' | ')' | '>' => depth += 1,
-            '(' | '<' => depth -= 1,
-            '[' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(t[..i].to_string());
-                }
-            }
-            _ => {}
-        }
-    }
-    None
+        .map(|t| a.types.to_type_expr(t))
 }
 
 /// The innermost unclosed `(`, `[` or `{` at the end of `toks`, with the number of commas
@@ -1225,27 +1157,20 @@ fn in_fn_header(toks: &[&crate::lexer::Token]) -> bool {
 }
 
 /// The type reached by following `segs` from a value of type `ty` (`.field`, `[i]`, `()`).
-fn follow(a: &Analysis, mut ty: String, segs: &[Seg]) -> Option<String> {
+fn follow(a: &Analysis, mut ty: TyId, segs: &[Seg]) -> Option<TyId> {
     for s in segs {
         ty = match s {
-            Seg::Name(n) => a
-                .index
-                .types
-                .get(&ty)?
-                .iter()
-                .find(|m| &m.name == n)?
-                .ty
-                .clone(),
-            Seg::Index => a.index.elems.get(&ty)?.clone(),
+            Seg::Name(n) => a.members(ty).into_iter().find(|m| &m.name == n)?.ty,
+            Seg::Index => crate::check::index::elem_of(&a.types, ty)?,
             Seg::Slice => ty,
-            Seg::Call => a.index.returns.get(&ty)?.clone(),
+            Seg::Call => crate::check::index::return_of(&a.types, ty)?,
         };
     }
     Some(ty)
 }
 
 /// The type of a chain starting at a variable or function in scope (`p.cb`, `ps[0].x`, `f().y`).
-fn chain_ty(a: &Analysis, fid: u32, off: usize, chain: &[Seg]) -> Option<String> {
+fn chain_ty(a: &Analysis, fid: u32, off: usize, chain: &[Seg]) -> Option<TyId> {
     let Seg::Name(first) = chain.first()? else {
         return None;
     };
@@ -1258,12 +1183,12 @@ fn chain_ty(a: &Analysis, fid: u32, off: usize, chain: &[Seg]) -> Option<String>
         DeclKind::Function if chain.get(1) == Some(&Seg::Call) => &chain[2..],
         _ => return None,
     };
-    follow(a, d.ty.clone()?, rest)
+    follow(a, d.ty?, rest)
 }
 
 /// The return type of the innermost function (declaration or literal) whose body is open at
-/// the end of `toks`; `""` when it returns nothing.
-fn enclosing_fn_return<'a>(text: &'a str, toks: &[&crate::lexer::Token]) -> Option<&'a str> {
+/// the end of `toks`, when it returns something.
+fn enclosing_fn_return(text: &str, toks: &[&crate::lexer::Token]) -> Option<T> {
     use crate::lexer::Tok;
     // the unclosed `{`s, innermost last
     let mut open = Vec::new();
@@ -1286,8 +1211,7 @@ fn enclosing_fn_return<'a>(text: &'a str, toks: &[&crate::lexer::Token]) -> Opti
                 Tok::Ident(k) if k == "fn" && depth == 0 => {
                     let header =
                         &text[toks[i].span.start as usize..toks[brace].span.start as usize];
-                    let (_, r) = super::calls::params_range(header)?;
-                    return Some(header[r + 1..].trim());
+                    return crate::parser::parse_fn_header_text(header)?.ret;
                 }
                 Tok::Newline | Tok::LBrace | Tok::RBrace | Tok::Comma | Tok::Assign
                     if depth == 0 =>
@@ -1308,11 +1232,6 @@ fn enclosing_fn_return<'a>(text: &'a str, toks: &[&crate::lexer::Token]) -> Opti
 /// arguments, after them otherwise.
 fn call_snippet(has_args: bool) -> &'static str {
     if has_args { "($0)" } else { "()$0" }
-}
-
-/// Whether a builtin's signature (`fn @args() str[]`) has parameters.
-fn builtin_has_args(sig: &str) -> bool {
-    super::calls::params_range(sig).is_some_and(|(l, r)| !sig[l..r].trim().is_empty())
 }
 
 fn param_hints() -> Command {
@@ -1362,8 +1281,7 @@ fn postfix_items(text: &str, start: usize, dot: usize, off: usize) -> Vec<Comple
 }
 
 /// Names a module exports.
-fn public_names(text: &str) -> HashSet<String> {
-    let (m, _) = crate::parser::parse_module_recover(text, 0);
+fn public_names(m: &ast::Module) -> HashSet<String> {
     m.items
         .iter()
         .flat_map(ast::Item::public_names)
@@ -1474,65 +1392,6 @@ fn is_slice(inner: &[u8]) -> bool {
     false
 }
 
-/// Can a value of type `ty` be passed for a parameter of type `param`? Returns the generic
-/// parameters (`tps`) bound by the match. Besides an exact match, a value is accepted for an
-/// optional of its type (it is wrapped implicitly). A fixed-size array is not accepted for a
-/// dynamic one: that needs `@as`.
-fn accepts(param: &str, ty: &str, tps: &[String]) -> Option<HashMap<String, String>> {
-    let try_match = |p: &str, t: &str| {
-        let mut binds = HashMap::new();
-        unify(p, t, tps, &mut binds).then_some(binds)
-    };
-    if let Some(b) = try_match(param, ty) {
-        return Some(b);
-    }
-    param
-        .strip_suffix('?')
-        .and_then(|inner| try_match(inner, ty))
-}
-
-/// Match a type pattern (`T[]`, `(fn(I) O)`) against a concrete type (`int[]`), binding the
-/// generic parameters `tps` to the text they stand for.
-fn unify(p: &str, c: &str, tps: &[String], binds: &mut HashMap<String, String>) -> bool {
-    if p.is_empty() {
-        return c.is_empty();
-    }
-    let word = |s: &str| s.bytes().take_while(|b| is_ident_byte(*b)).count();
-    let w = word(p);
-    if w > 0 {
-        let name = &p[..w];
-        if tps.iter().any(|t| t == name) {
-            if let Some(bound) = binds.get(name).cloned() {
-                return c.starts_with(&bound) && unify(&p[w..], &c[bound.len()..], tps, binds);
-            }
-            // try every balanced prefix of `c`
-            let mut depth = 0i32;
-            for (k, ch) in c.char_indices() {
-                match ch {
-                    '(' | '[' | '<' => depth += 1,
-                    ')' | ']' | '>' => depth -= 1,
-                    _ => {}
-                }
-                if depth < 0 {
-                    return false;
-                }
-                let end = k + ch.len_utf8();
-                if depth == 0 && !c[..end].ends_with(' ') {
-                    binds.insert(name.to_string(), c[..end].to_string());
-                    if unify(&p[w..], &c[end..], tps, binds) {
-                        return true;
-                    }
-                    binds.remove(name);
-                }
-            }
-            return false;
-        }
-        return c.starts_with(name) && word(&c[w..]) == 0 && unify(&p[w..], &c[w..], tps, binds);
-    }
-    let ch = p.chars().next().unwrap();
-    c.starts_with(ch) && unify(&p[ch.len_utf8()..], &c[ch.len_utf8()..], tps, binds)
-}
-
 /// The doc comment of the declaration at `span`, as Markdown.
 fn doc_at(a: &Analysis, span: Span) -> Option<Documentation> {
     docs::doc_comment(&a.sm.file(span.file).text, span)
@@ -1587,19 +1446,13 @@ fn literal_struct<'a>(a: &'a Analysis, text: &str, dot: usize) -> Option<(&'a Sy
 /// Fields not set yet in the struct literal around the `.` at `dot`.
 /// A struct's fields: (name, type, detail, definition). A generic struct's come from its
 /// declaration, with its type parameters unresolved.
-fn struct_fields(a: &Analysis, d: &SymDecl) -> Vec<(String, String, String, Option<Span>)> {
-    match d.ty.as_ref().and_then(|t| a.index.types.get(t)) {
-        Some(ms) => ms
-            .iter()
-            .map(|m| (m.name.clone(), m.ty.clone(), m.detail.clone(), m.def))
+fn struct_fields(a: &Analysis, d: &SymDecl) -> Vec<(String, Option<T>, String, Option<Span>)> {
+    match d.ty {
+        Some(t) => (a.members(t).into_iter())
+            .map(|m| (m.name, Some(a.types.to_type_expr(m.ty)), m.detail, m.def))
             .collect(),
-        None => d
-            .members
-            .iter()
-            .map(|(n, detail)| {
-                let ty = detail.rsplit_once(' ').map_or("", |(t, _)| t);
-                (n.clone(), ty.to_string(), detail.clone(), None)
-            })
+        None => (d.members.iter().enumerate())
+            .map(|(i, (n, detail))| (n.clone(), d.field_tys.get(i).cloned(), detail.clone(), None))
             .collect(),
     }
 }
@@ -1630,58 +1483,6 @@ fn struct_literal_fields(a: &Analysis, text: &str, dot: usize) -> Option<Vec<Com
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn generic_parameters_and_elements() {
-        let g = super::declared_generics("fn map<type I, type O>(I[] arr, (fn(I) O) f) O[]");
-        assert_eq!(g, ["I", "O"]);
-        assert!(super::mentions("I[]", &g) && !super::mentions("int[]", &g));
-        let given = "fn map<int, (fn() str)>(int[] arr, (fn(int) (fn() str)) f) (fn() str)[]";
-        assert!(super::declared_generics(given).is_empty());
-        assert!(super::declared_generics("fn add(int a, int b) int").is_empty());
-        assert_eq!(super::elem_ty("P[]").as_deref(), Some("P"));
-        assert_eq!(
-            super::elem_ty("(fn() int)[3]").as_deref(),
-            Some("(fn() int)")
-        );
-        assert_eq!(super::elem_ty("int[][]").as_deref(), Some("int[]"));
-        assert_eq!(super::elem_ty("[str]int"), None);
-    }
-
-    #[test]
-    fn first_argument_types() {
-        let t = |names: &[&str]| names.iter().map(ToString::to_string).collect::<Vec<_>>();
-        let b = |p: &str, ty: &str, tps: &[&str]| {
-            accepts(p, ty, &t(tps)).map(|m| {
-                let mut v: Vec<(String, String)> = m.into_iter().collect();
-                v.sort();
-                v
-            })
-        };
-        let pair = |k: &str, v: &str| (k.to_string(), v.to_string());
-        assert_eq!(b("int", "int", &[]), Some(vec![]));
-        assert_eq!(b("int", "uint", &[]), None);
-        assert_eq!(b("int", "int[]", &[]), None);
-        assert_eq!(b("T[]", "str[]", &["T"]), Some(vec![pair("T", "str")]));
-        assert_eq!(
-            b("T[]", "(int, str)[]", &["T"]),
-            Some(vec![pair("T", "(int, str)")])
-        );
-        assert_eq!(b("T[]", "int", &["T"]), None);
-        assert_eq!(
-            b("T[N]", "int[3]", &["T", "N"]),
-            Some(vec![pair("N", "3"), pair("T", "int")])
-        );
-        // a value for an optional, but not a fixed-size array for a dynamic one
-        assert_eq!(b("str?", "str", &[]), Some(vec![]));
-        assert_eq!(b("int[]", "int[3]", &[]), None);
-        assert_eq!(
-            b("[K]V", "[str]int[]", &["K", "V"]),
-            Some(vec![pair("K", "str"), pair("V", "int[]")])
-        );
-        assert_eq!(b("Pair<T, T>", "Pair<int, str>", &["T"]), None);
-        assert_eq!(b("Vec", "Vec2", &[]), None);
-    }
-
     use super::*;
 
     #[test]
@@ -1719,10 +1520,6 @@ mod tests {
         assert_eq!(
             receiver_chain("@println(\"{p"),
             Some((vec![Seg::Name("p".into())], 11))
-        );
-        assert_eq!(
-            param_names("fn add(int a, (int, int) b) int"),
-            vec!["a".to_string(), "b".to_string()]
         );
     }
 }

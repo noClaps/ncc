@@ -374,7 +374,7 @@ impl<'a> Printer<'a> {
                 self.out.push_str(&text);
                 self.out.push('\n');
             }
-            Item::Test(name, body, _) => {
+            Item::Test(name, body, ..) => {
                 let b = self.block(body, 0, false);
                 self.out.push_str(&format!("test {} {b}\n", quote(name)));
             }
@@ -504,7 +504,9 @@ impl<'a> Printer<'a> {
                 out.push_str(&self.expr(value, indent));
                 out
             }
-            StmtKind::FnVar { name, value } => format!("fn {name} = {}", self.expr(value, indent)),
+            StmtKind::FnVar { name, value, .. } => {
+                format!("fn {name} = {}", self.expr(value, indent))
+            }
             StmtKind::Assign { target, value } => {
                 format!(
                     "{} = {}",

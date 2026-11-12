@@ -10,11 +10,15 @@ use std::fmt::Write;
 
 use lsp_types::*;
 
-use super::nav::{Node, item_spans, walk};
+use super::{diag_code, diag_data};
+use crate::diag::codes;
+use crate::types::TyKind;
+
 use super::{
     Analysis, Server, edit_action, line_end, line_start, path_to_uri, pos_to_offset, range,
-    uri_to_path,
+    span_range, uri_to_path,
 };
+use crate::ast::visit::{Node, item_spans, walk};
 use crate::ast::{self, ExprKind as E, StmtKind as S};
 use crate::check::index::{DeclKind, SymDecl};
 use crate::lexer::Tok;
@@ -88,13 +92,11 @@ impl Server {
         text: &str,
         d: &Diagnostic,
     ) -> Vec<CodeActionOrCommand> {
-        let msg = d.message.as_str();
+        let code = diag_code(d);
         let off = pos_to_offset(text, d.range.start) as u32;
         let mut out = Vec::new();
-        if let Some(name) = msg
-            .strip_prefix("unknown type `")
-            .and_then(|r| r.strip_suffix('`'))
-            .filter(|n| n.bytes().all(is_ident_byte))
+        if code == codes::UNKNOWN_TYPE
+            && let Some(name) = diag_data(d, 0).filter(|n| n.bytes().all(is_ident_byte))
         {
             // after the top-level item that uses it
             let at =
@@ -114,21 +116,13 @@ impl Server {
                     Some(d),
                 ));
             }
-        } else if msg.starts_with("cannot find module `")
-            && let Some(target) = msg
-                .split_once("(looked for `")
-                .and_then(|(_, r)| r.strip_suffix("`)"))
+        } else if code == codes::MISSING_MODULE
+            && let (Some(module_path), Some(target)) = (diag_data(d, 0), diag_data(d, 1))
         {
             // create the missing file
             let new = path_to_uri(std::path::Path::new(target));
             out.push(CodeActionOrCommand::CodeAction(CodeAction {
-                title: format!(
-                    "Create module `{}`",
-                    msg.trim_start_matches("cannot find module `")
-                        .split('`')
-                        .next()
-                        .unwrap_or("")
-                ),
+                title: format!("Create module `{module_path}`"),
                 kind: Some(CodeActionKind::QUICKFIX),
                 diagnostics: Some(vec![d.clone()]),
                 edit: Some(WorkspaceEdit {
@@ -147,16 +141,15 @@ impl Server {
                 is_preferred: Some(true),
                 ..Default::default()
             }));
-        } else if let Some(rest) = msg.strip_prefix('`')
-            && let Some((name, alias)) = rest.split_once("` is not public in module `")
+        } else if code == codes::NOT_PUBLIC
+            && let (Some(name), Some(alias)) = (diag_data(d, 0), diag_data(d, 1))
         {
             // `pub` on the declaration in the imported module
-            let alias = alias.trim_end_matches('`');
             if let Some(path) = uri_to_path(uri)
                 && let Some(mpath) = self.analyses.get(&path).and_then(|a| a.imports.get(alias))
                 && let Some(mtext) = self.text_of(mpath)
             {
-                let (m, _) = crate::parser::parse_module_recover(&mtext, 0);
+                let m = self.module_of(mpath, &mtext);
                 let start = (m.items.iter())
                     .find(|it| it.declared().0.iter().any(|n| *n == name))
                     .map(|it| it.range().0);
@@ -175,7 +168,7 @@ impl Server {
                     ));
                 }
             }
-        } else if msg.starts_with("missing field `") && msg.contains("in pattern") {
+        } else if code == codes::MISSING_PATTERN_FIELD {
             out.extend(self.fill_pattern_fields(uri, module, text, off, d));
         }
         out
@@ -191,7 +184,7 @@ impl Server {
         d: &Diagnostic,
     ) -> Option<CodeActionOrCommand> {
         let a = self.analyses.get(&uri_to_path(uri)?)?;
-        let edit = super::actions::add_missing_fields(a, module, text, off, |_| "_".into())?;
+        let edit = super::actions::add_missing_fields(a, module, text, off, |_, _| "_".into())?;
         Some(edit_action(
             "Fill in the missing fields with `_`".into(),
             CodeActionKind::QUICKFIX,
@@ -332,10 +325,10 @@ fn extract_constant(
     }
     let (s32, e32) = (s as u32, e as u32);
     let x = a.expr_ty(fid, s32, e32)?;
-    if matches!(x.ty.as_str(), "void" | "never")
-        || x.ty.starts_with("fn")
-        || x.ty.starts_with("fut")
-    {
+    if matches!(
+        a.types.kind(x.ty),
+        TyKind::Void | TyKind::Never | TyKind::Fn(..) | TyKind::Fut(_)
+    ) {
         return None;
     }
     // only inside a function, test or block (at the top level it is "extract variable")
@@ -364,7 +357,7 @@ fn extract_constant(
         k += 1;
     }
     let at = line_start(text, lo as usize);
-    let decl = format!("{} {name} = {}\n\n", x.ty, &text[s..e]);
+    let decl = format!("{} {name} = {}\n\n", a.show(x.ty), &text[s..e]);
     Some(edit_action(
         "Extract into a module-level constant".into(),
         CodeActionKind::REFACTOR_EXTRACT,
@@ -401,7 +394,7 @@ fn match_on_call(
     let x = target?;
     let ty = a.expr_ty(fid, x.span.start, x.span.end)?;
     let edecl = a.decl(ty.type_def?)?;
-    if edecl.kind != DeclKind::Enum || ty.ty != edecl.name {
+    if edecl.kind != DeclKind::Enum || !matches!(a.types.kind(ty.ty), TyKind::Enum(_)) {
         return None;
     }
     let ls = line_start(text, x.span.start as usize);
@@ -415,13 +408,7 @@ fn match_on_call(
     Some(edit_action(
         "Match on the result".into(),
         CodeActionKind::REFACTOR_REWRITE,
-        vec![(
-            uri.clone(),
-            TextEdit::new(
-                range(text, x.span.start as usize, x.span.end as usize),
-                body,
-            ),
-        )],
+        vec![(uri.clone(), TextEdit::new(span_range(text, x.span), body))],
         None,
     ))
 }
@@ -444,20 +431,17 @@ pub(super) fn enum_match(
         format!("{alias}.{}", edecl.name)
     };
     let mut body = format!("{indent}if {subject} {{\n");
-    for (m, detail) in &edecl.members {
-        let pat = variant_pattern(&prefix, m, detail);
+    for (m, arity) in a.variants(edecl) {
+        let pat = variant_pattern(&prefix, &m, arity);
         writeln!(body, "{indent}  {pat} -> {{}}").unwrap();
     }
     writeln!(body, "{indent}}}").unwrap();
     Some(body)
 }
 
-/// A pattern matching variant `m` of the enum written `prefix`, with `_` for each value of its
-/// payload (`detail` is the variant's signature, `Shape.Circle(float)`).
-pub(super) fn variant_pattern(prefix: &str, m: &str, detail: &str) -> String {
-    let arity = detail
-        .split_once('(')
-        .map_or(0, |(_, ps)| ps.trim_end_matches(')').split(',').count());
+/// A pattern matching variant `m` of the enum written `prefix`, with `_` for each of the
+/// `arity` values of its payload.
+pub(super) fn variant_pattern(prefix: &str, m: &str, arity: usize) -> String {
     if arity == 0 {
         format!("{prefix}.{m}")
     } else {
@@ -529,7 +513,7 @@ pub fn exit_points(module: &ast::Module, text: &str, off: usize) -> Option<Vec<R
         }
         _ => {}
     };
-    super::nav::block_spans(body, &mut visit);
+    crate::ast::visit::block_spans(body, &mut visit);
     Some(out)
 }
 
@@ -547,7 +531,7 @@ mod tests {
     #[test]
     fn exit_point_highlights() {
         let src = "fn f(int x) int! {\n  fn g() int {\n    return 1\n  }\n  if {\n    x > 1 -> { throw \"no\" }\n    _ -> {}\n  }\n  return try h()\n}\n";
-        let (m, _) = crate::parser::parse_module_recover(src, 0);
+        let m = crate::parser::parse_module_recover(src, 0).0;
         let r = exit_points(&m, src, 0).unwrap();
         let lines: Vec<u32> = r.iter().map(|r| r.start.line).collect();
         // `fn`, `throw`, `return`, `try` -- not the nested function's `return`

@@ -55,6 +55,32 @@ impl ConstExpr {
             Self::Bin(_, a, b) => a.span().to(b.span()),
         }
     }
+
+    /// Call `f` with each name in the constant.
+    pub fn visit_names(&self, f: &mut dyn FnMut(&str)) {
+        match self {
+            Self::Int(..) => {}
+            Self::Name(n, _) => f(n),
+            Self::Neg(e, _) | Self::Paren(e, _) => e.visit_names(f),
+            Self::Bin(_, a, b) => {
+                a.visit_names(f);
+                b.visit_names(f);
+            }
+        }
+    }
+
+    /// The constant with each name for which `f` gives a constant replaced by it.
+    pub fn map_names(&self, f: &mut dyn FnMut(&str) -> Option<Self>) -> Self {
+        match self {
+            Self::Int(..) => self.clone(),
+            Self::Name(n, _) => f(n).unwrap_or_else(|| self.clone()),
+            Self::Neg(e, s) => Self::Neg(Box::new(e.map_names(f)), *s),
+            Self::Paren(e, s) => Self::Paren(Box::new(e.map_names(f)), *s),
+            Self::Bin(op, a, b) => {
+                Self::Bin(*op, Box::new(a.map_names(f)), Box::new(b.map_names(f)))
+            }
+        }
+    }
 }
 
 /// A generic parameter: `type T`, or a constant such as `uint N`.
@@ -330,7 +356,9 @@ pub struct DeclTarget {
     pub ty: TypeExpr,
     /// `_` allowed for discarding parts
     pub name: String,
+    /// the whole target, type and name
     pub span: Span,
+    pub name_span: Span,
 }
 
 #[derive(Clone, Debug)]
@@ -346,6 +374,7 @@ pub enum StmtKind {
     /// `fn f = fn(...) R { ... }`
     FnVar {
         name: String,
+        name_span: Span,
         value: Expr,
     },
     Assign {
@@ -397,6 +426,7 @@ pub struct StructDecl {
     pub fields: Vec<(TypeExpr, String, Span)>,
     pub public: bool,
     pub span: Span,
+    pub name_span: Span,
 }
 
 #[derive(Clone, Debug)]
@@ -406,6 +436,7 @@ pub struct EnumDecl {
     pub variants: Vec<(String, Vec<TypeExpr>, Span)>,
     pub public: bool,
     pub span: Span,
+    pub name_span: Span,
 }
 
 #[derive(Clone, Debug)]
@@ -414,6 +445,7 @@ pub struct TypeDecl {
     pub ty: TypeExpr,
     pub public: bool,
     pub span: Span,
+    pub name_span: Span,
 }
 
 #[derive(Clone, Debug)]
@@ -428,6 +460,7 @@ pub struct ExternDecl {
     pub alias: String,
     pub fns: Vec<ExternFn>,
     pub span: Span,
+    pub alias_span: Span,
 }
 
 #[derive(Clone, Debug)]
@@ -435,6 +468,7 @@ pub struct Import {
     pub path: String,
     pub alias: String,
     pub span: Span,
+    pub alias_span: Span,
 }
 
 #[derive(Clone, Debug)]
@@ -445,7 +479,8 @@ pub enum Item {
     Enum(EnumDecl),
     Type(TypeDecl),
     Fn(FnDecl),
-    Test(String, Block, Span),
+    /// `test "name" { ... }`: the name, body, whole span and the name's span
+    Test(String, Block, Span, Span),
     Stmt(Stmt),
 }
 
@@ -484,7 +519,7 @@ impl Item {
             Self::Enum(e) => (e.span.start, e.span.end),
             Self::Type(t) => (t.span.start, t.span.end),
             Self::Fn(f) => (f.sig.span.start, f.body.span.end),
-            Self::Test(_, b, sp) => (sp.start, b.span.end.max(sp.end)),
+            Self::Test(_, b, sp, _) => (sp.start, b.span.end.max(sp.end)),
             Self::Stmt(s) => (s.span.start, s.span.end),
         }
     }
@@ -493,4 +528,259 @@ impl Item {
 #[derive(Clone, Debug)]
 pub struct Module {
     pub items: Vec<Item>,
+}
+
+/// Walks over the syntax tree.
+pub mod visit {
+    use super::{ExprKind as E, StmtKind as S, *};
+
+    /// A node of the syntax tree, visited by `walk`. `Span` is reported for every node.
+    #[derive(Clone, Copy)]
+    pub enum Node<'a> {
+        Span(Span),
+        Stmt(&'a Stmt),
+        Expr(&'a Expr),
+        Block(&'a Block),
+        /// a function (declared or literal): its signature
+        Fn(&'a FnSig),
+    }
+
+    /// Visit every node of a module.
+    pub fn walk<'a>(m: &'a Module, out: &mut dyn FnMut(Node<'a>)) {
+        for it in &m.items {
+            item_spans(it, out);
+        }
+    }
+
+    pub fn item_spans<'a>(it: &'a Item, out: &mut dyn FnMut(Node<'a>)) {
+        match it {
+            Item::Import(im) => out(Node::Span(im.span)),
+            Item::Extern(e) => {
+                out(Node::Span(e.span));
+                for f in &e.fns {
+                    sig_spans(&f.sig, out);
+                }
+            }
+            Item::Struct(s) => {
+                out(Node::Span(s.span));
+                for (t, _, sp) in &s.fields {
+                    out(Node::Span(*sp));
+                    type_spans(t, out);
+                }
+            }
+            Item::Enum(e) => {
+                out(Node::Span(e.span));
+                for (_, ts, sp) in &e.variants {
+                    out(Node::Span(*sp));
+                    for t in ts {
+                        type_spans(t, out);
+                    }
+                }
+            }
+            Item::Type(t) => {
+                out(Node::Span(t.span));
+                type_spans(&t.ty, out);
+            }
+            Item::Fn(f) => fn_spans(f, out),
+            Item::Test(_, b, sp, _) => {
+                out(Node::Span(*sp));
+                block_spans(b, out);
+            }
+            Item::Stmt(s) => stmt_spans(s, out),
+        }
+    }
+
+    fn fn_spans<'a>(f: &'a FnDecl, out: &mut dyn FnMut(Node<'a>)) {
+        out(Node::Fn(&f.sig));
+        out(Node::Span(f.sig.span.to(f.body.span)));
+        sig_spans(&f.sig, out);
+        block_spans(&f.body, out);
+    }
+
+    fn sig_spans<'a>(s: &'a FnSig, out: &mut dyn FnMut(Node<'a>)) {
+        out(Node::Span(s.span));
+        for p in &s.params {
+            out(Node::Span(p.span));
+            type_spans(&p.ty, out);
+        }
+        if let Some(r) = &s.ret {
+            type_spans(r, out);
+        }
+    }
+
+    fn type_spans<'a>(t: &'a TypeExpr, out: &mut dyn FnMut(Node<'a>)) {
+        out(Node::Span(t.span()));
+        match t {
+            TypeExpr::Named { args, .. } | TypeExpr::Tuple(args, _) => {
+                for a in args {
+                    type_spans(a, out);
+                }
+            }
+            TypeExpr::Const(_) => {}
+            TypeExpr::Array(x, _, _)
+            | TypeExpr::Optional(x, _)
+            | TypeExpr::ErrorUnion(x, _)
+            | TypeExpr::Fut(x, _) => type_spans(x, out),
+            TypeExpr::Map(k, v, _) => {
+                type_spans(k, out);
+                type_spans(v, out);
+            }
+            TypeExpr::Fn(ps, r, _) => {
+                for p in ps {
+                    type_spans(p, out);
+                }
+                if let Some(r) = r {
+                    type_spans(r, out);
+                }
+            }
+        }
+    }
+
+    pub fn block_spans<'a>(b: &'a Block, out: &mut dyn FnMut(Node<'a>)) {
+        out(Node::Span(b.span));
+        out(Node::Block(b));
+        for s in &b.stmts {
+            stmt_spans(s, out);
+        }
+    }
+
+    pub fn stmt_spans<'a>(s: &'a Stmt, out: &mut dyn FnMut(Node<'a>)) {
+        out(Node::Span(s.span));
+        out(Node::Stmt(s));
+        match &s.kind {
+            S::VarDecl { targets, value, .. } => {
+                for t in targets {
+                    out(Node::Span(t.span));
+                    type_spans(&t.ty, out);
+                }
+                expr_spans(value, out);
+            }
+            S::FnVar { value, .. } | S::Discard(value) | S::Expr(value) | S::Throw(value) => {
+                expr_spans(value, out);
+            }
+            S::Assert(e) => expr_spans(e, out),
+            S::Assign { target, value } => {
+                expr_spans(target, out);
+                expr_spans(value, out);
+            }
+            S::Return(v) | S::Break { value: v, .. } => {
+                if let Some(v) = v {
+                    expr_spans(v, out);
+                }
+            }
+            S::Continue(_) => {}
+            S::While { cond, body, .. } => {
+                expr_spans(cond, out);
+                block_spans(body, out);
+            }
+            S::For {
+                var_span,
+                iter,
+                body,
+                ..
+            } => {
+                out(Node::Span(*var_span));
+                expr_spans(iter, out);
+                block_spans(body, out);
+            }
+            S::Lock {
+                name_span, body, ..
+            } => {
+                out(Node::Span(*name_span));
+                block_spans(body, out);
+            }
+            S::Block(b) => block_spans(b, out),
+            S::Fn(f) => fn_spans(f, out),
+        }
+    }
+
+    pub fn expr_spans<'a>(e: &'a Expr, out: &mut dyn FnMut(Node<'a>)) {
+        out(Node::Span(e.span));
+        out(Node::Expr(e));
+        match &e.kind {
+            E::Unary(_, x) | E::Try(x) | E::Async(x) | E::Await(x) | E::Field(x, _) => {
+                expr_spans(x, out)
+            }
+            E::Binary(_, a, b) | E::Index(a, b) => {
+                expr_spans(a, out);
+                expr_spans(b, out);
+            }
+            E::Call(c, args) => {
+                expr_spans(c, out);
+                for a in args {
+                    expr_spans(a, out);
+                }
+            }
+            E::Generic(x, ts) => {
+                expr_spans(x, out);
+                for t in ts {
+                    type_spans(t, out);
+                }
+            }
+            E::Builtin(_, t, args) => {
+                if let Some(t) = t {
+                    type_spans(t, out);
+                }
+                for a in args {
+                    expr_spans(a, out);
+                }
+            }
+            E::Tuple(xs) | E::Array(xs) => {
+                for x in xs {
+                    expr_spans(x, out);
+                }
+            }
+            E::Map(kvs) => {
+                for (k, v) in kvs {
+                    expr_spans(k, out);
+                    expr_spans(v, out);
+                }
+            }
+            E::Struct(t, fields) => {
+                expr_spans(t, out);
+                for (_, v, sp) in fields {
+                    out(Node::Span(*sp));
+                    expr_spans(v, out);
+                }
+            }
+            E::FnLit(sig, b) => {
+                out(Node::Fn(sig));
+                sig_spans(sig, out);
+                block_spans(b, out);
+            }
+            E::If(i) => {
+                out(Node::Span(i.span));
+                if let Some(s) = &i.scrutinee {
+                    expr_spans(s, out);
+                }
+                for arm in &i.arms {
+                    out(Node::Span(arm.span));
+                    for p in &arm.patterns {
+                        expr_spans(p, out);
+                    }
+                    block_spans(&arm.body, out);
+                }
+            }
+            E::Else(x, fb) => {
+                expr_spans(x, out);
+                match fb {
+                    ElseFallback::Expr(y) => expr_spans(y, out),
+                    ElseFallback::Block(b) => block_spans(b, out),
+                }
+            }
+            E::Catch(x, _, sp, b) => {
+                expr_spans(x, out);
+                out(Node::Span(*sp));
+                block_spans(b, out);
+            }
+            E::Str(segs) => {
+                for s in segs {
+                    if let StrSeg::Expr(x) = s {
+                        expr_spans(x, out);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 }

@@ -452,7 +452,9 @@ impl Checker {
                     ty,
                     fields,
                     "is set more than once",
-                    |name| format!("missing field `{name}` in `{}`", def.name),
+                    (codes::MISSING_FIELD, |name| {
+                        format!("missing field `{name}` in `{}`", def.name)
+                    }),
                     span,
                     |c, v, t| c.expect_expr(v, t),
                 )?;
@@ -490,7 +492,7 @@ impl Checker {
                     ast::ElseFallback::Block(b) => {
                         let id = self.new_jump();
                         let blk = self.check_jump_block(b, id, JumpKind::Value(inner), None);
-                        if value_needed && self.block_completes(&blk) {
+                        if value_needed && flow::block_completes(&blk) {
                             return err(
                                 b.span,
                                 "the `else` block must provide a value with `break <value>` or leave the scope (`return`, `throw`, ...)",
@@ -519,7 +521,7 @@ impl Checker {
                     self.check_jump_block(b, id, JumpKind::Value(inner), None)
                 };
                 self.pop_scope();
-                if value_needed && inner != VOID && self.block_completes(&blk) {
+                if value_needed && inner != VOID && flow::block_completes(&blk) {
                     return err(
                         b.span,
                         "the `catch` block must provide a value with `break <value>` or leave the scope (`return`, `throw`, ...)",
@@ -636,7 +638,12 @@ impl Checker {
                 {
                     err(span, format!("`{name}` is a module, not a value"))
                 } else {
-                    err(span, format!("unknown name `{name}`"))
+                    err_code(
+                        span,
+                        format!("unknown name `{name}`"),
+                        codes::UNKNOWN_NAME,
+                        &[name],
+                    )
                 }
             }
         }
@@ -851,7 +858,12 @@ impl Checker {
                 .get(f)
                 .and_then(|x| x.as_ref())
                 .map_or_else(|| "fn".into(), |x| x.name.clone());
-            return Ok(self.direct_target(f, &fname, callee.span));
+            // indexed at the name, without the type arguments
+            let at = match &callee.kind {
+                E::Generic(inner, _) => inner.span,
+                _ => callee.span,
+            };
+            return Ok(self.direct_target(f, &fname, at));
         }
         if let E::Ident(name) = &callee.kind
             && self.resolve_var(name, span)?.is_none()
@@ -1206,7 +1218,7 @@ impl Checker {
         sty: TyId,
         fields: &[(String, ast::Expr, Span)],
         repeated: &str,
-        missing: impl Fn(&str) -> String,
+        missing: (&'static str, impl Fn(&str) -> String),
         span: Span,
         mut check: impl FnMut(&mut Self, &ast::Expr, TyId) -> Result<T>,
     ) -> Result<Vec<T>> {
@@ -1218,7 +1230,7 @@ impl Checker {
             };
             // `.name`: the field reference covers the dot and the name
             let name_span = Span {
-                end: fsp.end + 1 + name.len() as u32,
+                end: fsp.end + name.len() as u32,
                 ..*fsp
             };
             self.idx_field_ref(sty, i, name_span);
@@ -1228,7 +1240,9 @@ impl Checker {
             vals[i] = Some(check(self, v, def.fields[i].1)?);
         }
         (vals.into_iter().zip(&def.fields))
-            .map(|(v, (name, _))| v.ok_or_else(|| Diag::new(span, missing(name))))
+            .map(|(v, (name, _))| {
+                v.ok_or_else(|| Diag::new(span, missing.1(name)).with_code(missing.0, &[name]))
+            })
             .collect()
     }
 
@@ -1483,7 +1497,7 @@ impl Checker {
                         pats.push(pat);
                     }
                     let body = self.check_block(&arm.body);
-                    if value_ty.is_some() && self.block_completes(&body) {
+                    if value_ty.is_some() && flow::block_completes(&body) {
                         return err(
                             arm.body.span,
                             "this branch must produce a value with `break <value>`",
@@ -1513,9 +1527,11 @@ impl Checker {
             }),
         };
         if !exhaustive {
-            return err(
+            return err_code(
                 span,
                 "`if` branches are not exhaustive; add a fallback `_ -> { ... }` branch",
+                codes::NOT_EXHAUSTIVE,
+                &[],
             );
         }
         Ok(Expr {
