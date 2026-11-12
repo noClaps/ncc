@@ -234,11 +234,13 @@ impl<'a> Printer<'a> {
         }
     }
 
-    /// Append a comment that follows `end` on the same source line to the last printed line.
+    /// Append a comment that follows `end` on the same source line to the last printed line,
+    /// unless code other than a separator comes between them (`fn f() { a } // c`).
     fn trailing_comment(&mut self, end: usize) {
         if self.next < self.comments.len() {
             let (s, e) = self.comments[self.next];
-            if s >= end && !self.src[end..s].contains('\n') {
+            let gap = |c: char| c == ',' || c == ';' || (c.is_whitespace() && c != '\n');
+            if s >= end && self.src[end..s].chars().all(gap) {
                 if self.out.ends_with('\n') {
                     self.out.pop();
                 }
@@ -925,6 +927,14 @@ mod tests {
         let src =
             "struct Q {\n}\nenum E {}\nextern \"m.h\" as m {\n\n}\nstruct C {\n  // only\n}\n";
         let out = "struct Q {}\nenum E {}\nextern \"m.h\" as m {}\nstruct C {\n  // only\n}\n";
+        assert_eq!(fmt(src), out);
+        assert_eq!(fmt(out), out);
+    }
+
+    #[test]
+    fn comment_after_one_line_body() {
+        let src = "fn r() int { return 0 } // tail\nstruct P { int x } // p\n";
+        let out = "fn r() int {\n  return 0\n} // tail\nstruct P {\n  int x\n} // p\n";
         assert_eq!(fmt(src), out);
         assert_eq!(fmt(out), out);
     }
