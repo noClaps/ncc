@@ -958,35 +958,29 @@ impl Server {
                     errors
                 }
             };
-        let diags = (errors.into_iter().map(|d| (d, DiagnosticSeverity::ERROR))).chain(
-            warnings
-                .into_iter()
-                .map(|d| (d, DiagnosticSeverity::WARNING)),
-        );
-        let mut out = Vec::new();
-        for (d, sev) in diags.filter(|_| !sm.files.is_empty()) {
-            out.push(to_diagnostic(&sm, d, sev, None, None));
-        }
+        use DiagnosticSeverity as Sev;
+        let tag = |sev, code| move |d| (d, sev, code);
         // loops that never end are information; the code after one is faded: unreachable
-        // code is a warning in debug builds and an error in release builds
-        for d in loops.infinite {
-            out.push(to_diagnostic(
-                &sm,
-                d,
-                DiagnosticSeverity::INFORMATION,
-                Some("infinite-loop"),
-                None,
-            ));
-        }
-        for d in loops.unreachable {
-            out.push(to_diagnostic(
-                &sm,
-                d,
-                DiagnosticSeverity::WARNING,
-                Some("unreachable-code"),
-                Some(vec![DiagnosticTag::UNNECESSARY]),
-            ));
-        }
+        // code is a warning in debug builds and an error in release builds (lints, and so
+        // `loops`, only run on programs that loaded)
+        let diags = (errors.into_iter().map(tag(Sev::ERROR, None)))
+            .chain(warnings.into_iter().map(tag(Sev::WARNING, None)))
+            .chain(
+                loops
+                    .infinite
+                    .into_iter()
+                    .map(tag(Sev::INFORMATION, Some("infinite-loop"))),
+            )
+            .chain(
+                (loops.unreachable.into_iter()).map(tag(Sev::WARNING, Some("unreachable-code"))),
+            );
+        let mut out: Vec<_> = (diags.filter(|_| !sm.files.is_empty()))
+            .map(|(d, sev, code)| {
+                let faded = code == Some("unreachable-code");
+                let tags = faded.then(|| vec![DiagnosticTag::UNNECESSARY]);
+                to_diagnostic(&sm, d, sev, code, tags)
+            })
+            .collect();
         // keep the previous index when the file did not load
         if let Some(index) = index {
             let decl_at = index
@@ -1226,25 +1220,13 @@ impl Server {
         let (path, text) = self.source(&p.text_document.uri)?;
         let module = self.module_of(&path, &text);
         // `span` is the whole declaration, `name_span` its name
-        let sym = |name: &str,
-                   kind: SymbolKind,
-                   (span, name_span): (Span, Span),
-                   detail: Option<String>,
-                   children: Option<Vec<DocSymbol>>| {
-            let range = span_range(&text, span);
-            let selection_range = span_range(&text, name_span);
-            DocSymbol {
-                name: if name.is_empty() {
-                    "_".into()
-                } else {
-                    name.to_string()
-                },
-                detail,
-                kind,
-                range,
-                selection_range,
-                children,
-            }
+        let sym = |name: &str, kind, span, name_span, detail| DocSymbol {
+            name: if name.is_empty() { "_" } else { name }.to_string(),
+            detail,
+            kind,
+            range: span_range(&text, span),
+            selection_range: span_range(&text, name_span),
+            children: None,
         };
         let src = |sp: Span| -> String {
             text.get(sp.start as usize..sp.end as usize)
@@ -1253,153 +1235,115 @@ impl Server {
                 .collect::<Vec<_>>()
                 .join(" ")
         };
-        // `(int a, int b) int` from a signature (its span covers the name; the parameters
-        // and return type run up to the body or `=`)
-        let sig_detail = |sig: &ast::FnSig| -> Option<String> {
+        // a function, with `(int a, int b) int` from its signature (whose span covers the
+        // name; the parameters and return type run up to the body or `=`)
+        let fn_sym = |sig: &ast::FnSig, span: Span| {
             let start = sig.span.end as usize;
-            let rest = text.get(start..)?;
-            let end = rest.find(['{', '=', '\n']).unwrap_or(rest.len());
-            let t = src(Span::new(sig.span.file, start, start + end));
-            t.starts_with('(').then_some(t)
+            let detail = text.get(start..).and_then(|rest| {
+                let end = rest.find(['{', '=', '\n']).unwrap_or(rest.len());
+                let t = src(Span::new(sig.span.file, start, start + end));
+                t.starts_with('(').then_some(t)
+            });
+            sym(&sig.name, SymbolKind::FUNCTION, span, sig.span, detail)
         };
-        let fn_symbol = |f: &ast::FnDecl| -> DocSymbol {
+        let fn_symbol = |f: &ast::FnDecl| {
             // functions declared directly in the body
-            let nested: Vec<DocSymbol> = f
-                .body
-                .stmts
-                .iter()
+            let nested: Vec<DocSymbol> = (f.body.stmts.iter())
                 .filter_map(|st| match &st.kind {
-                    ast::StmtKind::Fn(g) => Some(sym(
-                        &g.sig.name,
-                        SymbolKind::FUNCTION,
-                        (g.sig.span.to(g.body.span), g.sig.span),
-                        sig_detail(&g.sig),
-                        None,
-                    )),
+                    ast::StmtKind::Fn(g) => Some(fn_sym(&g.sig, g.sig.span.to(g.body.span))),
                     _ => None,
                 })
                 .collect();
-            sym(
-                &f.sig.name,
-                SymbolKind::FUNCTION,
-                (f.sig.span.to(f.body.span), f.sig.span),
-                sig_detail(&f.sig),
-                (!nested.is_empty()).then_some(nested),
-            )
+            DocSymbol {
+                children: (!nested.is_empty()).then_some(nested),
+                ..fn_sym(&f.sig, f.sig.span.to(f.body.span))
+            }
         };
         let mut out = Vec::new();
         for it in &module.items {
             match it {
                 ast::Item::Fn(f) => out.push(fn_symbol(f)),
                 ast::Item::Struct(s) => {
-                    let fields = s
-                        .fields
-                        .iter()
-                        .map(|(t, n, sp)| {
-                            sym(n, SymbolKind::FIELD, (*sp, *sp), Some(src(t.span())), None)
-                        })
+                    let fields = (s.fields.iter())
+                        .map(|(t, n, sp)| sym(n, SymbolKind::FIELD, *sp, *sp, Some(src(t.span()))))
                         .collect();
-                    out.push(sym(
-                        &s.name,
-                        SymbolKind::STRUCT,
-                        (s.span, s.name_span),
-                        None,
-                        Some(fields),
-                    ));
+                    let s = sym(&s.name, SymbolKind::STRUCT, s.span, s.name_span, None);
+                    out.push(DocSymbol {
+                        children: Some(fields),
+                        ..s
+                    });
                 }
                 ast::Item::Enum(e) => {
-                    let vs = e
-                        .variants
-                        .iter()
+                    let vs = (e.variants.iter())
                         .map(|(n, ts, sp)| {
                             let detail = (!ts.is_empty()).then(|| {
                                 let ts: Vec<String> = ts.iter().map(|t| src(t.span())).collect();
                                 format!("({})", ts.join(", "))
                             });
-                            sym(n, SymbolKind::ENUM_MEMBER, (*sp, *sp), detail, None)
+                            sym(n, SymbolKind::ENUM_MEMBER, *sp, *sp, detail)
                         })
                         .collect();
+                    let e = sym(&e.name, SymbolKind::ENUM, e.span, e.name_span, None);
+                    out.push(DocSymbol {
+                        children: Some(vs),
+                        ..e
+                    });
+                }
+                ast::Item::Type(t) => {
+                    let detail = Some(src(t.ty.span()));
                     out.push(sym(
-                        &e.name,
-                        SymbolKind::ENUM,
-                        (e.span, e.name_span),
-                        None,
-                        Some(vs),
+                        &t.name,
+                        SymbolKind::TYPE_PARAMETER,
+                        t.span,
+                        t.name_span,
+                        detail,
                     ));
                 }
-                ast::Item::Type(t) => out.push(sym(
-                    &t.name,
-                    SymbolKind::TYPE_PARAMETER,
-                    (t.span, t.name_span),
-                    Some(src(t.ty.span())),
-                    None,
-                )),
-                ast::Item::Test(name, _, span, name_span) => out.push(sym(
-                    name,
-                    SymbolKind::METHOD,
-                    (*span, *name_span),
-                    Some("test".into()),
-                    None,
-                )),
+                ast::Item::Test(name, _, span, name_span) => {
+                    let detail = Some("test".into());
+                    out.push(sym(name, SymbolKind::METHOD, *span, *name_span, detail));
+                }
                 ast::Item::Extern(e) => {
-                    let fs = e
-                        .fns
-                        .iter()
-                        .map(|f| {
-                            sym(
-                                &f.sig.name,
-                                SymbolKind::FUNCTION,
-                                (f.sig.span, f.sig.span),
-                                sig_detail(&f.sig),
-                                None,
-                            )
-                        })
-                        .collect();
-                    out.push(sym(
+                    let fs = e.fns.iter().map(|f| fn_sym(&f.sig, f.sig.span)).collect();
+                    let x = sym(
                         &e.alias,
                         SymbolKind::MODULE,
-                        (e.span, e.alias_span),
+                        e.span,
+                        e.alias_span,
                         Some(e.path.clone()),
-                        Some(fs),
+                    );
+                    out.push(DocSymbol {
+                        children: Some(fs),
+                        ..x
+                    });
+                }
+                ast::Item::Import(im) => {
+                    let detail = Some(im.path.clone());
+                    out.push(sym(
+                        &im.alias,
+                        SymbolKind::MODULE,
+                        im.span,
+                        im.alias_span,
+                        detail,
                     ));
                 }
-                ast::Item::Import(im) => out.push(sym(
-                    &im.alias,
-                    SymbolKind::MODULE,
-                    (im.span, im.alias_span),
-                    Some(im.path.clone()),
-                    None,
-                )),
                 ast::Item::Stmt(s) => match &s.kind {
                     ast::StmtKind::VarDecl {
                         targets, mutable, ..
                     } => {
+                        let kind = if *mutable {
+                            SymbolKind::VARIABLE
+                        } else {
+                            SymbolKind::CONSTANT
+                        };
                         for t in targets {
-                            let kind = if *mutable {
-                                SymbolKind::VARIABLE
-                            } else {
-                                SymbolKind::CONSTANT
-                            };
-                            out.push(sym(
-                                &t.name,
-                                kind,
-                                (t.span, t.name_span),
-                                Some(src(t.ty.span())),
-                                None,
-                            ));
+                            let detail = Some(src(t.ty.span()));
+                            out.push(sym(&t.name, kind, t.span, t.name_span, detail));
                         }
                     }
                     ast::StmtKind::FnVar {
                         name, name_span, ..
-                    } => {
-                        out.push(sym(
-                            name,
-                            SymbolKind::FUNCTION,
-                            (s.span, *name_span),
-                            None,
-                            None,
-                        ));
-                    }
+                    } => out.push(sym(name, SymbolKind::FUNCTION, s.span, *name_span, None)),
                     ast::StmtKind::Fn(f) => out.push(fn_symbol(f)),
                     _ => {}
                 },
