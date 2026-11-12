@@ -92,19 +92,11 @@ impl Server {
             .filter(|(_, ls)| ls.len() == 1)
             .map(|((at, kind), ls)| {
                 let label = ls.into_iter().next().unwrap().trim_end().to_string();
-                InlayHint {
-                    position: offset_to_pos(text, at as usize),
-                    label: InlayHintLabel::String(label),
-                    kind: Some(match kind {
-                        HintKind::Type => InlayHintKind::TYPE,
-                        HintKind::Param => InlayHintKind::PARAMETER,
-                    }),
-                    text_edits: None,
-                    tooltip: None,
-                    padding_left: None,
-                    padding_right: Some(true),
-                    data: None,
-                }
+                let kind = match kind {
+                    HintKind::Type => InlayHintKind::TYPE,
+                    HintKind::Param => InlayHintKind::PARAMETER,
+                };
+                hint(offset_to_pos(text, at as usize), label, Some(kind))
             })
             .collect();
         // `} // fn name` after long blocks
@@ -116,16 +108,7 @@ impl Server {
             }
             let lines = offset_to_pos(text, e).line - offset_to_pos(text, s).line;
             if lines >= CLOSING_HINT_LINES && rs as usize <= e && e <= re as usize {
-                out.push(InlayHint {
-                    position: offset_to_pos(text, e),
-                    label: InlayHintLabel::String(label),
-                    kind: None,
-                    text_edits: None,
-                    tooltip: None,
-                    padding_left: Some(true),
-                    padding_right: None,
-                    data: None,
-                });
+                out.push(hint(offset_to_pos(text, e), label, None));
             }
         };
         for it in &module.items {
@@ -182,18 +165,13 @@ impl Server {
             }
         }
         let module = self.module_of(&path, &text);
-        let mut aliases: HashSet<&str> = HashSet::new();
-        for it in &module.items {
-            match it {
-                ast::Item::Import(im) => {
-                    aliases.insert(&im.alias);
-                }
-                ast::Item::Extern(e) => {
-                    aliases.insert(&e.alias);
-                }
-                _ => {}
-            }
-        }
+        let aliases: HashSet<&str> = (module.items.iter())
+            .filter_map(|it| match it {
+                ast::Item::Import(im) => Some(im.alias.as_str()),
+                ast::Item::Extern(e) => Some(e.alias.as_str()),
+                _ => None,
+            })
+            .collect();
         let mut toks: Vec<(usize, usize, u32, u32)> = Vec::new();
         let (lexed, _) = crate::lexer::lex_all(&text, 0, 0);
         classify(&text, &lexed, &resolved, &aliases, &mut toks);
@@ -244,6 +222,20 @@ impl Server {
             result_id: None,
             data,
         }))
+    }
+}
+
+/// An inlay hint: of a kind before what it is about, of none after a closing brace.
+fn hint(position: Position, label: String, kind: Option<InlayHintKind>) -> InlayHint {
+    InlayHint {
+        position,
+        label: InlayHintLabel::String(label),
+        padding_left: kind.is_none().then_some(true),
+        padding_right: kind.is_some().then_some(true),
+        kind,
+        text_edits: None,
+        tooltip: None,
+        data: None,
     }
 }
 

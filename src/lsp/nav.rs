@@ -153,9 +153,9 @@ impl Server {
                     format!("{n} reference{}", if n == 1 { "" } else { "s" }),
                     "editor.action.showReferences".into(),
                     Some(vec![
-                        serde_json::to_value(&p.text_document.uri).ok()?,
-                        serde_json::to_value(decl_range.start).ok()?,
-                        serde_json::to_value(&locations).ok()?,
+                        serde_json::json!(p.text_document.uri),
+                        serde_json::json!(decl_range.start),
+                        serde_json::json!(locations),
                     ]),
                 )),
                 data: None,
