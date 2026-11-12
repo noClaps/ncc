@@ -362,9 +362,16 @@ impl CGen<'_> {
 
     // ------------------------------------------------------------ output helpers
 
+    /// Write a line, indenting the lines of the blocks it opens or closes.
     fn line(&mut self, s: impl AsRef<str>) {
-        self.body
-            .line(format!("{}{}", "  ".repeat(self.ind), s.as_ref()));
+        let s = s.as_ref();
+        if s.starts_with('}') {
+            self.ind -= 1;
+        }
+        self.body.line(format!("{}{s}", "  ".repeat(self.ind)));
+        if s.ends_with('{') {
+            self.ind += 1;
+        }
     }
 
     fn fresh(&mut self, prefix: &str) -> String {
@@ -611,7 +618,6 @@ impl CGen<'_> {
         }
         if looped {
             self.line("for (;;) {");
-            self.ind += 1;
         }
         self.block_stmts(&body);
         self.end_scope(h);
@@ -631,7 +637,6 @@ impl CGen<'_> {
         }
         if looped {
             self.line("tc:;");
-            self.ind -= 1;
             self.line("}");
         }
         let body_text = tidy::tidy(&self.body.take());
@@ -717,11 +722,9 @@ impl CGen<'_> {
 
     fn block(&mut self, b: &Block) {
         self.line("{");
-        self.ind += 1;
         let h = self.cleanup.len();
         self.block_stmts(b);
         self.end_scope(h);
-        self.ind -= 1;
         self.line("}");
     }
 
@@ -848,21 +851,17 @@ impl CGen<'_> {
             }
             SK::While { id, cond, body } => {
                 self.line("for (;;) {");
-                self.ind += 1;
                 let hh = self.cleanup.len();
                 self.line("{");
-                self.ind += 1;
                 let c = self.expr(cond);
                 let cv = self.fresh("c");
                 self.line(format!("bool {cv} = {};", c.code));
                 self.end_stmt(hh);
                 self.line(format!("if (!{cv}) break;"));
-                self.ind -= 1;
                 self.line("}");
                 let (brk, cont) = self.jump(*id, h, Some(hh));
                 self.block(body);
                 self.line(format!("{cont}:;"));
-                self.ind -= 1;
                 self.line("}");
                 self.line(format!("{brk}:;"));
             }
@@ -874,7 +873,6 @@ impl CGen<'_> {
                 body,
             } => {
                 self.line("{");
-                self.ind += 1;
                 let it = self.expr(iter);
                 // snapshot of the iterated value
                 let snap = self.own(it, iter.ty);
@@ -912,20 +910,16 @@ impl CGen<'_> {
                 if matches!(kind, ForKind::Index) && !self.local(*var).mutable {
                     // the index is the loop variable itself
                     self.line(format!("for (uint64_t {vn} = 0; {vn} < {n}; {vn}++) {{"));
-                    self.ind += 1;
                 } else {
                     self.line(format!("for (uint64_t {i} = 0; {i} < {n}; {i}++) {{"));
-                    self.ind += 1;
                     self.line(format!("{vc} {vn} = {vval};"));
                     self.line(format!("(void){vn};"));
                 }
                 let (brk, cont) = self.jump(*id, h, Some(self.cleanup.len()));
                 self.block(body);
                 self.line(format!("{cont}:;"));
-                self.ind -= 1;
                 self.line("}");
                 self.end_scope(h);
-                self.ind -= 1;
                 self.line("}");
                 self.line(format!("{brk}:;"));
             }
@@ -938,7 +932,6 @@ impl CGen<'_> {
                 let inner = self.local(*alias).ty;
                 let ic = self.tg.ct(inner);
                 self.line("{");
-                self.ind += 1;
                 let m = self.expr(mutex);
                 let mv = self.fresh("mx");
                 self.line(format!("nc_mutex *{mv} = {};", m.code));
@@ -949,7 +942,6 @@ impl CGen<'_> {
                 let (brk, _) = self.jump(*id, h, None);
                 self.block(body);
                 self.end_scope(h);
-                self.ind -= 1;
                 self.line("}");
                 self.line(format!("{brk}:;"));
             }
@@ -1464,9 +1456,7 @@ impl CGen<'_> {
                 let v = self.expr(x);
                 let rv = self.bind(x.ty, &v);
                 self.line(format!("if ({rv}.err) {{"));
-                self.ind += 1;
                 self.return_err(&format!("nc_str_rt({rv}.err)"));
-                self.ind -= 1;
                 self.line("}");
                 if ty == VOID {
                     return CVal::b("(nc_void)0");
@@ -1747,12 +1737,10 @@ impl CGen<'_> {
             } else {
                 self.line(format!("if (!{r}) {{"));
             }
-            self.ind += 1;
             let h = self.cleanup.len();
             let bv = self.expr(b);
             self.line(format!("{r} = {};", bv.code));
             self.end_stmt(h);
-            self.ind -= 1;
             self.line("}");
             return CVal::b(r);
         }
@@ -1919,7 +1907,6 @@ impl CGen<'_> {
         let h = self.cleanup.len();
         let end = self.value_jump(i.id, h, &r, ty);
         self.line("{");
-        self.ind += 1;
         let scrut = match &i.scrutinee {
             Some(s) => {
                 let v = self.expr(s);
@@ -1931,7 +1918,6 @@ impl CGen<'_> {
             let next = self.fresh("arm");
             let body_lbl = self.fresh("body");
             self.line("{");
-            self.ind += 1;
             let ha = self.cleanup.len();
             let n = arm.patterns.len();
             for (k, p) in arm.patterns.iter().enumerate() {
@@ -1980,13 +1966,11 @@ impl CGen<'_> {
                     }
                     (_, Some((sv, st))) => {
                         self.line("{");
-                        self.ind += 1;
                         let ok = self.fresh("ok");
                         self.line(format!("bool {ok} = true;"));
                         self.pat_test(p, sv, *st, &ok);
                         self.end_stmt(hp);
                         self.line(format!("if (!{ok}) goto {fail};"));
-                        self.ind -= 1;
                         self.line("}");
                     }
                     (Pat::Wild, None) => {}
@@ -2011,14 +1995,12 @@ impl CGen<'_> {
             self.block(&arm.body);
             self.end_scope(ha);
             self.line(format!("goto {end};"));
-            self.ind -= 1;
             self.line("}");
             self.line(format!("{next}:;"));
         }
         // exhaustive: unreachable, but keep C happy
         self.line("unreachable();");
         self.end_scope(h);
-        self.ind -= 1;
         self.line("}");
         self.line(format!("{end}:;"));
         self.finish_result(r, ty)
@@ -2073,7 +2055,6 @@ impl CGen<'_> {
             Pat::Cond(_) => unreachable!(),
             Pat::Value(e) => {
                 self.line(format!("if ({ok}) {{"));
-                self.ind += 1;
                 let v = self.expr(e);
                 let eq = if self.is_prim(st) {
                     format!("({sv} == {})", v.code)
@@ -2082,7 +2063,6 @@ impl CGen<'_> {
                     format!("eq_{st}({sv}, {})", v.code)
                 };
                 self.line(format!("{ok} = {eq};"));
-                self.ind -= 1;
                 self.line("}");
                 return;
             }
@@ -2101,9 +2081,7 @@ impl CGen<'_> {
                 continue;
             }
             self.line(format!("if ({ok}) {{"));
-            self.ind += 1;
             self.pat_test(sp, &ssv, sty, ok);
-            self.ind -= 1;
             self.line("}");
         }
     }
@@ -2166,11 +2144,8 @@ impl CGen<'_> {
             (format!("{on}.has"), format!("{on}.val"))
         };
         self.line(format!("if ({has}) {{"));
-        self.ind += 1;
         self.store(r.as_deref(), CVal::b(val), ty);
-        self.ind -= 1;
         self.line("} else {");
-        self.ind += 1;
         let h = self.cleanup.len();
         match fb {
             Fallback::Expr(x) => {
@@ -2186,7 +2161,6 @@ impl CGen<'_> {
                 self.line(format!("{end}:;"));
             }
         }
-        self.ind -= 1;
         self.line("}");
         self.finish_result(r, ty)
     }
@@ -2203,7 +2177,6 @@ impl CGen<'_> {
         let xn = self.bind(x.ty, &xv);
         let r = self.result_var(ty);
         self.line(format!("if ({xn}.err) {{"));
-        self.ind += 1;
         let h = self.cleanup.len();
         if let Some(l) = local {
             self.declare(VarRef::Local(l), format!("nc_str_rt({xn}.err)"));
@@ -2212,7 +2185,6 @@ impl CGen<'_> {
         self.block(b);
         self.end_scope(h);
         self.line(format!("goto {end};"));
-        self.ind -= 1;
         self.line("}");
         self.store(r.as_deref(), CVal::b(format!("{xn}.val")), ty);
         self.line(format!("{end}:;"));
