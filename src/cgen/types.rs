@@ -47,18 +47,9 @@ impl<'t> TypeGen<'t> {
         }
     }
 
-    /// Helper id: nominal types share their underlying type's helpers.
-    pub fn hid(&self, t: TyId) -> TyId {
-        self.t.base(t)
-    }
-
-    pub fn managed(&self, t: TyId) -> bool {
-        self.t.is_managed(t)
-    }
-
     /// Readable mangled name for a type, unique within the program.
     pub fn mangle(&mut self, t: TyId) -> String {
-        let t = self.hid(t);
+        let t = self.t.base(t);
         if let Some(n) = self.names.get(&t) {
             return n.clone();
         }
@@ -98,7 +89,7 @@ impl<'t> TypeGen<'t> {
 
     /// The C type used for values of `t`.
     pub fn ct(&mut self, t: TyId) -> String {
-        let t = self.hid(t);
+        let t = self.t.base(t);
         match self.t.kind(t).clone() {
             TyKind::Void => "nc_void".into(),
             TyKind::Never => "void".into(),
@@ -139,7 +130,7 @@ impl<'t> TypeGen<'t> {
 
     /// Ensure the C definition and helpers for `t` exist.
     pub fn need(&mut self, t: TyId) {
-        let t = self.hid(t);
+        let t = self.t.base(t);
         if t == NEVER || !self.done.insert(t) {
             return;
         }
@@ -264,7 +255,7 @@ impl<'t> TypeGen<'t> {
 
     fn helpers(&mut self, t: TyId, ct: &str, kind: &TyKind) {
         let h = t;
-        let managed = self.managed(t);
+        let managed = self.t.is_managed(t);
         writeln!(
             self.protos,
             "static {ct} rt_{h}({ct} x);\nstatic void rl_{h}({ct} x);\nstatic bool eq_{h}({ct} a, {ct} b);\nstatic uint64_t hs_{h}({ct} x);\nstatic void st_{h}(nc_sb *sb, {ct} x);\nstatic const nc_ti ti_{h};"
@@ -363,7 +354,7 @@ impl<'t> TypeGen<'t> {
             TyKind::Array(_) | TyKind::Fixed(..) => object("nc_arr", "nc_arr_str(sb, x);"),
             TyKind::Map(..) => object("nc_map", "nc_map_str(sb, x);"),
             TyKind::Opt(i) => {
-                let i = self.hid(*i);
+                let i = self.t.base(*i);
                 let ic = self.ct(i);
                 if self.t.opt_boxed(t) {
                     (
@@ -390,7 +381,7 @@ impl<'t> TypeGen<'t> {
                 }
             }
             TyKind::ErrU(i) => {
-                let i = self.hid(*i);
+                let i = self.t.base(*i);
                 (
                     format!("nc_str_retain(x.err); if (!x.err) x.val = rt_{i}(x.val);"),
                     format!("nc_str_release(x.err); if (!x.err) rl_{i}(x.val);"),
@@ -456,8 +447,8 @@ impl<'t> TypeGen<'t> {
                         st.push_str(" nc_sb_cstr(sb, \"(\");");
                     }
                     for (k, p) in ps.iter().enumerate() {
-                        let p = self.hid(*p);
-                        if self.managed(p) {
+                        let p = self.t.base(*p);
+                        if self.t.is_managed(p) {
                             write!(rl, " rl_{p}(x->u.v{vi}.p{k});").unwrap();
                         }
                         write!(eq, " && eq_{p}(a->u.v{vi}.p{k}, b->u.v{vi}.p{k})").unwrap();
@@ -507,8 +498,8 @@ impl<'t> TypeGen<'t> {
         let mut hs = String::from("uint64_t h = 0;");
         let mut st = format!("nc_sb_cstr(sb, \"{}\");", c_escape_str(open));
         for (k, (f, t)) in fields.iter().enumerate() {
-            let t = self.hid(*t);
-            if self.managed(t) {
+            let t = self.t.base(*t);
+            if self.t.is_managed(t) {
                 write!(rt, " x.{f} = rt_{t}(x.{f});").unwrap();
                 write!(rl, " rl_{t}(x.{f});").unwrap();
             }
