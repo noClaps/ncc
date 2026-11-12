@@ -126,6 +126,12 @@ static inline bool nc_dec(_Atomic int64_t *rc) {
   return atomic_fetch_sub_explicit(rc, 1, memory_order_acq_rel) == 1;
 }
 static inline bool nc_unique(_Atomic int64_t *rc) { return atomic_load_explicit(rc, memory_order_acquire) == 1; }
+/* `name(x)` retains the `T` object `x`, which may be NULL, and returns it */
+#define NC_RT(name, T) \
+  static inline T *name(T *x) { \
+    if (x) nc_inc(&x->rc); \
+    return x; \
+  }
 
 /* ------------------------------------------------------------------ checked integer arithmetic */
 
@@ -171,22 +177,16 @@ static inline int64_t nc_mod_i64(int64_t a, int64_t b, const char *loc) {
   if (b == -1) return 0;
   return a % b;
 }
-static inline uint64_t nc_div_u64(uint64_t a, uint64_t b, const char *loc) {
-  if (b == 0) nc_panic("division by zero", loc);
-  return a / b;
-}
-static inline uint64_t nc_mod_u64(uint64_t a, uint64_t b, const char *loc) {
-  if (b == 0) nc_panic("division by zero", loc);
-  return a % b;
-}
-static inline uint8_t nc_div_u8(uint8_t a, uint8_t b, const char *loc) {
-  if (b == 0) nc_panic("division by zero", loc);
-  return (uint8_t)(a / b);
-}
-static inline uint8_t nc_mod_u8(uint8_t a, uint8_t b, const char *loc) {
-  if (b == 0) nc_panic("division by zero", loc);
-  return (uint8_t)(a % b);
-}
+/* `name(a, b, loc)` computes `a op b` for an unsigned `T` */
+#define NC_CHECKED_DIV(name, op, T) \
+  static inline T name(T a, T b, const char *loc) { \
+    if (b == 0) nc_panic("division by zero", loc); \
+    return (T)(a op b); \
+  }
+NC_CHECKED_DIV(nc_div_u64, /, uint64_t)
+NC_CHECKED_DIV(nc_mod_u64, %, uint64_t)
+NC_CHECKED_DIV(nc_div_u8, /, uint8_t)
+NC_CHECKED_DIV(nc_mod_u8, %, uint8_t)
 static inline int64_t nc_neg_i64(int64_t a, const char *loc) {
   if (a == INT64_MIN) nc_panic("integer overflow", loc);
   return -a;
@@ -672,10 +672,7 @@ static nc_map *nc_map_new(const nc_ti *kti, const nc_ti *vti, int64_t cap) {
 }
 static inline void *nc_map_key(const nc_map *m, int64_t i) { return (char *)m->keys + (size_t)i * m->kti->size; }
 static inline void *nc_map_val(const nc_map *m, int64_t i) { return (char *)m->vals + (size_t)i * m->vti->size; }
-static inline nc_map *nc_map_rt(nc_map *m) {
-  if (m) nc_inc(&m->rc);
-  return m;
-}
+NC_RT(nc_map_rt, nc_map)
 static void nc_map_release(nc_map *m) {
   if (m && nc_dec(&m->rc)) {
     for (int64_t i = 0; i < m->cap; i++) {
@@ -819,10 +816,7 @@ static nc_cell *nc_cell_new(const nc_ti *ti) {
   c->ti = ti;
   return c;
 }
-static inline nc_cell *nc_cell_rt(nc_cell *c) {
-  if (c) nc_inc(&c->rc);
-  return c;
-}
+NC_RT(nc_cell_rt, nc_cell)
 static void nc_cell_release(nc_cell *c) {
   if (c && nc_dec(&c->rc)) {
     if (c->ti->release) c->ti->release(c->val);
@@ -837,10 +831,7 @@ static nc_mutex *nc_mutex_new(const nc_ti *ti) {
   m->ti = ti;
   return m;
 }
-static inline nc_mutex *nc_mutex_rt(nc_mutex *m) {
-  if (m) nc_inc(&m->rc);
-  return m;
-}
+NC_RT(nc_mutex_rt, nc_mutex)
 static void nc_mutex_release(nc_mutex *m) {
   if (m && nc_dec(&m->rc)) {
     if (m->ti->release) m->ti->release(m->val);
@@ -851,10 +842,7 @@ static void nc_mutex_release(nc_mutex *m) {
 
 /* ------------------------------------------------------------------ closures */
 
-static inline nc_env *nc_env_rt(nc_env *e) {
-  if (e) nc_inc(&e->rc);
-  return e;
-}
+NC_RT(nc_env_rt, nc_env)
 static inline void nc_env_release(nc_env *e) {
   if (e && nc_dec(&e->rc)) {
     e->drop(e);
@@ -878,10 +866,7 @@ static void nc_fut_release(nc_fut *f) {
     free(f);
   }
 }
-static inline nc_fut *nc_fut_rt(nc_fut *f) {
-  if (f) nc_inc(&f->rc);
-  return f;
-}
+NC_RT(nc_fut_rt, nc_fut)
 
 /* claim and run a future on the current thread if nobody started it yet */
 static void nc_fut_try_run(nc_fut *f) {
