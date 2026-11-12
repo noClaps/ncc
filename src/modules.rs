@@ -88,10 +88,6 @@ pub fn import_file(
     })
 }
 
-/// Load the module graph, preferring in-memory contents from `overlay` (keyed by canonical path).
-/// Every parse and import error across all modules is reported.
-/// Returns the graph of everything that could be loaded together with those errors; fails
-/// outright only when the entry file itself cannot be read.
 /// Parsed modules kept between loads (by the language server): a module is parsed again only
 /// when its text or its source file id changes.
 #[derive(Default)]
@@ -103,8 +99,10 @@ pub struct ParseCache {
 /// A module's text, its syntax tree and the parse errors.
 type Parsed = (String, Rc<Module>, Vec<Diag>);
 
-/// Load the module graph of `entry`, reading open documents from `overlay` instead of disk,
-/// and reusing (and filling) `cache` when given.
+/// Load the module graph of `entry`, reading open documents from `overlay` (keyed by canonical
+/// path) instead of disk, and reusing (and filling) `cache` when given. Returns the graph of
+/// everything that could be loaded with every parse and import error found; fails outright
+/// only when the entry file itself cannot be read.
 pub fn load_with(
     sm: &mut SourceMap,
     entry: &Path,
@@ -189,20 +187,18 @@ impl Loader<'_> {
         let file = self.sm.add(path.to_path_buf(), text);
         let text = &self.sm.file(file).text;
         let key = (path.to_path_buf(), file);
-        let (ast, parse_errors) = match self.cache.as_deref_mut() {
-            Some(c) => match c.modules.get(&key) {
-                Some((t, ast, errs)) if t == text => (Rc::clone(ast), errs.clone()),
-                _ => {
-                    let (ast, errs) = parse_module_recover(text, file);
-                    let ast = Rc::new(ast);
-                    c.modules
-                        .insert(key, (text.clone(), Rc::clone(&ast), errs.clone()));
-                    (ast, errs)
-                }
-            },
+        let cached = (self.cache.as_deref())
+            .and_then(|c| c.modules.get(&key))
+            .filter(|(t, ..)| t == text);
+        let (ast, parse_errors) = match cached {
+            Some((_, ast, errs)) => (Rc::clone(ast), errs.clone()),
             None => {
                 let (ast, errs) = parse_module_recover(text, file);
-                (Rc::new(ast), errs)
+                let ast = Rc::new(ast);
+                if let Some(c) = self.cache.as_deref_mut() {
+                    (c.modules).insert(key, (text.clone(), Rc::clone(&ast), errs.clone()));
+                }
+                (ast, errs)
             }
         };
         self.errors.extend(parse_errors);
