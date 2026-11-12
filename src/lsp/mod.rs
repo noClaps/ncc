@@ -375,12 +375,20 @@ pub fn run() -> ExitCode {
             while let Ok(m) = connection.receiver.try_recv() {
                 waiting.push_back(m);
             }
+            // workspace files nothing asked for yet are analysed a few at a time, and only once
+            // the client has been quiet for a moment
             if waiting.is_empty() && !server.unindexed.is_empty() {
-                server.index_some(4);
-                for out in std::mem::take(&mut server.outbox) {
-                    connection.sender.send(Message::Notification(out))?;
+                match connection.receiver.recv_timeout(DEBOUNCE) {
+                    Ok(m) => waiting.push_back(m),
+                    Err(e) if e.is_disconnected() => break,
+                    Err(_) => {
+                        server.index_some(4);
+                        for out in std::mem::take(&mut server.outbox) {
+                            connection.sender.send(Message::Notification(out))?;
+                        }
+                        continue;
+                    }
                 }
-                continue;
             }
             let msg = match waiting.pop_front() {
                 Some(m) => m,
@@ -1899,7 +1907,8 @@ fn publish(path: &Path, diagnostics: Vec<Diagnostic>, version: Option<i32>) -> N
     )
 }
 
-/// How long an edit waits for the next one before the document is analysed.
+/// How long the server waits for the next message before analysing: an edit for the next
+/// edit, and workspace indexing for the client to go quiet.
 const DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// A document's syntax tree: the version it was parsed at when open, its text when not.
