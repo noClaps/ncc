@@ -143,7 +143,7 @@ pub fn purity(p: &Program) -> Vec<bool> {
 
 /// Statement-level purity: no global writes, locks, mutexes or asserts.
 fn stmt_pure(s: &Stmt) -> bool {
-    let mut w = std::collections::HashSet::new();
+    let mut w = HashSet::new();
     flow::writes_stmt(s, &mut w);
     let mut ok = w.is_empty();
     flow::visit_stmts(s, &mut |s| {
@@ -208,29 +208,24 @@ impl<'p> Evaluator<'p> {
     /// Constants for immutable globals with constant initialisers (in main, in order).
     fn init_gconst(&mut self) {
         let p = self.p;
-        {
-            let ev = self;
-            let main = &p.funcs[p.main];
-            for s in &main.body.stmts {
-                if let SK::Let(Some(VarRef::Global(g)), e) = &s.kind
-                    && !p.globals[*g].mutable
-                {
-                    // panics are reported when the statement itself is folded below
-                    if let Ok(Some(v)) = ev.try_const(e) {
-                        ev.gconst.insert(*g, v);
-                    }
-                }
-                // destructured immutable globals: `str os, str cpu = @target()`
-                if let SK::Destructure(targets, e) = &s.kind
-                    && let Ok(Some(Val::Tuple(items))) = ev.try_const(e)
-                {
-                    for (t, start, count) in targets {
-                        if let Some(VarRef::Global(g)) = t
-                            && !p.globals[*g].mutable
-                        {
-                            ev.gconst
-                                .insert(*g, destructure_part(&items, *start, *count));
-                        }
+        for s in &p.funcs[p.main].body.stmts {
+            if let SK::Let(Some(VarRef::Global(g)), e) = &s.kind
+                && !p.globals[*g].mutable
+                // panics are reported when the statement itself is folded
+                && let Ok(Some(v)) = self.try_const(e)
+            {
+                self.gconst.insert(*g, v);
+            }
+            // destructured immutable globals: `str os, str cpu = @target()`
+            if let SK::Destructure(targets, e) = &s.kind
+                && let Ok(Some(Val::Tuple(items))) = self.try_const(e)
+            {
+                for (t, start, count) in targets {
+                    if let Some(VarRef::Global(g)) = t
+                        && !p.globals[*g].mutable
+                    {
+                        self.gconst
+                            .insert(*g, destructure_part(&items, *start, *count));
                     }
                 }
             }
@@ -289,43 +284,40 @@ impl<'p> Evaluator<'p> {
                     consts.insert(*l, lit_to_val(lit));
                 }
             }
-            SK::Destructure(_, e) | SK::Expr(e) | SK::Throw(e) | SK::Assert(e) => {
-                self.fold_expr(e, locals, consts)?;
-            }
+            SK::Destructure(_, e)
+            | SK::Expr(e)
+            | SK::Throw(e)
+            | SK::Assert(e)
+            | SK::Return(Some(e))
+            | SK::Break(_, Some(e)) => self.fold_expr(e, locals, consts)?,
             SK::Assign(p, e) => {
-                self.fold_place(p, locals, consts)?;
+                self.fold_each(|f| place_indices(p, f), locals, consts)?;
                 self.fold_expr(e, locals, consts)?;
             }
-            SK::Return(Some(e)) | SK::Break(_, Some(e)) => self.fold_expr(e, locals, consts)?,
             SK::Return(None) | SK::Break(_, None) | SK::Continue(_) => {}
-            SK::While { cond, body, .. } => {
-                self.fold_expr(cond, locals, consts)?;
+            SK::While { cond: e, body, .. } | SK::For { iter: e, body, .. } => {
+                self.fold_expr(e, locals, consts)?;
                 self.fold_block(body, locals, consts);
             }
-            SK::For { iter, body, .. } => {
-                self.fold_expr(iter, locals, consts)?;
-                self.fold_block(body, locals, consts);
-            }
-            SK::Lock { body, .. } => self.fold_block(body, locals, consts),
-            SK::Block(b) => self.fold_block(b, locals, consts),
+            SK::Lock { body: b, .. } | SK::Block(b) => self.fold_block(b, locals, consts),
         }
         Ok(())
     }
 
-    fn fold_place(
+    /// `fold_expr` on each expression `each` passes on, up to the first error.
+    fn fold_each(
         &mut self,
-        p: &mut Place,
+        each: impl FnOnce(&mut dyn FnMut(&mut Expr)),
         locals: &[Local],
         consts: &mut HashMap<LocalId, Val>,
     ) -> Result<(), Diag> {
-        match p {
-            Place::Var(_) => Ok(()),
-            Place::Field(b, _) | Place::TupleIndex(b, _) => self.fold_place(b, locals, consts),
-            Place::Index(b, i) => {
-                self.fold_place(b, locals, consts)?;
-                self.fold_expr(i, locals, consts)
+        let mut res = Ok(());
+        each(&mut |c| {
+            if res.is_ok() {
+                res = self.fold_expr(c, locals, consts);
             }
-        }
+        });
+        res
     }
 
     /// Fold children first, then this node when all of its inputs are constant.
@@ -336,36 +328,17 @@ impl<'p> Evaluator<'p> {
         consts: &mut HashMap<LocalId, Val>,
     ) -> Result<(), Diag> {
         // substitute known constants
-        match &e.kind {
-            EK::Var(VarRef::Local(l)) => {
-                if let Some(v) = consts.get(l)
-                    && let Some(x) = val_expr(v, e.ty, e.span, &self.p.types)
-                {
-                    *e = x;
-                }
-                return Ok(());
-            }
-            EK::Var(VarRef::Global(g)) => {
-                if let Some(v) = self.gconst.get(g)
-                    && let Some(x) = val_expr(v, e.ty, e.span, &self.p.types)
-                {
-                    *e = x;
-                }
-                return Ok(());
-            }
-            _ => {}
-        }
-        // children
-        let mut res = Ok(());
-        {
-            let mut f = |c: &mut Expr| {
-                if res.is_ok() {
-                    res = self.fold_expr(c, locals, consts);
-                }
+        if let EK::Var(v) = &e.kind {
+            let known = match v {
+                VarRef::Local(l) => consts.get(l),
+                VarRef::Global(g) => self.gconst.get(g),
             };
-            e.for_each_child_mut(&mut f);
+            if let Some(x) = known.and_then(|v| val_expr(v, e.ty, e.span, &self.p.types)) {
+                *e = x;
+            }
+            return Ok(());
         }
-        res?;
+        self.fold_each(|f| e.for_each_child_mut(f), locals, consts)?;
         // nested blocks
         match &mut e.kind {
             EK::If(i) => {
@@ -507,13 +480,7 @@ impl<'p> Evaluator<'p> {
             }
         }
         let tg = env.track_globals;
-        let gone: Vec<GlobalId> = (env.globals.keys())
-            .filter(|g| !self.trackable(f, VarRef::Global(**g), tg))
-            .copied()
-            .collect();
-        for g in gone {
-            env.forget(VarRef::Global(g));
-        }
+        env.forget_globals(|g| !self.trackable(f, VarRef::Global(g), tg));
     }
 
     fn var_ty(&self, f: FuncId, v: VarRef) -> TyId {
@@ -695,7 +662,8 @@ impl<'p> Evaluator<'p> {
             | SK::Return(Some(e))
             | SK::Break(_, Some(e)) => self.prop_expr(e, f, env),
             SK::Assign(pl, e) => {
-                self.prop_place(pl, f, env);
+                // a `$` in an index is unknown on its own, so it stays
+                place_indices(pl, &mut |i| self.prop_expr(i, f, env));
                 self.prop_expr(e, f, env);
             }
             SK::Return(None) | SK::Break(_, None) | SK::Continue(_) => {}
@@ -707,18 +675,6 @@ impl<'p> Evaluator<'p> {
                 self.prop_scoped(body, f, env);
             }
             SK::Block(b) => self.prop_block(b, f, env),
-        }
-    }
-
-    fn prop_place(&mut self, pl: &mut Place, f: FuncId, env: &mut Env) {
-        match pl {
-            Place::Var(_) => {}
-            Place::Field(b, _) | Place::TupleIndex(b, _) => self.prop_place(b, f, env),
-            // a `$` in the index is unknown on its own, so it stays
-            Place::Index(b, i) => {
-                self.prop_place(b, f, env);
-                self.prop_expr(i, f, env);
-            }
         }
     }
 
@@ -1382,6 +1338,18 @@ impl<'p> Evaluator<'p> {
     }
 }
 
+/// Call `f` with each index expression of a place, innermost first.
+fn place_indices(p: &mut Place, f: &mut dyn FnMut(&mut Expr)) {
+    match p {
+        Place::Var(_) => {}
+        Place::Field(b, _) | Place::TupleIndex(b, _) => place_indices(b, f),
+        Place::Index(b, i) => {
+            place_indices(b, f);
+            f(i);
+        }
+    }
+}
+
 /// The length of an array or (in characters) a string.
 fn seq_len(v: &Val) -> R<usize> {
     match v {
@@ -1517,6 +1485,13 @@ impl Env {
     fn forget(&mut self, r: VarRef) {
         if self.raw(r).is_some() {
             self.write(r, None);
+        }
+    }
+
+    fn forget_globals(&mut self, pred: impl Fn(GlobalId) -> bool) {
+        let gone: Vec<GlobalId> = self.globals.keys().copied().filter(|g| pred(*g)).collect();
+        for g in gone {
+            self.forget(VarRef::Global(g));
         }
     }
 
@@ -1728,33 +1703,23 @@ pub fn fmt_float(v: f64) -> String {
     let exp: i32 = exp.parse().unwrap();
     let neg = mant.starts_with('-');
     let digits: String = mant.chars().filter(char::is_ascii_digit).collect();
-    let prec = digits.len() as i32;
     let mut out = String::new();
     if neg {
         out.push('-');
     }
     if (-5..17).contains(&exp) {
-        let decimals = (prec - 1 - exp).max(0);
         // place the decimal point
-        if exp >= 0 {
-            let int_len = (exp + 1) as usize;
-            let mut d = digits.clone();
-            while d.len() < int_len + decimals as usize {
-                d.push('0');
-            }
-            out.push_str(&d[..int_len]);
-            if decimals > 0 {
-                out.push('.');
-                out.push_str(&d[int_len..int_len + decimals as usize]);
-            } else {
-                out.push_str(".0");
-            }
-        } else {
+        if exp < 0 {
             out.push_str("0.");
-            for _ in 0..(-exp - 1) {
-                out.push('0');
-            }
+            out.push_str(&"0".repeat((-exp - 1) as usize));
             out.push_str(&digits);
+        } else if digits.len() > exp as usize + 1 {
+            let (int, frac) = digits.split_at(exp as usize + 1);
+            out.push_str(&format!("{int}.{frac}"));
+        } else {
+            out.push_str(&digits);
+            out.push_str(&"0".repeat(exp as usize + 1 - digits.len()));
+            out.push_str(".0");
         }
     } else {
         out.push_str(&digits[..1]);
@@ -1806,64 +1771,54 @@ fn destructure_part(items: &[Val], start: usize, count: usize) -> Val {
     }
 }
 
-fn unsigned(
+/// An operator on integers of `bits` bits in `min..=max`, computed exactly in `i128` and
+/// checked against the range.
+fn int_op(
     op: BinOp,
-    a: u128,
-    b: u128,
-    max: u128,
+    (a, b): (i128, i128),
+    (min, max, bits): (i128, i128, i128),
     span: Span,
-    mk: impl Fn(u128) -> Val,
+    mk: impl Fn(i128) -> Val,
 ) -> R<Val> {
     use BinOp::*;
-    let bits = if max == 255 { 8 } else { 64 };
-    let chk = |v: Option<u128>| -> R<Val> {
-        match v {
-            Some(v) if v <= max => Ok(mk(v)),
-            _ => panic("integer overflow", span),
-        }
+    let fit = |v: Option<i128>| match v {
+        Some(v) if (min..=max).contains(&v) => Ok(v),
+        _ => panic("integer overflow", span),
     };
-    match op {
-        Add => chk(a.checked_add(b)),
-        Sub => chk(a.checked_sub(b)),
-        Mul => chk(a.checked_mul(b)),
-        Div | Mod => {
-            if b == 0 {
-                return panic("division by zero", span);
-            }
-            Ok(mk(if op == Div { a / b } else { a % b }))
-        }
-        Pow => {
-            let mut r: u128 = 1;
-            let mut i = 0;
-            while i < b {
-                r = match r.checked_mul(a) {
-                    Some(r) if r <= max => r,
-                    _ => return panic("integer overflow", span),
-                };
-                if r == 0 || r == 1 {
-                    break;
-                }
-                i += 1;
-            }
-            Ok(mk(r))
-        }
-        Shl => {
-            if b >= bits {
-                return panic("shift amount out of range", span);
-            }
-            chk(Some(a << b))
-        }
-        Shr => {
-            if b >= bits {
-                return panic("shift amount out of range", span);
-            }
-            Ok(mk(a >> b))
-        }
-        BitAnd => Ok(mk(a & b)),
-        BitOr => Ok(mk(a | b)),
-        BitXor => Ok(mk(a ^ b)),
-        _ => ord(op, a, b),
+    if matches!(op, Div | Mod) && b == 0 {
+        return panic("division by zero", span);
     }
+    if matches!(op, Shl | Shr) && !(0..bits).contains(&b) {
+        return panic("shift amount out of range", span);
+    }
+    let v = match op {
+        Add => a.checked_add(b),
+        Sub => a.checked_sub(b),
+        Mul => a.checked_mul(b),
+        Div => Some(a / b),
+        Mod => Some(a % b),
+        Pow if b < 0 => return panic("negative exponent", span),
+        Pow => Some(match a {
+            0 | 1 if b == 0 => 1,
+            0 | 1 => a,
+            -1 => 1 - 2 * (b % 2),
+            // any other base overflows within `bits` steps
+            _ => {
+                let mut r: i128 = 1;
+                for _ in 0..b {
+                    r = fit(r.checked_mul(a))?;
+                }
+                r
+            }
+        }),
+        Shl => Some(a << b),
+        Shr => Some(a >> b),
+        BitAnd => Some(a & b),
+        BitOr => Some(a | b),
+        BitXor => Some(a ^ b),
+        _ => return ord(op, a, b),
+    };
+    fit(v).map(mk)
 }
 
 /// An ordering comparison.
@@ -1879,7 +1834,6 @@ fn ord<T: PartialOrd>(op: BinOp, a: T, b: T) -> R<Val> {
 
 fn binop(op: BinOp, x: Val, y: Val, span: Span) -> R<Val> {
     use BinOp::*;
-    let ovf = || panic::<Val>("integer overflow", span);
     Ok(match (op, x, y) {
         (Eq, a, b) => Val::Bool(val_eq(&a, &b)),
         (Ne, a, b) => Val::Bool(!val_eq(&a, &b)),
@@ -1902,78 +1856,22 @@ fn binop(op: BinOp, x: Val, y: Val, span: Span) -> R<Val> {
             Val::Bool(char::from_u32(c).is_some_and(|c| s.contains(c)))
         }
         (In, Val::Str(a), Val::Str(s)) => Val::Bool(s.contains(&*a)),
-        (op, Val::Int(a), Val::Int(b)) => match op {
-            Add => a.checked_add(b).map(Val::Int).map_or_else(ovf, Ok)?,
-            Sub => a.checked_sub(b).map(Val::Int).map_or_else(ovf, Ok)?,
-            Mul => a.checked_mul(b).map(Val::Int).map_or_else(ovf, Ok)?,
-            Div => {
-                if b == 0 {
-                    return panic("division by zero", span);
-                }
-                a.checked_div(b).map(Val::Int).map_or_else(ovf, Ok)?
-            }
-            Mod => {
-                if b == 0 {
-                    return panic("division by zero", span);
-                }
-                Val::Int(if b == -1 { 0 } else { a % b })
-            }
-            Pow => {
-                if b < 0 {
-                    return panic("negative exponent", span);
-                }
-                let mut r: i64 = 1;
-                for _ in 0..b.min(64) {
-                    r = match r.checked_mul(a) {
-                        Some(r) => r,
-                        None => return ovf(),
-                    };
-                    if r == 0 || r == 1 && a == 1 {
-                        break;
-                    }
-                }
-                if b > 64 && !(a == 0 || a == 1 || a == -1) {
-                    return ovf();
-                }
-                if b > 64 && a == -1 {
-                    r = if b % 2 == 0 { 1 } else { -1 };
-                }
-                Val::Int(r)
-            }
-            Shl => {
-                if !(0..64).contains(&b) {
-                    return panic("shift amount out of range", span);
-                }
-                if b == 63 {
-                    match a {
-                        0 => Val::Int(0),
-                        -1 => Val::Int(i64::MIN),
-                        _ => return ovf(),
-                    }
-                } else {
-                    a.checked_mul(1i64 << b)
-                        .map(Val::Int)
-                        .map_or_else(ovf, Ok)?
-                }
-            }
-            Shr => {
-                if !(0..64).contains(&b) {
-                    return panic("shift amount out of range", span);
-                }
-                Val::Int(a >> b)
-            }
-            BitAnd => Val::Int(a & b),
-            BitOr => Val::Int(a | b),
-            BitXor => Val::Int(a ^ b),
-            _ => ord(op, a, b)?,
-        },
+        (op, Val::Int(a), Val::Int(b)) => {
+            let range = (i64::MIN.into(), i64::MAX.into(), 64);
+            int_op(op, (a.into(), b.into()), range, span, |v| {
+                Val::Int(v as i64)
+            })?
+        }
         (op, Val::UInt(a), Val::UInt(b)) => {
-            unsigned(op, a as u128, b as u128, u64::MAX as u128, span, |v| {
+            let range = (0, u64::MAX.into(), 64);
+            int_op(op, (a.into(), b.into()), range, span, |v| {
                 Val::UInt(v as u64)
             })?
         }
         (op, Val::Byte(a), Val::Byte(b)) => {
-            unsigned(op, a as u128, b as u128, 255, span, |v| Val::Byte(v as u8))?
+            int_op(op, (a.into(), b.into()), (0, 255, 8), span, |v| {
+                Val::Byte(v as u8)
+            })?
         }
         (op, Val::Float(a), Val::Float(b)) => match op {
             Add => Val::Float(a + b),
@@ -2091,14 +1989,9 @@ fn written(s: &Stmt) -> (HashSet<VarRef>, HashSet<VarRef>) {
     (assigned, declared)
 }
 
+/// Forget the globals in `which` (all of them when `None`).
 fn forget_globals(env: &mut Env, which: &Option<HashSet<GlobalId>>) {
-    let gone: Vec<GlobalId> = (env.globals.keys())
-        .filter(|g| which.as_ref().is_none_or(|gs| gs.contains(g)))
-        .copied()
-        .collect();
-    for g in gone {
-        env.forget(VarRef::Global(g));
-    }
+    env.forget_globals(|g| which.as_ref().is_none_or(|gs| gs.contains(&g)));
 }
 
 /// Per function, the globals it may change directly or through the functions it calls.
