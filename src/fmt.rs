@@ -378,8 +378,8 @@ impl<'a> Printer<'a> {
     }
 
     /// `head { ... }` (an extern block, struct or enum ending at `span`), one member per line;
-    /// `show` prints a member after the comments before it. Comments before the first member
-    /// never get a blank line above them.
+    /// `show` prints a member after the comments before it. Blank lines between members are
+    /// kept as between statements; comments before the first member never get one above them.
     fn members<'m, T: 'm>(
         &mut self,
         head: String,
@@ -389,8 +389,9 @@ impl<'a> Printer<'a> {
     ) {
         self.out.push_str(&head);
         self.out.push_str(" {\n");
+        self.cursor = self.find_outside_comments(span.start as usize, '{') + 1;
         for (i, (sp, m)) in members.enumerate() {
-            self.flush_comments(sp.start as usize, 1, i == 0);
+            self.entry_start(sp.start as usize, 1, i == 0);
             let text = show(self, m);
             self.out.push_str(&format!("{INDENT}{text}\n"));
             self.cursor = self.line_end(sp.end as usize);
@@ -902,6 +903,14 @@ mod tests {
         assert_eq!(fmt(src), src);
         let src = "int a = 1\n\nextern \"m.h\" as m {\n  // g\n  fn g() = \"g\"\n}\n";
         assert_eq!(fmt(src), src);
+    }
+
+    #[test]
+    fn blank_lines_between_members() {
+        let src = "struct P {\n  int x\n\n\n  int y\n  // c\n\n  int z\n}\n\nenum E {\n\n  A\n\n  B\n}\n\nextern \"m.h\" as m {\n  fn f() = \"f\"\n\n  fn g() = \"g\"\n}\n";
+        let out = "struct P {\n  int x\n\n  int y\n  // c\n\n  int z\n}\n\nenum E {\n  A\n\n  B\n}\n\nextern \"m.h\" as m {\n  fn f() = \"f\"\n\n  fn g() = \"g\"\n}\n";
+        assert_eq!(fmt(src), out);
+        assert_eq!(fmt(out), out);
     }
 
     #[test]
