@@ -623,6 +623,17 @@ fn insert_at(text: &str, at: usize, s: impl Into<String>) -> TextEdit {
     TextEdit::new(range(text, at, at), s.into())
 }
 
+/// What `pick` gives for the last node of `module` (in source order) it gives something for:
+/// of nested nodes, the innermost.
+fn last_node<'a, T>(
+    module: &'a ast::Module,
+    mut pick: impl FnMut(ast::visit::Node<'a>) -> Option<T>,
+) -> Option<T> {
+    let mut found = None;
+    ast::visit::walk(module, &mut |n| found = pick(n).or(found.take()));
+    found
+}
+
 /// Offset of the start of the line containing `off`.
 fn line_start(text: &str, off: usize) -> usize {
     text[..off.min(text.len())].rfind('\n').map_or(0, |i| i + 1)

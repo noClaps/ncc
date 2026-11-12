@@ -18,8 +18,8 @@ use crate::types::TyKind;
 
 use super::ssr::atomic;
 use super::{
-    Analysis, Server, edit_action, indent_at, insert_at, line_end, line_start, offset_to_pos,
-    pos_to_offset, range, span_range,
+    Analysis, Server, edit_action, indent_at, insert_at, last_node, line_end, line_start,
+    offset_to_pos, pos_to_offset, range, span_range,
 };
 use crate::ast::visit::{Node, walk};
 use crate::ast::{self, ExprKind as E, StmtKind as S};
@@ -179,18 +179,17 @@ fn block_stmt_around(module: &ast::Module, s: u32, e: u32) -> Option<&ast::Stmt>
             in_block.extend(b.stmts.iter().map(|st| (st.span.start, st.span.end)));
         }
     });
-    let mut stmt: Option<&ast::Stmt> = None;
-    walk(module, &mut |n| {
-        if let Node::Stmt(st) = n
-            && st.span.start <= s
-            && e <= st.span.end
-            && in_block.contains(&(st.span.start, st.span.end))
-            && stmt.is_none_or(|o| o.span.start <= st.span.start)
+    let (start, end) = (s, e);
+    last_node(module, |n| match n {
+        Node::Stmt(st)
+            if st.span.start <= start
+                && end <= st.span.end
+                && in_block.contains(&(st.span.start, st.span.end)) =>
         {
-            stmt = Some(st);
+            Some(st)
         }
-    });
-    stmt
+        _ => None,
+    })
 }
 
 /// Modules the files of `dir` could import, as (name, import path): files of `dir` (`./name`),
@@ -451,15 +450,9 @@ impl Server {
                 }
             } else if code == codes::NEEDS_THROWING {
                 // the innermost function around the error with a return type
-                let off = s as u32;
-                let mut best: Option<&ast::FnSig> = None;
-                walk(&module, &mut |n| {
-                    if let Node::Fn(sig) = n
-                        && sig.span.start <= off
-                        && best.is_none_or(|b| b.span.start < sig.span.start)
-                    {
-                        best = Some(sig);
-                    }
+                let best = last_node(&module, |n| match n {
+                    Node::Fn(sig) if sig.span.start as usize <= s => Some(sig),
+                    _ => None,
                 });
                 if let Some(sig) = best {
                     let (at, ins) = if let Some(r) = &sig.ret {
@@ -492,16 +485,12 @@ impl Server {
                 }
             } else if code == codes::NOT_EXHAUSTIVE {
                 let off = s as u32;
-                let mut target: Option<&ast::IfExpr> = None;
-                walk(&module, &mut |n| {
-                    if let Node::Expr(e) = n
-                        && let E::If(i) = &e.kind
-                        && i.span.start <= off
-                        && off <= i.span.end
-                        && target.is_none_or(|t| t.span.start <= i.span.start)
-                    {
-                        target = Some(i);
-                    }
+                let target = last_node(&module, |n| match n {
+                    Node::Expr(e) => match &e.kind {
+                        E::If(i) if i.span.start <= off && off <= i.span.end => Some(i),
+                        _ => None,
+                    },
+                    _ => None,
                 });
                 if let Some(ife) = target {
                     let arm_indent = ife.arms.first().map_or_else(
@@ -602,21 +591,15 @@ pub(super) fn add_missing_fields(
     off: u32,
     value: impl Fn(&crate::types::Types, crate::types::TyId) -> String,
 ) -> Option<TextEdit> {
-    let mut lit: Option<&ast::Expr> = None;
-    walk(module, &mut |n| {
-        if let Node::Expr(e) = n
-            && let E::Struct(..) = &e.kind
-            && e.span.start <= off
-            && off < e.span.end
-            && lit.is_none_or(|l| l.span.start <= e.span.start)
-        {
-            lit = Some(e);
-        }
-    });
-    let lit = lit?;
-    let E::Struct(tyx, fields) = &lit.kind else {
-        return None;
-    };
+    let (lit, tyx, fields) = last_node(module, |n| match n {
+        Node::Expr(e) => match &e.kind {
+            E::Struct(tyx, fields) if e.span.start <= off && off < e.span.end => {
+                Some((e, tyx, fields))
+            }
+            _ => None,
+        },
+        _ => None,
+    })?;
     // the literal failed to check, so it has no recorded type: find the struct by name
     let mut t = tyx.as_ref();
     if let E::Generic(inner, _) = &t.kind {
@@ -782,20 +765,17 @@ fn generate_function(
     uri: &Uri,
 ) -> Option<CodeActionOrCommand> {
     let at = at as u32;
-    let mut call: Option<&ast::Expr> = None;
-    walk(module, &mut |n| {
-        if let Node::Expr(e) = n
-            && let E::Call(c, _) = &e.kind
-            && matches!(&c.kind, E::Ident(n) if n == name)
-            && c.span.start == at
-        {
-            call = Some(e);
-        }
-    });
-    let call = call?;
-    let E::Call(_, args) = &call.kind else {
-        return None;
-    };
+    let (call, args) = last_node(module, |n| match n {
+        Node::Expr(e) => match &e.kind {
+            E::Call(c, args)
+                if c.span.start == at && matches!(&c.kind, E::Ident(n) if n == name) =>
+            {
+                Some((e, args))
+            }
+            _ => None,
+        },
+        _ => None,
+    })?;
     let visible = super::complete::visible(a, fid, at as usize);
     let mut params = Vec::new();
     let mut used = HashSet::new();
@@ -829,41 +809,31 @@ fn generate_function(
     }
     // the return type: the declared type of `T x = name(...)`, or the enclosing function's
     // return type for `return name(...)`
-    let mut ret: Option<String> = None;
-    walk(module, &mut |n| {
-        if let Node::Stmt(st) = n
-            && let S::VarDecl { targets, value, .. } = &st.kind
-            && targets.len() == 1
-            && value.span == call.span
-        {
-            let t = targets[0].ty.span();
-            ret = Some(text[t.start as usize..t.end as usize].to_string());
-        }
-    });
-    if ret.is_none() {
-        // `return name(...)` inside a function with a return type
-        let mut fsig: Option<&ast::FnSig> = None;
-        let mut is_return = false;
-        walk(module, &mut |n| match n {
-            Node::Fn(sig) if sig.span.start <= at => {
-                if fsig.is_none_or(|f| f.span.start < sig.span.start) {
-                    fsig = Some(sig);
-                }
-            }
-            Node::Stmt(st) => {
-                if let S::Return(Some(v)) = &st.kind
-                    && v.span == call.span
-                {
-                    is_return = true;
-                }
-            }
-            _ => {}
-        });
-        if is_return && let Some(r) = fsig.and_then(|f| f.ret.as_ref()) {
-            let sp = r.span();
-            ret = Some(text[sp.start as usize..sp.end as usize].to_string());
+    fn stmt(n: Node<'_>) -> Option<&S> {
+        match n {
+            Node::Stmt(st) => Some(&st.kind),
+            _ => None,
         }
     }
+    let ret = last_node(module, |n| match stmt(n)? {
+        S::VarDecl { targets, value, .. } if targets.len() == 1 && value.span == call.span => {
+            Some(targets[0].ty.span())
+        }
+        _ => None,
+    })
+    .or_else(|| {
+        // `return name(...)` inside a function with a return type
+        last_node(module, |n| match stmt(n)? {
+            S::Return(Some(v)) if v.span == call.span => Some(()),
+            _ => None,
+        })?;
+        let fsig = last_node(module, |n| match n {
+            Node::Fn(sig) if sig.span.start <= at => Some(sig),
+            _ => None,
+        });
+        Some(fsig?.ret.as_ref()?.span())
+    })
+    .map(|sp| &text[sp.start as usize..sp.end as usize]);
     // after the top-level item containing the call
     let item_end = super::refactor::item_extent(module, at)
         .map_or(text.len(), |(_, hi)| line_end(text, hi as usize));
@@ -936,23 +906,19 @@ fn inline_variable(
         return None;
     }
     // its declaration statement
-    let mut decl: Option<(&ast::Stmt, &ast::Expr)> = None;
-    walk(module, &mut |n| {
-        if let Node::Stmt(st) = n
-            && let S::VarDecl {
+    let (st, value) = last_node(module, |n| match n {
+        Node::Stmt(st) => match &st.kind {
+            S::VarDecl {
                 targets,
                 value,
                 mutex: false,
                 public: false,
                 ..
-            } = &st.kind
-            && targets.len() == 1
-            && targets[0].span == def
-        {
-            decl = Some((st, value));
-        }
-    });
-    let (st, value) = decl?;
+            } if targets.len() == 1 && targets[0].span == def => Some((st, value)),
+            _ => None,
+        },
+        _ => None,
+    })?;
     let uses: Vec<Span> = {
         let mut seen = HashSet::new();
         a.index

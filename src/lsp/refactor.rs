@@ -366,18 +366,17 @@ fn match_on_call(
     off: usize,
 ) -> Option<CodeActionOrCommand> {
     let off = off as u32;
-    let mut target: Option<&ast::Expr> = None;
-    walk(module, &mut |n| {
-        if let Node::Stmt(st) = n
-            && let S::Expr(x) = &st.kind
-            && matches!(x.kind, E::Call(..))
-            && x.span.start <= off
-            && off <= x.span.end
-        {
-            target = Some(x);
-        }
-    });
-    let x = target?;
+    let x = super::last_node(module, |n| match n {
+        Node::Stmt(st) => match &st.kind {
+            S::Expr(x)
+                if matches!(x.kind, E::Call(..)) && x.span.start <= off && off <= x.span.end =>
+            {
+                Some(x)
+            }
+            _ => None,
+        },
+        _ => None,
+    })?;
     let ty = a.expr_ty(fid, x.span.start, x.span.end)?;
     let edecl = a.decl(ty.type_def?)?;
     if edecl.kind != DeclKind::Enum || !matches!(a.types.kind(ty.ty), TyKind::Enum(_)) {
