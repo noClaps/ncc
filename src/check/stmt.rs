@@ -258,22 +258,21 @@ impl Checker {
                         EK::Else(_, Fallback::Block(..)) | EK::Catch(..) | EK::If(_)
                     ) && !matches!(self.types.kind(x.ty), TyKind::ErrU(_));
                 if !ok {
-                    let msg = match self.types.kind(x.ty) {
-                        TyKind::ErrU(_) => format!(
-                            "error union `{}` must be handled with `catch` or `try`",
-                            self.types.show(x.ty)
-                        ),
-                        _ if matches!(x.kind, EK::Call(..)) => format!(
-                            "return value of function not used (type `{}`); assign it to `_` to discard it",
-                            self.types.show(x.ty)
-                        ),
-                        _ => format!("unused value of type `{}`", self.types.show(x.ty)),
+                    let ty = self.types.show(x.ty);
+                    if let TyKind::ErrU(_) = self.types.kind(x.ty) {
+                        return err(
+                            e.span,
+                            format!("error union `{ty}` must be handled with `catch` or `try`"),
+                        );
+                    }
+                    let msg = if matches!(x.kind, EK::Call(..)) {
+                        format!(
+                            "return value of function not used (type `{ty}`); assign it to `_` to discard it"
+                        )
+                    } else {
+                        format!("unused value of type `{ty}`")
                     };
-                    let d = Diag::new(e.span, msg);
-                    return Err(match self.types.kind(x.ty) {
-                        TyKind::ErrU(_) => d,
-                        _ => d.with_code(codes::UNUSED_VALUE, &[]),
-                    });
+                    return err_code(e.span, msg, codes::UNUSED_VALUE, &[]);
                 }
                 push(out, SK::Expr(x));
             }
@@ -437,15 +436,7 @@ impl Checker {
                 name_span,
                 body,
             } => {
-                let Some((vr, ty)) = self.resolve_var(name, *name_span)? else {
-                    return err_code(
-                        *name_span,
-                        format!("unknown variable `{name}`"),
-                        codes::UNKNOWN_NAME,
-                        &[name],
-                    );
-                };
-                self.idx_var_ref(vr, *name_span);
+                let (vr, ty) = self.var_ref(name, *name_span)?;
                 let TyKind::Mutex(inner) = *self.types.kind(ty) else {
                     return err(*name_span, format!("`{name}` is not a mutex"));
                 };
@@ -540,25 +531,13 @@ impl Checker {
         let mut ctx = FnCtx::new(fid, m, ret, tp);
         ctx.tspans = tspans;
         self.fns.push(ctx);
-        let r = (|| {
-            if let Some(n) = name {
-                let sl = self.declare_local(n, fty, false, LocalKind::Normal, sig.span);
-                self.ctx().self_local = Some(sl);
-            }
-            self.ix.scopes.push(body.span);
-            let pids: Vec<_> = (sig.params.iter().zip(&params))
-                .map(|(p, &ty)| self.declare_local(&p.name, ty, false, LocalKind::Param, p.span))
-                .collect();
-            self.ix.scopes.pop();
-            let before = self.errors.len();
-            let b = self.check_block(body);
-            if self.errors.len() == before {
-                self.check_fn_end(&b, ret, sig.span, &display)?;
-            }
-            Ok((pids, b))
-        })();
+        if let Some(n) = name {
+            let sl = self.declare_local(n, fty, false, LocalKind::Normal, sig.span);
+            self.ctx().self_local = Some(sl);
+        }
+        let (pids, b, end) = self.check_fn_parts(sig, &params, body, &display);
         let ctx = self.fns.pop().unwrap();
-        let (pids, b) = r?;
+        end?;
         self.finish_fn(ctx, display, pids, b, Some(parent));
         Ok((fid, fty))
     }
@@ -582,47 +561,59 @@ impl Checker {
         Ok(None)
     }
 
-    pub fn var_mutable(&self, v: VarRef) -> bool {
-        match v {
-            VarRef::Local(l) => self.ctx_ref().locals[l].mutable,
-            VarRef::Global(g) => self.globals[g].mutable,
+    /// The variable `name` at `span`, which must exist.
+    fn var_ref(&mut self, name: &str, span: Span) -> Result<(VarRef, TyId)> {
+        let Some((v, ty)) = self.resolve_var(name, span)? else {
+            return err_code(
+                span,
+                format!("unknown variable `{name}`"),
+                codes::UNKNOWN_NAME,
+                &[name],
+            );
+        };
+        self.idx_var_ref(v, span);
+        Ok((v, ty))
+    }
+
+    /// Mutexes are only accessed through `lock`.
+    pub fn reject_mutex(&self, name: &str, ty: TyId, span: Span) -> Result<()> {
+        if let TyKind::Mutex(_) = self.types.kind(ty) {
+            return err(
+                span,
+                format!("`{name}` is a mutex; access it inside `lock {name} {{ ... }}`"),
+            );
         }
+        Ok(())
     }
 
     fn check_place(&mut self, e: &ast::Expr) -> Result<(Place, TyId)> {
         use ast::ExprKind as E;
         match &e.kind {
             E::Ident(name) => {
-                let Some((v, ty)) = self.resolve_var(name, e.span)? else {
+                let (v, ty) = self.var_ref(name, e.span)?;
+                self.reject_mutex(name, ty, e.span)?;
+                let (mutable, param) = match v {
+                    VarRef::Local(l) => {
+                        let l = &self.ctx_ref().locals[l];
+                        (l.mutable, l.kind == LocalKind::Param)
+                    }
+                    VarRef::Global(g) => (self.globals[g].mutable, false),
+                };
+                if param && !mutable {
+                    let msg = format!(
+                        "cannot assign to function argument `{name}`; declare it with `mut`"
+                    );
+                    return err(e.span, msg);
+                }
+                if !mutable {
                     return err_code(
                         e.span,
-                        format!("unknown variable `{name}`"),
-                        codes::UNKNOWN_NAME,
-                        &[name],
+                        format!(
+                            "cannot assign to immutable variable `{name}`; declare it with `mut`"
+                        ),
+                        codes::IMMUTABLE,
+                        &[],
                     );
-                };
-                self.idx_var_ref(v, e.span);
-                if matches!(self.types.kind(ty), TyKind::Mutex(_)) {
-                    return err(
-                        e.span,
-                        format!("`{name}` is a mutex; access it inside `lock {name} {{ ... }}`"),
-                    );
-                }
-                if !self.var_mutable(v) {
-                    let what = match v {
-                        VarRef::Local(l) if self.ctx_ref().locals[l].kind == LocalKind::Param => {
-                            "function argument"
-                        }
-                        _ => "immutable variable",
-                    };
-                    let d = Diag::new(
-                        e.span,
-                        format!("cannot assign to {what} `{name}`; declare it with `mut`"),
-                    );
-                    return Err(match v {
-                        VarRef::Local(l) if self.ctx_ref().locals[l].kind == LocalKind::Param => d,
-                        _ => d.with_code(codes::IMMUTABLE, &[]),
-                    });
                 }
                 Ok((Place::Var(v), ty))
             }

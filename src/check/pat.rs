@@ -4,16 +4,16 @@ use super::*;
 use crate::ast::ExprKind as E;
 
 impl Checker {
+    /// A pattern matching values of type `ty`. Anything that is not a binding or the shape of
+    /// a tuple, array, enum variant or struct is a value, compared with `==`.
     pub fn check_pattern(&mut self, p: &ast::Expr, ty: TyId, multi: bool) -> Result<Pat> {
         let span = p.span;
         match &p.kind {
-            E::Wildcard => Ok(Pat::Wild),
-            E::Ident(name) => {
-                // an existing name is compared; otherwise the identifier binds a new variable
-                if self.resolve_var(name, span)?.is_some() || self.is_value_symbol(name) {
-                    let v = self.expect_expr(p, ty)?;
-                    return self.value_pat(v, ty, span);
-                }
+            E::Wildcard => return Ok(Pat::Wild),
+            // an existing name is compared; otherwise the identifier binds a new variable
+            E::Ident(name)
+                if self.resolve_var(name, span)?.is_none() && !self.is_value_symbol(name) =>
+            {
                 if multi {
                     return err(
                         span,
@@ -23,7 +23,7 @@ impl Checker {
                 let l = self.declare_local(name, ty, false, LocalKind::Normal, span);
                 let label = format!("{} ", self.types.show(ty));
                 self.idx_hint(span.start, span.file, label, index::HintKind::Type);
-                Ok(Pat::Bind(l))
+                return Ok(Pat::Bind(l));
             }
             E::Tuple(items) => {
                 if let TyKind::Tuple(ts) = self.types.kind(ty).clone() {
@@ -39,11 +39,9 @@ impl Checker {
                     }
                     return Ok(Pat::Tuple(self.check_patterns(items, ts, multi)?));
                 }
-                let v = self.expect_expr(p, ty)?;
-                self.value_pat(v, ty, span)
             }
-            E::Array(items) => match self.types.kind(ty).clone() {
-                TyKind::Array(e) | TyKind::Fixed(e, _) => {
+            E::Array(items) => {
+                if let TyKind::Array(e) | TyKind::Fixed(e, _) = *self.types.kind(ty) {
                     if let TyKind::Fixed(_, n) = *self.types.kind(ty)
                         && n as usize != items.len()
                     {
@@ -57,13 +55,9 @@ impl Checker {
                         );
                     }
                     let ts = vec![e; items.len()];
-                    Ok(Pat::Array(self.check_patterns(items, ts, multi)?))
+                    return Ok(Pat::Array(self.check_patterns(items, ts, multi)?));
                 }
-                _ => {
-                    let v = self.expect_expr(p, ty)?;
-                    self.value_pat(v, ty, span)
-                }
-            },
+            }
             E::Call(callee, args) => {
                 if let E::Field(base, vname) = &callee.kind
                     && let Some(ety) = self.type_path(base)?
@@ -80,13 +74,9 @@ impl Checker {
                             ),
                         );
                     }
-                    return Ok(Pat::Variant(
-                        idx,
-                        self.check_patterns(args, payload, multi)?,
-                    ));
+                    let ps = self.check_patterns(args, payload, multi)?;
+                    return Ok(Pat::Variant(idx, ps));
                 }
-                let v = self.expect_expr(p, ty)?;
-                self.value_pat(v, ty, span)
             }
             E::Field(base, vname) => {
                 if let Some(ety) = self.type_path(base)? {
@@ -100,8 +90,6 @@ impl Checker {
                     }
                     return Ok(Pat::Variant(idx, vec![]));
                 }
-                let v = self.expect_expr(p, ty)?;
-                self.value_pat(v, ty, span)
             }
             E::Struct(path, fields) => {
                 let Some(sty) = self.type_path(path)? else {
@@ -118,13 +106,13 @@ impl Checker {
                     span,
                     |c, v, t| c.check_pattern(v, t, multi),
                 )?;
-                Ok(Pat::Struct(out))
+                return Ok(Pat::Struct(out));
             }
-            _ => {
-                let v = self.expect_expr(p, ty)?;
-                self.value_pat(v, ty, span)
-            }
+            _ => {}
         }
+        let v = self.expect_expr(p, ty)?;
+        self.require_plain(ty, span, "values cannot be compared")?;
+        Ok(Pat::Value(v))
     }
 
     /// Patterns for `items`, matching values of the types `tys` in order.
@@ -167,11 +155,6 @@ impl Checker {
             .ok_or_else(|| Diag::new(span, format!("enum `{}` has no member `{vname}`", def.name)))
     }
 
-    fn value_pat(&self, v: Expr, ty: TyId, span: Span) -> Result<Pat> {
-        self.require_plain(ty, span, "values cannot be compared")?;
-        Ok(Pat::Value(v))
-    }
-
     // ------------------------------------------------------------ exhaustiveness
 
     pub fn exhaustive(&self, arms: &[Arm], ty: TyId) -> bool {
@@ -205,13 +188,12 @@ impl Checker {
             // no constructor in this column: it is irrelevant
             return self.matrix_exhaustive(&default, rest);
         }
+        let is_lit =
+            |p: &Pat, lit: &Lit| matches!(p, Pat::Value(Expr { kind: EK::Lit(x), .. }) if x == lit);
         // the rows matching the literal `lit` (or anything) in the first column
         let lit_rows = |lit: Lit| -> Vec<Vec<Pat>> {
-            rows.iter()
-                .filter(|r| {
-                    Self::is_wild(&r[0])
-                        || matches!(&r[0], Pat::Value(Expr { kind: EK::Lit(x), .. }) if *x == lit)
-                })
+            (rows.iter())
+                .filter(|r| Self::is_wild(&r[0]) || is_lit(&r[0], &lit))
                 .map(|r| r[1..].to_vec())
                 .collect()
         };
@@ -219,22 +201,11 @@ impl Checker {
             TyKind::Bool => [true, false]
                 .into_iter()
                 .all(|b| self.matrix_exhaustive(&lit_rows(Lit::Bool(b)), rest)),
-            TyKind::Byte => {
-                let mut covered = [false; 256];
-                for r in rows {
-                    if let Pat::Value(Expr {
-                        kind: EK::Lit(Lit::Byte(b)),
-                        ..
-                    }) = &r[0]
-                    {
-                        covered[*b as usize] = true;
-                    }
-                }
-                if covered.iter().all(|c| *c) {
-                    (0..=255u8).all(|b| self.matrix_exhaustive(&lit_rows(Lit::Byte(b)), rest))
-                } else {
-                    self.matrix_exhaustive(&default, rest)
-                }
+            // all the values are listed
+            TyKind::Byte
+                if (0..=255).all(|b| rows.iter().any(|r| is_lit(&r[0], &Lit::Byte(b)))) =>
+            {
+                (0..=255).all(|b| self.matrix_exhaustive(&lit_rows(Lit::Byte(b)), rest))
             }
             TyKind::Enum(i) => {
                 let variants = self.types.enums[i as usize].variants.clone();
@@ -250,9 +221,7 @@ impl Checker {
                 _ => None,
             }),
             TyKind::Struct(i) => {
-                let ts: Vec<TyId> = self.types.structs[i as usize]
-                    .fields
-                    .iter()
+                let ts: Vec<TyId> = (self.types.structs[i as usize].fields.iter())
                     .map(|f| f.1)
                     .collect();
                 self.expand_product(rows, &ts, rest, |p| match p {
@@ -271,6 +240,8 @@ impl Checker {
         }
     }
 
+    /// The rows whose first column matches the product `ts` (a wildcard, or a pattern `get`
+    /// splits into its parts), with that column expanded into the parts.
     fn expand_product(
         &self,
         rows: &[Vec<Pat>],
@@ -278,24 +249,17 @@ impl Checker {
         rest: &[TyId],
         get: impl Fn(&Pat) -> Option<Vec<Pat>>,
     ) -> bool {
-        let sub: Vec<Vec<Pat>> = rows
-            .iter()
+        let sub: Vec<Vec<Pat>> = (rows.iter())
             .filter_map(|r| {
-                if Self::is_wild(&r[0]) {
-                    let mut row = vec![Pat::Wild; ts.len()];
-                    row.extend(r[1..].iter().cloned());
-                    Some(row)
-                } else {
-                    get(&r[0]).map(|ps| {
-                        let mut row = ps;
-                        row.extend(r[1..].iter().cloned());
-                        row
-                    })
-                }
+                let mut row = match &r[0] {
+                    p if Self::is_wild(p) => vec![Pat::Wild; ts.len()],
+                    p => get(p)?,
+                };
+                row.extend_from_slice(&r[1..]);
+                Some(row)
             })
             .collect();
-        let mut tys2 = ts.to_vec();
-        tys2.extend_from_slice(rest);
-        self.matrix_exhaustive(&sub, &tys2)
+        let tys: Vec<TyId> = ts.iter().chain(rest).copied().collect();
+        self.matrix_exhaustive(&sub, &tys)
     }
 }

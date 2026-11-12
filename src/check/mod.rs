@@ -365,9 +365,7 @@ impl Checker {
                         self.add_sym(m, &t.name, Sym::Type(ty), t.public, t.span)?;
                     }
                     ast::Item::Extern(e) => {
-                        if self.mods[m].externs.contains_key(&e.alias)
-                            || self.mods[m].imports.contains_key(&e.alias)
-                        {
+                        if self.is_alias(m, &e.alias) {
                             return err(e.span, format!("duplicate alias `{}`", e.alias));
                         }
                         self.mods[m].externs.insert(e.alias.clone(), HashMap::new());
@@ -419,6 +417,11 @@ impl Checker {
         let detail = self.type_detail(ty);
         self.idx_decl(name, span, name_span, kind, detail, members);
         self.idx_last_ty(name, ty);
+    }
+
+    /// Whether `name` is an import or extern block alias in module `m`.
+    pub fn is_alias(&self, m: usize, name: &str) -> bool {
+        self.mods[m].imports.contains_key(name) || self.mods[m].externs.contains_key(name)
     }
 
     /// The symbol `name` declares in module `m`, if `declare_names` accepted it.
@@ -799,44 +802,48 @@ impl Checker {
             .map(|t| (t.name.clone(), t.span))
             .collect();
         self.fns.push(ctx);
-        self.ix.scopes.push(p.decl.body.span);
-        let pids: Vec<_> = (p.decl.sig.params.iter().zip(&params))
-            .map(|(prm, &ty)| self.declare_local(&prm.name, ty, false, LocalKind::Param, prm.span))
-            .collect();
-        self.ix.scopes.pop();
-        let before = self.errors.len();
-        let body = self.check_block(&p.decl.body);
-        // a missing-return error would only be noise when statements failed to check
-        if self.errors.len() == before {
-            let r = self.check_fn_end(&body, ret, p.decl.sig.span, &p.decl.sig.name);
-            self.report(r);
-        }
+        let decl = &p.decl;
+        let (pids, body, end) = self.check_fn_parts(&decl.sig, &params, &decl.body, &decl.sig.name);
+        self.report(end);
         let ctx = self.fns.pop().unwrap();
         self.finish_fn(ctx, p.decl.sig.name, pids, body, None);
     }
 
-    pub fn check_fn_end(&mut self, body: &Block, ret: TyId, span: Span, name: &str) -> Result<()> {
-        let completes = flow::block_completes(body);
-        if completes {
-            if ret == NEVER {
-                return err(
-                    span,
-                    format!("function `{name}` is declared `never` but can return"),
-                );
-            }
-            let needs = match self.types.kind(ret) {
-                TyKind::Void => false,
-                TyKind::ErrU(i) => *i != VOID,
-                _ => true,
-            };
-            if needs {
-                return err(
-                    span,
-                    format!("function `{name}` does not return a value on every path"),
-                );
-            }
-        }
-        Ok(())
+    /// Declare the parameters and check the body of the function on top of `fns`. Also returns
+    /// an error when the end of the body is reachable but must not be.
+    pub fn check_fn_parts(
+        &mut self,
+        sig: &ast::FnSig,
+        params: &[TyId],
+        body: &ast::Block,
+        name: &str,
+    ) -> (Vec<LocalId>, Block, Result<()>) {
+        self.ix.scopes.push(body.span);
+        let pids = (sig.params.iter().zip(params))
+            .map(|(p, &ty)| self.declare_local(&p.name, ty, false, LocalKind::Param, p.span))
+            .collect();
+        self.ix.scopes.pop();
+        let before = self.errors.len();
+        let body = self.check_block(body);
+        let ret = self.ctx_ref().ret;
+        let needs_value = match self.types.kind(ret) {
+            TyKind::Void => false,
+            TyKind::ErrU(i) => *i != VOID,
+            _ => true,
+        };
+        // a missing-return error would only be noise when statements failed to check
+        let end = if self.errors.len() > before || !flow::block_completes(&body) {
+            Ok(())
+        } else if ret == NEVER {
+            let msg = format!("function `{name}` is declared `never` but can return");
+            err(sig.span, msg)
+        } else if needs_value {
+            let msg = format!("function `{name}` does not return a value on every path");
+            err(sig.span, msg)
+        } else {
+            Ok(())
+        };
+        (pids, body, end)
     }
 
     // ------------------------------------------------------------ generics
@@ -1472,9 +1479,7 @@ impl Checker {
             }) => list.push((id, span.start)),
             Some(_) => return err(span, format!("`{name}` is already defined in this module")),
             None => {
-                if self.mods[m].imports.contains_key(name)
-                    || self.mods[m].externs.contains_key(name)
-                {
+                if self.is_alias(m, name) {
                     return err(span, format!("`{name}` is already used as a module alias"));
                 }
                 self.mods[m].syms.insert(

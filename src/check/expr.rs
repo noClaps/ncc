@@ -576,12 +576,7 @@ impl Checker {
     fn check_ident(&mut self, name: &str, span: Span) -> Result<Expr> {
         if let Some((v, ty)) = self.resolve_var(name, span)? {
             self.idx_var_ref(v, span);
-            if matches!(self.types.kind(ty), TyKind::Mutex(_)) {
-                return err(
-                    span,
-                    format!("`{name}` is a mutex; access it inside `lock {name} {{ ... }}`"),
-                );
-            }
+            self.reject_mutex(name, ty, span)?;
             return Ok(Expr::new(EK::Var(v), ty, span));
         }
         // a generic constant: `N` in `fn f<uint N>`
@@ -607,9 +602,7 @@ impl Checker {
             }
             Some(Sym::Globals(_)) => unreachable!(),
             None => {
-                if self.mods[m].imports.contains_key(name)
-                    || self.mods[m].externs.contains_key(name)
-                {
+                if self.is_alias(m, name) {
                     err(span, format!("`{name}` is a module, not a value"))
                 } else {
                     err_code(
@@ -685,9 +678,7 @@ impl Checker {
     fn module_alias(&mut self, e: &ast::Expr) -> Result<Option<String>> {
         if let E::Ident(n) = &e.kind {
             let m = self.module();
-            if (self.mods[m].imports.contains_key(n) || self.mods[m].externs.contains_key(n))
-                && self.resolve_var(n, e.span)?.is_none()
-            {
+            if self.is_alias(m, n) && self.resolve_var(n, e.span)?.is_none() {
                 self.ix.used_aliases.borrow_mut().insert((m, n.clone()));
                 return Ok(Some(n.clone()));
             }
