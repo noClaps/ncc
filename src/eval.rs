@@ -126,19 +126,27 @@ pub fn purity(p: &Program) -> Vec<bool> {
         pure[i] = ok && f.body.stmts.iter().all(stmt_pure);
         calls[i] = cs;
     }
-    loop {
-        let mut changed = false;
-        for i in 0..n {
-            if pure[i] && calls[i].iter().any(|g| !pure[*g]) {
-                pure[i] = false;
-                changed = true;
+    propagate(&mut pure, &calls, |mine, theirs| {
+        let was = *mine;
+        *mine &= *theirs;
+        *mine != was
+    });
+    pure
+}
+
+/// Merge into each function's fact those of the functions it calls until nothing changes;
+/// `merge` returns whether it changed the fact.
+fn propagate<T: Clone>(facts: &mut [T], calls: &[Vec<FuncId>], merge: impl Fn(&mut T, &T) -> bool) {
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (i, cs) in calls.iter().enumerate() {
+            for &g in cs {
+                let theirs = facts[g].clone();
+                changed |= merge(&mut facts[i], &theirs);
             }
         }
-        if !changed {
-            break;
-        }
     }
-    pure
 }
 
 /// Statement-level purity: no global writes, locks, mutexes or asserts.
@@ -2004,29 +2012,20 @@ fn global_writes(p: &Program) -> Vec<Option<HashSet<GlobalId>>> {
         }
         out[i] = (!unknown).then_some(w);
     }
-    loop {
-        let mut changed = false;
-        for i in 0..n {
-            for &g in &calls[i] {
-                let add = out[g].clone();
-                match (&mut out[i], add) {
-                    (Some(_), None) => {
-                        out[i] = None;
-                        changed = true;
-                    }
-                    (Some(mine), Some(theirs)) => {
-                        let before = mine.len();
-                        mine.extend(theirs);
-                        changed |= mine.len() != before;
-                    }
-                    (None, _) => {}
-                }
+    propagate(&mut out, &calls, |mine, theirs| {
+        match (&mut *mine, theirs) {
+            (Some(_), None) => {
+                *mine = None;
+                true
             }
+            (Some(m), Some(t)) => {
+                let before = m.len();
+                m.extend(t);
+                m.len() != before
+            }
+            (None, _) => false,
         }
-        if !changed {
-            break;
-        }
-    }
+    });
     out
 }
 
