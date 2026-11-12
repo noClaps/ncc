@@ -25,7 +25,6 @@ use crate::ast::visit::{Node, walk};
 use crate::ast::{self, ExprKind as E, StmtKind as S};
 use crate::check::index::DeclKind;
 use crate::diag::Span;
-use crate::lexer::is_ident_byte;
 
 const UNUSED_IMPORT: &str = "unused-import";
 const UNREACHABLE_BRANCH: &str = "unreachable-branch";
@@ -255,13 +254,7 @@ pub(super) fn importable_modules(dir: &Path) -> (Vec<(String, String)>, Vec<Path
             p.clone(),
         )
     });
-    out.retain(|(n, _)| {
-        n.chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-            && n.bytes().all(is_ident_byte)
-            && !crate::parser::is_keyword(n)
-    });
+    out.retain(|(n, _)| super::valid_name(n));
     (out, dirs)
 }
 
@@ -345,18 +338,17 @@ impl Server {
 
         for d in &p.context.diagnostics {
             let code = diag_code(d);
+            let (s, e) = (
+                pos_to_offset(&text, d.range.start),
+                pos_to_offset(&text, d.range.end),
+            );
             if code == codes::IMMUTABLE {
                 if let Some((a, r)) = self.lookup(&uri, d.range.start)
                     && let Some(def) = r.def
                     && a.sm.file(def.file).path == path
                 {
-                    let at = offset_to_pos(&text, def.start as usize);
-                    out.push(fix(
-                        "Make the variable mutable".into(),
-                        d,
-                        vec![insert(at, "mut ")],
-                        true,
-                    ));
+                    let edit = insert_at(&text, def.start as usize, "mut ");
+                    out.push(fix("Make the variable mutable".into(), d, vec![edit], true));
                 }
             } else if code == codes::UNUSED_VALUE {
                 out.push(fix(
@@ -384,10 +376,6 @@ impl Server {
                     ));
                 }
             } else if code == UNREACHABLE_BRANCH {
-                let (s, e) = (
-                    pos_to_offset(&text, d.range.start),
-                    pos_to_offset(&text, d.range.end),
-                );
                 // the whole lines when the branch is alone on them
                 let (ls, le) = (line_start(&text, s), line_end(&text, e));
                 let alone = text[ls..s].trim().is_empty() && text[e..le].trim().is_empty();
@@ -399,10 +387,10 @@ impl Server {
                     true,
                 ));
             } else if code == UNUSED_IMPORT {
-                let off = pos_to_offset(&text, d.range.start) as u32;
+                let off = s as u32;
                 if let Some((span, ..)) = unused_imports(&text, &module)
                     .into_iter()
-                    .find(|(s, ..)| s.start <= off && off <= s.end)
+                    .find(|(sp, ..)| sp.start <= off && off <= sp.end)
                 {
                     out.push(fix(
                         "Remove unused import".into(),
@@ -418,23 +406,17 @@ impl Server {
                 if let Some(a) = self.analyses.get(&path)
                     && let Some(fid) = a.file_id(&path)
                 {
-                    let off = pos_to_offset(&text, d.range.start);
-                    let mut cands: Vec<(usize, String)> =
-                        super::complete::visible_names(a, fid, off)
-                            .into_iter()
-                            .chain(a.imports.keys().cloned())
-                            .filter(|n| n != name)
-                            .map(|n| (levenshtein(name, &n), n))
-                            .filter(|(dist, n)| *dist <= (name.len().max(n.len()) / 3).max(1))
-                            .collect();
+                    let mut cands: Vec<(usize, String)> = super::complete::visible_names(a, fid, s)
+                        .into_iter()
+                        .chain(a.imports.keys().cloned())
+                        .filter(|n| n != name)
+                        .map(|n| (levenshtein(name, &n), n))
+                        .filter(|(dist, n)| *dist <= (name.len().max(n.len()) / 3).max(1))
+                        .collect();
                     cands.sort();
                     cands.dedup();
-                    let s = pos_to_offset(&text, d.range.start);
-                    if let Some(i) = text[s..pos_to_offset(&text, d.range.end)].find(name) {
-                        let r = Range::new(
-                            offset_to_pos(&text, s + i),
-                            offset_to_pos(&text, s + i + name.len()),
-                        );
+                    if let Some(i) = text[s..e].find(name) {
+                        let r = range(&text, s + i, s + i + name.len());
                         // a module used as `name.x` that is not imported yet
                         let used_as_module = text[s + i + name.len()..].starts_with('.');
                         if used_as_module {
@@ -469,7 +451,7 @@ impl Server {
                 }
             } else if code == codes::NEEDS_THROWING {
                 // the innermost function around the error with a return type
-                let off = pos_to_offset(&text, d.range.start) as u32;
+                let off = s as u32;
                 let mut best: Option<&ast::FnSig> = None;
                 walk(&module, &mut |n| {
                     if let Node::Fn(sig) = n
@@ -496,25 +478,20 @@ impl Server {
                         out.push(fix(
                             format!("Make `{}` throwing", sig.name),
                             d,
-                            vec![insert(offset_to_pos(&text, at), &ins)],
+                            vec![insert_at(&text, at, ins)],
                             true,
                         ));
                     }
                 }
             } else if code == codes::MISSING_FIELD {
                 if let Some(a) = fresh.map(|f| f.0)
-                    && let Some(edit) = add_missing_fields(
-                        a,
-                        &module,
-                        &text,
-                        pos_to_offset(&text, d.range.start) as u32,
-                        default_value,
-                    )
+                    && let Some(edit) =
+                        add_missing_fields(a, &module, &text, s as u32, default_value)
                 {
                     out.push(fix("Add missing fields".into(), d, vec![edit], true));
                 }
             } else if code == codes::NOT_EXHAUSTIVE {
-                let off = pos_to_offset(&text, d.range.start) as u32;
+                let off = s as u32;
                 let mut target: Option<&ast::IfExpr> = None;
                 walk(&module, &mut |n| {
                     if let Node::Expr(e) = n
@@ -550,16 +527,17 @@ impl Server {
                         out.push(fix(
                             "Add missing branches".into(),
                             d,
-                            vec![insert(offset_to_pos(&text, at), &arms)],
+                            vec![insert_at(&text, at, arms)],
                             true,
                         ));
                     }
                     out.push(fix(
                         "Add a fallback `_` branch".into(),
                         d,
-                        vec![insert(
-                            offset_to_pos(&text, at),
-                            &format!("{lead}{arm_indent}_ -> {{}}\n"),
+                        vec![insert_at(
+                            &text,
+                            at,
+                            format!("{lead}{arm_indent}_ -> {{}}\n"),
                         )],
                         false,
                     ));
@@ -584,13 +562,10 @@ impl Server {
                 .map(|e| e.range)
                 .collect();
             edits.retain(|e| {
-                !whole.iter().any(|w| {
-                    *w != e.range
-                        && (w.start.line, w.start.character)
-                            <= (e.range.start.line, e.range.start.character)
-                        && (e.range.end.line, e.range.end.character)
-                            <= (w.end.line, w.end.character)
-                })
+                let r = e.range;
+                !whole
+                    .iter()
+                    .any(|w| *w != r && w.start <= r.start && r.end <= w.end)
             });
             if edits.len() == 1 || unused.len() > 1 {
                 out.push(edit_action(

@@ -18,7 +18,7 @@ use super::{
     Analysis, Server, edit_action, insert_at, line_end, line_start, path_to_uri, pos_to_offset,
     range, span_range, uri_to_path,
 };
-use crate::ast::visit::{Node, item_spans, walk};
+use crate::ast::visit::{Node, walk};
 use crate::ast::{self, ExprKind as E, StmtKind as S};
 use crate::check::index::{DeclKind, SymDecl};
 use crate::lexer::Tok;
@@ -26,19 +26,9 @@ use crate::lexer::is_ident_byte;
 
 /// The extent (start, end) of the top-level item containing `off`.
 pub(super) fn item_extent(module: &ast::Module, off: u32) -> Option<(u32, u32)> {
-    for it in &module.items {
-        let (mut lo, mut hi) = (u32::MAX, 0);
-        item_spans(it, &mut |n| {
-            if let Node::Span(sp) = n {
-                lo = lo.min(sp.start);
-                hi = hi.max(sp.end);
-            }
-        });
-        if lo <= off && off <= hi {
-            return Some((lo, hi));
-        }
-    }
-    None
+    (module.items.iter())
+        .map(ast::Item::range)
+        .find(|&(lo, hi)| lo <= off && off <= hi)
 }
 
 /// Format an integer in a base, as an NC literal.

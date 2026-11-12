@@ -1545,13 +1545,7 @@ impl Server {
     fn rename(&self, p: RenameParams) -> Result<Option<WorkspaceEdit>, String> {
         let pp = p.text_document_position;
         let new = p.new_name.trim();
-        let valid = new
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-            && new.bytes().all(is_ident_byte)
-            && new != "_";
-        if !valid || crate::parser::is_keyword(new) {
+        if !valid_name(new) || new == "_" {
             return Err(format!("`{new}` is not a valid name"));
         }
         let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
@@ -1768,6 +1762,13 @@ fn literals_and_comments(text: &str) -> Vec<(usize, usize)> {
         .map(|t| (t.span.start as usize, t.span.end as usize))
         .chain(crate::lexer::comments(text))
         .collect()
+}
+
+/// Whether `n` can name a declaration: an identifier that is not a keyword.
+fn valid_name(n: &str) -> bool {
+    n.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && n.bytes().all(is_ident_byte)
+        && !crate::parser::is_keyword(n)
 }
 
 /// Whether an offset is inside a string literal or a comment.

@@ -68,16 +68,11 @@ impl Server {
     pub(super) fn will_rename_files(&self, p: RenameFilesParams) -> Option<WorkspaceEdit> {
         let mut changes: std::collections::HashMap<Uri, Vec<TextEdit>> = Default::default();
         for f in &p.files {
-            let (Ok(old), Ok(new)) = (f.old_uri.parse::<Uri>(), f.new_uri.parse::<Uri>()) else {
-                continue;
-            };
-            let Some(old) = uri_to_path(&old) else {
+            let path = |u: &str| uri_to_path(&u.parse().ok()?);
+            let (Some(old), Some(new)) = (path(&f.old_uri), path(&f.new_uri)) else {
                 continue;
             };
             // the new file does not exist yet: canonicalize its directory
-            let Some(new) = uri_to_path(&new) else {
-                continue;
-            };
             let new = match (
                 new.parent().and_then(|d| std::fs::canonicalize(d).ok()),
                 new.file_name(),
@@ -115,16 +110,8 @@ impl Server {
                         continue;
                     }
                     if let Some(s) = quoted_at(&text, im.span, &im.path) {
-                        changes
-                            .entry(path_to_uri(importer))
-                            .or_default()
-                            .push(TextEdit::new(
-                                Range::new(
-                                    offset_to_pos(&text, s),
-                                    offset_to_pos(&text, s + im.path.len()),
-                                ),
-                                path,
-                            ));
+                        let edit = TextEdit::new(range(&text, s, s + im.path.len()), path);
+                        changes.entry(path_to_uri(importer)).or_default().push(edit);
                     }
                 }
             }
