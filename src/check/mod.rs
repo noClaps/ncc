@@ -415,6 +415,11 @@ impl Checker {
         }
     }
 
+    /// The symbol `name` declares in module `m`, if `declare_names` accepted it.
+    fn declared(&self, m: usize, name: &str) -> Option<Sym> {
+        self.mods[m].syms.get(name).map(|e| e.sym.clone())
+    }
+
     fn resolve_decls(&mut self, m: usize) {
         let ast = Rc::clone(&self.mods[m].ast);
         let none = HashMap::new();
@@ -422,8 +427,9 @@ impl Checker {
             let item_r: Result<()> = (|| {
                 match it {
                     ast::Item::Type(t) => {
-                        let Sym::Type(ty) = self.mods[m].syms[&t.name].sym else {
-                            unreachable!()
+                        // not declared: its name was rejected, which is reported already
+                        let Some(Sym::Type(ty)) = self.declared(m, &t.name) else {
+                            return Ok(());
                         };
                         let under = self.resolve_type(&t.ty, m, &none)?;
                         if let TyKind::Named(n) = self.types.kind(ty).clone() {
@@ -456,9 +462,9 @@ impl Checker {
                         }
                     }
                     ast::Item::Struct(s) if s.type_params.is_empty() => {
-                        let Sym::Struct { ty: Some(ty), .. } = self.mods[m].syms[&s.name].sym
+                        let Some(Sym::Struct { ty: Some(ty), .. }) = self.declared(m, &s.name)
                         else {
-                            unreachable!()
+                            return Ok(());
                         };
                         self.fill_struct(ty, s, m, &none)?;
                         let detail = self.type_detail(ty);
@@ -473,8 +479,8 @@ impl Checker {
                         self.idx_last_ty(&s.name, ty);
                     }
                     ast::Item::Enum(e) if e.type_params.is_empty() => {
-                        let Sym::Enum { ty: Some(ty), .. } = self.mods[m].syms[&e.name].sym else {
-                            unreachable!()
+                        let Some(Sym::Enum { ty: Some(ty), .. }) = self.declared(m, &e.name) else {
+                            return Ok(());
                         };
                         self.fill_enum(ty, e, m, &none)?;
                         let detail = self.type_detail(ty);
