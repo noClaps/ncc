@@ -1117,7 +1117,7 @@ impl Parser {
         }
     }
 
-    /// The binary operator at the current token and its precedence (`**` is parsed apart).
+    /// The binary operator at the current token and its precedence.
     fn binop_info(&self) -> Option<(BinOp, u8)> {
         let op = match self.peek() {
             Tok::Ident(s) if s == "or" => BinOp::Or,
@@ -1140,13 +1140,14 @@ impl Parser {
             Tok::Star => BinOp::Mul,
             Tok::Slash => BinOp::Div,
             Tok::Percent => BinOp::Mod,
+            Tok::StarStar => BinOp::Pow,
             _ => return None,
         };
         Some((op, op.prec()))
     }
 
     fn binary(&mut self, min: u8) -> Result<Expr> {
-        let mut lhs = self.pow()?;
+        let mut lhs = self.unary()?;
         let mut last_cmp = false;
         while let Some((op, prec)) = self.binop_info() {
             if prec < min {
@@ -1161,7 +1162,8 @@ impl Parser {
             let opsp = self.bump().span;
             self.check_line_break(opsp, op.symbol())?;
             self.skip_nl();
-            let rhs = self.binary(prec + 1)?;
+            // `**` is right-associative
+            let rhs = self.binary(if op == BinOp::Pow { prec } else { prec + 1 })?;
             last_cmp = prec == 3;
             let sp = lhs.span.to(rhs.span);
             lhs = Expr {
@@ -1194,22 +1196,6 @@ impl Parser {
             )
         };
         err(opsp, msg)
-    }
-
-    fn pow(&mut self) -> Result<Expr> {
-        let base = self.unary()?;
-        if self.at(&Tok::StarStar) {
-            let opsp = self.bump().span;
-            self.check_line_break(opsp, "**")?;
-            self.skip_nl();
-            let exp = self.pow()?; // right-assoc
-            let sp = base.span.to(exp.span);
-            return Ok(Expr {
-                kind: ExprKind::Binary(BinOp::Pow, Box::new(base), Box::new(exp)),
-                span: sp,
-            });
-        }
-        Ok(base)
     }
 
     fn unary(&mut self) -> Result<Expr> {
