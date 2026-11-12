@@ -149,6 +149,22 @@ impl TypeExpr {
         ts.iter().map(Self::show).collect::<Vec<_>>().join(", ")
     }
 
+    /// The types directly inside this one.
+    pub fn children(&self) -> Vec<&Self> {
+        match self {
+            Self::Named { args, .. } | Self::Tuple(args, _) => args.iter().collect(),
+            Self::Array(e, ..)
+            | Self::Optional(e, _)
+            | Self::ErrorUnion(e, _)
+            | Self::Fut(e, _) => {
+                vec![e]
+            }
+            Self::Map(k, v, _) => vec![k, v],
+            Self::Fn(ps, r, _) => ps.iter().chain(r.as_deref()).collect(),
+            Self::Const(_) => vec![],
+        }
+    }
+
     pub fn span(&self) -> Span {
         match self {
             Self::Named { span, .. } => *span,
@@ -572,8 +588,8 @@ pub mod visit {
         Stmt(&'a Stmt),
         Expr(&'a Expr),
         Block(&'a Block),
-        /// a function (declared or literal): its signature
-        Fn(&'a FnSig),
+        /// a function (declared or literal): its signature and body
+        Fn(&'a FnSig, &'a Block),
     }
 
     /// Visit every node of a module.
@@ -617,7 +633,7 @@ pub mod visit {
     }
 
     fn fn_spans<'a>(f: &'a FnDecl, out: &mut dyn FnMut(Node<'a>)) {
-        out(Node::Fn(&f.sig));
+        out(Node::Fn(&f.sig, &f.body));
         out(Node::Span(f.sig.span.to(f.body.span)));
         sig_spans(&f.sig, out);
         block_spans(&f.body, out);
@@ -640,29 +656,8 @@ pub mod visit {
 
     fn type_spans<'a>(t: &'a TypeExpr, out: &mut dyn FnMut(Node<'a>)) {
         out(Node::Span(t.span()));
-        match t {
-            TypeExpr::Named { args, .. } | TypeExpr::Tuple(args, _) => {
-                for a in args {
-                    type_spans(a, out);
-                }
-            }
-            TypeExpr::Const(_) => {}
-            TypeExpr::Array(x, _, _)
-            | TypeExpr::Optional(x, _)
-            | TypeExpr::ErrorUnion(x, _)
-            | TypeExpr::Fut(x, _) => type_spans(x, out),
-            TypeExpr::Map(k, v, _) => {
-                type_spans(k, out);
-                type_spans(v, out);
-            }
-            TypeExpr::Fn(ps, r, _) => {
-                for p in ps {
-                    type_spans(p, out);
-                }
-                if let Some(r) = r {
-                    type_spans(r, out);
-                }
-            }
+        for c in t.children() {
+            type_spans(c, out);
         }
     }
 
@@ -774,7 +769,7 @@ pub mod visit {
                 }
             }
             E::FnLit(sig, b) => {
-                out(Node::Fn(sig));
+                out(Node::Fn(sig, b));
                 sig_spans(sig, out);
                 block_spans(b, out);
             }

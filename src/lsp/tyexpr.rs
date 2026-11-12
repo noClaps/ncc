@@ -51,17 +51,6 @@ fn const_param<'a>(c: &'a ConstExpr, tps: &[String]) -> Option<&'a str> {
     }
 }
 
-/// The types directly inside `t`.
-fn children(t: &T) -> Vec<&T> {
-    match t {
-        T::Named { args, .. } | T::Tuple(args, _) => args.iter().collect(),
-        T::Array(e, ..) | T::Optional(e, _) | T::ErrorUnion(e, _) | T::Fut(e, _) => vec![e],
-        T::Map(k, v, _) => vec![k, v],
-        T::Fn(ps, r, _) => ps.iter().chain(r.as_deref()).collect(),
-        T::Const(_) => vec![],
-    }
-}
-
 /// Whether `t` names one of the generic parameters `tps`.
 pub fn mentions(t: &T, tps: &[String]) -> bool {
     let in_size = |c: &ConstExpr| {
@@ -72,7 +61,7 @@ pub fn mentions(t: &T, tps: &[String]) -> bool {
     param(t, tps).is_some()
         || matches!(t, T::Array(_, Some(n), _) if in_size(n))
         || matches!(t, T::Const(c) if in_size(c))
-        || children(t).into_iter().any(|c| mentions(c, tps))
+        || t.children().into_iter().any(|c| mentions(c, tps))
 }
 
 /// `t` with the generic parameters in `binds` replaced by what they stand for.
@@ -134,53 +123,34 @@ fn unify(p: &T, c: &T, tps: &[String], binds: &mut HashMap<String, T>) -> bool {
     if let Some(name) = param(p, tps) {
         return bind(name, c, binds);
     }
-    let all = |ps: &[T], cs: &[T], binds: &mut HashMap<String, T>| {
-        ps.len() == cs.len() && ps.iter().zip(cs).all(|(p, c)| unify(p, c, tps, binds))
-    };
-    match (p, c) {
+    let shape = match (p, c) {
         (
             T::Named {
                 module: pm,
                 name: pn,
-                args: pa,
                 ..
             },
             T::Named {
                 module: cm,
                 name: cn,
-                args: ca,
                 ..
             },
-        ) => pm == cm && pn == cn && all(pa, ca, binds),
-        (T::Array(pe, pn, _), T::Array(ce, cn, _)) => {
-            let size = match (pn, cn) {
-                (None, None) => true,
-                (Some(p), Some(c)) => match const_param(p, tps) {
-                    Some(n) => bind(n, &T::Const(c.clone()), binds),
-                    None => p.show() == c.show(),
-                },
-                _ => false,
-            };
-            size && unify(pe, ce, tps, binds)
-        }
-        (T::Map(pk, pv, _), T::Map(ck, cv, _)) => {
-            unify(pk, ck, tps, binds) && unify(pv, cv, tps, binds)
-        }
-        (T::Optional(p, _), T::Optional(c, _))
-        | (T::ErrorUnion(p, _), T::ErrorUnion(c, _))
-        | (T::Fut(p, _), T::Fut(c, _)) => unify(p, c, tps, binds),
-        (T::Tuple(ps, _), T::Tuple(cs, _)) => all(ps, cs, binds),
-        (T::Fn(pp, pr, _), T::Fn(cp, cr, _)) => {
-            all(pp, cp, binds)
-                && match (pr, cr) {
-                    (None, None) => true,
-                    (Some(p), Some(c)) => unify(p, c, tps, binds),
-                    _ => false,
-                }
-        }
+        ) => pm == cm && pn == cn,
+        (T::Array(_, pn, _), T::Array(_, cn, _)) => match (pn, cn) {
+            (None, None) => true,
+            (Some(p), Some(c)) => match const_param(p, tps) {
+                Some(n) => bind(n, &T::Const(c.clone()), binds),
+                None => p.show() == c.show(),
+            },
+            _ => false,
+        },
+        (T::Fn(_, pr, _), T::Fn(_, cr, _)) => pr.is_some() == cr.is_some(),
         (T::Const(p), T::Const(c)) => p.show() == c.show(),
-        _ => false,
-    }
+        _ => std::mem::discriminant(p) == std::mem::discriminant(c),
+    };
+    // the same kind of type, with matching children
+    let (ps, cs) = (p.children(), c.children());
+    shape && ps.len() == cs.len() && ps.into_iter().zip(cs).all(|(p, c)| unify(p, c, tps, binds))
 }
 
 /// Bind the generic parameter `name` to `c`, or check that it is bound to it already.

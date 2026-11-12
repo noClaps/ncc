@@ -429,7 +429,7 @@ impl Server {
                 codes::NEEDS_THROWING => {
                     // the innermost function around the error with a return type
                     let best = last_node(&module, |n| match n {
-                        Node::Fn(sig) if sig.span.start as usize <= s => Some(sig),
+                        Node::Fn(sig, _) if sig.span.start as usize <= s => Some(sig),
                         _ => None,
                     });
                     if let Some(sig) = best {
@@ -795,7 +795,7 @@ fn generate_function(
             _ => None,
         })?;
         let fsig = last_node(module, |n| match n {
-            Node::Fn(sig) if sig.span.start <= at => Some(sig),
+            Node::Fn(sig, _) if sig.span.start <= at => Some(sig),
             _ => None,
         });
         Some(fsig?.ret.as_ref()?.span())

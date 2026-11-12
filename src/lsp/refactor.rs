@@ -447,24 +447,16 @@ pub fn exit_points(module: &ast::Module, text: &str, off: usize) -> Option<Vec<R
     }
     // every function: (keyword offset, body)
     let mut fns: Vec<(usize, &ast::Block)> = Vec::new();
-    let fn_kw = |sig_start: u32| text[..sig_start as usize].rfind("fn").unwrap_or(0);
-    for it in &module.items {
-        if let ast::Item::Fn(f) = it {
-            fns.push((fn_kw(f.sig.span.start), &f.body));
+    walk(module, &mut |n| {
+        if let Node::Fn(sig, body) = n {
+            // a declaration's span is its name; a literal's, its keyword
+            let at = sig.span.start as usize;
+            let kw = match sig.name.as_str() {
+                "" => at,
+                _ => text[..at].rfind("fn").unwrap_or(0),
+            };
+            fns.push((kw, body));
         }
-    }
-    walk(module, &mut |n| match n {
-        Node::Stmt(st) => {
-            if let S::Fn(f) = &st.kind {
-                fns.push((fn_kw(f.sig.span.start), &f.body));
-            }
-        }
-        Node::Expr(x) => {
-            if let E::FnLit(_, b) = &x.kind {
-                fns.push((x.span.start as usize, b));
-            }
-        }
-        _ => {}
     });
     // the function the keyword belongs to: the one it opens, or the innermost around it
     let (kw, body) = if word == "fn" {
