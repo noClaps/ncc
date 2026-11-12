@@ -256,7 +256,7 @@ impl Server {
                             module.iter().map(|m| format!("{m}.")).collect::<String>()
                         ) =>
                 {
-                    generic_args(&args.iter().map(T::show).collect::<Vec<_>>())
+                    format!("<{}>", T::show_list(args))
                 }
                 _ => generic_args(&tps.iter().map(|t| slot(Some(t))).collect::<Vec<_>>()),
             };
