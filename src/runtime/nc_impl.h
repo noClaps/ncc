@@ -389,15 +389,6 @@ static bool nc_str_eq(const nc_str *a, const nc_str *b) {
   return a == b || (a->blen == b->blen && memcmp(a->data, b->data, (size_t)a->blen) == 0);
 }
 
-static uint64_t nc_hash_bytes(const void *p, size_t n) {
-  const unsigned char *s = p;
-  uint64_t h = 1469598103934665603ULL;
-  for (size_t i = 0; i < n; i++) {
-    h ^= s[i];
-    h *= 1099511628211ULL;
-  }
-  return h;
-}
 static inline uint64_t nc_hash_u64(uint64_t x) {
   x ^= x >> 33;
   x *= 0xff51afd7ed558ccdULL;
@@ -407,7 +398,11 @@ static inline uint64_t nc_hash_u64(uint64_t x) {
   return x;
 }
 static inline uint64_t nc_hash_mix(uint64_t h, uint64_t x) { return nc_hash_u64(h ^ (x + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2))); }
-static uint64_t nc_str_hash(const nc_str *s) { return nc_hash_bytes(s->data, (size_t)s->blen); }
+static uint64_t nc_str_hash(const nc_str *s) {
+  uint64_t h = 1469598103934665603ULL;
+  for (int64_t i = 0; i < s->blen; i++) h = (h ^ (unsigned char)s->data[i]) * 1099511628211ULL;
+  return h;
+}
 
 /* byte offset of the i-th scalar */
 static int64_t nc_str_offset(const nc_str *s, uint64_t i) {
