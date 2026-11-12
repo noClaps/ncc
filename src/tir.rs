@@ -279,4 +279,6 @@ pub struct Program {
     pub tests: Vec<Test>,
     /// `(os, cpu)` of the C compiler's target, when known (see `@target`)
     pub target: Option<(String, String)>,
+    /// Source file of the entry module, once release tree shaking has run (see `shake`)
+    pub entry_file: Option<u32>,
 }

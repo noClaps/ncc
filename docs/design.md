@@ -40,7 +40,16 @@
    Within a block, an effect-free assignment is also removed when a later assignment
    overwrites it before anything reads it. A `let` overwritten this way is merged into the
    later assignment. Nested blocks that declare nothing are flattened into their parent.
-7. **C generation** (`src/cgen/`): emits one readable C23 translation unit with the runtime
+7. **Import tree shaking** (`src/shake.rs`, release mode only): the checker picks the imported
+   top-level statements to run before folding, so a use that folding or dead code
+   elimination removes can leave an imported initialiser behind. This pass repeats the choice
+   on the final program: starting from the entry module's code and tests, it follows the
+   functions and globals that kept code references, and drops the imported statements that
+   initialise nothing reached. It alternates with dead code elimination until neither
+   changes anything. Extern files whose functions are never reached are left out of the
+   build. Unreached functions, types and runtime helpers are dropped from the C output by
+   name in every mode (`src/cgen/prune.rs`).
+8. **C generation** (`src/cgen/`): emits one readable C23 translation unit with the runtime
    embedded (the public header `src/runtime/nc.h`, then the implementation
    `src/runtime/nc_impl.h`), then calls the C compiler. Debug builds use
    `-O0 -g -fno-omit-frame-pointer`; release builds use `-O3 -DNDEBUG`, which also inlines.

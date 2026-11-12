@@ -318,6 +318,7 @@ impl Checker {
             main,
             tests: std::mem::take(&mut self.tests),
             target: None,
+            entry_file: None,
         }
     }
 

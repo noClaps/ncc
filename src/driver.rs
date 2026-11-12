@@ -29,6 +29,7 @@ pub struct Options {
 /// compilation target is then needed for `@target`.
 fn frontend(file: &Path, sm: &mut SourceMap, release: bool, codegen: bool) -> Option<Program> {
     let r = crate::modules::load_with(sm, file, &Default::default()).map(|(graph, load_errors)| {
+        let entry_file = graph.modules[0].file;
         let (mut p, mut errors, index) = crate::check::check(graph, false);
         errors.extend(load_errors);
         if codegen && errors.is_empty() && uses_target(&p) {
@@ -69,7 +70,12 @@ fn frontend(file: &Path, sm: &mut SourceMap, release: bool, codegen: bool) -> Op
             }
         }
         if release && errors.is_empty() {
+            // dropping unused imported initialisers can make more code dead, and the reverse
             crate::dce::run(&mut p);
+            while crate::shake::run(&mut p, entry_file) {
+                crate::dce::run(&mut p);
+            }
+            p.entry_file = Some(entry_file);
         }
         (p, errors)
     });
@@ -206,10 +212,12 @@ fn compile(
     format: Format,
     out: &Path,
 ) -> bool {
-    // extern C files go into the generated translation unit
+    // extern C files go into the generated translation unit; release builds leave out files
+    // whose functions are never called
+    let reached = p.entry_file.map(|f| crate::shake::reach(p, f).externs);
     let mut files: Vec<&Path> = Vec::new();
-    for x in &p.externs {
-        if !files.contains(&x.file.as_path()) {
+    for (i, x) in p.externs.iter().enumerate() {
+        if reached.as_ref().is_none_or(|r| r.contains(&i)) && !files.contains(&x.file.as_path()) {
             files.push(&x.file);
         }
     }

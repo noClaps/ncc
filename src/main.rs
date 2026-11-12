@@ -11,6 +11,7 @@ mod lint;
 mod lsp;
 mod modules;
 mod parser;
+mod shake;
 mod tir;
 mod types;
 

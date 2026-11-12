@@ -576,3 +576,62 @@ fn unreachable_after_endless_loop() {
     assert!(!out.exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Release builds only keep the imported code that the program still uses after folding.
+#[test]
+fn release_tree_shakes_imports() {
+    let dir = std::env::temp_dir().join(format!("ncc-shake-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("lib")).unwrap();
+    let write = |name: &str, src: &str| std::fs::write(dir.join(name), src).unwrap();
+    write(
+        "lib/ext.c",
+        "#include <stdint.h>\nint64_t ext_twice(int64_t x) { return x * 2; }\n",
+    );
+    write(
+        "lib/big.c",
+        "#include <stdint.h>\nstatic const char BIG_TABLE[] = \"unused\";\nint64_t ext_big(int64_t x) { return x + (int64_t)sizeof BIG_TABLE; }\n",
+    );
+    write(
+        "lib/m.nc",
+        "extern \"./ext.c\" as a {\n  fn twice(int x) int = \"ext_twice\"\n}\n\
+         extern \"./big.c\" as b {\n  fn big(int x) int = \"ext_big\"\n}\n\
+         fn squares(uint n) uint[] {\n  mut uint[] out = []\n  mut uint i = 0\n  while i < n {\n    out = out <> [i * i]\n    i = i + 1\n  }\n  return out\n}\n\
+         pub uint[] TABLE = squares(@args().len + 5)\n\
+         pub fn first() uint {\n  return TABLE[1]\n}\n\
+         pub fn twice(int x) int {\n  return a.twice(x)\n}\n\
+         pub fn big(int x) int {\n  return b.big(x)\n}\n",
+    );
+    // `first` is only called in a branch that folding removes
+    write(
+        "main.nc",
+        "import { \"./lib/m\" as m }\nbool DEBUG = false\nstr[] args = @args()\nmut int n = 0\nfor _a in args {\n  n = n + 1\n}\n\
+         if DEBUG {\n  true -> { @println(m.first()) }\n  _ -> {}\n}\n@println(m.twice(n))\n",
+    );
+    let nc = dir.join("main.nc");
+    let build = |release: bool| {
+        let out = dir.join(if release { "release.c" } else { "debug.c" });
+        let mut args = vec!["build", "-f", "c", "-o", out.to_str().unwrap()];
+        if release {
+            args.push("-r");
+        }
+        let (_, err, code) = run(&args, &nc);
+        assert_eq!(code, 0, "{err}");
+        std::fs::read_to_string(out).unwrap()
+    };
+
+    let debug = build(false);
+    assert!(
+        debug.contains("TABLE") && debug.contains("ext_big("),
+        "{debug}"
+    );
+    let c = build(true);
+    // the unused initialiser and the function it calls, and the extern file never called
+    assert!(!c.contains("TABLE"), "{c}");
+    assert!(!c.contains("squares"), "{c}");
+    assert!(!c.contains("big.c") && !c.contains("ext_big"), "{c}");
+    assert!(c.contains("ext_twice(int64_t x)"), "{c}");
+
+    let (out, err, code) = run(&["run", "-r"], &nc);
+    assert_eq!((out.as_str(), code), ("2\n", 0), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
