@@ -8,7 +8,7 @@
 //! It relies on the shape of generated code: one statement per line, `{` at the end of a line
 //! opening a block and `}` at the start of a line closing one.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::is_ident;
 
@@ -88,33 +88,25 @@ fn flatten_blocks(lines: &[&str], all: bool) -> Vec<String> {
 
 /// Drop `(void)x;` lines for variables that are mentioned elsewhere besides their declaration.
 fn strip_void_markers<'a>(lines: &[&'a str]) -> Vec<&'a str> {
-    let marker = |t: &str| -> Option<String> {
-        let name = t.strip_prefix("(void)")?.strip_suffix(';')?;
-        is_ident(name).then(|| name.to_string())
-    };
-    let names: HashSet<String> = lines.iter().filter_map(|l| marker(l.trim())).collect();
-    if names.is_empty() {
-        return lines.to_vec();
+    fn marker(l: &str) -> Option<&str> {
+        let name = l.trim().strip_prefix("(void)")?.strip_suffix(';')?;
+        is_ident(name).then_some(name)
     }
-    let mut uses: std::collections::HashMap<&str, usize> = Default::default();
-    for l in lines {
-        if marker(l.trim()).is_some() {
-            continue;
-        }
-        for w in super::idents(l) {
-            if names.contains(w) {
-                *uses.entry(w).or_default() += 1;
-            }
-        }
-    }
+    let uses = mentions(lines.iter().filter(|l| marker(l).is_none()).copied());
     // one mention is the declaration; more means the variable is used
-    lines
-        .iter()
-        .filter(|l| {
-            marker(l.trim()).is_none_or(|n| uses.get(n.as_str()).copied().unwrap_or(0) <= 1)
-        })
+    (lines.iter())
+        .filter(|l| marker(l).is_none_or(|n| uses.get(n).is_none_or(|&u| u <= 1)))
         .copied()
         .collect()
+}
+
+/// How many times each identifier is mentioned in the lines.
+fn mentions<'a>(lines: impl Iterator<Item = &'a str>) -> HashMap<&'a str, usize> {
+    let mut uses = HashMap::new();
+    for w in lines.flat_map(super::idents) {
+        *uses.entry(w).or_default() += 1;
+    }
+    uses
 }
 
 /// Drop bare `{` `}` pairs with nothing between them.
@@ -144,14 +136,7 @@ fn drop_unused_temps(lines: &[&str]) -> Vec<String> {
         (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) && t.ends_with(';'))
             .then_some((decl.len() + 3, name))
     }
-    let mut uses: std::collections::HashMap<&str, usize> = Default::default();
-    for l in lines {
-        for w in super::idents(l) {
-            if w.starts_with('t') {
-                *uses.entry(w).or_default() += 1;
-            }
-        }
-    }
+    let uses = mentions(lines.iter().copied());
     lines
         .iter()
         .map(|l| {

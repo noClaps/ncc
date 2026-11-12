@@ -63,18 +63,6 @@ impl<'t> TypeGen<'t> {
             return n.clone();
         }
         let base = match self.t.kind(t).clone() {
-            TyKind::Void
-            | TyKind::Never
-            | TyKind::Bool
-            | TyKind::Byte
-            | TyKind::Int
-            | TyKind::UInt
-            | TyKind::Float
-            | TyKind::Char
-            | TyKind::Str
-            | TyKind::Error
-            | TyKind::Struct(_)
-            | TyKind::Enum(_) => ident(&self.t.show(t)),
             TyKind::Array(e) => format!("arr_{}", self.mangle(e)),
             TyKind::Fixed(e, n) => format!("arr{n}_{}", self.mangle(e)),
             TyKind::Map(k, v) => format!("map_{}_{}", self.mangle(k), self.mangle(v)),
@@ -91,9 +79,10 @@ impl<'t> TypeGen<'t> {
             }
             TyKind::Fut(i) => format!("fut_{}", self.mangle(i)),
             TyKind::Mutex(i) => format!("mutex_{}", self.mangle(i)),
-            TyKind::Named(_) => unreachable!(),
             TyKind::Const(_, v) if v < 0 => format!("m{}", -v),
             TyKind::Const(_, v) => v.to_string(),
+            // built-in and nominal types
+            _ => ident(&self.t.show(t)),
         };
         let mut name = base;
         if name.len() > 60 {

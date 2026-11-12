@@ -24,95 +24,41 @@ enum Kind {
 }
 
 /// Identifiers declared by the standard headers the runtime uses.
-const HEADERS: &[(&str, &[&str])] = &[
-    (
-        "math.h",
-        &[
-            "isnan", "isinf", "pow", "fmod", "NAN", "INFINITY", "HUGE_VAL",
-        ],
-    ),
+const HEADERS: &[(&str, &str)] = &[
+    ("math.h", "isnan isinf pow fmod NAN INFINITY HUGE_VAL"),
     (
         "pthread.h",
-        &[
-            "pthread_t",
-            "pthread_mutex_t",
-            "pthread_cond_t",
-            "pthread_attr_t",
-            "pthread_mutex_lock",
-            "pthread_mutex_unlock",
-            "pthread_mutex_init",
-            "pthread_mutex_destroy",
-            "pthread_cond_init",
-            "pthread_cond_destroy",
-            "pthread_cond_wait",
-            "pthread_cond_signal",
-            "pthread_cond_broadcast",
-            "pthread_create",
-            "pthread_detach",
-            "pthread_self",
-            "pthread_equal",
-            "pthread_attr_init",
-            "pthread_attr_setstacksize",
-            "pthread_attr_destroy",
-            "PTHREAD_MUTEX_INITIALIZER",
-            "PTHREAD_COND_INITIALIZER",
-        ],
+        "pthread_t pthread_mutex_t pthread_cond_t pthread_attr_t pthread_mutex_lock \
+         pthread_mutex_unlock pthread_mutex_init pthread_mutex_destroy \
+         pthread_cond_init pthread_cond_destroy pthread_cond_wait pthread_cond_signal \
+         pthread_cond_broadcast pthread_create pthread_detach pthread_self \
+         pthread_equal pthread_attr_init pthread_attr_setstacksize pthread_attr_destroy \
+         PTHREAD_MUTEX_INITIALIZER PTHREAD_COND_INITIALIZER",
     ),
-    ("setjmp.h", &["jmp_buf", "setjmp", "longjmp"]),
+    ("setjmp.h", "jmp_buf setjmp longjmp"),
     (
         "stdatomic.h",
-        &[
-            "atomic_init",
-            "atomic_load_explicit",
-            "atomic_fetch_add_explicit",
-            "atomic_fetch_sub_explicit",
-            "memory_order_relaxed",
-            "memory_order_acquire",
-            "memory_order_acq_rel",
-        ],
+        "atomic_init atomic_load_explicit atomic_fetch_add_explicit \
+         atomic_fetch_sub_explicit memory_order_relaxed memory_order_acquire \
+         memory_order_acq_rel",
     ),
-    ("stdbool.h", &["bool", "true", "false"]),
-    ("stdckdint.h", &["ckd_add", "ckd_sub", "ckd_mul"]),
-    (
-        "stddef.h",
-        &["size_t", "max_align_t", "unreachable", "NULL", "ptrdiff_t"],
-    ),
+    ("stdbool.h", "bool true false"),
+    ("stdckdint.h", "ckd_add ckd_sub ckd_mul"),
+    ("stddef.h", "size_t max_align_t unreachable NULL ptrdiff_t"),
     (
         "stdint.h",
-        &[
-            "int8_t",
-            "int16_t",
-            "int32_t",
-            "int64_t",
-            "uint8_t",
-            "uint16_t",
-            "uint32_t",
-            "uint64_t",
-            "INT64_C",
-            "UINT64_C",
-            "UINT32_C",
-            "INT64_MIN",
-            "INT64_MAX",
-            "UINT64_MAX",
-        ],
+        "int8_t int16_t int32_t int64_t uint8_t uint16_t uint32_t uint64_t INT64_C \
+         UINT64_C UINT32_C INT64_MIN INT64_MAX UINT64_MAX",
     ),
     (
         "stdio.h",
-        &[
-            "FILE", "stdout", "stderr", "fwrite", "fputs", "fputc", "fflush", "printf", "fprintf",
-            "snprintf", "puts",
-        ],
+        "FILE stdout stderr fwrite fputs fputc fflush printf fprintf snprintf puts",
     ),
     (
         "stdlib.h",
-        &[
-            "malloc", "calloc", "realloc", "free", "exit", "strtod", "atoi", "getenv",
-        ],
+        "malloc calloc realloc free exit strtod atoi getenv",
     ),
-    (
-        "string.h",
-        &["memcpy", "memcmp", "memset", "strlen", "strchr"],
-    ),
+    ("string.h", "memcpy memcmp memset strlen strchr"),
 ];
 
 /// Names of the runtime's public (non-`static`) functions, which extern C files may call.
@@ -172,7 +118,7 @@ pub fn prune(src: &str, extra_roots: &[String]) -> String {
         let wanted = match &it.kind {
             Kind::Guard => false,
             Kind::Include(h) => match HEADERS.iter().find(|(name, _)| name == h) {
-                Some((_, ids)) => ids.iter().any(|id| used.contains(*id)),
+                Some((_, ids)) => ids.split_whitespace().any(|id| used.contains(id)),
                 None => true,
             },
             Kind::Decl(_) => keep[i],
