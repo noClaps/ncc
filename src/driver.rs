@@ -150,7 +150,6 @@ fn detect_target() -> Result<(String, String), String> {
     Ok((os.to_string(), cpu.to_string()))
 }
 
-/// The C compiler command from `$CC`, falling back to `cc`.
 /// Linker flags for release executables on `os` (as named by `detect_target`): drop unreached
 /// code and data, unneeded shared libraries and the symbol table. None when the linker is
 /// unknown.
@@ -166,6 +165,7 @@ fn release_link_flags(os: Option<&str>) -> &'static [&'static str] {
     }
 }
 
+/// The C compiler command from `$CC`, falling back to `cc`.
 fn cc_command() -> (String, Vec<String>) {
     let cc = std::env::var("CC")
         .ok()
@@ -329,12 +329,17 @@ fn compile(
     }
 }
 
+fn exit(ok: bool) -> ExitCode {
+    if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
 pub fn check(o: &Options) -> ExitCode {
     let mut sm = SourceMap::default();
-    match frontend(o.file.as_ref().unwrap(), &mut sm, false, false) {
-        Some(_) => ExitCode::SUCCESS,
-        None => ExitCode::FAILURE,
-    }
+    exit(frontend(o.file.as_ref().unwrap(), &mut sm, false, false).is_some())
 }
 
 fn format_from_ext(p: &Path) -> Format {
@@ -362,11 +367,7 @@ pub fn build(o: &Options) -> ExitCode {
     let Some(p) = frontend(file, &mut sm, o.release, true) else {
         return ExitCode::FAILURE;
     };
-    if compile(&p, &sm, Mode::Run, o.release, format, &out) {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    }
+    exit(compile(&p, &sm, Mode::Run, o.release, format, &out))
 }
 
 fn run_exe(exe: &Path, args: &[String]) -> ExitCode {
@@ -386,7 +387,8 @@ fn run_exe(exe: &Path, args: &[String]) -> ExitCode {
     }
 }
 
-fn build_and_run(o: &Options, mode: Mode) -> ExitCode {
+/// Build the program to a temporary executable and run it (`mode` picks its tests or itself).
+pub fn run(o: &Options, mode: Mode) -> ExitCode {
     let file = o.file.as_ref().unwrap();
     let mut sm = SourceMap::default();
     let Some(p) = frontend(file, &mut sm, o.release, true) else {
@@ -400,14 +402,6 @@ fn build_and_run(o: &Options, mode: Mode) -> ExitCode {
         return ExitCode::FAILURE;
     }
     run_exe(&exe, &o.args)
-}
-
-pub fn run(o: &Options) -> ExitCode {
-    build_and_run(o, Mode::Run)
-}
-
-pub fn test(o: &Options) -> ExitCode {
-    build_and_run(o, Mode::Test)
 }
 
 pub fn init(name: Option<String>) -> ExitCode {

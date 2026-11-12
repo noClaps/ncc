@@ -115,6 +115,11 @@ Options:
                  (default: directory name)
   -h, --help     Show this help and exit.";
 
+fn show_help(text: &str) -> ExitCode {
+    println!("{text}");
+    ExitCode::SUCCESS
+}
+
 fn usage_error(msg: &str, help: &str) -> ExitCode {
     eprintln!("error: {msg}\n\n{help}");
     ExitCode::from(2)
@@ -128,10 +133,7 @@ fn main() -> ExitCode {
     };
     let rest = &args[1..];
     match cmd.as_str() {
-        "-h" | "--help" => {
-            println!("{HELP}");
-            ExitCode::SUCCESS
-        }
+        "-h" | "--help" => show_help(HELP),
         "fmt" => {
             let mut file: Option<String> = None;
             let mut check = false;
@@ -140,10 +142,7 @@ fn main() -> ExitCode {
             let mut i = 0;
             while i < rest.len() {
                 match rest[i].as_str() {
-                    "-h" | "--help" => {
-                        println!("{HELP_FMT}");
-                        return ExitCode::SUCCESS;
-                    }
+                    "-h" | "--help" => return show_help(HELP_FMT),
                     "--check" => check = true,
                     "-o" | "--output" => {
                         // the value is optional: take the next argument only when it is not the
@@ -184,10 +183,7 @@ fn main() -> ExitCode {
             driver::fmt(std::path::Path::new(&file), check, output)
         }
         "lsp" => match rest.first().map(String::as_str) {
-            Some("-h" | "--help") => {
-                println!("{HELP_LSP}");
-                ExitCode::SUCCESS
-            }
+            Some("-h" | "--help") => show_help(HELP_LSP),
             Some(a) => usage_error(&format!("unexpected argument `{a}`"), HELP_LSP),
             None => lsp::run(),
         },
@@ -196,10 +192,7 @@ fn main() -> ExitCode {
             let mut it = rest.iter();
             while let Some(a) = it.next() {
                 match a.as_str() {
-                    "-h" | "--help" => {
-                        println!("{HELP_INIT}");
-                        return ExitCode::SUCCESS;
-                    }
+                    "-h" | "--help" => return show_help(HELP_INIT),
                     "--name" => match it.next() {
                         Some(n) => name = Some(n.clone()),
                         None => return usage_error("`--name` requires a value", HELP_INIT),
@@ -221,10 +214,7 @@ fn main() -> ExitCode {
             while let Some(a) = it.next() {
                 let a = a.as_str();
                 match a {
-                    "-h" | "--help" => {
-                        println!("{help}");
-                        return ExitCode::SUCCESS;
-                    }
+                    "-h" | "--help" => return show_help(help),
                     // everything after `--` goes to the program, options included
                     "--" if cmd == "run" || cmd == "test" => {
                         opts.args = it.cloned().collect();
@@ -269,9 +259,9 @@ fn main() -> ExitCode {
             }
             match cmd.as_str() {
                 "build" => driver::build(&opts),
-                "run" => driver::run(&opts),
+                "run" => driver::run(&opts, cgen::Mode::Run),
                 "check" => driver::check(&opts),
-                _ => driver::test(&opts),
+                _ => driver::run(&opts, cgen::Mode::Test),
             }
         }
         _ => usage_error(&format!("unknown command `{cmd}`"), HELP),
