@@ -123,21 +123,26 @@ struct Printer<'a> {
 
 const INDENT: &str = "  ";
 
-/// A list entry: its source offset and a printer for it at a given indentation.
+/// A list entry: its source range and a printer for it at a given indentation.
 type EntryFn<'e, 'a> = Box<dyn Fn(&mut Printer<'a>, usize) -> String + 'e>;
-type Entry<'e, 'a> = (usize, EntryFn<'e, 'a>);
-
-fn entry<'e, 'a>(
+struct Entry<'e, 'a> {
     start: usize,
-    f: impl Fn(&mut Printer<'a>, usize) -> String + 'e,
-) -> Entry<'e, 'a> {
-    (start, Box::new(f))
+    end: usize,
+    show: EntryFn<'e, 'a>,
+}
+
+fn entry<'e, 'a>(span: Span, f: impl Fn(&mut Printer<'a>, usize) -> String + 'e) -> Entry<'e, 'a> {
+    Entry {
+        start: span.start as usize,
+        end: span.end as usize,
+        show: Box::new(f),
+    }
 }
 
 /// One entry per expression.
 fn expr_entries<'a>(xs: &[Expr]) -> Vec<Entry<'_, 'a>> {
     xs.iter()
-        .map(|x| entry(x.span.start as usize, move |p, i| p.expr(x, i)))
+        .map(|x| entry(x.span, move |p, i| p.expr(x, i)))
         .collect()
 }
 
@@ -180,6 +185,27 @@ impl<'a> Printer<'a> {
 
     fn has_comment_in(&self, start: usize, end: usize) -> bool {
         self.comments.iter().any(|&(s, _)| s >= start && s < end)
+    }
+
+    /// The first `c` at or after `from` that is not inside a comment.
+    fn find_outside_comments(&self, from: usize, c: char) -> usize {
+        let mut at = from;
+        while let Some(k) = self.src[at..].find(c) {
+            let pos = at + k;
+            match self.comments.iter().find(|&&(s, e)| s <= pos && pos < e) {
+                Some(&(_, e)) => at = e,
+                None => return pos,
+            }
+        }
+        self.src.len()
+    }
+
+    /// Whether the bracketed list from `open` to `end` holds comments of its own: comments
+    /// between its entries (given by their ranges) rather than inside one of them.
+    fn list_has_comments(&self, open: usize, end: usize, entries: &[(usize, usize)]) -> bool {
+        self.comments
+            .iter()
+            .any(|&(s, _)| s > open && s < end && !entries.iter().any(|&(a, b)| s >= a && s < b))
     }
 
     /// Is there an empty line in the source between two offsets?
@@ -385,17 +411,14 @@ impl<'a> Printer<'a> {
         let entries = s
             .params
             .iter()
-            .map(|p| entry(p.span.start as usize, move |_, _| p.show()))
+            .map(|p| entry(p.span, move |_, _| p.show()))
             .collect();
-        // the parameter list ends at the `)` after the last parameter
-        let end = s
-            .params
-            .last()
-            .map(|p| p.span.end as usize)
-            .and_then(|e| self.src[e..].find(')').map(|i| e + i))
-            .unwrap_or(s.span.end as usize);
+        // the parameter list runs from the first `(` to the `)` after the last parameter
+        let open = self.find_outside_comments(s.span.start as usize, '(');
+        let last = s.params.last().map_or(open + 1, |p| p.span.end as usize);
+        let end = self.find_outside_comments(last, ')');
         let id = SIG_ID + s.span.start as usize;
-        let params = self.bracketed("()", entries, false, indent, end, Some(id));
+        let params = self.bracketed("()", entries, false, indent, open, end, Some(id));
         let mut out = if named {
             format!(
                 "fn {}{}{params}",
@@ -555,23 +578,28 @@ impl<'a> Printer<'a> {
         items.join(", ")
     }
 
-    /// Bracketed list (`brackets` is the opening and closing character), one entry per line if
-    /// the original spanned several lines. Line wrapping knows it by `id`, by default the source
-    /// end offset.
+    /// Bracketed list (`brackets` is the opening and closing character, the opening one at
+    /// source offset `start`, the closing one at `end`), one entry per line if the original
+    /// spanned several lines or the list holds comments of its own. Line wrapping knows it by
+    /// `id`, by default `end`.
+    #[allow(clippy::too_many_arguments)]
     fn bracketed(
         &mut self,
         brackets: &str,
         entries: Vec<Entry<'_, 'a>>,
         multi: bool,
         indent: usize,
+        start: usize,
         end: usize,
         id: Option<usize>,
     ) -> String {
         let (open, close) = brackets.split_at(1);
         let id = id.unwrap_or(end);
-        let multi = multi || self.force.contains(&id);
-        if !multi || entries.is_empty() {
-            let items: Vec<String> = entries.iter().map(|(_, f)| f(self, indent)).collect();
+        let ranges: Vec<(usize, usize)> = entries.iter().map(|e| (e.start, e.end)).collect();
+        let comments = self.list_has_comments(start, end, &ranges);
+        let multi = ((multi || self.force.contains(&id)) && !entries.is_empty()) || comments;
+        if !multi {
+            let items: Vec<String> = entries.iter().map(|e| (e.show)(self, indent)).collect();
             let mark = if entries.is_empty() {
                 String::new()
             } else {
@@ -582,14 +610,22 @@ impl<'a> Printer<'a> {
         let saved = std::mem::take(&mut self.out);
         self.out.push_str(open);
         self.out.push('\n');
-        for (start, f) in &entries {
-            self.flush_comments(*start, indent + 1, false);
-            let text = f(self, indent + 1);
+        self.cursor = start + 1;
+        for (i, e) in entries.iter().enumerate() {
+            self.flush_comments(e.start, indent + 1, i == 0);
+            let text = (e.show)(self, indent + 1);
             self.out.push_str(&ind(indent + 1));
             self.out.push_str(&text);
             self.out.push_str(",\n");
+            // a comment after the entry (and its comma) on the same line stays at its end
+            let after = e.end + usize::from(self.src[e.end..].starts_with(','));
+            self.cursor = after;
+            let next = entries.get(i + 1).map_or(end, |n| n.start);
+            if self.comments.get(self.next).is_some_and(|c| c.0 < next) {
+                self.trailing_comment(after);
+            }
         }
-        self.flush_comments(end, indent + 1, false);
+        self.flush_comments(end, indent + 1, entries.is_empty());
         self.out.push_str(&ind(indent));
         self.out.push_str(close);
         std::mem::replace(&mut self.out, saved)
@@ -626,12 +662,15 @@ impl<'a> Printer<'a> {
                 let callee = self.paren(f, indent, prec(f) < POSTFIX);
                 let multi = (self.multiline(e.span) && args.len() > 1 && self.args_multiline(e))
                     || (self.force.contains(&(e.span.end as usize)) && !args.is_empty());
-                if !multi && hugs(args) {
+                let open = self.find_outside_comments(f.span.end as usize, '(');
+                let end = e.span.end as usize;
+                let entries = expr_entries(args);
+                let ranges: Vec<_> = entries.iter().map(|e| (e.start, e.end)).collect();
+                if !multi && hugs(args) && !self.list_has_comments(open, end, &ranges) {
                     // `f([...])`: the inner list breaks, not the call
                     return format!("{callee}({})", self.list(args, indent));
                 }
-                let entries = expr_entries(args);
-                let list = self.bracketed("()", entries, multi, indent, e.span.end as usize, None);
+                let list = self.bracketed("()", entries, multi, indent, open, end, None);
                 format!("{callee}{list}")
             }
             ExprKind::Generic(inner, args) => {
@@ -641,13 +680,16 @@ impl<'a> Printer<'a> {
             ExprKind::Builtin(name, ty, args) => {
                 let mut entries = Vec::new();
                 if let Some(t) = ty {
-                    entries.push(entry(t.span().start as usize, move |_, _| t.show()));
+                    entries.push(entry(t.span(), move |_, _| t.show()));
                 }
                 entries.extend(expr_entries(args));
-                if ty.is_none() && hugs(args) {
+                let open = self.find_outside_comments(e.span.start as usize, '(');
+                let end = e.span.end as usize;
+                let ranges: Vec<_> = entries.iter().map(|e| (e.start, e.end)).collect();
+                if ty.is_none() && hugs(args) && !self.list_has_comments(open, end, &ranges) {
                     return format!("@{name}({})", self.list(args, indent));
                 }
-                let list = self.bracketed("()", entries, false, indent, e.span.end as usize, None);
+                let list = self.bracketed("()", entries, false, indent, open, end, None);
                 format!("@{name}{list}")
             }
             ExprKind::Field(b, name) => {
@@ -670,19 +712,23 @@ impl<'a> Printer<'a> {
             ExprKind::Array(items) => {
                 let multi = self.multiline(e.span);
                 let entries = expr_entries(items);
-                self.bracketed("[]", entries, multi, indent, e.span.end as usize, None)
+                let open = self.find_outside_comments(e.span.start as usize, '[');
+                let end = e.span.end as usize;
+                self.bracketed("[]", entries, multi, indent, open, end, None)
             }
             ExprKind::Map(entries) => {
                 let multi = self.multiline(e.span);
                 let entries = entries
                     .iter()
                     .map(|(k, v)| {
-                        entry(k.span.start as usize, move |p, i| {
+                        entry(k.span.to(v.span), move |p, i| {
                             format!("{}: {}", p.expr(k, i), p.expr(v, i))
                         })
                     })
                     .collect();
-                self.bracketed("[]", entries, multi, indent, e.span.end as usize, None)
+                let open = self.find_outside_comments(e.span.start as usize, '[');
+                let end = e.span.end as usize;
+                self.bracketed("[]", entries, multi, indent, open, end, None)
             }
             ExprKind::Struct(ty, fields) => {
                 let t = self.expr(ty, indent);
@@ -690,12 +736,14 @@ impl<'a> Printer<'a> {
                 let entries = fields
                     .iter()
                     .map(|(name, v, sp)| {
-                        entry(sp.start as usize, move |p, i| {
+                        entry(sp.to(v.span), move |p, i| {
                             format!(".{name} = {}", p.expr(v, i))
                         })
                     })
                     .collect();
-                let body = self.bracketed("{}", entries, multi, indent, e.span.end as usize, None);
+                let open = self.find_outside_comments(ty.span.end as usize, '{');
+                let end = e.span.end as usize;
+                let body = self.bracketed("{}", entries, multi, indent, open, end, None);
                 format!("{t}{body}")
             }
             ExprKind::FnLit(sig, body) => {
@@ -854,6 +902,27 @@ mod tests {
         assert_eq!(fmt(src), src);
         let src = "int a = 1\n\nextern \"m.h\" as m {\n  // g\n  fn g() = \"g\"\n}\n";
         assert_eq!(fmt(src), src);
+    }
+
+    #[test]
+    fn comments_in_parameter_lists() {
+        let src = "fn f(int a, // first\n  int b) int {\n  return a + b\n}\n";
+        let out = "fn f(\n  int a, // first\n  int b,\n) int {\n  return a + b\n}\n";
+        assert_eq!(fmt(src), out);
+        assert_eq!(fmt(out), out);
+        let src = "fn g(\n  // lead\n  int a, int b) {}\n";
+        let out = "fn g(\n  // lead\n  int a,\n  int b,\n) {}\n";
+        assert_eq!(fmt(src), out);
+        assert_eq!(fmt(out), out);
+        let src = "extern \"m.h\" as m {\n  fn h(int a, // c\n    int b) = \"h\"\n}\n";
+        let out = "extern \"m.h\" as m {\n  fn h(\n    int a, // c\n    int b,\n  ) = \"h\"\n}\n";
+        assert_eq!(fmt(src), out);
+        assert_eq!(fmt(out), out);
+        // call arguments: a comment after the last one stays there
+        let src = "int y = f(1, 2, // two\n)\n";
+        let out = "int y = f(\n  1,\n  2, // two\n)\n";
+        assert_eq!(fmt(src), out);
+        assert_eq!(fmt(out), out);
     }
 
     #[test]
