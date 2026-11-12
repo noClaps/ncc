@@ -232,7 +232,10 @@ impl Checker {
                 };
                 let (fid, fty) = self.check_nested_fn(sig, body, None)?;
                 let var = self.declare_var(name, fty, false, false, *name_span)?;
-                push(out, SK::Let(var, closure(fid, fty, value.span)));
+                push(
+                    out,
+                    SK::Let(var, Expr::new(EK::Closure(fid), fty, value.span)),
+                );
             }
             S::Assign { target, value } => {
                 let (place, ty) = self.check_place(target)?;
@@ -446,11 +449,7 @@ impl Checker {
                 let TyKind::Mutex(inner) = *self.types.kind(ty) else {
                     return err(*name_span, format!("`{name}` is not a mutex"));
                 };
-                let mutex = Expr {
-                    kind: EK::Var(vr),
-                    ty,
-                    span: *name_span,
-                };
+                let mutex = Expr::new(EK::Var(vr), ty, *name_span);
                 let id = self.new_jump();
                 self.push_scope();
                 let alias = self.declare_local(name, inner, true, LocalKind::LockAlias, *name_span);
@@ -476,7 +475,10 @@ impl Checker {
                 }
                 let (fid, fty) = self.check_nested_fn(&f.sig, &f.body, Some(&f.sig.name))?;
                 let var = self.declare_var(&f.sig.name, fty, false, false, f.sig.span)?;
-                push(out, SK::Let(var, closure(fid, fty, f.sig.span)));
+                push(
+                    out,
+                    SK::Let(var, Expr::new(EK::Closure(fid), fty, f.sig.span)),
+                );
             }
             S::Assert(e) => {
                 if !self.in_test() {
@@ -681,14 +683,6 @@ impl Checker {
             );
         }
         Ok(i)
-    }
-}
-
-fn closure(fid: FuncId, ty: TyId, span: Span) -> Expr {
-    Expr {
-        kind: EK::Closure(fid),
-        ty,
-        span,
     }
 }
 

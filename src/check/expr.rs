@@ -16,11 +16,7 @@ impl Checker {
         self.idx_fn_ref(f, name, span);
         let (ps, r) = self.sigs[f].clone();
         let ty = self.types.intern(TyKind::Fn(ps, r));
-        Expr {
-            kind: EK::FnRef(f),
-            ty,
-            span,
-        }
+        Expr::new(EK::FnRef(f), ty, span)
     }
 
     pub fn check_expr(&mut self, e: &ast::Expr, expected: Option<TyId>) -> Result<Expr> {
@@ -42,11 +38,7 @@ impl Checker {
         {
             let span = e.span;
             let inner_e = self.coerce(e, inner)?;
-            return Ok(Expr {
-                kind: EK::Some(Box::new(inner_e)),
-                ty,
-                span,
-            });
+            return Ok(Expr::new(EK::Some(Box::new(inner_e)), ty, span));
         }
         if e.ty == VOID {
             return err(
@@ -176,11 +168,7 @@ impl Checker {
                 Lit::UInt(v as u64)
             }
         };
-        Ok(Expr {
-            kind: EK::Lit(lit),
-            ty,
-            span,
-        })
+        Ok(Expr::new(EK::Lit(lit), ty, span))
     }
 
     pub fn check_expr_opts(
@@ -203,7 +191,7 @@ impl Checker {
         value_needed: bool,
     ) -> Result<Expr> {
         let span = e.span;
-        let mk = |kind, ty| Ok(Expr { kind, ty, span });
+        let mk = |kind, ty| Ok(Expr::new(kind, ty, span));
         // named types can be created with the literal syntax of their underlying type
         if let Some(exp) = expected {
             let exp_s = self.strip_opt(exp);
@@ -215,11 +203,7 @@ impl Checker {
             {
                 let under = self.types.base(exp_s);
                 let x = self.expect_expr(e, under)?;
-                return Ok(Expr {
-                    kind: EK::Retype(Box::new(x)),
-                    ty: exp_s,
-                    span,
-                });
+                return Ok(Expr::new(EK::Retype(Box::new(x)), exp_s, span));
             }
         }
         match &e.kind {
@@ -256,11 +240,9 @@ impl Checker {
                 let mut parts = Vec::new();
                 for seg in segs {
                     match seg {
-                        ast::StrSeg::Lit(l) => parts.push(Expr {
-                            kind: EK::Lit(Lit::Str(l.clone())),
-                            ty: STR,
-                            span,
-                        }),
+                        ast::StrSeg::Lit(l) => {
+                            parts.push(Expr::new(EK::Lit(Lit::Str(l.clone())), STR, span))
+                        }
                         ast::StrSeg::Expr(x) => {
                             let v = self.check_expr(x, None)?;
                             parts.push(self.stringify(v)?);
@@ -577,11 +559,7 @@ impl Checker {
             self.require_plain(v.ty, span, "cannot be converted to a string")?;
             EK::ToStr(Box::new(v))
         };
-        Ok(Expr {
-            kind,
-            ty: STR,
-            span,
-        })
+        Ok(Expr::new(kind, STR, span))
     }
 
     /// Check `e` as the type in `ty`, or, when it is not known yet, infer it from `e`.
@@ -604,11 +582,7 @@ impl Checker {
                     format!("`{name}` is a mutex; access it inside `lock {name} {{ ... }}`"),
                 );
             }
-            return Ok(Expr {
-                kind: EK::Var(v),
-                ty,
-                span,
-            });
+            return Ok(Expr::new(EK::Var(v), ty, span));
         }
         // a generic constant: `N` in `fn f<uint N>`
         if let Some(&t) = self.ctx_ref().tparams.get(name)
@@ -696,23 +670,15 @@ impl Checker {
                 }
                 ty = self.types.intern(TyKind::Fixed(el, (h - l + 1) as u64));
                 // the bounds are known: use their values
-                lo = Expr {
-                    kind: EK::Lit(Lit::UInt(l as u64)),
-                    ty: UINT,
-                    span: lo.span,
-                };
-                hi = Expr {
-                    kind: EK::Lit(Lit::UInt(h as u64)),
-                    ty: UINT,
-                    span: hi.span,
-                };
+                lo = Expr::new(EK::Lit(Lit::UInt(l as u64)), UINT, lo.span);
+                hi = Expr::new(EK::Lit(Lit::UInt(h as u64)), UINT, hi.span);
             }
         }
-        Ok(Expr {
-            kind: EK::Slice(Box::new(b), Box::new(lo), Box::new(hi)),
+        Ok(Expr::new(
+            EK::Slice(Box::new(b), Box::new(lo), Box::new(hi)),
             ty,
             span,
-        })
+        ))
     }
 
     /// Is this identifier a module alias (not shadowed by a variable)?
@@ -950,11 +916,7 @@ impl Checker {
                             "mutexes from other modules cannot be accessed directly",
                         );
                     }
-                    Ok(Expr {
-                        kind: EK::Var(VarRef::Global(g)),
-                        ty,
-                        span,
-                    })
+                    Ok(Expr::new(EK::Var(VarRef::Global(g)), ty, span))
                 }
                 Some((_, Sym::Fn { func: Some(f), .. })) => Ok(self.fn_ref(f, name, span)),
                 Some((_, Sym::Fn { func: None, .. })) => err(
@@ -984,11 +946,7 @@ impl Checker {
                 );
             }
             self.idx_variant_ref(ty, idx, span);
-            return Ok(Expr {
-                kind: EK::Variant(idx, vec![]),
-                ty,
-                span,
-            });
+            return Ok(Expr::new(EK::Variant(idx, vec![]), ty, span));
         }
         let b = self.check_expr(base, None)?;
         match self.types.kind(b.ty).clone() {
@@ -999,11 +957,7 @@ impl Checker {
                         let ty = fields[idx].1;
                         let bty = b.ty;
                         self.idx_field_ref(bty, idx, span);
-                        Ok(Expr {
-                            kind: EK::Field(Box::new(b), idx),
-                            ty,
-                            span,
-                        })
+                        Ok(Expr::new(EK::Field(Box::new(b), idx), ty, span))
                     }
                     None => err(
                         span,
@@ -1014,11 +968,7 @@ impl Checker {
             TyKind::Array(_) | TyKind::Fixed(..) | TyKind::Str | TyKind::Map(..)
                 if name == "len" =>
             {
-                Ok(Expr {
-                    kind: EK::Len(Box::new(b)),
-                    ty: UINT,
-                    span,
-                })
+                Ok(Expr::new(EK::Len(Box::new(b)), UINT, span))
             }
             TyKind::Named(_) => err(
                 span,
@@ -1073,7 +1023,7 @@ impl Checker {
         span: Span,
     ) -> Result<Expr> {
         use BinOp::*;
-        let mk = |kind, ty| Ok(Expr { kind, ty, span });
+        let mk = |kind, ty| Ok(Expr::new(kind, ty, span));
         match op {
             And | Or => {
                 let a = self.expect_expr(l, BOOL)?;
@@ -1284,11 +1234,11 @@ impl Checker {
                 } else {
                     PrintTo::Stdout
                 };
-                Ok(Expr {
-                    kind: EK::Print(to, name.ends_with("ln"), xs),
-                    ty: VOID,
+                Ok(Expr::new(
+                    EK::Print(to, name.ends_with("ln"), xs),
+                    VOID,
                     span,
-                })
+                ))
             }
             "as" => {
                 let Some(te) = ty else {
@@ -1310,7 +1260,7 @@ impl Checker {
                     "env" => (EK::Env, self.types.intern(TyKind::Map(STR, STR))),
                     _ => (EK::Target, self.types.tuple(vec![STR, STR])),
                 };
-                Ok(Expr { kind, ty, span })
+                Ok(Expr::new(kind, ty, span))
             }
             "embed" => {
                 let [arg] = args else {
@@ -1328,11 +1278,11 @@ impl Checker {
                     Diag::new(arg.span, format!("cannot read `{}`: {e}", file.display()))
                 })?;
                 let ty = self.types.array(BYTE);
-                Ok(Expr {
-                    kind: EK::Embed(std::rc::Rc::new(bytes), file),
+                Ok(Expr::new(
+                    EK::Embed(std::rc::Rc::new(bytes), file),
                     ty,
                     span,
-                })
+                ))
             }
             _ => err(span, format!("unknown builtin function `@{name}`")),
         }
@@ -1371,13 +1321,7 @@ impl Checker {
     }
 
     fn check_cast(&mut self, x: Expr, t: TyId, span: Span) -> Result<Expr> {
-        let retype = |x: Expr| {
-            Ok(Expr {
-                kind: EK::Retype(Box::new(x)),
-                ty: t,
-                span,
-            })
-        };
+        let retype = |x: Expr| Ok(Expr::new(EK::Retype(Box::new(x)), t, span));
         if x.ty == t {
             return Ok(x);
         }
@@ -1436,16 +1380,12 @@ impl Checker {
         if to == TyKind::Str {
             self.require_plain(x.ty, span, "cannot be converted to a string")?;
         }
-        Ok(Expr {
-            kind: EK::Cast(Box::new(x)),
-            ty: t,
-            span,
-        })
+        Ok(Expr::new(EK::Cast(Box::new(x)), t, span))
     }
 
     fn check_if(&mut self, ife: &ast::IfExpr, value_ty: Option<TyId>, span: Span) -> Result<Expr> {
         let id = self.new_jump();
-        let scrut = match &ife.scrutinee {
+        let scrutinee = match &ife.scrutinee {
             Some(s) => {
                 let x = self.check_expr(s, None)?;
                 match self.types.kind(x.ty) {
@@ -1484,7 +1424,7 @@ impl Checker {
                 let res = (|| {
                     let mut pats = Vec::new();
                     for p in &arm.patterns {
-                        let pat = match &scrut {
+                        let pat = match &scrutinee {
                             Some(s) => self.check_pattern(p, s.ty, arm.patterns.len() > 1)?,
                             None => {
                                 if matches!(p.kind, E::Wildcard) {
@@ -1516,7 +1456,7 @@ impl Checker {
         })();
         self.ctx().jumps.pop();
         let arms = r?;
-        let exhaustive = match &scrut {
+        let exhaustive = match &scrutinee {
             Some(s) => self.exhaustive(&arms, s.ty),
             None => arms.iter().any(|a| {
                 a.patterns.iter().any(|p| match p {
@@ -1534,15 +1474,12 @@ impl Checker {
                 &[],
             );
         }
-        Ok(Expr {
-            kind: EK::If(Box::new(If {
-                id,
-                scrutinee: scrut,
-                arms,
-            })),
-            ty: value_ty.unwrap_or(VOID),
-            span,
-        })
+        let kind = EK::If(Box::new(If {
+            id,
+            scrutinee,
+            arms,
+        }));
+        Ok(Expr::new(kind, value_ty.unwrap_or(VOID), span))
     }
 }
 

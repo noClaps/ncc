@@ -358,6 +358,10 @@ macro_rules! for_each_child {
 }
 
 impl Expr {
+    pub fn new(kind: EK, ty: TyId, span: Span) -> Self {
+        Self { kind, ty, span }
+    }
+
     /// Apply `f` to each direct sub-expression, not those in nested blocks or `if` patterns.
     pub fn for_each_child<'a>(&'a self, f: &mut dyn FnMut(&'a Expr)) {
         for_each_child!(&self.kind, f, as_ref)
