@@ -110,6 +110,7 @@ struct PendingFn {
     tparams: HashMap<String, TyId>,
 }
 
+#[derive(Default)]
 pub struct Checker {
     pub mods: Vec<ModInfo>,
     pub types: Types,
@@ -154,21 +155,9 @@ pub fn check(graph: ModuleGraph, editor: bool) -> (Program, Vec<Diag>, index::In
             })
             .collect(),
         types: Types::new(),
-        funcs: vec![],
-        sigs: vec![],
-        globals: vec![],
-        externs: vec![],
-        fn_insts: HashMap::new(),
-        type_insts: HashMap::new(),
-        pending: vec![],
-        fns: vec![],
-        next_jump: 0,
-        never_funcs: HashSet::new(),
-        tests: vec![],
         order: graph.order,
-        ix: Default::default(),
-        errors: vec![],
         editor,
+        ..Default::default()
     };
     let p = c.run();
     c.record_module_facts();
@@ -290,13 +279,8 @@ impl Checker {
             .map(|(i, f)| {
                 f.unwrap_or_else(|| Func {
                     name: "<invalid>".into(),
-                    params: vec![],
                     ret: sigs[i].1,
-                    locals: vec![],
-                    captures: vec![],
-                    body: Block { stmts: vec![] },
-                    parent: None,
-                    self_local: None,
+                    ..Default::default()
                 })
             })
             .collect();

@@ -140,7 +140,7 @@ pub enum Pat {
     Variant(usize, Vec<Self>),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Block {
     pub stmts: Vec<Stmt>,
 }
@@ -232,7 +232,7 @@ pub struct Capture {
     pub by_ref: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Func {
     pub name: String,
     pub params: Vec<LocalId>,

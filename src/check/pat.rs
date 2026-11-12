@@ -146,6 +146,11 @@ impl Checker {
 
     fn variant_of(&self, ety: TyId, ty: TyId, vname: &str, span: Span) -> Result<usize> {
         self.same_type(ty, ety, span)?;
+        self.enum_variant(ety, vname, span)
+    }
+
+    /// The index of the variant `vname` of the enum `ety`.
+    pub fn enum_variant(&self, ety: TyId, vname: &str, span: Span) -> Result<usize> {
         let Some(def) = self.types.enum_def(ety) else {
             return err(span, format!("`{}` is not an enum", self.types.show(ety)));
         };

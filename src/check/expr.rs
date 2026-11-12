@@ -208,33 +208,27 @@ impl Checker {
         }
         match &e.kind {
             E::Int(v, u) => self.int_lit(*v as i128, *u, expected, span),
-            E::Unary(UnOp::Neg, inner) if matches!(inner.kind, E::Int(..)) => {
-                let E::Int(v, u) = inner.kind else {
-                    unreachable!()
-                };
+            E::Unary(UnOp::Neg, inner) if let E::Int(v, u) = inner.kind => {
                 if u {
                     return err(span, "negative value cannot be a `uint`");
                 }
                 self.int_lit(-(v as i128), false, expected, span)
             }
             E::Float(f) => mk(EK::Lit(Lit::Float(*f)), self.lit_ty(expected, FLOAT)),
-            E::Unary(UnOp::Neg, inner) if matches!(inner.kind, E::Float(_)) => {
-                let E::Float(f) = inner.kind else {
-                    unreachable!()
-                };
+            E::Unary(UnOp::Neg, inner) if let E::Float(f) = inner.kind => {
                 mk(EK::Lit(Lit::Float(-f)), self.lit_ty(expected, FLOAT))
             }
             E::Char(c) => mk(EK::Lit(Lit::Char(*c)), self.lit_ty(expected, CHAR)),
             E::Bool(b) => mk(EK::Lit(Lit::Bool(*b)), self.lit_ty(expected, BOOL)),
             E::Str(segs) => {
                 let ty = self.lit_ty(expected, STR);
-                if segs.iter().all(|s| matches!(s, ast::StrSeg::Lit(_))) {
-                    let mut s = String::new();
-                    for seg in segs {
-                        if let ast::StrSeg::Lit(l) = seg {
-                            s.push_str(l);
-                        }
-                    }
+                let lits: Option<String> = (segs.iter())
+                    .map(|s| match s {
+                        ast::StrSeg::Lit(l) => Some(l.as_str()),
+                        ast::StrSeg::Expr(_) => None,
+                    })
+                    .collect();
+                if let Some(s) = lits {
                     return mk(EK::Lit(Lit::Str(s)), ty);
                 }
                 let mut parts = Vec::new();
@@ -799,14 +793,10 @@ impl Checker {
                     _ => {}
                 }
             } else if let Some(ty) = self.type_path(base)? {
-                let Some(def) = self.types.enum_def(ty).cloned() else {
-                    return err(span, format!("`{}` is not an enum", self.types.show(ty)));
-                };
-                let Some(idx) = def.variants.iter().position(|(n, _)| n == name) else {
-                    return err(span, format!("enum `{}` has no member `{name}`", def.name));
-                };
+                let idx = self.enum_variant(ty, name, span)?;
                 self.idx_variant_ref(ty, idx, span);
-                return Ok(Target::Variant(ty, idx, def.variants[idx].1.clone()));
+                let payload = self.types.enum_def(ty).unwrap().variants[idx].1.clone();
+                return Ok(Target::Variant(ty, idx, payload));
             }
         }
         if let Some(f) = self.generic_fn_ref(callee)? {
@@ -924,9 +914,7 @@ impl Checker {
                     format!("`{}` is a type, not a value", self.types.show(ty)),
                 );
             };
-            let Some(idx) = def.variants.iter().position(|(n, _)| n == name) else {
-                return err(span, format!("enum `{}` has no member `{name}`", def.name));
-            };
+            let idx = self.enum_variant(ty, name, span)?;
             if !def.variants[idx].1.is_empty() {
                 return err(
                     span,
@@ -1258,13 +1246,10 @@ impl Checker {
                     return err(span, "`@embed` expects one path: `@embed(\"./file\")`");
                 };
                 let path = match &arg.kind {
-                    ast::ExprKind::Str(segs) => match segs.as_slice() {
-                        [ast::StrSeg::Lit(s)] => s.clone(),
-                        _ => return err(arg.span, "`@embed` paths must be plain string literals"),
-                    },
+                    E::Str(segs) if let [ast::StrSeg::Lit(s)] = segs.as_slice() => s,
                     _ => return err(arg.span, "`@embed` paths must be plain string literals"),
                 };
-                let file = self.resolve_embed_path(&path, arg.span)?;
+                let file = self.resolve_embed_path(path, arg.span)?;
                 let bytes = std::fs::read(&file).map_err(|e| {
                     Diag::new(arg.span, format!("cannot read `{}`: {e}", file.display()))
                 })?;
