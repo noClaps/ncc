@@ -396,3 +396,75 @@ impl Pat {
         }
     }
 }
+
+/// The expressions of a statement itself (including indices of its target), not those of the
+/// statements nested in it. `$iter` is `iter` or `iter_mut`, matching how `$kind` is borrowed.
+macro_rules! own_exprs {
+    ($kind:expr, $iter:ident) => {
+        match $kind {
+            SK::Let(_, e)
+            | SK::Destructure(_, e)
+            | SK::Expr(e)
+            | SK::Throw(e)
+            | SK::Assert(e)
+            | SK::While { cond: e, .. }
+            | SK::For { iter: e, .. }
+            | SK::Lock { mutex: e, .. } => vec![e],
+            SK::Return(e) | SK::Break(_, e) => e.$iter().collect(),
+            SK::Assign(pl, e) => {
+                // the value, then the indices from the outermost place in: reversed, the
+                // evaluation order
+                let mut pl = pl;
+                let mut out = vec![e];
+                loop {
+                    match pl {
+                        Place::Var(_) => break,
+                        Place::Field(b, _) | Place::TupleIndex(b, _) => pl = b,
+                        Place::Index(b, i) => {
+                            out.push(i);
+                            pl = b;
+                        }
+                    }
+                }
+                out.reverse();
+                out
+            }
+            SK::Continue(_) | SK::Block(_) => vec![],
+        }
+    };
+}
+
+impl Stmt {
+    /// The statement's own expressions in evaluation order: not those in its body or in the
+    /// blocks of its expressions.
+    pub fn own_exprs(&self) -> Vec<&Expr> {
+        own_exprs!(&self.kind, iter)
+    }
+
+    /// Like `own_exprs`, with mutable access.
+    pub fn own_exprs_mut(&mut self) -> Vec<&mut Expr> {
+        own_exprs!(&mut self.kind, iter_mut)
+    }
+
+    /// The body of a loop, `lock` or block statement.
+    pub fn body(&self) -> Option<&Block> {
+        match &self.kind {
+            SK::While { body, .. }
+            | SK::For { body, .. }
+            | SK::Lock { body, .. }
+            | SK::Block(body) => Some(body),
+            _ => None,
+        }
+    }
+
+    /// Like `body`, with mutable access.
+    pub fn body_mut(&mut self) -> Option<&mut Block> {
+        match &mut self.kind {
+            SK::While { body, .. }
+            | SK::For { body, .. }
+            | SK::Lock { body, .. }
+            | SK::Block(body) => Some(body),
+            _ => None,
+        }
+    }
+}

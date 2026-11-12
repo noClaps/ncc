@@ -76,7 +76,7 @@ struct Analysis<'p> {
 impl Analysis<'_> {
     fn stmt(&mut self, s: &Stmt) {
         let mut reads = HashSet::new();
-        for e in own_exprs(s) {
+        for e in s.own_exprs() {
             self.reads(e, &mut reads);
         }
         match removable(self.p, self.func, s) {
@@ -145,47 +145,6 @@ impl Analysis<'_> {
         }
         self.live
     }
-}
-
-/// The expressions of a statement itself (including indices of its target), not those of the
-/// statements nested in it. `$iter` is `iter` or `iter_mut`, matching how `$kind` is borrowed.
-macro_rules! own_exprs {
-    ($kind:expr, $iter:ident) => {
-        match $kind {
-            SK::Let(_, e)
-            | SK::Destructure(_, e)
-            | SK::Expr(e)
-            | SK::Throw(e)
-            | SK::Assert(e)
-            | SK::While { cond: e, .. }
-            | SK::For { iter: e, .. }
-            | SK::Lock { mutex: e, .. } => vec![e],
-            SK::Return(e) | SK::Break(_, e) => e.$iter().collect(),
-            SK::Assign(pl, e) => {
-                let mut pl = pl;
-                let mut out = vec![e];
-                loop {
-                    match pl {
-                        Place::Var(_) => break out,
-                        Place::Field(b, _) | Place::TupleIndex(b, _) => pl = b,
-                        Place::Index(b, i) => {
-                            out.push(i);
-                            pl = b;
-                        }
-                    }
-                }
-            }
-            SK::Continue(_) | SK::Block(_) => vec![],
-        }
-    };
-}
-
-fn own_exprs(s: &Stmt) -> Vec<&Expr> {
-    own_exprs!(&s.kind, iter)
-}
-
-fn own_exprs_mut(s: &mut Stmt) -> Vec<&mut Expr> {
-    own_exprs!(&mut s.kind, iter_mut)
 }
 
 enum Removable {
@@ -453,14 +412,10 @@ impl Prune<'_> {
     }
 
     fn stmt(&mut self, s: &mut Stmt) {
-        for e in own_exprs_mut(s) {
+        for e in s.own_exprs_mut() {
             self.expr(e);
         }
-        if let SK::While { body, .. }
-        | SK::For { body, .. }
-        | SK::Lock { body, .. }
-        | SK::Block(body) = &mut s.kind
-        {
+        if let Some(body) = s.body_mut() {
             self.block(body);
         }
     }

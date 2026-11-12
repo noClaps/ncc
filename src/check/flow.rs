@@ -7,44 +7,11 @@ use crate::types::NEVER;
 
 /// Visit every expression (pre-order) in a statement, including nested blocks.
 pub fn visit_stmt<'a>(s: &'a Stmt, f: &mut dyn FnMut(&'a Expr)) {
-    match &s.kind {
-        SK::Let(_, e) | SK::Destructure(_, e) | SK::Expr(e) | SK::Throw(e) | SK::Assert(e) => {
-            visit_expr(e, f);
-        }
-        SK::Assign(p, e) => {
-            visit_place(p, f);
-            visit_expr(e, f);
-        }
-        SK::Return(e) | SK::Break(_, e) => {
-            if let Some(e) = e {
-                visit_expr(e, f);
-            }
-        }
-        SK::Continue(_) => {}
-        SK::While { cond, body, .. } => {
-            visit_expr(cond, f);
-            visit_block(body, f);
-        }
-        SK::For { iter, body, .. } => {
-            visit_expr(iter, f);
-            visit_block(body, f);
-        }
-        SK::Lock { mutex, body, .. } => {
-            visit_expr(mutex, f);
-            visit_block(body, f);
-        }
-        SK::Block(b) => visit_block(b, f),
+    for e in s.own_exprs() {
+        visit_expr(e, f);
     }
-}
-
-fn visit_place<'a>(p: &'a Place, f: &mut dyn FnMut(&'a Expr)) {
-    match p {
-        Place::Var(_) => {}
-        Place::Field(b, _) | Place::TupleIndex(b, _) => visit_place(b, f),
-        Place::Index(b, i) => {
-            visit_place(b, f);
-            visit_expr(i, f);
-        }
+    if let Some(b) = s.body() {
+        visit_block(b, f);
     }
 }
 
@@ -132,14 +99,8 @@ pub fn visit_stmts(s: &Stmt, f: &mut dyn FnMut(&Stmt)) {
     // through statement bodies only: blocks inside expressions are found by `visit_stmt`
     fn bodies(s: &Stmt, f: &mut dyn FnMut(&Stmt)) {
         f(s);
-        if let SK::While { body, .. }
-        | SK::For { body, .. }
-        | SK::Lock { body, .. }
-        | SK::Block(body) = &s.kind
-        {
-            for s in &body.stmts {
-                bodies(s, f);
-            }
+        for s in s.body().iter().flat_map(|b| &b.stmts) {
+            bodies(s, f);
         }
     }
     bodies(s, f);
