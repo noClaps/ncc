@@ -33,16 +33,22 @@ pub fn find_root(start: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Top-level import directories installed in the NC home (`~/.nc`) rather than a project.
+/// Top-level import directories installed in the NC home (`~/.local/share/nc`) rather than a
+/// project.
 pub const SYSTEM_LIBS: [&str; 2] = ["std", "libc"];
 
-/// The NC home directory, holding `std/`, `libc/` and `bin/ncc`: `$NC_HOME` when set,
-/// otherwise `~/.nc`.
+/// The NC home directory, holding `std/` and `libc/`: `$NC_HOME` when set, otherwise
+/// `$XDG_DATA_HOME/nc`, falling back to `~/.local/share/nc` (an unset or relative
+/// `$XDG_DATA_HOME` is ignored, as the XDG base directory spec requires).
 pub fn nc_home() -> Option<PathBuf> {
     let var = |k| std::env::var_os(k).filter(|v| !v.is_empty());
-    var("NC_HOME")
-        .map(PathBuf::from)
-        .or_else(|| var("HOME").map(|h| PathBuf::from(h).join(".nc")))
+    var("NC_HOME").map(PathBuf::from).or_else(|| {
+        var("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .filter(|d| d.is_absolute())
+            .or_else(|| var("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+            .map(|d| d.join("nc"))
+    })
 }
 
 /// Whether an import path names a module of a system library (`std/x`, `libc/x`).

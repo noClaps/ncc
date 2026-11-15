@@ -333,9 +333,10 @@ drop_one<int, 0>([]) // error: array size `N - 1` is -1, which is not a valid si
 - `.nc` is appended to import paths.
 - `./` and `../` paths resolve against the importing file's directory.
 - `.../` paths resolve from the project root, `$ROOT`, so `.../lib/math` is `$ROOT/lib/math.nc`.
-- `std/` and `libc/` paths resolve in the NC home: `std/math` is `~/.nc/std/math.nc` and
-  `libc/stdio` is `~/.nc/libc/stdio.nc`. The NC home is `$NC_HOME`, or `~/.nc` when that is
-  unset. These imports don't need a project root.
+- `std/` and `libc/` paths resolve in the NC home: `std/math` is `~/.local/share/nc/std/math.nc`
+  and `libc/stdio` is `~/.local/share/nc/libc/stdio.nc`. The NC home is `$NC_HOME`, or
+  `$XDG_DATA_HOME/nc` when that is unset, or `~/.local/share/nc` when neither is set. These
+  imports don't need a project root.
 - All other paths resolve in `$ROOT/.nc/deps/`.
 - `$ROOT` is the nearest directory, searching upward from the entry file's directory, that
   contains `.nc/config.toml` (originally `nc.toml` in the root itself). It is only required

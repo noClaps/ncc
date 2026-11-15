@@ -21,12 +21,15 @@ cargo build --release
 ./install.sh
 ```
 
-This builds ncc and installs it into the NC home, `~/.nc` (set `$NC_HOME` to use a
-different directory, both when installing and when running ncc):
+This builds ncc and installs it under `~/.local`:
 
-- `~/.nc/bin/ncc`: the compiler (add `~/.nc/bin` to your `PATH`)
-- `~/.nc/std/`: the standard library, from [`std/`](std/), imported as `"std/..."`
-- `~/.nc/libc/`: the libc bindings, from [`libc/`](libc/), imported as `"libc/..."`
+- `~/.local/bin/ncc`: the compiler (add `~/.local/bin` to your `PATH`)
+- `~/.local/share/nc/std/`: the standard library, from [`std/`](std/), imported as `"std/..."`
+- `~/.local/share/nc/libc/`: the libc bindings, from [`libc/`](libc/), imported as `"libc/..."`
+
+`~/.local/share/nc` is the NC home, where ncc looks for `std/` and `libc/`. It follows
+`$XDG_DATA_HOME` when that is set (`$XDG_DATA_HOME/nc`), and `$NC_HOME` overrides it entirely;
+set either both when installing and when running ncc.
 
 ## Usage
 

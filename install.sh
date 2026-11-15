@@ -1,15 +1,22 @@
 #!/bin/sh
-# Install ncc into the NC home ($NC_HOME, defaulting to ~/.nc):
-#   $NC_HOME/bin/ncc   the compiler
-#   $NC_HOME/std/      the standard library  (imported as "std/...")
-#   $NC_HOME/libc/     the libc bindings     (imported as "libc/...")
+# Install ncc under ~/.local:
+#   ~/.local/bin/ncc            the compiler
+#   $NC_HOME/std/               the standard library  (imported as "std/...")
+#   $NC_HOME/libc/              the libc bindings     (imported as "libc/...")
+# where the NC home, $NC_HOME, defaults to $XDG_DATA_HOME/nc, which defaults to
+# ~/.local/share/nc.
 set -eu
 
 repo=$(cd "$(dirname "$0")" && pwd)
+: "${HOME:?HOME is not set}"
+bin="$HOME/.local/bin"
 if [ -n "${NC_HOME:-}" ]; then
 	home=$NC_HOME
 else
-	home="${HOME:?neither NC_HOME nor HOME is set}/.nc"
+	case "${XDG_DATA_HOME:-}" in
+	/*) home="$XDG_DATA_HOME/nc" ;;
+	*) home="$HOME/.local/share/nc" ;;
+	esac
 fi
 mkdir -p "$home"
 home=$(cd "$home" && pwd)
@@ -17,9 +24,9 @@ home=$(cd "$home" && pwd)
 echo "Building ncc (release)..."
 cargo build --release --manifest-path "$repo/Cargo.toml"
 
-mkdir -p "$home/bin"
-install -m 755 "$repo/target/release/ncc" "$home/bin/ncc"
-echo "Installed $home/bin/ncc"
+mkdir -p "$bin"
+install -m 755 "$repo/target/release/ncc" "$bin/ncc"
+echo "Installed $bin/ncc"
 
 # Replace the installed libraries with the repo's copies so removed modules don't linger.
 for lib in std libc; do
@@ -32,11 +39,11 @@ for lib in std libc; do
 done
 
 case ":$PATH:" in
-*":$home/bin:"*) ;;
+*":$bin:"*) ;;
 *)
 	echo
 	echo "Add ncc to your PATH by adding this line to your shell profile:"
-	echo "  export PATH=\"$home/bin:\$PATH\""
+	echo "  export PATH=\"$bin:\$PATH\""
 	;;
 esac
 
