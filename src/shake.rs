@@ -46,6 +46,14 @@ fn analyse(p: &Program, entry_file: u32) -> (Reach, Vec<bool>) {
     };
     let mut work: Vec<FuncId> = p.tests.iter().map(|t| t.func).collect();
     let mut keep: Vec<bool> = stmts.iter().map(|s| s.span.file == entry_file).collect();
+    let writes: Vec<HashSet<GlobalId>> = stmts
+        .iter()
+        .map(|s| {
+            let mut w = HashSet::new();
+            flow::writes_stmt(s, &mut w);
+            w
+        })
+        .collect();
     for (s, _) in stmts.iter().zip(&keep).filter(|(_, k)| **k) {
         refs(s, &mut r, &mut work);
     }
@@ -59,13 +67,8 @@ fn analyse(p: &Program, entry_file: u32) -> (Reach, Vec<bool>) {
         }
         // imported initialisers of reached globals, which may reach more
         let mut changed = false;
-        for (s, k) in stmts.iter().zip(keep.iter_mut()) {
-            if *k {
-                continue;
-            }
-            let mut writes = HashSet::new();
-            flow::writes_stmt(s, &mut writes);
-            if writes.iter().any(|g| r.globals.contains(g)) {
+        for ((s, k), w) in stmts.iter().zip(keep.iter_mut()).zip(&writes) {
+            if !*k && w.iter().any(|g| r.globals.contains(g)) {
                 *k = true;
                 changed = true;
                 refs(s, &mut r, &mut work);
@@ -79,12 +82,19 @@ fn analyse(p: &Program, entry_file: u32) -> (Reach, Vec<bool>) {
 
 /// Record the functions, globals and externs `s` references; new functions go on `work`.
 fn refs(s: &Stmt, r: &mut Reach, work: &mut Vec<FuncId>) {
-    let mut funcs = HashSet::new();
-    flow::refs_stmt(s, &mut r.globals, &mut funcs);
-    work.extend(funcs.into_iter().filter(|f| !r.funcs.contains(f)));
-    flow::visit_stmt(s, &mut |e| {
-        if let EK::Call(Callee::Extern(x), _) | EK::Async(Callee::Extern(x), _) = &e.kind {
+    // nested lets declare globals only at module level, covered by `writes_stmt`
+    if let SK::Assign(pl, _) = &s.kind
+        && let Some(VarRef::Global(g)) = flow::place_root(pl)
+    {
+        r.globals.insert(g);
+    }
+    flow::visit_stmt(s, &mut |e| match &e.kind {
+        EK::Var(VarRef::Global(g)) => {
+            r.globals.insert(*g);
+        }
+        EK::Call(Callee::Extern(x), _) | EK::Async(Callee::Extern(x), _) => {
             r.externs.insert(*x);
         }
+        _ => work.extend(e.fn_ref().filter(|f| !r.funcs.contains(f))),
     });
 }

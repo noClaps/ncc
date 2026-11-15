@@ -31,6 +31,8 @@ pub struct Parser {
     stmt_start: usize,
     /// set when a statement recovered from an error itself
     recovered: bool,
+    /// tokens split by `expect_gt`, with their original value (undone on backtrack)
+    splits: Vec<(usize, Token)>,
 }
 
 /// Parse a module, recovering from errors at statement boundaries. Returns the items that
@@ -98,6 +100,7 @@ impl Parser {
             src,
             stmt_start: 0,
             recovered: false,
+            splits: vec![],
         }
     }
 
@@ -154,12 +157,12 @@ impl Parser {
     fn prev_span(&self) -> Span {
         self.toks[self.pos.saturating_sub(1)].span
     }
-    fn bump(&mut self) -> Token {
-        let t = self.toks[self.pos].clone();
+    fn bump(&mut self) -> Span {
+        let sp = self.span();
         if self.pos < self.toks.len() - 1 {
             self.pos += 1;
         }
-        t
+        sp
     }
     fn at(&self, t: &Tok) -> bool {
         self.peek() == t
@@ -182,7 +185,7 @@ impl Parser {
     }
     fn expect(&mut self, t: &Tok) -> Result<Span> {
         if self.at(t) {
-            Ok(self.bump().span)
+            Ok(self.bump())
         } else {
             err(
                 self.span(),
@@ -213,6 +216,7 @@ impl Parser {
             }
             // keep what follows the `>`: `>>` -> `>`, `>=` -> `=`
             t @ (Tok::Shr | Tok::Ge) => {
+                self.splits.push((self.pos, self.toks[self.pos].clone()));
                 let tok = &mut self.toks[self.pos];
                 tok.tok = if t == Tok::Shr { Tok::Gt } else { Tok::Assign };
                 tok.span.start += 1;
@@ -224,7 +228,7 @@ impl Parser {
     fn ident(&mut self) -> Result<(String, Span)> {
         match self.peek().clone() {
             Tok::Ident(s) if !is_keyword(&s) => {
-                let sp = self.bump().span;
+                let sp = self.bump();
                 Ok((s, sp))
             }
             t => err(
@@ -236,7 +240,7 @@ impl Parser {
     /// An identifier, or `_`.
     fn ident_or_wild(&mut self) -> Result<(String, Span)> {
         if self.at_kw("_") {
-            return Ok(("_".into(), self.bump().span));
+            return Ok(("_".into(), self.bump()));
         }
         self.ident()
     }
@@ -309,9 +313,9 @@ impl Parser {
     /// Brackets opened between `from` and `to` (token indices) that are still unclosed.
     fn open_brackets(&self, from: usize, to: usize) -> Vec<usize> {
         let mut open = Vec::new();
-        for i in from..to {
-            match self.toks[i].tok {
-                Tok::LParen | Tok::LBracket | Tok::LBrace => open.push(i),
+        for (i, t) in self.toks[from..to].iter().enumerate() {
+            match t.tok {
+                Tok::LParen | Tok::LBracket | Tok::LBrace => open.push(from + i),
                 Tok::RParen | Tok::RBracket | Tok::RBrace => {
                     open.pop();
                 }
@@ -435,7 +439,7 @@ impl Parser {
                 fns.push(ExternFn { sig, symbol });
                 self.end_stmt()?;
             }
-            let end = self.bump().span;
+            let end = self.bump();
             items.push(Item::Extern(ExternDecl {
                 path,
                 alias,
@@ -546,12 +550,13 @@ impl Parser {
             self.eat(&Tok::Comma);
             self.end_stmt()?;
         }
-        Ok((name, type_params, members, self.bump().span))
+        Ok((name, type_params, members, self.bump()))
     }
 
     fn plain_string(&mut self, what: &str) -> Result<String> {
-        let sp = self.span();
-        match self.bump().tok {
+        let t = self.peek().clone();
+        let sp = self.bump();
+        match t {
             Tok::Str(parts) => match parts.as_slice() {
                 [StrPart::Lit(s)] => Ok(s.clone()),
                 _ => err(sp, format!("{what} must be a plain string literal")),
@@ -712,7 +717,7 @@ impl Parser {
         match self.peek() {
             Tok::LBrace | Tok::Assign | Tok::Newline | Tok::RParen | Tok::Eof => Ok(None),
             Tok::Bang => {
-                let sp = self.bump().span;
+                let sp = self.bump();
                 let void = TypeExpr::Named {
                     module: None,
                     name: "void".into(),
@@ -867,7 +872,7 @@ impl Parser {
                     Err(d) => p.recover(d, at),
                 }
             }
-            let end = p.bump().span;
+            let end = p.bump();
             Ok(Block {
                 stmts,
                 span: start.to(end),
@@ -1162,7 +1167,7 @@ impl Parser {
                     "comparison operators cannot be chained; use parentheses",
                 );
             }
-            let opsp = self.bump().span;
+            let opsp = self.bump();
             self.check_line_break(opsp, op.symbol())?;
             self.skip_nl();
             // `**` is right-associative
@@ -1281,14 +1286,16 @@ impl Parser {
                 Tok::Lt if matches!(e.kind, ExprKind::Ident(_) | ExprKind::Field(..)) => {
                     // speculative generic arguments
                     let save = self.pos;
-                    let saved_toks = self.toks.clone();
+                    let splits = self.splits.len();
                     match self.generic_args() {
                         Ok(args) if matches!(self.peek(), Tok::LParen | Tok::LBrace | Tok::Dot) => {
                             ExprKind::Generic(Box::new(e), args)
                         }
                         _ => {
                             self.pos = save;
-                            self.toks = saved_toks;
+                            for (i, t) in self.splits.drain(splits..).rev() {
+                                self.toks[i] = t;
+                            }
                             return Ok(e);
                         }
                     }
@@ -1359,7 +1366,7 @@ impl Parser {
         if let Some(kind) = leaf {
             return Ok(Expr {
                 kind,
-                span: self.bump().span,
+                span: self.bump(),
             });
         }
         let kind = match t {

@@ -15,9 +15,16 @@ pub fn visit_stmt<'a>(s: &'a Stmt, f: &mut dyn FnMut(&'a Expr)) {
     }
 }
 
-fn visit_block<'a>(b: &'a Block, f: &mut dyn FnMut(&'a Expr)) {
+pub fn visit_block<'a>(b: &'a Block, f: &mut dyn FnMut(&'a Expr)) {
     for s in &b.stmts {
         visit_stmt(s, f);
+    }
+}
+
+/// Visit every expression (pre-order) in every function of the program.
+pub fn visit_program<'a>(p: &'a Program, f: &mut dyn FnMut(&'a Expr)) {
+    for func in &p.funcs {
+        visit_block(&func.body, f);
     }
 }
 
@@ -42,29 +49,6 @@ pub fn visit_expr<'a>(e: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
     }
 }
 
-/// Globals and functions referenced by a statement.
-pub fn refs_stmt(s: &Stmt, globals: &mut HashSet<GlobalId>, funcs: &mut HashSet<FuncId>) {
-    if let SK::Assign(p, _) = &s.kind
-        && let Some(VarRef::Global(g)) = place_root(p)
-    {
-        globals.insert(g);
-    }
-    let mut f = |e: &Expr| match &e.kind {
-        EK::Var(VarRef::Global(g)) => {
-            globals.insert(*g);
-        }
-        EK::FnRef(id)
-        | EK::Closure(id)
-        | EK::Call(Callee::Direct(id), _)
-        | EK::Async(Callee::Direct(id), _) => {
-            funcs.insert(*id);
-        }
-        _ => {}
-    };
-    visit_stmt(s, &mut f);
-    // nested lets declare globals only at module level, covered by writes_stmt
-}
-
 pub fn place_root(p: &Place) -> Option<VarRef> {
     match p {
         Place::Var(v) => Some(*v),
@@ -76,6 +60,15 @@ pub fn place_root(p: &Place) -> Option<VarRef> {
 pub fn nested_blocks(e: &Expr) -> Vec<&Block> {
     match &e.kind {
         EK::If(i) => i.arms.iter().map(|a| &a.body).collect(),
+        EK::Catch(_, _, b, _) | EK::Else(_, Fallback::Block(b, _)) => vec![b],
+        _ => vec![],
+    }
+}
+
+/// Like `nested_blocks`, with mutable access.
+pub fn nested_blocks_mut(e: &mut Expr) -> Vec<&mut Block> {
+    match &mut e.kind {
+        EK::If(i) => i.arms.iter_mut().map(|a| &mut a.body).collect(),
         EK::Catch(_, _, b, _) | EK::Else(_, Fallback::Block(b, _)) => vec![b],
         _ => vec![],
     }
@@ -113,6 +106,13 @@ pub fn visit_stmts(s: &Stmt, f: &mut dyn FnMut(&Stmt)) {
     });
 }
 
+/// `visit_stmts` for each statement of a block.
+pub fn visit_block_stmts(b: &Block, f: &mut dyn FnMut(&Stmt)) {
+    for s in &b.stmts {
+        visit_stmts(s, f);
+    }
+}
+
 /// Globals written (declared or assigned) by a statement, including nested blocks.
 pub fn writes_stmt(s: &Stmt, out: &mut HashSet<GlobalId>) {
     visit_stmts(s, &mut |s| match &s.kind {
@@ -136,16 +136,18 @@ pub fn writes_stmt(s: &Stmt, out: &mut HashSet<GlobalId>) {
 
 /// Whether execution can fall off the end of the block.
 pub fn block_completes(b: &Block) -> bool {
-    // the constructs some `break` leaves, with or without a value
-    let mut broken = HashSet::new();
-    for s in &b.stmts {
-        visit_stmts(s, &mut |s| {
-            if let SK::Break(id, _) = &s.kind {
-                broken.insert(*id);
-            }
-        });
-    }
-    completes(b, &broken)
+    completes(b, &broken(b))
+}
+
+/// The constructs some `break` in the block leaves, with or without a value.
+pub fn broken(b: &Block) -> HashSet<JumpId> {
+    let mut out = HashSet::new();
+    visit_block_stmts(b, &mut |s| {
+        if let SK::Break(id, _) = s.kind {
+            out.insert(id);
+        }
+    });
+    out
 }
 
 fn completes(b: &Block, broken: &HashSet<JumpId>) -> bool {

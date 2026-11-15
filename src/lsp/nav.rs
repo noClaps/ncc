@@ -5,10 +5,7 @@ use std::path::{Path, PathBuf};
 
 use lsp_types::*;
 
-use super::{
-    Analysis, Server, offset_to_pos, path_to_uri, pos_to_offset, range, span_range, uri_to_path,
-};
-use crate::ast;
+use super::{Analysis, Server, offset_to_pos, path_to_uri, pos_to_offset, range, uri_to_path};
 use crate::ast::visit::{Node, walk};
 use crate::check::index::{Call, DeclKind};
 use crate::diag::Span;
@@ -40,12 +37,8 @@ impl Server {
             let e = a.expr_around(fid, off, |e| e.type_def.is_some())?;
             (a, e.type_def?)
         };
-        let f = a.sm.file(def.file);
         let span = a.decl(def).map_or(def, |d| d.name_span);
-        Some(GotoDefinitionResponse::Scalar(Location::new(
-            path_to_uri(&f.path),
-            span_range(&f.text, span),
-        )))
+        Some(GotoDefinitionResponse::Scalar(a.location(span)))
     }
 
     /// The import or extern alias at a position.
@@ -55,24 +48,18 @@ impl Server {
         let (s, e) = super::word_at(&text, off)?;
         let name = &text[s..e];
         let module = self.module_of(&path, &text);
-        let (decl, module_path, target) = module.items.iter().find_map(|it| match it {
-            ast::Item::Import(im) if im.alias == name => {
-                let a = self.analyses.get(&path);
-                let target = a.and_then(|a| a.imports.get(name)).cloned();
-                Some((im.alias_span, &im.path, target))
-            }
-            ast::Item::Extern(x) if x.alias == name => Some((
-                x.alias_span,
-                &x.path,
-                path.parent().map(|d| d.join(&x.path)),
-            )),
-            _ => None,
-        })?;
-        let mut ranges = vec![span_range(&text, decl)];
+        let decl = module.aliases().find(|m| m.alias == name)?;
+        let target = if decl.external {
+            path.parent().map(|d| d.join(decl.path))
+        } else {
+            (self.analyses.get(&path)).and_then(|a| a.imports.get(name).cloned())
+        };
+        let lines = super::Lines::new(&text);
+        let mut ranges = vec![lines.span_range(decl.alias_span)];
         let (toks, _) = crate::lexer::lex_all(&text, 0, 0);
         qualifier_uses(&toks, &mut |n, sp| {
             if n == name {
-                ranges.push(span_range(&text, sp));
+                ranges.push(lines.span_range(sp));
             }
         });
         // the cursor must be on one of them
@@ -83,7 +70,7 @@ impl Server {
             name: name.to_string(),
             ranges,
             here,
-            module_path: module_path.clone(),
+            module_path: decl.path.to_string(),
             target,
         })
     }
@@ -149,7 +136,7 @@ impl Server {
     /// client's `editor.action.showReferences` command (as rust-analyzer does).
     pub(super) fn code_lenses(&self, p: CodeLensParams) -> Option<Vec<CodeLens>> {
         let path = uri_to_path(&p.text_document.uri)?;
-        let (a, fid, text) = self.analysis(&p.text_document.uri)?;
+        let (a, fid, _) = self.analysis(&p.text_document.uri)?;
         let mut out = Vec::new();
         for d in &a.index.decls {
             if d.span.file != fid
@@ -163,7 +150,7 @@ impl Server {
             }
             let key = (path.clone(), d.span.start);
             let occ = self.occurrences(&key, &d.name);
-            let decl_range = span_range(text, d.name_span);
+            let decl_range = super::file_range(a.sm.file(fid), d.name_span);
             let locations: Vec<Location> = occ
                 .into_iter()
                 .filter(|(f, r)| !(f == &path && *r == decl_range))
@@ -205,8 +192,8 @@ impl Server {
             tags: None,
             detail: Some(d.detail.clone()),
             uri: path_to_uri(&f.path),
-            range: span_range(&f.text, def),
-            selection_range: span_range(&f.text, sel),
+            range: super::file_range(f, def),
+            selection_range: super::file_range(f, sel),
             data: Some(serde_json::json!({
                 "path": f.path.to_string_lossy(),
                 "start": def.start,
@@ -307,7 +294,7 @@ impl Server {
                 let at_file = a.sm.file(c.at.file);
                 if seen.insert((at_file.path.clone(), c.at.start)) {
                     let ranges = &mut groups.entry(key).or_insert_with(|| (item, vec![])).1;
-                    ranges.push(span_range(&at_file.text, c.at));
+                    ranges.push(super::file_range(at_file, c.at));
                 }
             }
         }
@@ -326,6 +313,7 @@ impl Server {
             }
         });
         spans.push(Span::new(0, 0, text.len()));
+        let lines = super::Lines::new(&text);
         let mut out = Vec::new();
         for pos in p.positions {
             let off = pos_to_offset(&text, pos) as u32;
@@ -343,7 +331,7 @@ impl Server {
             let mut parent: Option<Box<SelectionRange>> = None;
             for s in chain {
                 parent = Some(Box::new(SelectionRange {
-                    range: span_range(&text, s),
+                    range: lines.span_range(s),
                     parent,
                 }));
             }
@@ -363,20 +351,16 @@ impl Server {
         let dir = path.parent()?.to_path_buf();
         let imports = self.analyses.get(&path).map(|a| &a.imports);
         let mut out = Vec::new();
-        for it in &module.items {
-            let (span, lit, target) = match it {
-                ast::Item::Import(im) => (
-                    im.span,
-                    &im.path,
-                    imports.and_then(|m| m.get(&im.alias)).cloned(),
-                ),
-                ast::Item::Extern(e) => (e.span, &e.path, Some(dir.join(&e.path))),
-                _ => continue,
+        for m in module.aliases() {
+            let target = if m.external {
+                Some(dir.join(m.path))
+            } else {
+                imports.and_then(|i| i.get(m.alias)).cloned()
             };
             if let Some(target) = target.filter(|t| t.is_file())
-                && let Some(s) = quoted_at(&text, span, lit)
+                && let Some(s) = quoted_at(&text, m.span, m.path)
             {
-                out.push(link(&text, s, s + lit.len(), &target));
+                out.push(link(&text, s, s + m.path.len(), &target));
             }
         }
         // `@embed("./file")`

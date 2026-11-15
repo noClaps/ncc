@@ -5,6 +5,10 @@
 //! registered on the cleanup stack and released at the end of the enclosing statement
 //! unless moved. Function arguments are borrowed; return values are owned.
 
+/// `write!` / `writeln!` into a `String`, which cannot fail.
+macro_rules! w { ($($a:tt)*) => { write!($($a)*).unwrap() } }
+macro_rules! wl { ($($a:tt)*) => { writeln!($($a)*).unwrap() } }
+
 mod body;
 mod prune;
 mod tidy;
@@ -14,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
 use crate::ast::{BinOp, UnOp};
-use crate::check::flow;
+use crate::check::{flow, index::elem_of};
 use crate::diag::{SourceMap, Span};
 use crate::tir::*;
 use crate::types::*;
@@ -104,7 +108,7 @@ pub struct CGen<'p> {
     uses_args: bool,
     embeds: usize,
     /// the current function's self calls in tail position, which jump back to its top
-    tail: HashSet<*const Stmt>,
+    tail: TailMap<'p>,
     /// the managed parameters some tail call replaces, with their types' helper ids: owned by
     /// the function once `tc_own` is set
     tail_own: Vec<(LocalId, TyId)>,
@@ -147,7 +151,7 @@ pub fn generate(
         value_fns: HashSet::new(),
         uses_args: false,
         embeds: 0,
-        tail: HashSet::new(),
+        tail: HashMap::new(),
         tail_own: vec![],
     };
     let mut noreturn: HashSet<String> = (0..p.funcs.len())
@@ -159,7 +163,7 @@ pub fn generate(
     g.run(mode, externs)
 }
 
-impl CGen<'_> {
+impl<'p> CGen<'p> {
     fn run(&mut self, mode: Mode, externs: &[ExternSource]) -> (String, String) {
         for f in &self.p.funcs {
             for st in &f.body.stmts {
@@ -183,17 +187,17 @@ impl CGen<'_> {
                 continue;
             }
             let proto = self.fn_proto(i, f);
-            writeln!(self.protos, "{proto};").unwrap();
+            wl!(self.protos, "{proto};");
         }
         for x in &self.p.externs {
             let ps = c_params(x.params.iter().map(|t| self.tg.ct(*t)).collect());
             let rc = self.tg.ret_ct(x.ret);
-            writeln!(
+            wl!(
                 self.protos,
                 "{rc} {}({ps}); /* extern {} */",
-                x.symbol, x.name
-            )
-            .unwrap();
+                x.symbol,
+                x.name
+            );
             for t in x.params.iter().chain([&x.ret]) {
                 self.tg.need(*t);
             }
@@ -204,9 +208,9 @@ impl CGen<'_> {
             let c = self.ct(gl.ty);
             // the C name already carries the source name unless it had to be mangled
             if c_ident(&gl.name) == gl.name {
-                writeln!(globals, "static {c} {};", self.gname(i)).unwrap();
+                wl!(globals, "static {c} {};", self.gname(i));
             } else {
-                writeln!(globals, "static {c} {}; /* {} */", self.gname(i), gl.name).unwrap();
+                wl!(globals, "static {c} {}; /* {} */", self.gname(i), gl.name);
             }
         }
         // function bodies
@@ -230,12 +234,10 @@ impl CGen<'_> {
                         flow::writes_stmt(s, &mut w);
                         !w.is_empty()
                     })
-                    .cloned()
                     .collect();
-                let body = Block { stmts };
                 let proto = format!("static {} nc_test_init(void)", self.tg.ct(main.ret));
-                writeln!(self.protos, "{proto};").unwrap();
-                self.gen_fn(self.p.main, Some(("nc_test_init", body)));
+                wl!(self.protos, "{proto};");
+                self.gen_fn(self.p.main, Some(("nc_test_init", stmts)));
                 self.test_main()
             }
         };
@@ -277,11 +279,11 @@ impl CGen<'_> {
             pruned.push_str("\n/* ------------------------------------------------------------------ extern implementations */\n");
             pruned.push_str("#define NC_RUNTIME_H\n#define NC_GEN_H\n");
             for h in ["stdatomic.h", "stdbool.h", "stddef.h", "stdint.h"] {
-                writeln!(pruned, "#include <{h}>").unwrap();
+                wl!(pruned, "#include <{h}>");
             }
         }
         for x in externs {
-            writeln!(pruned, "#line 1 \"{}\"", c_escape_str(&x.path)).unwrap();
+            wl!(pruned, "#line 1 \"{}\"", c_escape_str(&x.path));
             for l in x.text.lines() {
                 // blank the line rather than drop it, keeping `#line` numbering right
                 if !is_nc_include(l) {
@@ -313,12 +315,11 @@ impl CGen<'_> {
         );
         for t in &self.p.tests {
             let name = c_escape_str(&t.name);
-            writeln!(
+            wl!(
                 s,
                 "  {{\n    jmp_buf jb;\n    nc_test_jmp = &jb;\n    if (setjmp(jb) == 0) {{\n      {erru} r = {}();\n      nc_test_jmp = NULL;\n      fflush(stderr);\n      if (r.err) {{ printf(\"FAIL {name}: %.*s\\n\", (int)r.err->blen, r.err->data); failed++; }}\n      else {{ printf(\"PASS {name}\\n\"); passed++; }}\n    }} else {{\n      nc_test_jmp = NULL;\n      printf(\"FAIL {name}: %s\\n\", nc_test_msg);\n      failed++;\n    }}\n    fflush(stdout);\n  }}",
                 self.fname(t.func)
-            )
-            .unwrap();
+            );
         }
         s + "  printf(\"%d passed, %d failed\\n\", passed, failed);\n  return failed ? 1 : 0;\n}\n"
     }
@@ -326,8 +327,7 @@ impl CGen<'_> {
     // ------------------------------------------------------------ naming
 
     fn fname(&self, f: FuncId) -> String {
-        let name = &self.p.funcs[f].name;
-        format!("f{f}_{}", c_ident(name))
+        format!("f{f}_{}", c_ident(&self.p.funcs[f].name))
     }
     fn gname(&self, g: GlobalId) -> String {
         format!("g{g}_{}", c_ident(&self.p.globals[g].name))
@@ -391,13 +391,6 @@ impl CGen<'_> {
             temp,
             moved: false,
         });
-    }
-
-    fn var_ty(&self, v: VarRef) -> TyId {
-        match v {
-            VarRef::Local(l) => self.local(l).ty,
-            VarRef::Global(g) => self.p.globals[g].ty,
-        }
     }
 
     /// Declare a temporary holding an owned value.
@@ -510,7 +503,7 @@ impl CGen<'_> {
         format!("{noreturn}static {rc} {}({})", self.fname(i), c_params(ps))
     }
 
-    fn gen_fn(&mut self, i: FuncId, init_body: Option<(&str, Block)>) {
+    fn gen_fn(&mut self, i: FuncId, init_body: Option<(&str, Vec<&'p Stmt>)>) {
         let f = &self.p.funcs[i];
         self.func = i;
         self.body.clear();
@@ -527,12 +520,12 @@ impl CGen<'_> {
             }
         }
         let is_init = init_body.is_some();
-        let body = match init_body {
+        let stmts = match init_body {
             Some((name, b)) => {
                 proto = proto.replacen(&self.fname(i), name, 1);
                 b
             }
-            None => f.body.clone(),
+            None => f.body.stmts.iter().collect(),
         };
         // environment struct
         if !f.captures.is_empty() && !is_init {
@@ -552,25 +545,23 @@ impl CGen<'_> {
                         (self.managed(outer.ty)).then(|| format!("rl_{}", self.h(outer.ty))),
                     )
                 };
-                writeln!(s, "  {c}c{ci}; /* {} */", outer.name).unwrap();
+                wl!(s, "  {c}c{ci}; /* {} */", outer.name);
                 if let Some(r) = release {
-                    writeln!(drop, "  {r}(e->c{ci});").unwrap();
+                    wl!(drop, "  {r}(e->c{ci});");
                 }
             }
             s.push_str("};\n");
             self.env_defs.push_str(&s);
             if drop.is_empty() {
-                writeln!(
+                wl!(
                     self.env_defs,
                     "static void {en}_drop(nc_env *e_) {{ (void)e_; }}"
-                )
-                .unwrap();
+                );
             } else {
-                writeln!(
+                wl!(
                     self.env_defs,
                     "static void {en}_drop(nc_env *e_) {{\n  struct {en} *e = (struct {en} *)e_;\n{drop}}}"
-                )
-                .unwrap();
+                );
             }
             self.line(format!("struct {en} *E = (struct {en} *)env;"));
         }
@@ -586,9 +577,9 @@ impl CGen<'_> {
         let ret = f.ret;
         // self calls in tail position become a jump to the end of a loop around the body
         let (tail, replaced) = if self.c_main || is_init {
-            (HashSet::new(), vec![])
+            (HashMap::new(), vec![])
         } else {
-            tail_calls(i, f, &body, &self.p.types)
+            tail_calls(i, f, &self.p.types)
         };
         self.tail = tail;
         let looped = !self.tail.is_empty();
@@ -608,7 +599,9 @@ impl CGen<'_> {
         if looped {
             self.line("for (;;) {");
         }
-        self.block_stmts(&body);
+        for s in stmts {
+            self.stmt(s);
+        }
         self.end_scope(h);
         // implicit return (falling off the end of C `main` returns 0)
         match self.p.types.kind(ret) {
@@ -636,9 +629,9 @@ impl CGen<'_> {
         };
         // the C name already carries the source name unless it had to be mangled
         if !self.c_main && (is_init || c_ident(&name) != name) {
-            writeln!(self.funcs_out, "/* {} */", name.replace("*/", "* /")).unwrap();
+            wl!(self.funcs_out, "/* {} */", name.replace("*/", "* /"));
         }
-        writeln!(self.funcs_out, "{proto} {{\n{body_text}}}\n").unwrap();
+        wl!(self.funcs_out, "{proto} {{\n{body_text}}}\n");
     }
 
     // ------------------------------------------------------------ variables
@@ -670,16 +663,8 @@ impl CGen<'_> {
     fn declare(&mut self, v: VarRef, value: String) {
         match v {
             VarRef::Global(g) => {
-                let n = self.gname(g);
-                let ty = self.p.globals[g].ty;
-                if self.managed(ty) {
-                    let h = self.h(ty);
-                    // re-running an initialiser releases the previous value
-                    let c = self.tg.ct(ty);
-                    self.line(format!("{{ {c} old = {n}; {n} = {value}; rl_{h}(old); }}"));
-                } else {
-                    self.line(format!("{n} = {value};"));
-                }
+                // re-running an initialiser releases the previous value
+                self.store_release("", &self.gname(g), self.p.globals[g].ty, &value);
             }
             VarRef::Local(l) => {
                 let loc = self.local(l).clone();
@@ -719,8 +704,8 @@ impl CGen<'_> {
 
     fn stmt(&mut self, s: &Stmt) {
         let h = self.cleanup.len();
-        if self.tail.contains(&std::ptr::from_ref(s)) {
-            self.tail_call(call_args(s));
+        if let Some(args) = self.tail.get(&std::ptr::from_ref(s)).copied() {
+            self.tail_call(args);
             // the jump left the statement: its temporaries are released already
             self.cleanup.truncate(h);
             return;
@@ -731,7 +716,7 @@ impl CGen<'_> {
                 if let Some(var) = *v
                     && e.ty != NEVER
                 {
-                    if let TyKind::Mutex(inner) = *self.p.types.kind(self.var_ty(var))
+                    if let TyKind::Mutex(inner) = *self.p.types.kind(self.p.var_ty(self.func, var))
                         && !matches!(self.p.types.kind(e.ty), TyKind::Mutex(_))
                     {
                         let o = self.own(val, inner);
@@ -762,7 +747,7 @@ impl CGen<'_> {
                     let code = if *count == 1 {
                         parts[0].clone()
                     } else {
-                        let c = self.ct(self.var_ty(*var));
+                        let c = self.ct(self.p.var_ty(self.func, *var));
                         format!("({c}){{{}}}", parts.join(", "))
                     };
                     self.declare(*var, code);
@@ -1042,13 +1027,7 @@ impl CGen<'_> {
         let c = self.ct(ty);
         // a place without indexing is a plain lvalue: assign to it directly
         if let Some(lv) = self.place_lvalue(place) {
-            if self.managed(ty) {
-                let h = self.h(ty);
-                self.line(format!("{{ {c} old_ = {lv}; {lv} = {o}; rl_{h}(old_); }}"));
-            } else {
-                self.line(format!("{lv} = {o};"));
-            }
-            return;
+            return self.store_release("", &lv, ty, &o);
         }
         // a literal can be stored after the place is computed; anything else runs first
         let nv = if matches!(e.kind, EK::Lit(_)) {
@@ -1058,34 +1037,39 @@ impl CGen<'_> {
         };
         let p = self.place_ptr(place);
         if self.managed(ty) {
-            let h = self.h(ty);
-            self.line(format!(
-                "{{ {c} *p_ = {p}; {c} old_ = *p_; *p_ = {nv}; rl_{h}(old_); }}"
-            ));
+            self.store_release(&format!("{c} *p_ = {p}; "), "*p_", ty, &nv);
         } else {
             self.line(format!("*{p} = {nv};"));
         }
     }
 
+    /// `lv = v;`, releasing the old value when `ty` is managed; `pre` declares what `lv` uses.
+    fn store_release(&mut self, pre: &str, lv: &str, ty: TyId, v: &str) {
+        if self.managed(ty) {
+            let (c, h) = (self.tg.ct(ty), self.h(ty));
+            self.line(format!(
+                "{{ {pre}{c} old_ = {lv}; {lv} = {v}; rl_{h}(old_); }}"
+            ));
+        } else {
+            self.line(format!("{lv} = {v};"));
+        }
+    }
+
     fn place_ty(&self, p: &Place) -> TyId {
         match p {
-            Place::Var(v) => self.var_ty(*v),
-            Place::Field(b, i) => {
-                let t = self.place_ty(b);
-                self.p.types.struct_def(t).unwrap().fields[*i].1
-            }
+            Place::Var(v) => self.p.var_ty(self.func, *v),
+            Place::Field(b, i) => self.place_field(b, *i).1,
             Place::TupleIndex(b, i) => match self.p.types.kind(self.place_ty(b)) {
                 TyKind::Tuple(ts) => ts[*i],
                 _ => unreachable!(),
             },
-            Place::Index(b, _) => {
-                let t = self.place_ty(b);
-                match self.p.types.kind(t) {
-                    TyKind::Map(_, v) => *v,
-                    _ => self.p.types.elem(t).unwrap(),
-                }
-            }
+            Place::Index(b, _) => elem_of(&self.p.types, self.place_ty(b)).unwrap(),
         }
+    }
+
+    /// Field `i` (name and type) of the struct at place `b`.
+    fn place_field(&self, b: &Place, i: usize) -> &(String, TyId) {
+        &self.p.types.struct_def(self.place_ty(b)).unwrap().fields[i]
     }
 
     /// The place as a C lvalue, when reaching it needs no code (no indexing).
@@ -1093,8 +1077,7 @@ impl CGen<'_> {
         match p {
             Place::Var(v) => Some(self.var_access(*v)),
             Place::Field(b, i) => {
-                let t = self.place_ty(b);
-                let fname = field_name(&self.p.types.struct_def(t).unwrap().fields[*i].0);
+                let fname = field_name(&self.place_field(b, *i).0);
                 let b = self.place_lvalue(b)?;
                 Some(format!("{b}.{fname}"))
             }
@@ -1111,8 +1094,7 @@ impl CGen<'_> {
         match p {
             Place::Var(v) => format!("&{}", self.var_access(*v)),
             Place::Field(b, i) => {
-                let t = self.place_ty(b);
-                let fname = field_name(&self.p.types.struct_def(t).unwrap().fields[*i].0);
+                let fname = field_name(&self.place_field(b, *i).0);
                 let bp = self.place_ptr(b);
                 format!("&({bp})->{fname}")
             }
@@ -1128,7 +1110,7 @@ impl CGen<'_> {
                 let bpv = self.fresh("pp");
                 let bc = self.tg.ct(t);
                 self.line(format!("{bc} *{bpv} = {bp};"));
-                if let TyKind::Map(k, _) = self.p.types.kind(t).clone() {
+                if let TyKind::Map(k, _) = *self.p.types.kind(t) {
                     let kv = self.expr(idx);
                     let c = self.tg.ct(k);
                     let kn = self.decl(&c, "k", &kv.code);
@@ -1181,13 +1163,12 @@ impl CGen<'_> {
         }
         let n = format!("ls{}", self.strs.len());
         let clen = s.chars().count();
-        writeln!(
+        wl!(
             self.str_defs,
             "static nc_str {n} = {{-1, {}, {clen}, \"{}\"}};",
             s.len(),
             c_escape_bytes(s.as_bytes())
-        )
-        .unwrap();
+        );
         self.strs.insert(s.to_string(), n.clone());
         n
     }
@@ -1307,7 +1288,7 @@ impl CGen<'_> {
                 let bn = self.bind(b.ty, &bv);
                 let ec = self.ct(ty);
                 let loc = self.loc(e.span);
-                CVal::b(match self.p.types.kind(self.p.types.base(b.ty)).clone() {
+                CVal::b(match *self.p.types.kind(self.p.types.base(b.ty)) {
                     TyKind::Map(k, _) => {
                         let kv = self.expr(idx);
                         let c = self.tg.ct(k);
@@ -1463,18 +1444,16 @@ impl CGen<'_> {
                 self.embeds += 1;
                 let len = bytes.len();
                 if len == 0 {
-                    writeln!(
+                    wl!(
                         self.str_defs,
                         "static nc_arr nc_embed{n} = {{-1, 0, 0, &ti_{BYTE}, NULL}};"
-                    )
-                    .unwrap();
+                    );
                 } else {
                     let p = c_escape_str(&path.display().to_string());
-                    writeln!(
+                    wl!(
                         self.str_defs,
                         "static const uint8_t nc_embed{n}_data[] = {{\n#embed \"{p}\"\n}};\nstatic nc_arr nc_embed{n} = {{-1, {len}, {len}, &ti_{BYTE}, (void *)nc_embed{n}_data}};"
-                    )
-                    .unwrap();
+                    );
                 }
                 CVal::b(format!("(&nc_embed{n})"))
             }
@@ -1649,9 +1628,9 @@ impl CGen<'_> {
         let mut def = format!("struct {sname} {{\n  nc_fut h;\n  nc_fn fn;\n");
         for (i, p) in params.iter().enumerate() {
             let pc = self.ct(*p);
-            writeln!(def, "  {pc} a{i};").unwrap();
+            wl!(def, "  {pc} a{i};");
         }
-        writeln!(def, "  {rc} result;\n}};").unwrap();
+        wl!(def, "  {rc} result;\n}};");
         // run function
         let call_args = (0..params.len()).map(|i| format!("s->a{i}")).collect();
         let call = self.call_code(c, "s->fn", call_args);
@@ -1660,17 +1639,20 @@ impl CGen<'_> {
         } else {
             format!("s->result = {call};")
         };
-        writeln!(def, "static void {sname}_run(nc_fut *f) {{\n  struct {sname} *s = (struct {sname} *)f;\n  {store}\n}}").unwrap();
+        wl!(
+            def,
+            "static void {sname}_run(nc_fut *f) {{\n  struct {sname} *s = (struct {sname} *)f;\n  {store}\n}}"
+        );
         let mut drop = format!(
             "static void {sname}_drop(nc_fut *f) {{\n  struct {sname} *s = (struct {sname} *)f;\n  nc_fn_release(s->fn);\n"
         );
         for (i, p) in params.iter().enumerate() {
             if self.managed(*p) {
-                writeln!(drop, "  rl_{}(s->a{i});", self.h(*p)).unwrap();
+                wl!(drop, "  rl_{}(s->a{i});", self.h(*p));
             }
         }
         if self.managed(rt) {
-            writeln!(drop, "  if (s->h.state == 2) rl_{}(s->result);", self.h(rt)).unwrap();
+            wl!(drop, "  if (s->h.state == 2) rl_{}(s->result);", self.h(rt));
         }
         drop.push_str("}\n");
         self.fut_defs.push_str(&def);
@@ -1757,7 +1739,7 @@ impl CGen<'_> {
             }
             In => {
                 let bt = self.p.types.base(b.ty);
-                match self.p.types.kind(bt).clone() {
+                match self.p.types.kind(bt) {
                     TyKind::Str => {
                         if a.ty == CHAR {
                             format!("nc_str_has_char({y}, {x})")
@@ -1801,12 +1783,12 @@ impl CGen<'_> {
         let v = self.expr(x);
         let from = self.p.types.base(x.ty);
         let loc = self.loc(span);
-        let tk = self.p.types.kind(to).clone();
+        let tk = self.p.types.kind(to);
         if to == STR {
             return self.str_of(x.ty, &v.code);
         }
         let c = &v.code;
-        match (from, &tk) {
+        match (from, tk) {
             (BOOL, TyKind::Int) => CVal::b(format!("(int64_t)({c} ? 1 : 0)")),
             (BOOL, TyKind::UInt) => CVal::b(format!("(uint64_t)({c} ? 1 : 0)")),
             (BYTE, TyKind::Char) => CVal::b(format!("(uint32_t){c}")),
@@ -2290,31 +2272,11 @@ fn tail_release(var: &str, h: TyId) -> String {
     format!("if (tc_own) rl_{h}({var});")
 }
 
-/// The arguments of the self call the tail statement `s` makes (see `tail_calls`).
-fn call_args(s: &Stmt) -> &[Expr] {
-    let (SK::Return(Some(e)) | SK::Expr(e) | SK::Break(_, Some(e))) = &s.kind else {
-        unreachable!("not a tail call")
-    };
-    match &e.kind {
-        EK::Call(_, args) => args,
-        EK::Try(x) => match &x.kind {
-            EK::Call(_, args) => args,
-            _ => unreachable!("not a tail call"),
-        },
-        _ => unreachable!("not a tail call"),
-    }
-}
-
-/// The statements of function `fid` (with body `body`) that call it in tail position: their
-/// result, or their lack of one, is what the function returns, so the call can reuse the
+/// The statements of function `fid` that call it in tail position, with the call's arguments:
+/// their result, or their lack of one, is what the function returns, so the call can reuse the
 /// frame. Calls inside a `lock` are left alone, since the lock must be held during them.
 /// Also returns, for each parameter, whether some tail call passes it a new value.
-fn tail_calls(
-    fid: FuncId,
-    f: &Func,
-    body: &Block,
-    types: &Types,
-) -> (HashSet<*const Stmt>, Vec<bool>) {
+fn tail_calls<'a>(fid: FuncId, f: &'a Func, types: &Types) -> (TailMap<'a>, Vec<bool>) {
     let (throws, void) = match types.kind(f.ret) {
         TyKind::ErrU(i) => (true, *i == VOID),
         _ => (false, f.ret == VOID),
@@ -2325,12 +2287,15 @@ fn tail_calls(
         throws,
         void,
         ifs: vec![],
-        out: HashSet::new(),
+        out: HashMap::new(),
         replaced: vec![false; f.params.len()],
     };
-    scan.block(body, true);
+    scan.block(&f.body, true);
     (scan.out, scan.replaced)
 }
+
+/// Tail statements (see `tail_calls`) and the arguments of their self calls.
+type TailMap<'a> = HashMap<*const Stmt, &'a [Expr]>;
 
 struct TailScan<'a> {
     fid: FuncId,
@@ -2341,12 +2306,12 @@ struct TailScan<'a> {
     void: bool,
     /// the `if`s whose value is returned
     ifs: Vec<JumpId>,
-    out: HashSet<*const Stmt>,
+    out: TailMap<'a>,
     /// per parameter: some tail call passes it something other than itself
     replaced: Vec<bool>,
 }
 
-impl TailScan<'_> {
+impl<'a> TailScan<'a> {
     /// The arguments of a self call, wrapped in `try` exactly when the function can throw.
     fn self_call<'e>(&self, e: &'e Expr) -> Option<&'e [Expr]> {
         let call = match &e.kind {
@@ -2368,7 +2333,7 @@ impl TailScan<'_> {
     }
 
     /// `tail`: the block's last statement is in tail position.
-    fn block(&mut self, b: &Block, tail: bool) {
+    fn block(&mut self, b: &'a Block, tail: bool) {
         for (k, s) in b.stmts.iter().enumerate() {
             let last = tail && k + 1 == b.stmts.len();
             // the value the function returns after this statement, if it is in tail position
@@ -2387,7 +2352,7 @@ impl TailScan<'_> {
                 {
                     *r |= !matches!(a.kind, EK::Var(VarRef::Local(l)) if l == p);
                 }
-                self.out.insert(std::ptr::from_ref(s));
+                self.out.insert(std::ptr::from_ref(s), args);
                 continue;
             }
             // a returned `if`: its `break`s with a value are in tail position

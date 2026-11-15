@@ -53,17 +53,17 @@ impl<'t> TypeGen<'t> {
         if let Some(n) = self.names.get(&t) {
             return n.clone();
         }
-        let base = match self.t.kind(t).clone() {
+        let base = match *self.t.kind(t) {
             TyKind::Array(e) => format!("arr_{}", self.mangle(e)),
             TyKind::Fixed(e, n) => format!("arr{n}_{}", self.mangle(e)),
             TyKind::Map(k, v) => format!("map_{}_{}", self.mangle(k), self.mangle(v)),
             TyKind::Opt(i) => format!("opt_{}", self.mangle(i)),
             TyKind::ErrU(i) => format!("err_{}", self.mangle(i)),
-            TyKind::Tuple(ts) => {
+            TyKind::Tuple(ref ts) => {
                 let parts: Vec<String> = ts.iter().map(|x| self.mangle(*x)).collect();
                 format!("tup_{}", parts.join("_"))
             }
-            TyKind::Fn(ps, r) => {
+            TyKind::Fn(ref ps, r) => {
                 let mut parts: Vec<String> = ps.iter().map(|x| self.mangle(*x)).collect();
                 parts.push(self.mangle(r));
                 format!("fn_{}", parts.join("_"))
@@ -90,7 +90,7 @@ impl<'t> TypeGen<'t> {
     /// The C type used for values of `t`.
     pub fn ct(&mut self, t: TyId) -> String {
         let t = self.t.base(t);
-        match self.t.kind(t).clone() {
+        match self.t.kind(t) {
             TyKind::Void => "nc_void".into(),
             TyKind::Never => "void".into(),
             TyKind::Bool => "bool".into(),
@@ -134,16 +134,18 @@ impl<'t> TypeGen<'t> {
         if t == NEVER || !self.done.insert(t) {
             return;
         }
-        let kind = self.t.kind(t).clone();
+        let kind = self.t.kind(t);
         let name = self.mangle(t);
         // forward declarations for aggregate types
-        match &kind {
+        match kind {
             TyKind::Opt(_) if self.t.opt_boxed(t) => {}
-            TyKind::Opt(_) | TyKind::ErrU(_) | TyKind::Tuple(_) | TyKind::Struct(_) => {
-                writeln!(self.decls, "typedef struct nc_{name} nc_{name};").unwrap();
-            }
-            TyKind::Enum(_) if self.t.enum_has_payload(t) => {
-                writeln!(self.decls, "typedef struct nc_{name} nc_{name};").unwrap();
+            TyKind::Enum(_) if !self.t.enum_has_payload(t) => {}
+            TyKind::Opt(_)
+            | TyKind::ErrU(_)
+            | TyKind::Tuple(_)
+            | TyKind::Struct(_)
+            | TyKind::Enum(_) => {
+                wl!(self.decls, "typedef struct nc_{name} nc_{name};");
             }
             _ => {}
         }
@@ -152,31 +154,29 @@ impl<'t> TypeGen<'t> {
         }
         let ct = self.ct(t);
         // definitions
-        match &kind {
+        match kind {
             // `nc.h` defines the optionals and error unions of built-in types
-            TyKind::Opt(i) | TyKind::ErrU(i) if in_header(&kind, *i, &name) => {}
+            TyKind::Opt(i) | TyKind::ErrU(i) if in_header(kind, *i, &name) => {}
             TyKind::Opt(i) if !self.t.opt_boxed(t) => {
                 let ic = self.ct(*i);
-                writeln!(
+                wl!(
                     self.decls,
                     "struct nc_{name} {{\n  bool has;\n  {ic} val;\n}};"
-                )
-                .unwrap();
+                );
             }
             TyKind::ErrU(i) => {
                 let ic = self.ct(*i);
-                writeln!(
+                wl!(
                     self.decls,
                     "struct nc_{name} {{\n  nc_str *err; /* NULL on success */\n  {ic} val;\n}};"
-                )
-                .unwrap();
+                );
             }
             TyKind::Tuple(_) | TyKind::Struct(_) => {
-                let fields = self.c_fields(&kind);
+                let fields = self.c_fields(kind);
                 let mut s = format!("struct nc_{name} {{\n");
                 for (f, x) in &fields {
                     let xc = self.ct(*x);
-                    writeln!(s, "  {xc} {f};").unwrap();
+                    wl!(s, "  {xc} {f};");
                 }
                 if fields.is_empty() {
                     s.push_str("  char _empty;\n");
@@ -196,9 +196,9 @@ impl<'t> TypeGen<'t> {
                     s.push_str("    struct {");
                     for (k, p) in ps.iter().enumerate() {
                         let pc = self.ct(*p);
-                        write!(s, " {pc} p{k};").unwrap();
+                        w!(s, " {pc} p{k};");
                     }
-                    writeln!(s, " }} v{vi}; /* {vname} */").unwrap();
+                    wl!(s, " }} v{vi}; /* {vname} */");
                 }
                 s.push_str("  } u;\n};\n");
                 self.late_decls.push_str(&s);
@@ -210,64 +210,40 @@ impl<'t> TypeGen<'t> {
                     args.push(self.ct(*p));
                 }
                 let fp = self.fp_type(t);
-                writeln!(self.decls, "typedef {rc} (*{fp})({});", args.join(", ")).unwrap();
+                wl!(self.decls, "typedef {rc} (*{fp})({});", args.join(", "));
             }
             _ => {}
         }
-        self.helpers(t, &ct, &kind);
+        self.helpers(t, &ct, kind);
     }
 
     fn helpers(&mut self, t: TyId, ct: &str, kind: &TyKind) {
         let h = t;
         let managed = self.t.is_managed(t);
-        writeln!(
+        wl!(
             self.protos,
             "static {ct} rt_{h}({ct} x);\nstatic void rl_{h}({ct} x);\nstatic bool eq_{h}({ct} a, {ct} b);\nstatic uint64_t hs_{h}({ct} x);\nstatic void st_{h}(nc_sb *sb, {ct} x);\nstatic const nc_ti ti_{h};"
-        )
-        .unwrap();
+        );
         let (rt, rl, eq, hs, st) = self.helper_bodies(t, kind);
-        let b = &mut self.bodies;
-        writeln!(b, "/* {} */", self.t.show(t).replace("*/", "* /")).unwrap();
-        writeln!(b, "static {ct} rt_{h}({ct} x) {{ {rt} return x; }}").unwrap();
-        let (vx, vab, vsx) = (
+        let (vx, vab, vhx, vsx) = (
             unused(&rl, &["x"]),
             unused(&eq, &["a", "b"]),
+            unused(&hs, &["x"]),
             unused(&st, &["sb", "x"]),
         );
-        writeln!(b, "static void rl_{h}({ct} x) {{ {vx}{rl} }}").unwrap();
-        writeln!(b, "static bool eq_{h}({ct} a, {ct} b) {{ {vab}{eq} }}").unwrap();
-        let vx = unused(&hs, &["x"]);
-        writeln!(b, "static uint64_t hs_{h}({ct} x) {{ {vx}{hs} }}").unwrap();
-        writeln!(b, "static void st_{h}(nc_sb *sb, {ct} x) {{ {vsx}{st} }}").unwrap();
-        if managed {
-            writeln!(
-                b,
-                "static void vrt_{h}(void *p) {{ *({ct} *)p = rt_{h}(*({ct} *)p); }}"
-            )
-            .unwrap();
-            writeln!(b, "static void vrl_{h}(void *p) {{ rl_{h}(*({ct} *)p); }}").unwrap();
-        }
-        writeln!(b, "static bool veq_{h}(const void *a, const void *b) {{ return eq_{h}(*({ct} const *)a, *({ct} const *)b); }}").unwrap();
-        writeln!(
-            b,
-            "static uint64_t vhs_{h}(const void *a) {{ return hs_{h}(*({ct} const *)a); }}"
-        )
-        .unwrap();
-        writeln!(
-            b,
-            "static void vst_{h}(nc_sb *sb, const void *a) {{ st_{h}(sb, *({ct} const *)a); }}"
-        )
-        .unwrap();
-        let (r, l) = if managed {
-            (format!("vrt_{h}"), format!("vrl_{h}"))
+        let (v, r, l) = if managed {
+            let v = format!(
+                "static void vrt_{h}(void *p) {{ *({ct} *)p = rt_{h}(*({ct} *)p); }}\nstatic void vrl_{h}(void *p) {{ rl_{h}(*({ct} *)p); }}\n"
+            );
+            (v, format!("vrt_{h}"), format!("vrl_{h}"))
         } else {
-            ("NULL".into(), "NULL".into())
+            (String::new(), "NULL".into(), "NULL".into())
         };
-        writeln!(
-            b,
-            "static const nc_ti ti_{h} = {{sizeof({ct}), {r}, {l}, veq_{h}, vhs_{h}, vst_{h}}};\n"
-        )
-        .unwrap();
+        let show = self.t.show(t).replace("*/", "* /");
+        wl!(
+            self.bodies,
+            "/* {show} */\nstatic {ct} rt_{h}({ct} x) {{ {rt} return x; }}\nstatic void rl_{h}({ct} x) {{ {vx}{rl} }}\nstatic bool eq_{h}({ct} a, {ct} b) {{ {vab}{eq} }}\nstatic uint64_t hs_{h}({ct} x) {{ {vhx}{hs} }}\nstatic void st_{h}(nc_sb *sb, {ct} x) {{ {vsx}{st} }}\n{v}static bool veq_{h}(const void *a, const void *b) {{ return eq_{h}(*({ct} const *)a, *({ct} const *)b); }}\nstatic uint64_t vhs_{h}(const void *a) {{ return hs_{h}(*({ct} const *)a); }}\nstatic void vst_{h}(nc_sb *sb, const void *a) {{ st_{h}(sb, *({ct} const *)a); }}\nstatic const nc_ti ti_{h} = {{sizeof({ct}), {r}, {l}, veq_{h}, vhs_{h}, vst_{h}}};\n"
+        );
     }
 
     /// (retain stmts, release stmts, eq body, hash body, str body)
@@ -372,12 +348,11 @@ impl<'t> TypeGen<'t> {
                 if !self.t.enum_has_payload(t) {
                     let mut st = s("switch (x) {");
                     for (vi, (vn, _)) in def.variants.iter().enumerate() {
-                        write!(
+                        w!(
                             st,
                             " case {vi}: nc_sb_cstr(sb, \"{}.{vn}\"); break;",
                             c_escape_str(&def.name)
-                        )
-                        .unwrap();
+                        );
                     }
                     st.push_str(" }");
                     return prim("nc_hash_u64(x)", &st);
@@ -389,29 +364,28 @@ impl<'t> TypeGen<'t> {
                 let mut hs = s("uint64_t h = nc_hash_u64(x->tag); switch (x->tag) {");
                 let mut st = s("switch (x->tag) {");
                 for (vi, (vn, ps)) in def.variants.iter().enumerate() {
-                    write!(rl, " case {vi}:").unwrap();
-                    write!(eq, " case {vi}: return true").unwrap();
-                    write!(hs, " case {vi}:").unwrap();
-                    write!(
+                    w!(rl, " case {vi}:");
+                    w!(eq, " case {vi}: return true");
+                    w!(hs, " case {vi}:");
+                    w!(
                         st,
                         " case {vi}: nc_sb_cstr(sb, \"{}.{vn}\");",
                         c_escape_str(&def.name)
-                    )
-                    .unwrap();
+                    );
                     if !ps.is_empty() {
                         st.push_str(" nc_sb_cstr(sb, \"(\");");
                     }
                     for (k, p) in ps.iter().enumerate() {
                         let p = self.t.base(*p);
                         if self.t.is_managed(p) {
-                            write!(rl, " rl_{p}(x->u.v{vi}.p{k});").unwrap();
+                            w!(rl, " rl_{p}(x->u.v{vi}.p{k});");
                         }
-                        write!(eq, " && eq_{p}(a->u.v{vi}.p{k}, b->u.v{vi}.p{k})").unwrap();
-                        write!(hs, " h = nc_hash_mix(h, hs_{p}(x->u.v{vi}.p{k}));").unwrap();
+                        w!(eq, " && eq_{p}(a->u.v{vi}.p{k}, b->u.v{vi}.p{k})");
+                        w!(hs, " h = nc_hash_mix(h, hs_{p}(x->u.v{vi}.p{k}));");
                         if k > 0 {
                             st.push_str(" nc_sb_cstr(sb, \", \");");
                         }
-                        write!(st, " st_{p}(sb, x->u.v{vi}.p{k});").unwrap();
+                        w!(st, " st_{p}(sb, x->u.v{vi}.p{k});");
                     }
                     if !ps.is_empty() {
                         st.push_str(" nc_sb_cstr(sb, \")\");");
@@ -468,22 +442,22 @@ impl<'t> TypeGen<'t> {
         for (k, (f, t)) in fields.iter().enumerate() {
             let t = self.t.base(*t);
             if self.t.is_managed(t) {
-                write!(rt, " x.{f} = rt_{t}(x.{f});").unwrap();
-                write!(rl, " rl_{t}(x.{f});").unwrap();
+                w!(rt, " x.{f} = rt_{t}(x.{f});");
+                w!(rl, " rl_{t}(x.{f});");
             }
-            write!(eq, " && eq_{t}(a.{f}, b.{f})").unwrap();
-            write!(hs, " h = nc_hash_mix(h, hs_{t}(x.{f}));").unwrap();
+            w!(eq, " && eq_{t}(a.{f}, b.{f})");
+            w!(hs, " h = nc_hash_mix(h, hs_{t}(x.{f}));");
             if k > 0 {
                 st.push_str(" nc_sb_cstr(sb, \", \");");
             }
             if let Some(n) = &names {
-                write!(st, " nc_sb_cstr(sb, \".{} = \");", n[k]).unwrap();
+                w!(st, " nc_sb_cstr(sb, \".{} = \");", n[k]);
             }
-            write!(st, " st_{t}(sb, x.{f});").unwrap();
+            w!(st, " st_{t}(sb, x.{f});");
         }
         eq.push(';');
         hs.push_str(" return h;");
-        write!(st, " nc_sb_cstr(sb, \"{}\");", c_escape_str(close)).unwrap();
+        w!(st, " nc_sb_cstr(sb, \"{}\");", c_escape_str(close));
         (rt, rl, eq, hs, st)
     }
 }
@@ -516,7 +490,7 @@ pub fn c_escape_bytes(b: &[u8]) -> String {
                 out.push(c as char);
             }
             _ => {
-                write!(out, "\\{c:03o}").unwrap();
+                w!(out, "\\{c:03o}");
                 prev_octal = true;
                 continue;
             }

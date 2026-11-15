@@ -5,9 +5,11 @@ use lsp_types::*;
 use super::{BUILTINS, DeclKind, Server, docs, is_ident_byte, markdown};
 use std::collections::HashMap;
 
+use super::complete::{generic_open, tabstops, unclosed};
 use super::tyexpr;
 use crate::ast::TypeExpr;
 use crate::check::index::Sig;
+use crate::lexer::{Tok, Token};
 
 /// The call around a position.
 pub struct CallCtx {
@@ -27,53 +29,22 @@ impl Server {
     /// The unclosed call `callee(` (or `callee<T>(`) around `off`.
     pub(super) fn call_at(&self, uri: &Uri, off: usize) -> Option<CallCtx> {
         let (path, text) = self.source(uri)?;
-        // find the unclosed `(` before the cursor and count the commas at its level, skipping
-        // string and character literals and comments
+        // the unclosed `(` before the cursor and the commas at its level
+        let (toks, _) = crate::lexer::lex_all(&text, 0, 0);
+        let toks: Vec<&Token> = (toks.iter())
+            .take_while(|t| t.span.end as usize <= off)
+            .collect();
+        let (open, commas) = unclosed(&toks).filter(|&(i, _)| toks[i].tok == Tok::LParen)?;
         let b = text.as_bytes();
-        let mut skip = vec![false; b.len()];
-        for (s, e) in super::literals_and_comments(&text) {
-            skip[s..e.min(b.len())].fill(true);
-        }
-        let (mut depth, mut commas, mut i) = (0i32, 0u32, off.min(b.len()));
-        let open = loop {
-            if i == 0 {
-                return None;
-            }
-            i -= 1;
-            if skip[i] {
-                continue;
-            }
-            match b[i] {
-                b')' | b']' | b'}' => depth += 1,
-                b'(' | b'[' | b'{' if depth > 0 => depth -= 1,
-                b'(' => break i,
-                b'[' | b'{' => return None,
-                b',' if depth == 0 => commas += 1,
-                _ => {}
-            }
-        };
-        let mut e = open;
+        let mut e = toks[open].span.start as usize;
         while e > 0 && b[e - 1] == b' ' {
             e -= 1;
         }
         // explicit generic arguments: `map<int, str>(`
         let generic_args: Vec<TypeExpr> = if e > 0 && b[e - 1] == b'>' {
-            let close = e - 1;
-            let mut d = 0;
-            while e > 0 {
-                e -= 1;
-                match b[e] {
-                    b'>' => d += 1,
-                    b'<' => {
-                        d -= 1;
-                        if d == 0 {
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            crate::parser::parse_generic_args_text(&text[e..=close]).unwrap_or_default()
+            e = toks[generic_open(&toks, open)?].span.start as usize;
+            let close = toks[open - 1].span.end as usize;
+            crate::parser::parse_generic_args_text(&text[e..close]).unwrap_or_default()
         } else {
             vec![]
         };
@@ -152,7 +123,7 @@ impl Server {
             name: shown,
             sig,
             open_tps,
-            arg: commas,
+            arg: commas as u32,
             documentation,
             param_docs,
         })
@@ -211,10 +182,9 @@ impl Server {
             .map(|(i, t)| (t.show(), name(i)))
             .collect();
         let plain: Vec<String> = args.iter().map(|(t, n)| format!("{t} {n}")).collect();
-        let snip: Vec<String> = args
-            .iter()
-            .enumerate()
-            .map(|(i, (t, n))| format!("{t} ${{{}:{n}}}", i + 1))
+        let mut slot = tabstops();
+        let snip: Vec<String> = (args.iter())
+            .map(|(t, n)| format!("{t} {}", slot(Some(n))))
             .collect();
         let label = format!("fn({}){ret_part} {{}}", plain.join(", "));
         vec![CompletionItem {

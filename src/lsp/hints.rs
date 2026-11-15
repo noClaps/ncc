@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use lsp_types::*;
 
-use super::{KEYWORDS, Positions, Server, offset_to_pos, pos_to_offset};
+use super::{Lines, Server, pos_to_offset};
 use crate::ast;
 use crate::check::index::{DeclKind, HintKind};
 use crate::lexer::{StrPart, Tok};
@@ -78,6 +78,7 @@ impl Server {
         );
         // generic function bodies are checked once per instantiation: a hint whose label
         // differs between instantiations would be misleading, so it is left out
+        let lines = Lines::new(text);
         let mut labels: HashMap<(u32, HintKind), HashSet<&str>> = HashMap::new();
         for h in &a.index.hints {
             if h.at.file == fid && rs <= h.at.start && h.at.start <= re {
@@ -96,7 +97,7 @@ impl Server {
                     HintKind::Type => InlayHintKind::TYPE,
                     HintKind::Param => InlayHintKind::PARAMETER,
                 };
-                hint(offset_to_pos(text, at as usize), label, Some(kind))
+                hint(lines.pos(at as usize), label, Some(kind))
             })
             .collect();
         // `} // fn name` after long blocks
@@ -106,9 +107,12 @@ impl Server {
             if e == 0 || e > text.len() || !text[..e].ends_with('}') {
                 return;
             }
-            let lines = offset_to_pos(text, e).line - offset_to_pos(text, s).line;
-            if lines >= CLOSING_HINT_LINES && rs as usize <= e && e <= re as usize {
-                out.push(hint(offset_to_pos(text, e), label, None));
+            let end = lines.pos(e);
+            if end.line - lines.pos(s).line >= CLOSING_HINT_LINES
+                && rs as usize <= e
+                && e <= re as usize
+            {
+                out.push(hint(end, label, None));
             }
         };
         for it in &module.items {
@@ -165,13 +169,7 @@ impl Server {
             }
         }
         let module = self.module_of(&path, &text);
-        let aliases: HashSet<&str> = (module.items.iter())
-            .filter_map(|it| match it {
-                ast::Item::Import(im) => Some(im.alias.as_str()),
-                ast::Item::Extern(e) => Some(e.alias.as_str()),
-                _ => None,
-            })
-            .collect();
+        let aliases: HashSet<&str> = module.aliases().map(|m| m.alias).collect();
         let mut toks: Vec<(usize, usize, u32, u32)> = Vec::new();
         let (lexed, _) = crate::lexer::lex_all(&text, 0, 0);
         classify(&text, &lexed, &resolved, &aliases, &mut toks);
@@ -186,7 +184,7 @@ impl Server {
             None => (0, text.len()),
         };
         let mut data = Vec::new();
-        let mut positions = Positions::new(&text);
+        let lines = Lines::new(&text);
         let (mut pl, mut pc) = (0u32, 0u32);
         for (s, e, ty, mods) in toks {
             if e < rs || s > re {
@@ -196,7 +194,7 @@ impl Server {
             let mut start = s;
             for piece in text[s..e].split_inclusive('\n') {
                 let len = piece.trim_end_matches('\n').encode_utf16().count() as u32;
-                let pos = positions.at(start);
+                let pos = lines.pos(start);
                 start += piece.len();
                 if len == 0 {
                     continue;
@@ -258,7 +256,7 @@ fn classify(
                 } else if name == "none" {
                     // like Rust's `None`: a built-in variant
                     out.push((s, e, ENUM_MEMBER, M_DEFAULT_LIBRARY));
-                } else if KEYWORDS.contains(&name.as_str()) {
+                } else if crate::parser::is_keyword(name) {
                     out.push((s, e, KEYWORD, 0));
                 } else if crate::types::builtin_type(name).is_some() {
                     out.push((s, e, TYPE, M_DEFAULT_LIBRARY));

@@ -18,8 +18,8 @@ use crate::types::TyKind;
 
 use super::ssr::atomic;
 use super::{
-    Analysis, Server, edit_action, indent_at, insert_at, last_node, line_end, line_start,
-    offset_to_pos, pos_to_offset, range, span_range,
+    Analysis, Server, edit_action, indent_at, insert_at, last_expr, last_fn_before, last_stmt,
+    line_end, line_start, offset_to_pos, pos_to_offset, range, span_range,
 };
 use crate::ast::visit::{Node, walk};
 use crate::ast::{self, ExprKind as E, StmtKind as S};
@@ -174,16 +174,9 @@ fn block_stmt_around(module: &ast::Module, s: u32, e: u32) -> Option<&ast::Stmt>
             in_block.extend(b.stmts.iter().map(|st| (st.span.start, st.span.end)));
         }
     });
-    let (start, end) = (s, e);
-    last_node(module, |n| match n {
-        Node::Stmt(st)
-            if st.span.start <= start
-                && end <= st.span.end
-                && in_block.contains(&(st.span.start, st.span.end)) =>
-        {
-            Some(st)
-        }
-        _ => None,
+    last_stmt(module, |st| {
+        let span = (st.span.start, st.span.end);
+        (span.0 <= s && e <= span.1 && in_block.contains(&span)).then_some(st)
     })
 }
 
@@ -193,52 +186,43 @@ fn block_stmt_around(module: &ast::Module, s: u32, e: u32) -> Option<&ast::Stmt>
 pub(super) fn importable_modules(dir: &Path) -> (Vec<(String, String)>, Vec<PathBuf>) {
     let mut out = Vec::new();
     let mut dirs = vec![dir.to_path_buf()];
-    let stem = |f: &Path| f.file_stem().map(|n| n.to_string_lossy().into_owned());
+    let stem = |f: &Path| {
+        f.file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned()
+    };
     if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {
             let f = e.path();
             if f.extension().is_some_and(|x| x == "nc") && f.is_file() {
-                let n = stem(&f).unwrap_or_default();
+                let n = stem(&f);
                 out.push((n.clone(), format!("./{n}")));
             }
         }
     }
-    // dependency modules in `scan`, imported by their path from `base`
-    fn add_deps(
-        scan: &Path,
-        base: &Path,
-        out: &mut Vec<(String, String)>,
-        dirs: &mut Vec<PathBuf>,
-    ) {
+    // the modules in `scan`, imported by `prefix` and their path from `base`: all files of a
+    // dependency, or the project's files outside `dir`
+    let mut add = |scan: &Path, base: &Path, dep: bool, prefix: &str| {
         let mut files = Vec::new();
-        super::collect_nc_files(scan, true, &mut files, dirs, 0);
+        super::collect_nc_files(scan, dep, &mut files, &mut dirs, 0);
         for f in files {
-            if let Ok(rel) = f.with_extension("").strip_prefix(base) {
-                let name = f.file_stem().unwrap_or_default().to_string_lossy();
-                out.push((name.into_owned(), rel.to_string_lossy().into_owned()));
+            if (dep || f.parent() != Some(dir))
+                && let Ok(rel) = f.with_extension("").strip_prefix(base)
+            {
+                out.push((stem(&f), format!("{prefix}{}", rel.to_string_lossy())));
             }
         }
-    }
+    };
     if let Some(home) = crate::modules::nc_home() {
         for lib in crate::modules::SYSTEM_LIBS {
-            add_deps(&home.join(lib), &home, &mut out, &mut dirs);
+            add(&home.join(lib), &home, true, "");
         }
     }
     if let Some(root) = crate::modules::find_root(dir) {
-        let mut files = Vec::new();
-        super::collect_nc_files(&root, false, &mut files, &mut dirs, 0);
-        for f in files {
-            if f.parent() != Some(dir)
-                && let Ok(rel) = f.with_extension("").strip_prefix(&root)
-            {
-                out.push((
-                    stem(&f).unwrap_or_default(),
-                    format!(".../{}", rel.to_string_lossy()),
-                ));
-            }
-        }
+        add(&root, &root, false, ".../");
         let deps = root.join(".nc").join("deps");
-        add_deps(&deps, &deps, &mut out, &mut dirs);
+        add(&deps, &deps, true, "");
     }
     out.sort_by_key(|(n, p)| {
         (
@@ -416,11 +400,7 @@ impl Server {
                 }
                 codes::NEEDS_THROWING => {
                     // the innermost function around the error with a return type
-                    let best = last_node(&module, |n| match n {
-                        Node::Fn(sig, _) if sig.span.start as usize <= s => Some(sig),
-                        _ => None,
-                    });
-                    if let Some(sig) = best {
+                    if let Some(sig) = last_fn_before(&module, s as u32) {
                         let (at, ins) = if let Some(r) = &sig.ret {
                             (r.span().end as usize, "!".to_string())
                         } else {
@@ -450,11 +430,8 @@ impl Server {
                 }
                 codes::NOT_EXHAUSTIVE => {
                     let off = s as u32;
-                    let target = last_node(&module, |n| match n {
-                        Node::Expr(e) => match &e.kind {
-                            E::If(i) if i.span.start <= off && off <= i.span.end => Some(i),
-                            _ => None,
-                        },
+                    let target = last_expr(&module, |e| match &e.kind {
+                        E::If(i) if i.span.start <= off && off <= i.span.end => Some(i),
                         _ => None,
                     });
                     if let Some(ife) = target {
@@ -546,13 +523,8 @@ pub(super) fn add_missing_fields(
     off: u32,
     value: impl Fn(&crate::types::Types, crate::types::TyId) -> String,
 ) -> Option<TextEdit> {
-    let (lit, tyx, fields) = last_node(module, |n| match n {
-        Node::Expr(e) => match &e.kind {
-            E::Struct(tyx, fields) if e.span.start <= off && off < e.span.end => {
-                Some((e, tyx, fields))
-            }
-            _ => None,
-        },
+    let (lit, tyx, fields) = last_expr(module, |e| match &e.kind {
+        E::Struct(tyx, fields) if e.span.start <= off && off < e.span.end => Some((e, tyx, fields)),
         _ => None,
     })?;
     // the literal failed to check, so it has no recorded type: find the struct by name
@@ -720,15 +692,10 @@ fn generate_function(
     uri: &Uri,
 ) -> Option<CodeActionOrCommand> {
     let at = at as u32;
-    let (call, args) = last_node(module, |n| match n {
-        Node::Expr(e) => match &e.kind {
-            E::Call(c, args)
-                if c.span.start == at && matches!(&c.kind, E::Ident(n) if n == name) =>
-            {
-                Some((e, args))
-            }
-            _ => None,
-        },
+    let (call, args) = last_expr(module, |e| match &e.kind {
+        E::Call(c, args) if c.span.start == at && matches!(&c.kind, E::Ident(n) if n == name) => {
+            Some((e, args))
+        }
         _ => None,
     })?;
     let visible = super::complete::visible(a, fid, at as usize);
@@ -764,13 +731,7 @@ fn generate_function(
     }
     // the return type: the declared type of `T x = name(...)`, or the enclosing function's
     // return type for `return name(...)`
-    fn stmt(n: Node<'_>) -> Option<&S> {
-        match n {
-            Node::Stmt(st) => Some(&st.kind),
-            _ => None,
-        }
-    }
-    let ret = last_node(module, |n| match stmt(n)? {
+    let ret = last_stmt(module, |st| match &st.kind {
         S::VarDecl { targets, value, .. } if targets.len() == 1 && value.span == call.span => {
             Some(targets[0].ty.span())
         }
@@ -778,15 +739,11 @@ fn generate_function(
     })
     .or_else(|| {
         // `return name(...)` inside a function with a return type
-        last_node(module, |n| match stmt(n)? {
+        last_stmt(module, |st| match &st.kind {
             S::Return(Some(v)) if v.span == call.span => Some(()),
             _ => None,
         })?;
-        let fsig = last_node(module, |n| match n {
-            Node::Fn(sig, _) if sig.span.start <= at => Some(sig),
-            _ => None,
-        });
-        Some(fsig?.ret.as_ref()?.span())
+        Some(last_fn_before(module, at)?.ret.as_ref()?.span())
     })
     .map(|sp| &text[sp.start as usize..sp.end as usize]);
     // after the top-level item containing the call
@@ -861,17 +818,14 @@ fn inline_variable(
         return None;
     }
     // its declaration statement
-    let (st, value) = last_node(module, |n| match n {
-        Node::Stmt(st) => match &st.kind {
-            S::VarDecl {
-                targets,
-                value,
-                mutex: false,
-                public: false,
-                ..
-            } if targets.len() == 1 && targets[0].span == def => Some((st, value)),
-            _ => None,
-        },
+    let (st, value) = last_stmt(module, |st| match &st.kind {
+        S::VarDecl {
+            targets,
+            value,
+            mutex: false,
+            public: false,
+            ..
+        } if targets.len() == 1 && targets[0].span == def => Some((st, value)),
         _ => None,
     })?;
     let uses: Vec<Span> = {

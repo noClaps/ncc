@@ -183,8 +183,13 @@ impl<'a> Printer<'a> {
         self.text(s).contains('\n')
     }
 
+    /// The comments starting at or after `start` (comments are sorted by start).
+    fn comments_from(&self, start: usize) -> &'a [(usize, usize)] {
+        &self.comments[self.comments.partition_point(|c| c.0 < start)..]
+    }
+
     fn has_comment_in(&self, start: usize, end: usize) -> bool {
-        self.comments.iter().any(|&(s, _)| s >= start && s < end)
+        self.comments_from(start).first().is_some_and(|c| c.0 < end)
     }
 
     /// The first `c` at or after `from` that is not inside a comment.
@@ -192,20 +197,21 @@ impl<'a> Printer<'a> {
         let mut at = from;
         while let Some(k) = self.src[at..].find(c) {
             let pos = at + k;
-            match self.comments.iter().find(|&&(s, e)| s <= pos && pos < e) {
-                Some(&(_, e)) => at = e,
-                None => return pos,
+            let before = &self.comments[..self.comments.partition_point(|c| c.0 <= pos)];
+            match before.last() {
+                Some(&(_, e)) if pos < e => at = e,
+                _ => return pos,
             }
         }
         self.src.len()
     }
 
     /// Whether the bracketed list from `open` to `end` holds comments of its own: comments
-    /// between its entries (given by their ranges) rather than inside one of them.
-    fn list_has_comments(&self, open: usize, end: usize, entries: &[(usize, usize)]) -> bool {
-        self.comments
-            .iter()
-            .any(|&(s, _)| s > open && s < end && !entries.iter().any(|&(a, b)| s >= a && s < b))
+    /// between its entries rather than inside one of them.
+    fn list_has_comments(&self, open: usize, end: usize, entries: &[Entry]) -> bool {
+        (self.comments_from(open + 1).iter())
+            .take_while(|c| c.0 < end)
+            .any(|&(s, _)| !entries.iter().any(|e| s >= e.start && s < e.end))
     }
 
     /// Is there an empty line in the source between two offsets?
@@ -263,151 +269,135 @@ impl<'a> Printer<'a> {
         }
     }
 
-    /// The end of the source line containing `off`.
-    fn line_end(&self, off: usize) -> usize {
-        self.src[off..]
-            .find('\n')
-            .map_or(self.src.len(), |k| off + k)
-    }
-
     fn cursor_is_block_start(&self) -> bool {
         self.out.is_empty() || self.out.ends_with("{\n")
+    }
+
+    /// `open`, then `entries` one per line at `indent`, each followed by the comments before it
+    /// and the comment at the end of its line, then the comments before `to` and `close`. The
+    /// source cursor starts at `from`. Blank lines before entries are kept as between
+    /// statements, except in a `list` (`Some(separator)` printed after each entry).
+    #[allow(clippy::too_many_arguments)]
+    fn lines(
+        &mut self,
+        open: &str,
+        entries: &[Entry<'_, 'a>],
+        indent: usize,
+        from: usize,
+        to: usize,
+        list: Option<&str>,
+        close: &str,
+    ) -> String {
+        let saved = std::mem::take(&mut self.out);
+        self.out.push_str(open);
+        self.cursor = from;
+        for (i, e) in entries.iter().enumerate() {
+            match list {
+                None => self.entry_start(e.start, indent, i == 0),
+                Some(_) => self.flush_comments(e.start, indent, i == 0),
+            }
+            let text = (e.show)(self, indent);
+            let sep = list.unwrap_or_default();
+            self.out.push_str(&format!("{}{text}{sep}\n", ind(indent)));
+            self.cursor = e.end;
+            self.trailing_comment(e.end);
+        }
+        self.flush_comments(to, indent, false);
+        self.out.push_str(close);
+        std::mem::replace(&mut self.out, saved)
     }
 
     // ------------------------------------------------------------------ items
 
     fn module(&mut self, m: &Module) {
-        let mut i = 0;
-        let mut first = true;
-        while i < m.items.len() {
-            let (start, end) = m.items[i].range();
-            let (start, end) = (start as usize, end as usize);
-            self.entry_start(start, 0, first);
-            first = false;
-            if let Item::Import(_) = &m.items[i] {
-                // consecutive imports form one block
-                let mut j = i;
-                let mut group = Vec::new();
-                while let Some(Item::Import(im)) = m.items.get(j) {
-                    group.push(im);
-                    j += 1;
+        // consecutive imports form one block
+        let groups =
+            (m.items).chunk_by(|a, b| matches!((a, b), (Item::Import(_), Item::Import(_))));
+        let entries: Vec<_> = groups
+            .map(|group| {
+                let (start, mut end) = (group[0].range().0 as usize, group[0].range().1 as usize);
+                if let Item::Import(_) = group[0] {
+                    // skip the closing brace of the import block
+                    let last = group.last().unwrap().range().1 as usize;
+                    end = self.src[last..].find('}').map_or(last, |k| last + k + 1);
                 }
-                if group.len() == 1 {
-                    let im = group[0];
-                    self.out.push_str(&format!(
-                        "import {{ {} as {} }}\n",
-                        quote(&im.path),
-                        im.alias
-                    ));
-                } else {
-                    self.out.push_str("import {\n");
-                    for im in &group {
-                        self.flush_comments(im.span.start as usize, 1, false);
-                        self.out.push_str(&format!(
-                            "{INDENT}{} as {}\n",
-                            quote(&im.path),
-                            im.alias
-                        ));
-                        self.cursor = im.span.end as usize;
-                        self.trailing_comment(im.span.end as usize);
-                    }
-                    self.out.push_str("}\n");
-                }
-                let last_end = group.last().unwrap().span.end as usize;
-                // skip the closing brace of the import block
-                let close = self.src[last_end..]
-                    .find('}')
-                    .map_or(last_end, |k| last_end + k + 1);
-                self.cursor = close;
-                self.trailing_comment(close);
-                i = j;
-                continue;
-            }
-            self.item(&m.items[i]);
-            self.cursor = end;
-            self.trailing_comment(end);
-            i += 1;
-        }
-        self.flush_comments(usize::MAX, 0, false);
+                let show = Box::new(move |p: &mut Self, _| p.item(group));
+                Entry { start, end, show }
+            })
+            .collect();
+        self.out = self.lines("", &entries, 0, 0, usize::MAX, None, "");
     }
 
-    fn item(&mut self, it: &Item) {
-        match it {
-            Item::Import(_) => unreachable!(),
+    /// An item, or a block of imports.
+    fn item(&mut self, items: &[Item]) -> String {
+        match &items[0] {
+            Item::Import(_) => {
+                let show = |im: &Import| format!("{} as {}", quote(&im.path), im.alias);
+                let imports: Vec<_> = (items.iter())
+                    .filter_map(|it| {
+                        if let Item::Import(im) = it {
+                            Some(im)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                if let [im] = imports[..] {
+                    return format!("import {{ {} }}", show(im));
+                }
+                let entries: Vec<_> = (imports.iter())
+                    .map(|&im| entry(im.span, move |_, _| show(im)))
+                    .collect();
+                let last = imports.last().unwrap().span.end as usize;
+                self.lines("import {\n", &entries, 1, self.cursor, last, Some(""), "}")
+            }
             Item::Extern(e) => {
                 let head = format!("extern {} as {}", quote(&e.path), e.alias);
-                let fns = e.fns.iter().map(|f| (f.sig.span, f));
-                self.members(head, fns, e.span, |p, f| {
-                    let sig = p.sig(&f.sig, true, 1);
-                    format!("{sig} = {}", quote(&f.symbol))
+                let fns = e.fns.iter().map(|f| {
+                    entry(f.sig.span, move |p, _| {
+                        let sig = p.sig(&f.sig, true, 1);
+                        format!("{sig} = {}", quote(&f.symbol))
+                    })
                 });
+                self.members(head, fns.collect(), e.span)
             }
             Item::Struct(s) => {
                 let params = GenericParam::list(&s.type_params);
                 let head = format!("{}struct {}{params}", vis(s.public), s.name);
-                let fields = s.fields.iter().map(|f| (f.span, f));
-                self.members(head, fields, s.span, |_, f| f.show());
+                let fields = s.fields.iter().map(|f| entry(f.span, |_, _| f.show()));
+                self.members(head, fields.collect(), s.span)
             }
             Item::Enum(e) => {
                 let params = GenericParam::list(&e.type_params);
                 let head = format!("{}enum {}{params}", vis(e.public), e.name);
-                let variants = e.variants.iter().map(|v| (v.span, v));
-                self.members(head, variants, e.span, |_, v| match &v.payload[..] {
-                    [] => v.name.clone(),
-                    ts => format!("{}({})", v.name, TypeExpr::show_list(ts)),
+                let variants = e.variants.iter().map(|v| {
+                    entry(v.span, |_, _| match &v.payload[..] {
+                        [] => v.name.clone(),
+                        ts => format!("{}({})", v.name, TypeExpr::show_list(ts)),
+                    })
                 });
+                self.members(head, variants.collect(), e.span)
             }
-            Item::Type(t) => {
-                let ty = t.ty.show();
-                self.out
-                    .push_str(&format!("{}type {} = {ty}\n", vis(t.public), t.name));
-            }
-            Item::Fn(f) => {
-                let text = self.fn_decl(f, 0);
-                self.out.push_str(&text);
-                self.out.push('\n');
-            }
+            Item::Type(t) => format!("{}type {} = {}", vis(t.public), t.name, t.ty.show()),
+            Item::Fn(f) => self.fn_decl(f, 0),
             Item::Test(t) => {
                 let b = self.block(&t.body, 0, false);
-                self.out.push_str(&format!("test {} {b}\n", quote(&t.name)));
+                format!("test {} {b}", quote(&t.name))
             }
-            Item::Stmt(s) => {
-                let text = self.stmt(s, 0);
-                self.out.push_str(&text);
-                self.out.push('\n');
-            }
+            Item::Stmt(s) => self.stmt(s, 0),
         }
     }
 
     /// `head { ... }` (an extern block, struct or enum ending at `span`), one member per line,
-    /// or `head {}` with neither members nor comments;
-    /// `show` prints a member after the comments before it. Blank lines between members are
-    /// kept as between statements; comments before the first member never get one above them.
-    fn members<'m, T: 'm>(
-        &mut self,
-        head: String,
-        members: impl Iterator<Item = (Span, &'m T)>,
-        span: Span,
-        show: impl Fn(&mut Self, &T) -> String,
-    ) {
-        self.out.push_str(&head);
+    /// or `head {}` with neither members nor comments. Blank lines between members are kept as
+    /// between statements; comments before the first member never get one above them.
+    fn members(&mut self, head: String, members: Vec<Entry<'_, 'a>>, span: Span) -> String {
         let open = self.find_outside_comments(span.start as usize, '{');
-        let mut members = members.peekable();
-        if members.peek().is_none() && !self.has_comment_in(open, span.end as usize) {
-            self.out.push_str(" {}\n");
-            return;
+        if members.is_empty() && !self.has_comment_in(open, span.end as usize) {
+            return format!("{head} {{}}");
         }
-        self.out.push_str(" {\n");
-        self.cursor = open + 1;
-        for (i, (sp, m)) in members.enumerate() {
-            self.entry_start(sp.start as usize, 1, i == 0);
-            let text = show(self, m);
-            self.out.push_str(&format!("{INDENT}{text}\n"));
-            self.cursor = self.line_end(sp.end as usize);
-            self.trailing_comment(sp.end as usize);
-        }
-        self.flush_comments(span.end as usize, 1, false);
-        self.out.push_str("}\n");
+        let body = self.lines("{\n", &members, 1, open + 1, span.end as usize, None, "}");
+        format!("{head} {body}")
     }
 
     fn fn_decl(&mut self, f: &FnDecl, indent: usize) -> String {
@@ -428,7 +418,7 @@ impl<'a> Printer<'a> {
         let last = s.params.last().map_or(open + 1, |p| p.span.end as usize);
         let end = self.find_outside_comments(last, ')');
         let id = SIG_ID + s.span.start as usize;
-        let params = self.bracketed("()", entries, false, indent, open, end, Some(id));
+        let params = self.bracketed("()", entries, false, indent, open, end, Some(id), false);
         let mut out = if named {
             format!(
                 "fn {}{}{params}",
@@ -463,23 +453,16 @@ impl<'a> Printer<'a> {
                 return format!("{{ {s} }}");
             }
         }
-        let saved = std::mem::take(&mut self.out);
-        self.out.push_str("{\n");
-        self.cursor = bs + 1;
-        for (i, s) in b.stmts.iter().enumerate() {
-            self.entry_start(s.span.start as usize, indent + 1, i == 0);
-            let text = self.stmt(s, indent + 1);
-            self.out.push_str(&ind(indent + 1));
-            self.out.push_str(&text);
-            self.out.push('\n');
-            self.cursor = s.span.end as usize;
-            self.trailing_comment(s.span.end as usize);
-        }
-        self.flush_comments(be, indent + 1, b.stmts.is_empty());
-        self.out.push_str(&ind(indent));
-        self.out.push('}');
+        let stmts: Vec<_> = (b.stmts.iter())
+            .map(|s| entry(s.span, move |p, i| p.stmt(s, i)))
+            .collect();
+        // without statements, the cursor at the end keeps a blank line from going above the
+        // first comment
+        let from = if stmts.is_empty() { be } else { bs + 1 };
+        let close = format!("{}}}", ind(indent));
+        let out = self.lines("{\n", &stmts, indent + 1, from, be, None, &close);
         self.cursor = be;
-        std::mem::replace(&mut self.out, saved)
+        out
     }
 
     fn label(l: &Option<String>) -> String {
@@ -588,10 +571,11 @@ impl<'a> Printer<'a> {
         items.join(", ")
     }
 
-    /// Bracketed list (`brackets` is the opening and closing character, the opening one at
-    /// source offset `start`, the closing one at `end`), one entry per line if the original
-    /// spanned several lines or the list holds comments of its own. Line wrapping knows it by
-    /// `id`, by default `end`.
+    /// Bracketed list (`brackets` is the opening and closing character, the opening one the
+    /// first at or after source offset `from`, the closing one at `end`), one entry per line
+    /// if `multi` (the original spanned several lines) or the list holds comments of its own.
+    /// Line wrapping knows it by `id`, by default `end`; with `hug` (a lone bracketed argument)
+    /// the argument breaks instead of the list.
     #[allow(clippy::too_many_arguments)]
     fn bracketed(
         &mut self,
@@ -599,46 +583,30 @@ impl<'a> Printer<'a> {
         entries: Vec<Entry<'_, 'a>>,
         multi: bool,
         indent: usize,
-        start: usize,
+        from: usize,
         end: usize,
         id: Option<usize>,
+        hug: bool,
     ) -> String {
         let (open, close) = brackets.split_at(1);
+        let start = self.find_outside_comments(from, brackets.chars().next().unwrap());
         let id = id.unwrap_or(end);
-        let ranges: Vec<(usize, usize)> = entries.iter().map(|e| (e.start, e.end)).collect();
-        let comments = self.list_has_comments(start, end, &ranges);
+        let comments = self.list_has_comments(start, end, &entries);
         let multi = ((multi || self.force.contains(&id)) && !entries.is_empty()) || comments;
         if !multi {
             let items: Vec<String> = entries.iter().map(|e| (e.show)(self, indent)).collect();
-            let mark = if entries.is_empty() {
+            let mark = if entries.is_empty() || hug {
                 String::new()
             } else {
                 format!("{MARK_START}{id}{MARK_END}")
             };
             return format!("{mark}{open}{}{close}", items.join(", "));
         }
-        let saved = std::mem::take(&mut self.out);
-        self.out.push_str(open);
-        self.out.push('\n');
-        self.cursor = start + 1;
-        for (i, e) in entries.iter().enumerate() {
-            self.flush_comments(e.start, indent + 1, i == 0);
-            let text = (e.show)(self, indent + 1);
-            self.out.push_str(&ind(indent + 1));
-            self.out.push_str(&text);
-            self.out.push_str(",\n");
-            // a comment after the entry (and its comma) on the same line stays at its end
-            let after = e.end + usize::from(self.src[e.end..].starts_with(','));
-            self.cursor = after;
-            let next = entries.get(i + 1).map_or(end, |n| n.start);
-            if self.comments.get(self.next).is_some_and(|c| c.0 < next) {
-                self.trailing_comment(after);
-            }
-        }
-        self.flush_comments(end, indent + 1, entries.is_empty());
-        self.out.push_str(&ind(indent));
-        self.out.push_str(close);
-        std::mem::replace(&mut self.out, saved)
+        // without entries, the cursor at the end keeps a blank line from going above the
+        // first comment
+        let from = if entries.is_empty() { end } else { start + 1 };
+        let (open, close) = (format!("{open}\n"), format!("{}{close}", ind(indent)));
+        self.lines(&open, &entries, indent + 1, from, end, Some(","), &close)
     }
 
     fn expr(&mut self, e: &Expr, indent: usize) -> String {
@@ -670,17 +638,11 @@ impl<'a> Printer<'a> {
             }
             ExprKind::Call(f, args) => {
                 let callee = self.paren(f, indent, prec(f) < POSTFIX);
-                let multi = (self.multiline(e.span) && args.len() > 1 && self.args_multiline(e))
-                    || (self.force.contains(&(e.span.end as usize)) && !args.is_empty());
-                let open = self.find_outside_comments(f.span.end as usize, '(');
-                let end = e.span.end as usize;
+                let multi = self.multiline(e.span) && args.len() > 1 && self.args_multiline(e);
+                let (from, end) = (f.span.end as usize, e.span.end as usize);
                 let entries = expr_entries(args);
-                let ranges: Vec<_> = entries.iter().map(|e| (e.start, e.end)).collect();
-                if !multi && hugs(args) && !self.list_has_comments(open, end, &ranges) {
-                    // `f([...])`: the inner list breaks, not the call
-                    return format!("{callee}({})", self.list(args, indent));
-                }
-                let list = self.bracketed("()", entries, multi, indent, open, end, None);
+                let list =
+                    self.bracketed("()", entries, multi, indent, from, end, None, hugs(args));
                 format!("{callee}{list}")
             }
             ExprKind::Generic(inner, args) => {
@@ -693,13 +655,9 @@ impl<'a> Printer<'a> {
                     entries.push(entry(t.span(), move |_, _| t.show()));
                 }
                 entries.extend(expr_entries(args));
-                let open = self.find_outside_comments(e.span.start as usize, '(');
-                let end = e.span.end as usize;
-                let ranges: Vec<_> = entries.iter().map(|e| (e.start, e.end)).collect();
-                if ty.is_none() && hugs(args) && !self.list_has_comments(open, end, &ranges) {
-                    return format!("@{name}({})", self.list(args, indent));
-                }
-                let list = self.bracketed("()", entries, false, indent, open, end, None);
+                let (from, end) = (e.span.start as usize, e.span.end as usize);
+                let hug = ty.is_none() && hugs(args);
+                let list = self.bracketed("()", entries, false, indent, from, end, None, hug);
                 format!("@{name}{list}")
             }
             ExprKind::Field(b, name) => {
@@ -719,42 +677,41 @@ impl<'a> Printer<'a> {
                 )
             }
             ExprKind::Tuple(items) => format!("({})", self.list(items, indent)),
-            ExprKind::Array(items) => {
-                let multi = self.multiline(e.span);
-                let entries = expr_entries(items);
-                let open = self.find_outside_comments(e.span.start as usize, '[');
-                let end = e.span.end as usize;
-                self.bracketed("[]", entries, multi, indent, open, end, None)
-            }
-            ExprKind::Map(entries) => {
-                let multi = self.multiline(e.span);
-                let entries = entries
-                    .iter()
-                    .map(|(k, v)| {
-                        entry(k.span.to(v.span), move |p, i| {
-                            format!("{}: {}", p.expr(k, i), p.expr(v, i))
-                        })
-                    })
-                    .collect();
-                let open = self.find_outside_comments(e.span.start as usize, '[');
-                let end = e.span.end as usize;
-                self.bracketed("[]", entries, multi, indent, open, end, None)
-            }
-            ExprKind::Struct(ty, fields) => {
-                let t = self.expr(ty, indent);
-                let multi = self.multiline(e.span);
-                let entries = fields
-                    .iter()
-                    .map(|(name, v, sp)| {
-                        entry(sp.to(v.span), move |p, i| {
-                            format!(".{name} = {}", p.expr(v, i))
-                        })
-                    })
-                    .collect();
-                let open = self.find_outside_comments(ty.span.end as usize, '{');
-                let end = e.span.end as usize;
-                let body = self.bracketed("{}", entries, multi, indent, open, end, None);
-                format!("{t}{body}")
+            ExprKind::Array(_) | ExprKind::Map(_) | ExprKind::Struct(..) => {
+                let (brackets, from, head, entries) = match &e.kind {
+                    ExprKind::Array(items) => {
+                        ("[]", e.span.start, String::new(), expr_entries(items))
+                    }
+                    ExprKind::Map(entries) => {
+                        let entries = entries.iter().map(|(k, v)| {
+                            entry(k.span.to(v.span), move |p, i| {
+                                format!("{}: {}", p.expr(k, i), p.expr(v, i))
+                            })
+                        });
+                        ("[]", e.span.start, String::new(), entries.collect())
+                    }
+                    ExprKind::Struct(ty, fields) => {
+                        let fields = fields.iter().map(|(name, v, sp)| {
+                            entry(sp.to(v.span), move |p, i| {
+                                format!(".{name} = {}", p.expr(v, i))
+                            })
+                        });
+                        ("{}", ty.span.end, self.expr(ty, indent), fields.collect())
+                    }
+                    _ => unreachable!(),
+                };
+                let (multi, end) = (self.multiline(e.span), e.span.end as usize);
+                let list = self.bracketed(
+                    brackets,
+                    entries,
+                    multi,
+                    indent,
+                    from as usize,
+                    end,
+                    None,
+                    false,
+                );
+                format!("{head}{list}")
             }
             ExprKind::FnLit(sig, body) => {
                 let s = self.sig(sig, false, indent);
@@ -806,27 +763,20 @@ impl<'a> Printer<'a> {
             out.push_str(&self.expr(s, indent));
             out.push(' ');
         }
-        out.push_str("{\n");
-        let saved = std::mem::take(&mut self.out);
-        self.cursor = i
-            .arms
-            .first()
-            .map_or(i.span.end as usize, |a| a.span.start as usize);
-        for (k, arm) in i.arms.iter().enumerate() {
-            self.entry_start(arm.span.start as usize, indent + 1, k == 0);
-            let pats = self.list(&arm.patterns, indent + 1);
-            let body = self.block(&arm.body, indent + 1, true);
-            self.out.push_str(&ind(indent + 1));
-            self.out.push_str(&format!("{pats} -> {body}\n"));
-            self.cursor = arm.body.span.end as usize;
-            self.trailing_comment(arm.body.span.end as usize);
-        }
-        self.flush_comments(i.span.end as usize, indent + 1, false);
-        let arms = std::mem::replace(&mut self.out, saved);
-        out.push_str(&arms);
-        out.push_str(&ind(indent));
-        out.push('}');
-        out
+        let arms: Vec<_> = (i.arms.iter())
+            .map(|arm| {
+                entry(arm.span.to(arm.body.span), move |p, n| {
+                    let pats = p.list(&arm.patterns, n);
+                    format!("{pats} -> {}", p.block(&arm.body, n, true))
+                })
+            })
+            .collect();
+        let (from, end) = (
+            arms.first().map_or(i.span.end as usize, |a| a.start),
+            i.span.end,
+        );
+        let close = format!("{}}}", ind(indent));
+        out + &self.lines("{\n", &arms, indent + 1, from, end as usize, None, &close)
     }
 }
 

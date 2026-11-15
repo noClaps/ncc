@@ -200,20 +200,6 @@ pub struct IndexState {
 }
 
 impl Checker {
-    pub fn members_of(&self, t: TyId) -> Vec<(String, String)> {
-        match self.types.kind(t) {
-            TyKind::Struct(i) => self.types.structs[*i as usize]
-                .fields
-                .iter()
-                .map(|(n, ft)| (n.clone(), format!("{} {n}", self.types.show(*ft))))
-                .collect(),
-            TyKind::Array(_) | TyKind::Fixed(..) | TyKind::Str | TyKind::Map(..) => {
-                vec![("len".into(), "uint len".into())]
-            }
-            _ => vec![],
-        }
-    }
-
     /// Declare a function (one of an `extern` block when `alias` is given) with its signature
     /// and return type.
     pub fn idx_fn_decl(
@@ -333,11 +319,10 @@ impl Checker {
         scope: Option<Span>,
     ) {
         let detail = self.var_detail(name, ty, mutable);
-        let members = self.members_of(ty);
         let type_def = self.type_def_of(ty);
         // the name ends the declaration: `int x`
         let name_span = name_suffix(span, name.len());
-        let Some(d) = self.idx_decl(name, span, name_span, DeclKind::Variable, detail, members)
+        let Some(d) = self.idx_decl(name, span, name_span, DeclKind::Variable, detail, vec![])
         else {
             return;
         };
@@ -395,22 +380,15 @@ impl Checker {
         self.ix.index.exprs.push(ExprTy { span, ty, type_def });
     }
 
-    pub fn idx_hint(&mut self, at: u32, file: u32, label: String, kind: HintKind) {
-        self.ix.index.hints.push(Hint {
-            at: Span {
-                file,
-                start: at,
-                end: at,
-            },
-            label,
-            kind,
-        });
-    }
-
     /// The type `ty` of the variable declared at `span`, shown before it.
     pub fn idx_type_hint(&mut self, span: Span, ty: TyId) {
+        if !self.editor {
+            return;
+        }
         let label = format!("{} ", self.types.show(ty));
-        self.idx_hint(span.start, span.file, label, HintKind::Type);
+        self.ix
+            .index
+            .hint(span.start, span.file, label, HintKind::Type);
     }
 
     pub fn var_detail(&self, name: &str, ty: TyId, mutable: bool) -> String {
@@ -488,6 +466,9 @@ impl Checker {
     /// Record a direct call: parameter-name inlay hints and the call-hierarchy edge.
     pub fn idx_call(&mut self, f: FuncId, callee: &crate::ast::Expr, args: &[crate::ast::Expr]) {
         use crate::ast::ExprKind as E;
+        if !self.editor {
+            return;
+        }
         let mut c = callee;
         while let E::Generic(inner, _) = &c.kind {
             c = inner;
@@ -512,10 +493,10 @@ impl Checker {
                 at,
             });
         }
-        let Some(names) = self.ix.fn_params.get(&f).cloned() else {
+        let Some(names) = self.ix.fn_params.get(&f) else {
             return;
         };
-        for (a, n) in args.iter().zip(&names) {
+        for (a, n) in args.iter().zip(names) {
             let same = match &a.kind {
                 E::Ident(x) | E::Field(_, x) => x == n,
                 _ => false,
@@ -523,7 +504,8 @@ impl Checker {
             if n == "_" || same || a.span.end <= a.span.start {
                 continue;
             }
-            self.idx_hint(a.span.start, a.span.file, format!("{n}:"), HintKind::Param);
+            let label = format!("{n}:");
+            (self.ix.index).hint(a.span.start, a.span.file, label, HintKind::Param);
         }
     }
 }
@@ -537,6 +519,18 @@ pub fn name_suffix(span: Span, len: usize) -> Span {
 }
 
 impl Index {
+    fn hint(&mut self, at: u32, file: u32, label: String, kind: HintKind) {
+        self.hints.push(Hint {
+            at: Span {
+                file,
+                start: at,
+                end: at,
+            },
+            label,
+            kind,
+        });
+    }
+
     /// Narrow the name spans of references recorded with their whole span to the referenced
     /// declaration's name, which ends them.
     pub fn name_refs(&mut self) {

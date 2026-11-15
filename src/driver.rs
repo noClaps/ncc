@@ -92,13 +92,9 @@ fn frontend(file: &Path, sm: &mut SourceMap, release: bool, codegen: bool) -> Op
 
 fn uses_target(p: &Program) -> bool {
     let mut found = false;
-    for f in &p.funcs {
-        for s in &f.body.stmts {
-            crate::check::flow::visit_stmt(s, &mut |e| {
-                found |= matches!(e.kind, crate::tir::EK::Target);
-            });
-        }
-    }
+    crate::check::flow::visit_program(p, &mut |e| {
+        found |= matches!(e.kind, crate::tir::EK::Target);
+    });
     found
 }
 

@@ -103,22 +103,11 @@ fn receiver_chain(head: &str) -> Option<(Vec<Seg>, usize)> {
         while i > 0 && (b[i - 1] == b')' || b[i - 1] == b']') {
             let close = b[i - 1];
             let open = if close == b')' { b'(' } else { b'[' };
-            let mut depth = 0;
-            let mut j = i;
-            loop {
-                if j == 0 {
-                    return None;
-                }
-                j -= 1;
-                if b[j] == close {
-                    depth += 1;
-                } else if b[j] == open {
-                    depth -= 1;
-                    if depth == 0 {
-                        break;
-                    }
-                }
-            }
+            let mut depth = 1;
+            let j = (0..i - 1).rev().find(|&j| {
+                depth += (b[j] == close) as i32 - (b[j] == open) as i32;
+                depth == 0
+            })?;
             segs.push(if close == b')' {
                 Seg::Call
             } else if is_slice(&b[j + 1..i - 1]) {
@@ -308,10 +297,11 @@ impl Server {
                 _ => None,
             },
         };
-        let item = |label: &str, kind: CompletionItemKind, detail: Option<String>| CompletionItem {
+        let item = |label: &str, kind, detail: Option<String>, sort_text| CompletionItem {
             label: label.to_string(),
             kind: Some(kind),
             detail,
+            sort_text,
             ..Default::default()
         };
         let mut items = Vec::new();
@@ -321,13 +311,9 @@ impl Server {
             let typed = &before[q + 1..];
             let pre = &text[..line_start + q];
             let in_embed = pre.trim_end().ends_with("@embed(");
-            let in_import = match (pre.rfind("import"), pre.rfind('}')) {
-                (Some(i), Some(c)) => i > c,
-                (Some(_), None) => true,
-                _ => false,
-            };
-            let in_path = in_embed || in_import;
-            return Some(if in_path {
+            let in_import =
+                (pre.rfind("import")).is_some_and(|i| pre.rfind('}').is_none_or(|c| i > c));
+            return Some(if in_embed || in_import {
                 path_items(&path, typed, in_import)
             } else {
                 vec![]
@@ -432,23 +418,20 @@ impl Server {
                     alias,
                     CompletionItemKind::MODULE,
                     Some("module".into()),
+                    None,
                 ));
             }
             // extern blocks
             let module = self.module_of(&path, &text);
-            let externs: Vec<(&str, &str)> = module
-                .items
-                .iter()
-                .filter_map(|it| match it {
-                    ast::Item::Extern(e) => Some((e.alias.as_str(), e.path.as_str())),
-                    _ => None,
-                })
+            let externs: Vec<(&str, &str)> = (module.aliases())
+                .filter_map(|a| a.external.then_some((a.alias, a.path)))
                 .collect();
             for (alias, file) in &externs {
                 items.push(item(
                     alias,
                     CompletionItemKind::MODULE,
                     Some(format!("extern \"{file}\"")),
+                    None,
                 ));
             }
             // items reached through a qualifier, found by their own name: `c_` offers
@@ -496,20 +479,22 @@ impl Server {
         if self.snippets {
             items.extend(self.fn_literal_items(&pp.text_document.uri, off));
         }
-        for k in KEYWORDS {
+        items.extend(KEYWORDS.iter().map(|k| {
             let kind = match *k {
                 "true" | "false" | "none" => CompletionItemKind::CONSTANT,
                 _ => CompletionItemKind::KEYWORD,
             };
-            let mut it = item(k, kind, None);
-            it.sort_text = Some(format!("3{k}"));
-            items.push(it);
-        }
-        for (t, _) in crate::types::BUILTIN_TYPES {
-            let mut it = item(t, CompletionItemKind::KEYWORD, Some("builtin type".into()));
-            it.sort_text = Some(format!("2{t}"));
-            items.push(it);
-        }
+            item(k, kind, None, Some(format!("3{k}")))
+        }));
+        items.extend((crate::types::BUILTIN_TYPES.iter()).map(|(t, _)| {
+            let detail = Some("builtin type".into());
+            item(
+                t,
+                CompletionItemKind::KEYWORD,
+                detail,
+                Some(format!("2{t}")),
+            )
+        }));
         // keyword snippets only at the start of a statement
         if self.snippets && before[..word_start].trim().is_empty() {
             for (label, body, desc) in SNIPPETS {
@@ -966,32 +951,21 @@ fn arg_ty(
     if !tyexpr::mentions(&ty, tps) {
         return Some(ty);
     }
-    // the arguments' spans: (first token, last token)
-    let mut args: Vec<(usize, usize)> = Vec::new();
-    let (mut depth, mut first) = (0, None);
-    for (i, t) in toks.iter().enumerate().skip(open + 1) {
-        match t.tok {
-            Tok::Newline => continue,
-            Tok::Comma if depth == 0 => {
-                args.extend(first.map(|f| (f, i - 1)));
-                first = None;
-                continue;
-            }
-            Tok::LParen | Tok::LBracket | Tok::LBrace => depth += 1,
-            Tok::RParen | Tok::RBracket | Tok::RBrace => depth -= 1,
-            _ => {}
-        }
-        first.get_or_insert(i);
-    }
+    // the arguments before the one being typed, without leading newlines
+    let mut args = split_top(&toks[open + 1..]);
+    args.pop();
+    let args = (args.into_iter())
+        .map(|p| &p[p.iter().take_while(|t| t.tok == Tok::Newline).count()..])
+        .filter(|p| !p.is_empty());
     let mut binds: HashMap<String, T> = HashMap::new();
     if let Some((a, fid)) = a {
-        for (k, &(f, l)) in args.iter().enumerate().take(c.arg as usize) {
-            let (start, end) = (toks[f].span.start, toks[l].span.end);
+        for (k, arg) in args.enumerate().take(c.arg as usize) {
+            let (start, end) = (arg[0].span.start, arg[arg.len() - 1].span.end);
             // the checked type, or (on the line being typed, which does not parse yet) the
             // type of a simple expression
             let x = match a.expr_ty(fid, start, end) {
                 Some(x) => Some(a.types.to_type_expr(x.ty)),
-                None => text_ty(a, fid, text, &toks[f..=l]),
+                None => text_ty(a, fid, text, arg),
             };
             let (Some(x), Some((Some(p), _))) = (x, ps.get(k)) else {
                 continue;
@@ -1033,21 +1007,9 @@ fn text_ty(a: &Analysis, fid: u32, text: &str, toks: &[&Token]) -> Option<T> {
     }
     // `[a, b]`: an array of the first element's type
     if first.tok == Tok::LBracket && last.tok == Tok::RBracket {
-        let mut depth = 0;
-        let end = toks[1..]
-            .iter()
-            .position(|t| {
-                match t.tok {
-                    Tok::LParen | Tok::LBracket | Tok::LBrace => depth += 1,
-                    Tok::RParen | Tok::RBracket | Tok::RBrace => depth -= 1,
-                    Tok::Comma if depth == 0 => return true,
-                    _ => {}
-                }
-                depth < 0
-            })
-            .map_or(toks.len() - 1, |p| p + 1);
-        return (end > 1)
-            .then(|| text_ty(a, fid, text, &toks[1..end]))
+        let elem = split_top(&toks[1..toks.len() - 1])[0];
+        return (!elem.is_empty())
+            .then(|| text_ty(a, fid, text, elem))
             .flatten()
             .map(|t| T::Array(Box::new(t), None, Span::default()));
     }
@@ -1068,14 +1030,9 @@ fn text_ty(a: &Analysis, fid: u32, text: &str, toks: &[&Token]) -> Option<T> {
 
 /// The innermost unclosed `(`, `[` or `{` at the end of `toks`, with the number of commas
 /// after it at its level.
-fn unclosed(toks: &[&Token]) -> Option<(usize, usize)> {
+pub(super) fn unclosed(toks: &[&Token]) -> Option<(usize, usize)> {
     let (mut depth, mut commas) = (0, 0);
-    let mut i = toks.len();
-    loop {
-        if i == 0 {
-            return None;
-        }
-        i -= 1;
+    for i in (0..toks.len()).rev() {
         match toks[i].tok {
             Tok::RParen | Tok::RBracket | Tok::RBrace => depth += 1,
             Tok::LParen | Tok::LBracket | Tok::LBrace if depth > 0 => depth -= 1,
@@ -1084,6 +1041,49 @@ fn unclosed(toks: &[&Token]) -> Option<(usize, usize)> {
             _ => {}
         }
     }
+    None
+}
+
+/// The index of the `<` opening the generic arguments that end just before `toks[end]`
+/// (`map<int, fut<int>>(`, where the lexer reads `>>` as one token).
+pub(super) fn generic_open(toks: &[&Token], end: usize) -> Option<usize> {
+    let mut depth = 0;
+    for i in (0..end).rev() {
+        match toks[i].tok {
+            Tok::Gt => depth += 1,
+            Tok::Shr => depth += 2,
+            Tok::Lt => depth -= 1,
+            _ if i + 1 == end => return None,
+            _ => {}
+        }
+        if depth <= 0 {
+            return (depth == 0).then_some(i);
+        }
+    }
+    None
+}
+
+/// The pieces of `toks` between commas outside brackets, up to the first unmatched closing
+/// bracket.
+fn split_top<'t, 'a>(toks: &'t [&'a Token]) -> Vec<&'t [&'a Token]> {
+    let (mut depth, mut start, mut out) = (0, 0, Vec::new());
+    for (i, t) in toks.iter().enumerate() {
+        match t.tok {
+            Tok::LParen | Tok::LBracket | Tok::LBrace => depth += 1,
+            Tok::RParen | Tok::RBracket | Tok::RBrace if depth == 0 => {
+                out.push(&toks[start..i]);
+                return out;
+            }
+            Tok::RParen | Tok::RBracket | Tok::RBrace => depth -= 1,
+            Tok::Comma if depth == 0 => {
+                out.push(&toks[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(&toks[start..]);
+    out
 }
 
 /// Whether the innermost unclosed `(` at the end of `toks` opens the parameters of a function
@@ -1095,20 +1095,10 @@ fn in_fn_header(toks: &[&Token]) -> bool {
     let mut j = open;
     // generic parameters
     if j > 0 && toks[j - 1].tok == Tok::Gt {
-        let mut d = 0;
-        while j > 0 {
-            j -= 1;
-            match toks[j].tok {
-                Tok::Gt => d += 1,
-                Tok::Lt => {
-                    d -= 1;
-                    if d == 0 {
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
+        let Some(lt) = generic_open(toks, j) else {
+            return false;
+        };
+        j = lt;
     }
     let ident = |k: usize| match &toks[k].tok {
         Tok::Ident(n) => Some(n.as_str()),
@@ -1192,7 +1182,7 @@ fn enclosing_fn_return(text: &str, toks: &[&Token]) -> Option<T> {
 }
 
 /// Numbered snippet placeholders: `${1:name}`, or `$1` without a name.
-fn tabstops() -> impl FnMut(Option<&str>) -> String {
+pub(super) fn tabstops() -> impl FnMut(Option<&str>) -> String {
     let mut k = 0;
     move |name| {
         k += 1;
@@ -1381,20 +1371,18 @@ fn literal_struct<'a>(a: &'a Analysis, text: &str, dot: usize) -> Option<(&'a Sy
     // the unclosed `{` around the cursor
     let b = text.as_bytes();
     let mut depth = 0;
-    let mut i = dot;
-    let open = loop {
-        if i == 0 {
-            return None;
-        }
-        i -= 1;
+    let open = (0..dot).rev().find(|&i| {
         match b[i] {
             b')' | b']' | b'}' => depth += 1,
             b'(' | b'[' | b'{' if depth > 0 => depth -= 1,
-            b'{' => break i,
-            b'(' | b'[' => return None,
+            b'(' | b'[' | b'{' => return true,
             _ => {}
         }
-    };
+        false
+    })?;
+    if b[open] != b'{' {
+        return None;
+    }
     // the type before it: `Name`, `Name<int>` or `mod.Name`
     let mut t = text[..open].trim_end();
     if t.ends_with('>') {
@@ -1492,6 +1480,18 @@ mod tests {
         assert_eq!(
             receiver_chain("@println(\"{p"),
             Some((vec![Seg::Name("p".into())], 11))
+        );
+    }
+
+    #[test]
+    fn finds_generic_args_and_open_calls() {
+        let (toks, _) = crate::lexer::lex_all("f(a, map<int, fut<int>>(x, [1, 2], ", 0, 0);
+        let toks: Vec<&Token> = toks.iter().filter(|t| t.tok != Tok::Eof).collect();
+        let (open, commas) = unclosed(&toks).unwrap();
+        assert_eq!((toks[open].span.start, commas), (23, 2));
+        assert_eq!(
+            generic_open(&toks, open).map(|i| toks[i].span.start),
+            Some(8)
         );
     }
 }

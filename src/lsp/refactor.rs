@@ -366,15 +366,10 @@ fn match_on_call(
     off: usize,
 ) -> Option<CodeActionOrCommand> {
     let off = off as u32;
-    let x = super::last_node(module, |n| match n {
-        Node::Stmt(st) => match &st.kind {
-            S::Expr(x)
-                if matches!(x.kind, E::Call(..)) && x.span.start <= off && off <= x.span.end =>
-            {
-                Some(x)
-            }
-            _ => None,
-        },
+    let x = super::last_stmt(module, |st| match &st.kind {
+        S::Expr(x) if matches!(x.kind, E::Call(..)) && x.span.start <= off && off <= x.span.end => {
+            Some(x)
+        }
         _ => None,
     })?;
     let ty = a.expr_ty(fid, x.span.start, x.span.end)?;

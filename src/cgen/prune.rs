@@ -254,15 +254,14 @@ fn skip_literal(b: &[u8], mut i: usize) -> usize {
 }
 
 fn directive_kind(line: &str) -> Kind {
-    let body = line.trim_start_matches('#').trim_start();
-    if let Some(rest) = body.strip_prefix("include") {
-        let h = rest
-            .trim()
-            .trim_matches(|c| c == '<' || c == '>' || c == '"')
-            .to_string();
-        return Kind::Include(h);
+    if let Some(h) = super::include_target(line) {
+        return Kind::Include(h.trim_matches(['<', '>', '"']).to_string());
     }
-    if let Some(rest) = body.strip_prefix("define") {
+    if let Some(rest) = line
+        .trim_start_matches('#')
+        .trim_start()
+        .strip_prefix("define")
+    {
         let name = ident_prefix(rest.trim_start());
         if name == "NC_RUNTIME_H" {
             return Kind::Guard;

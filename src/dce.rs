@@ -39,12 +39,10 @@ fn pass(p: &mut Program) -> bool {
             live: HashSet::new(),
             deps: HashMap::new(),
         };
-        for f in 0..p.funcs.len() {
+        for (f, func) in p.funcs.iter().enumerate() {
             a.func = f;
             // every statement, including those in nested bodies and in blocks of expressions
-            for s in &p.funcs[f].body.stmts {
-                crate::check::flow::visit_stmts(s, &mut |s| a.stmt(s));
-            }
+            crate::check::flow::visit_block_stmts(&func.body, &mut |s| a.stmt(s));
         }
         a.propagate()
     };
@@ -114,21 +112,14 @@ impl Analysis<'_> {
         for c in children(e) {
             self.reads(c, out);
         }
-        match &e.kind {
-            EK::Var(v) => {
-                out.insert(self.key(*v));
+        if let EK::Var(v) = e.kind {
+            out.insert(self.key(v));
+        } else if let Some(f) = e.fn_ref() {
+            // creating or calling a nested function reads the variables it captures
+            let func = &self.p.funcs[f];
+            if let Some(parent) = func.parent {
+                out.extend(func.captures.iter().map(|c| Key::Local(parent, c.outer)));
             }
-            EK::FnRef(f)
-            | EK::Closure(f)
-            | EK::Call(Callee::Direct(f), _)
-            | EK::Async(Callee::Direct(f), _) => {
-                // creating or calling a nested function reads the variables it captures
-                let func = &self.p.funcs[*f];
-                if let Some(parent) = func.parent {
-                    out.extend(func.captures.iter().map(|c| Key::Local(parent, c.outer)));
-                }
-            }
-            _ => {}
         }
     }
 
@@ -159,11 +150,9 @@ enum Removable {
 fn store_key(p: &Program, func: FuncId, v: VarRef) -> Option<Key> {
     match v {
         VarRef::Global(g) => Some(Key::Global(g)),
-        VarRef::Local(l) => {
-            let local = &p.funcs[func].locals[l];
-            (matches!(local.kind, LocalKind::Normal | LocalKind::Param) && !local.boxed)
-                .then_some(Key::Local(func, l))
-        }
+        VarRef::Local(l) => p.funcs[func].locals[l]
+            .unshared()
+            .then_some(Key::Local(func, l)),
     }
 }
 
@@ -423,17 +412,13 @@ impl Prune<'_> {
     /// Prune the blocks nested in `e`.
     fn expr(&mut self, e: &mut Expr) {
         e.for_each_child_mut(&mut |c| self.expr(c));
-        match &mut e.kind {
-            EK::If(i) => {
-                for a in &mut i.arms {
-                    for pt in &mut a.patterns {
-                        pt.for_each_expr_mut(&mut |x| self.expr(x));
-                    }
-                    self.block(&mut a.body);
-                }
+        if let EK::If(i) = &mut e.kind {
+            for pt in i.arms.iter_mut().flat_map(|a| &mut a.patterns) {
+                pt.for_each_expr_mut(&mut |x| self.expr(x));
             }
-            EK::Catch(_, _, b, _) | EK::Else(_, Fallback::Block(b, _)) => self.block(b),
-            _ => {}
+        }
+        for b in crate::check::flow::nested_blocks_mut(e) {
+            self.block(b);
         }
     }
 }

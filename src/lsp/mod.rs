@@ -45,7 +45,7 @@ use lsp_types::*;
 
 use crate::ast;
 use crate::check::index::{DeclKind, Index};
-use crate::diag::{SourceMap, Span, codes};
+use crate::diag::{SourceFile, SourceMap, Span, codes};
 use crate::lexer::{Tok, is_ident_byte};
 use crate::parser::KEYWORDS;
 
@@ -218,6 +218,12 @@ impl Analysis {
         self.decl_at.get(&span).map(|&i| &self.index.decls[i])
     }
 
+    /// Where `span` is, in the files of this analysis.
+    fn location(&self, span: Span) -> Location {
+        let f = self.sm.file(span.file);
+        Location::new(path_to_uri(&f.path), file_range(f, span))
+    }
+
     fn file_id(&self, path: &Path) -> Option<u32> {
         self.sm
             .files
@@ -388,12 +394,11 @@ pub fn run() -> ExitCode {
                     }
                 }
             }
-            let msg = match waiting.pop_front() {
-                Some(m) => m,
-                None => match connection.receiver.recv() {
-                    Ok(m) => m,
-                    Err(_) => break,
-                },
+            let Some(msg) = waiting
+                .pop_front()
+                .or_else(|| connection.receiver.recv().ok())
+            else {
+                break;
             };
             match msg {
                 Message::Request(req) => {
@@ -500,45 +505,50 @@ fn path_to_uri(p: &Path) -> Uri {
     s.parse().expect("valid file URI")
 }
 
-/// Byte offset -> LSP position (UTF-16 columns).
+/// Byte offset -> LSP position (UTF-16 columns), for one offset: `Lines` converts many.
 fn offset_to_pos(text: &str, offset: usize) -> Position {
     let offset = offset.min(text.len());
-    let before = &text[..offset];
-    let line = before.matches('\n').count();
-    let col: usize = text[line_start(text, offset)..offset]
+    pos_on_line(text, text[..offset].matches('\n').count(), offset)
+}
+
+/// The position of `offset` (at most `text.len()`), on line `line` (from 0).
+fn pos_on_line(text: &str, line: usize, offset: usize) -> Position {
+    let col = text[line_start(text, offset)..offset]
         .encode_utf16()
         .count();
     Position::new(line as u32, col as u32)
 }
 
-/// Converts mostly increasing byte offsets to LSP positions without rescanning the text from
-/// the start each time.
-struct Positions<'a> {
-    text: &'a str,
-    off: usize,
-    line: u32,
+/// A span of an analysed file as an LSP range, using the file's table of line starts.
+fn file_range(f: &SourceFile, span: Span) -> Range {
+    let pos = |off: u32| {
+        let off = (off as usize).min(f.text.len());
+        pos_on_line(&f.text, f.line_col(off).0 - 1, off)
+    };
+    Range::new(pos(span.start), pos(span.end))
 }
 
-impl<'a> Positions<'a> {
+/// Converts byte offsets of a text to LSP positions, by binary search over its line starts.
+struct Lines<'a> {
+    text: &'a str,
+    starts: Vec<usize>,
+}
+
+impl<'a> Lines<'a> {
     fn new(text: &'a str) -> Self {
-        Self {
-            text,
-            off: 0,
-            line: 0,
-        }
+        let lines = text.match_indices('\n').map(|(i, _)| i + 1);
+        let starts = std::iter::once(0).chain(lines).collect();
+        Self { text, starts }
     }
 
-    fn at(&mut self, offset: usize) -> Position {
+    fn pos(&self, offset: usize) -> Position {
         let offset = offset.min(self.text.len());
-        if offset < self.off {
-            (self.off, self.line) = (0, 0);
-        }
-        self.line += self.text[self.off..offset].matches('\n').count() as u32;
-        self.off = offset;
-        let col = self.text[line_start(self.text, offset)..offset]
-            .encode_utf16()
-            .count();
-        Position::new(self.line, col as u32)
+        let line = self.starts.partition_point(|&s| s <= offset) - 1;
+        pos_on_line(self.text, line, offset)
+    }
+
+    fn span_range(&self, span: Span) -> Range {
+        Range::new(self.pos(span.start as usize), self.pos(span.end as usize))
     }
 }
 
@@ -618,6 +628,36 @@ fn last_node<'a, T>(
     let mut found = None;
     ast::visit::walk(module, &mut |n| found = pick(n).or(found.take()));
     found
+}
+
+/// `last_node` for expressions.
+fn last_expr<'a, T>(
+    module: &'a ast::Module,
+    mut pick: impl FnMut(&'a ast::Expr) -> Option<T>,
+) -> Option<T> {
+    last_node(module, |n| match n {
+        ast::visit::Node::Expr(e) => pick(e),
+        _ => None,
+    })
+}
+
+/// `last_node` for statements.
+fn last_stmt<'a, T>(
+    module: &'a ast::Module,
+    mut pick: impl FnMut(&'a ast::Stmt) -> Option<T>,
+) -> Option<T> {
+    last_node(module, |n| match n {
+        ast::visit::Node::Stmt(st) => pick(st),
+        _ => None,
+    })
+}
+
+/// The signature of the last function (of nested ones, the innermost) starting before `off`.
+fn last_fn_before(module: &ast::Module, off: u32) -> Option<&ast::FnSig> {
+    last_node(module, |n| match n {
+        ast::visit::Node::Fn(sig, _) if sig.span.start <= off => Some(sig),
+        _ => None,
+    })
 }
 
 /// Offset of the start of the line containing `off`.
@@ -1176,25 +1216,22 @@ impl Server {
             )));
         }
         let (a, r) = self.lookup(&pp.text_document.uri, pp.position)?;
-        let def = r.def?;
-        let f = a.sm.file(def.file);
-        Some(GotoDefinitionResponse::Scalar(Location::new(
-            path_to_uri(&f.path),
-            span_range(&f.text, def),
-        )))
+        Some(GotoDefinitionResponse::Scalar(a.location(r.def?)))
     }
 
     fn symbols(&self, p: DocumentSymbolParams) -> Option<Vec<DocSymbol>> {
         let (path, text) = self.source(&p.text_document.uri)?;
         let module = self.module_of(&path, &text);
+        let lines = Lines::new(&text);
+        use SymbolKind as K;
         // `span` is the whole declaration, `name_span` its name
-        let sym = |name: &str, kind, span, name_span, detail| DocSymbol {
+        let sym = |name: &str, kind, span, name_span, detail, children| DocSymbol {
             name: if name.is_empty() { "_" } else { name }.to_string(),
             detail,
             kind,
-            range: span_range(&text, span),
-            selection_range: span_range(&text, name_span),
-            children: None,
+            range: lines.span_range(span),
+            selection_range: lines.span_range(name_span),
+            children,
         };
         let src = |sp: Span| -> String {
             text.get(sp.start as usize..sp.end as usize)
@@ -1205,132 +1242,95 @@ impl Server {
         };
         // a function, with `(int a, int b) int` from its signature (whose span covers the
         // name; the parameters and return type run up to the body or `=`)
-        let fn_sym = |sig: &ast::FnSig, span: Span| {
+        let fn_sym = |sig: &ast::FnSig, span: Span, children| {
             let start = sig.span.end as usize;
             let detail = text.get(start..).and_then(|rest| {
                 let end = rest.find(['{', '=', '\n']).unwrap_or(rest.len());
                 let t = src(Span::new(sig.span.file, start, start + end));
                 t.starts_with('(').then_some(t)
             });
-            sym(&sig.name, SymbolKind::FUNCTION, span, sig.span, detail)
+            sym(&sig.name, K::FUNCTION, span, sig.span, detail, children)
         };
         let fn_symbol = |f: &ast::FnDecl| {
             // functions declared directly in the body
             let nested: Vec<DocSymbol> = (f.body.stmts.iter())
                 .filter_map(|st| match &st.kind {
-                    ast::StmtKind::Fn(g) => Some(fn_sym(&g.sig, g.sig.span.to(g.body.span))),
+                    ast::StmtKind::Fn(g) => Some(fn_sym(&g.sig, g.sig.span.to(g.body.span), None)),
                     _ => None,
                 })
                 .collect();
-            DocSymbol {
-                children: (!nested.is_empty()).then_some(nested),
-                ..fn_sym(&f.sig, f.sig.span.to(f.body.span))
-            }
+            let nested = (!nested.is_empty()).then_some(nested);
+            fn_sym(&f.sig, f.sig.span.to(f.body.span), nested)
         };
         let mut out = Vec::new();
         for it in &module.items {
-            match it {
-                ast::Item::Fn(f) => out.push(fn_symbol(f)),
+            let symbol = match it {
+                ast::Item::Fn(f) => fn_symbol(f),
                 ast::Item::Struct(s) => {
                     let fields = (s.fields.iter())
                         .map(|f| {
                             let detail = Some(src(f.ty.span()));
-                            sym(&f.name, SymbolKind::FIELD, f.span, f.span, detail)
+                            sym(&f.name, K::FIELD, f.span, f.span, detail, None)
                         })
                         .collect();
-                    let s = sym(&s.name, SymbolKind::STRUCT, s.span, s.name_span, None);
-                    out.push(DocSymbol {
-                        children: Some(fields),
-                        ..s
-                    });
+                    sym(&s.name, K::STRUCT, s.span, s.name_span, None, Some(fields))
                 }
                 ast::Item::Enum(e) => {
                     let vs = (e.variants.iter())
-                        .map(
-                            |ast::Variant {
-                                 name,
-                                 payload,
-                                 span,
-                             }| {
-                                let detail = (!payload.is_empty()).then(|| {
-                                    let ts: Vec<String> =
-                                        payload.iter().map(|t| src(t.span())).collect();
-                                    format!("({})", ts.join(", "))
-                                });
-                                sym(name, SymbolKind::ENUM_MEMBER, *span, *span, detail)
-                            },
-                        )
+                        .map(|v| {
+                            let detail = (!v.payload.is_empty()).then(|| {
+                                let ts: Vec<String> =
+                                    v.payload.iter().map(|t| src(t.span())).collect();
+                                format!("({})", ts.join(", "))
+                            });
+                            sym(&v.name, K::ENUM_MEMBER, v.span, v.span, detail, None)
+                        })
                         .collect();
-                    let e = sym(&e.name, SymbolKind::ENUM, e.span, e.name_span, None);
-                    out.push(DocSymbol {
-                        children: Some(vs),
-                        ..e
-                    });
+                    sym(&e.name, K::ENUM, e.span, e.name_span, None, Some(vs))
                 }
                 ast::Item::Type(t) => {
                     let detail = Some(src(t.ty.span()));
-                    out.push(sym(
+                    sym(
                         &t.name,
-                        SymbolKind::TYPE_PARAMETER,
+                        K::TYPE_PARAMETER,
                         t.span,
                         t.name_span,
                         detail,
-                    ));
+                        None,
+                    )
                 }
-                ast::Item::Test(ast::Test {
-                    name,
-                    span,
-                    name_span,
-                    ..
-                }) => {
+                ast::Item::Test(t) => {
                     let detail = Some("test".into());
-                    out.push(sym(name, SymbolKind::METHOD, *span, *name_span, detail));
+                    sym(&t.name, K::METHOD, t.span, t.name_span, detail, None)
                 }
                 ast::Item::Extern(e) => {
-                    let fs = e.fns.iter().map(|f| fn_sym(&f.sig, f.sig.span)).collect();
-                    let x = sym(
-                        &e.alias,
-                        SymbolKind::MODULE,
-                        e.span,
-                        e.alias_span,
-                        Some(e.path.clone()),
-                    );
-                    out.push(DocSymbol {
-                        children: Some(fs),
-                        ..x
-                    });
+                    let fs = e.fns.iter().map(|f| fn_sym(&f.sig, f.sig.span, None));
+                    let (detail, fs) = (Some(e.path.clone()), Some(fs.collect()));
+                    sym(&e.alias, K::MODULE, e.span, e.alias_span, detail, fs)
                 }
                 ast::Item::Import(im) => {
                     let detail = Some(im.path.clone());
-                    out.push(sym(
-                        &im.alias,
-                        SymbolKind::MODULE,
-                        im.span,
-                        im.alias_span,
-                        detail,
-                    ));
+                    sym(&im.alias, K::MODULE, im.span, im.alias_span, detail, None)
                 }
                 ast::Item::Stmt(s) => match &s.kind {
                     ast::StmtKind::VarDecl {
                         targets, mutable, ..
                     } => {
-                        let kind = if *mutable {
-                            SymbolKind::VARIABLE
-                        } else {
-                            SymbolKind::CONSTANT
-                        };
+                        let kind = if *mutable { K::VARIABLE } else { K::CONSTANT };
                         for t in targets {
                             let detail = Some(src(t.ty.span()));
-                            out.push(sym(&t.name, kind, t.span, t.name_span, detail));
+                            out.push(sym(&t.name, kind, t.span, t.name_span, detail, None));
                         }
+                        continue;
                     }
                     ast::StmtKind::FnVar {
                         name, name_span, ..
-                    } => out.push(sym(name, SymbolKind::FUNCTION, s.span, *name_span, None)),
-                    ast::StmtKind::Fn(f) => out.push(fn_symbol(f)),
-                    _ => {}
+                    } => sym(name, K::FUNCTION, s.span, *name_span, None, None),
+                    ast::StmtKind::Fn(f) => fn_symbol(f),
+                    _ => continue,
                 },
-            }
+            };
+            out.push(symbol);
         }
         Some(out)
     }
@@ -1383,7 +1383,7 @@ impl Server {
                     continue;
                 }
                 if seen.insert((f.path.clone(), ns.start)) {
-                    out.push((f.path.clone(), span_range(&f.text, ns)));
+                    out.push((f.path.clone(), file_range(f, ns)));
                 }
             }
         }
@@ -1546,7 +1546,8 @@ impl Server {
     fn folding(&self, p: FoldingRangeParams) -> Option<Vec<FoldingRange>> {
         let (_, text) = self.source(&p.text_document.uri)?;
         let (toks, _) = crate::lexer::lex_all(&text, 0, 0);
-        let line = |off: u32| offset_to_pos(&text, off as usize).line;
+        let lines = Lines::new(&text);
+        let line = |off: u32| lines.pos(off as usize).line;
         let mut out = Vec::new();
         // open brackets: (offset, whether it is an import block)
         let mut stack: Vec<(u32, bool)> = Vec::new();
@@ -1616,16 +1617,12 @@ impl Server {
                 if !seen.insert((f.path.clone(), d.span.start)) {
                     continue;
                 }
-                let span = d.name_span;
                 out.push(WorkspaceSymbol {
                     name: d.name.clone(),
                     kind,
                     tags: None,
                     container_name: f.path.file_name().map(|n| n.to_string_lossy().into_owned()),
-                    location: OneOf::Left(Location::new(
-                        path_to_uri(&f.path),
-                        span_range(&f.text, span),
-                    )),
+                    location: OneOf::Left(a.location(d.name_span)),
                     data: None,
                 });
             }
@@ -1852,7 +1849,7 @@ fn to_diagnostic(
     (
         f.path.clone(),
         Diagnostic {
-            range: span_range(&f.text, d.span),
+            range: file_range(f, d.span),
             severity: Some(severity),
             code: code.or(d.code).map(|c| NumberOrString::String(c.into())),
             source: Some("ncc".into()),

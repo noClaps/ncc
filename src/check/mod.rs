@@ -272,7 +272,7 @@ impl Checker {
         let main_body = self.assemble_main();
         self.finish_fn(main_ctx, "main".into(), vec![], main_body, None);
         // functions whose checking failed early get empty bodies
-        let sigs = self.sigs.clone();
+        let sigs = &self.sigs;
         let funcs = std::mem::take(&mut self.funcs)
             .into_iter()
             .enumerate()
@@ -430,9 +430,8 @@ impl Checker {
                             self.types.named[n as usize].underlying = under;
                         }
                         self.ix.type_spans.insert(ty, t.span);
-                        let members = self.members_of(ty);
                         let spans = (t.span, t.name_span);
-                        self.idx_type_decl(&t.name, spans, index::DeclKind::Type, ty, members);
+                        self.idx_type_decl(&t.name, spans, index::DeclKind::Type, ty, vec![]);
                         // reject cycles
                         let mut seen = vec![ty];
                         let mut cur = under;
@@ -1203,29 +1202,6 @@ impl Checker {
                 self.require_plain(kt, *sp, "cannot be used as a map key")?;
                 self.types.intern(TyKind::Map(kt, vt))
             }
-            T::Optional(i, sp) => {
-                let it = self.resolve_type(i, m, tp)?;
-                if matches!(
-                    self.types.kind(it),
-                    TyKind::Void | TyKind::Never | TyKind::ErrU(_) | TyKind::Mutex(_)
-                ) {
-                    return err(*sp, format!("`{}` cannot be optional", self.types.show(it)));
-                }
-                self.types.opt(it)
-            }
-            T::ErrorUnion(i, sp) => {
-                let it = self.resolve_type(i, m, tp)?;
-                if matches!(
-                    self.types.kind(it),
-                    TyKind::Never | TyKind::ErrU(_) | TyKind::Mutex(_)
-                ) {
-                    return err(
-                        *sp,
-                        format!("`{}` cannot be an error union", self.types.show(it)),
-                    );
-                }
-                self.types.erru(it)
-            }
             T::Tuple(ts, sp) => {
                 let mut out = Vec::new();
                 for t in ts {
@@ -1240,24 +1216,38 @@ impl Checker {
                     .iter()
                     .map(|p| self.resolve_type(p, m, tp))
                     .collect::<Result<_>>()?;
-                let r = match r {
-                    Some(r) => self.resolve_type(r, m, tp)?,
-                    None => VOID,
-                };
+                let r = r
+                    .as_ref()
+                    .map_or(Ok(VOID), |r| self.resolve_type(r, m, tp))?;
                 self.types.intern(TyKind::Fn(out, r))
             }
-            T::Fut(i, sp) => {
+            T::Optional(i, sp) | T::ErrorUnion(i, sp) | T::Fut(i, sp) => {
                 let it = self.resolve_type(i, m, tp)?;
-                if matches!(
-                    self.types.kind(it),
-                    TyKind::Fut(_) | TyKind::Never | TyKind::Mutex(_)
-                ) {
+                let k = self.types.kind(it);
+                let (bad, what, wrap) = match te {
+                    T::Optional(..) => (
+                        matches!(k, TyKind::Void | TyKind::ErrU(_)),
+                        "cannot be optional",
+                        TyKind::Opt(it),
+                    ),
+                    T::ErrorUnion(..) => (
+                        matches!(k, TyKind::ErrU(_)),
+                        "cannot be an error union",
+                        TyKind::ErrU(it),
+                    ),
+                    _ => (matches!(k, TyKind::Fut(_)), "", TyKind::Fut(it)),
+                };
+                if bad || matches!(k, TyKind::Never | TyKind::Mutex(_)) {
+                    let s = self.types.show(it);
                     return err(
                         *sp,
-                        format!("invalid future type `fut {}`", self.types.show(it)),
+                        match what {
+                            "" => format!("invalid future type `fut {s}`"),
+                            _ => format!("`{s}` {what}"),
+                        },
                     );
                 }
-                self.types.intern(TyKind::Fut(it))
+                self.types.intern(wrap)
             }
             T::Const(c) => {
                 return err(

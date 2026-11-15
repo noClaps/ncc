@@ -371,29 +371,59 @@ impl Expr {
     pub fn for_each_child_mut(&mut self, f: &mut dyn FnMut(&mut Expr)) {
         for_each_child!(&mut self.kind, f, as_mut)
     }
+
+    /// The function this expression refers to, makes a closure of, or calls or spawns directly.
+    pub fn fn_ref(&self) -> Option<FuncId> {
+        match self.kind {
+            EK::FnRef(id)
+            | EK::Closure(id)
+            | EK::Call(Callee::Direct(id), _)
+            | EK::Async(Callee::Direct(id), _) => Some(id),
+            _ => None,
+        }
+    }
+}
+
+impl Local {
+    /// Whether the variable is not shared with other code: not captured, aliased or boxed.
+    pub fn unshared(&self) -> bool {
+        matches!(self.kind, LocalKind::Normal | LocalKind::Param) && !self.boxed
+    }
+}
+
+impl Program {
+    /// The type of variable `v` of function `f`.
+    pub fn var_ty(&self, f: FuncId, v: VarRef) -> TyId {
+        match v {
+            VarRef::Local(l) => self.funcs[f].locals[l].ty,
+            VarRef::Global(g) => self.globals[g].ty,
+        }
+    }
+}
+
+/// The expressions of a pattern, given to `$f`. `$iter` is `iter` or `iter_mut`, matching how
+/// `$pat` is borrowed, and `$m` the calling method.
+macro_rules! pat_exprs {
+    ($pat:expr, $f:ident, $iter:ident, $m:ident) => {
+        match $pat {
+            Pat::Wild | Pat::Bind(_) => {}
+            Pat::Value(e) | Pat::Cond(e) => $f(e),
+            Pat::Tuple(ps) | Pat::Struct(ps) | Pat::Array(ps) | Pat::Variant(_, ps) => {
+                ps.$iter().for_each(|p| p.$m($f));
+            }
+        }
+    };
 }
 
 impl Pat {
     /// Apply `f` to each expression in the pattern.
     pub fn for_each_expr<'a>(&'a self, f: &mut dyn FnMut(&'a Expr)) {
-        match self {
-            Pat::Wild | Pat::Bind(_) => {}
-            Pat::Value(e) | Pat::Cond(e) => f(e),
-            Pat::Tuple(ps) | Pat::Struct(ps) | Pat::Array(ps) | Pat::Variant(_, ps) => {
-                ps.iter().for_each(|p| p.for_each_expr(f));
-            }
-        }
+        pat_exprs!(self, f, iter, for_each_expr)
     }
 
     /// Like `for_each_expr`, with mutable access.
     pub fn for_each_expr_mut(&mut self, f: &mut dyn FnMut(&mut Expr)) {
-        match self {
-            Pat::Wild | Pat::Bind(_) => {}
-            Pat::Value(e) | Pat::Cond(e) => f(e),
-            Pat::Tuple(ps) | Pat::Struct(ps) | Pat::Array(ps) | Pat::Variant(_, ps) => {
-                ps.iter_mut().for_each(|p| p.for_each_expr_mut(f));
-            }
-        }
+        pat_exprs!(self, f, iter_mut, for_each_expr_mut)
     }
 }
 
@@ -434,6 +464,19 @@ macro_rules! own_exprs {
     };
 }
 
+/// The body of a loop, `lock` or block statement, borrowed as `$kind` is.
+macro_rules! body {
+    ($kind:expr) => {
+        match $kind {
+            SK::While { body, .. }
+            | SK::For { body, .. }
+            | SK::Lock { body, .. }
+            | SK::Block(body) => Some(body),
+            _ => None,
+        }
+    };
+}
+
 impl Stmt {
     /// The statement's own expressions in evaluation order: not those in its body or in the
     /// blocks of its expressions.
@@ -448,23 +491,11 @@ impl Stmt {
 
     /// The body of a loop, `lock` or block statement.
     pub fn body(&self) -> Option<&Block> {
-        match &self.kind {
-            SK::While { body, .. }
-            | SK::For { body, .. }
-            | SK::Lock { body, .. }
-            | SK::Block(body) => Some(body),
-            _ => None,
-        }
+        body!(&self.kind)
     }
 
     /// Like `body`, with mutable access.
     pub fn body_mut(&mut self) -> Option<&mut Block> {
-        match &mut self.kind {
-            SK::While { body, .. }
-            | SK::For { body, .. }
-            | SK::Lock { body, .. }
-            | SK::Block(body) => Some(body),
-            _ => None,
-        }
+        body!(&mut self.kind)
     }
 }

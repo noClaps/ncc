@@ -11,20 +11,16 @@ use crate::tir::*;
 fn shared_access(p: &Program, f: FuncId) -> Option<&str> {
     let func = &p.funcs[f];
     let mut vars = Vec::new();
-    for s in &func.body.stmts {
-        flow::visit_stmt(s, &mut |e| {
-            if let EK::Var(v) = e.kind {
-                vars.push(v);
-            }
-        });
-    }
-    for s in &func.body.stmts {
-        flow::visit_stmts(s, &mut |s| {
-            if let SK::Assign(pl, _) = &s.kind {
-                vars.extend(flow::place_root(pl));
-            }
-        });
-    }
+    flow::visit_block(&func.body, &mut |e| {
+        if let EK::Var(v) = e.kind {
+            vars.push(v);
+        }
+    });
+    flow::visit_block_stmts(&func.body, &mut |s| {
+        if let SK::Assign(pl, _) = &s.kind {
+            vars.extend(flow::place_root(pl));
+        }
+    });
     vars.into_iter().find_map(|v| match v {
         VarRef::Global(g) if p.globals[g].mutable => Some(p.globals[g].name.as_str()),
         VarRef::Local(l) if matches!(func.locals[l].kind, LocalKind::CapRef(_)) => {
@@ -36,12 +32,10 @@ fn shared_access(p: &Program, f: FuncId) -> Option<&str> {
 
 fn callees(p: &Program, f: FuncId) -> Vec<FuncId> {
     let mut out = Vec::new();
-    for s in &p.funcs[f].body.stmts {
-        flow::visit_stmt(s, &mut |e: &Expr| match &e.kind {
-            EK::Call(Callee::Direct(g), _) | EK::FnRef(g) | EK::Closure(g) => out.push(*g),
-            _ => {}
-        });
-    }
+    flow::visit_block(&p.funcs[f].body, &mut |e: &Expr| match &e.kind {
+        EK::Call(Callee::Direct(g), _) | EK::FnRef(g) | EK::Closure(g) => out.push(*g),
+        _ => {}
+    });
     out
 }
 
@@ -254,14 +248,7 @@ pub fn loops(p: &Program, sm: &crate::diag::SourceMap) -> Loops {
     let mut out = Loops::default();
     let mut seen = HashSet::new();
     for (fi, f) in p.funcs.iter().enumerate() {
-        let mut breaks = HashSet::new();
-        for s in &f.body.stmts {
-            flow::visit_stmts(s, &mut |s| {
-                if let SK::Break(id, _) = s.kind {
-                    breaks.insert(id);
-                }
-            });
-        }
+        let breaks = flow::broken(&f.body);
         let mut cx = LoopCx {
             sm,
             consts: &mut consts,
@@ -364,31 +351,27 @@ fn leaves(body: &Block, id: JumpId) -> bool {
     // jump targets inside the body: jumps to them stay inside
     let mut inner = HashSet::from([id]);
     let mut found = false;
-    for s in &body.stmts {
-        flow::visit_stmts(s, &mut |s| match &s.kind {
-            SK::While { id, .. } | SK::For { id, .. } | SK::Lock { id, .. } => {
-                inner.insert(*id);
-            }
-            SK::Return(_) | SK::Throw(_) => found = true,
-            _ => {}
-        });
-        flow::visit_stmt(s, &mut |e| match &e.kind {
-            EK::If(i) => {
-                inner.insert(i.id);
-            }
-            EK::Catch(_, _, _, j) | EK::Else(_, Fallback::Block(_, j)) => {
-                inner.insert(*j);
-            }
-            EK::Try(_) => found = true,
-            _ => {}
-        });
-    }
-    for s in &body.stmts {
-        flow::visit_stmts(s, &mut |s| match &s.kind {
-            SK::Break(j, _) | SK::Continue(j) if !inner.contains(j) => found = true,
-            _ => {}
-        });
-    }
+    flow::visit_block_stmts(body, &mut |s| match &s.kind {
+        SK::While { id, .. } | SK::For { id, .. } | SK::Lock { id, .. } => {
+            inner.insert(*id);
+        }
+        SK::Return(_) | SK::Throw(_) => found = true,
+        _ => {}
+    });
+    flow::visit_block(body, &mut |e| match &e.kind {
+        EK::If(i) => {
+            inner.insert(i.id);
+        }
+        EK::Catch(_, _, _, j) | EK::Else(_, Fallback::Block(_, j)) => {
+            inner.insert(*j);
+        }
+        EK::Try(_) => found = true,
+        _ => {}
+    });
+    flow::visit_block_stmts(body, &mut |s| match &s.kind {
+        SK::Break(j, _) | SK::Continue(j) if !inner.contains(j) => found = true,
+        _ => {}
+    });
     found
 }
 

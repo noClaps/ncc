@@ -585,6 +585,36 @@ impl Module {
             _ => None,
         })
     }
+
+    /// The aliases of the module's imports and extern blocks, in source order.
+    pub fn aliases(&self) -> impl Iterator<Item = ModuleAlias<'_>> {
+        (self.items.iter()).filter_map(|it| {
+            let (alias, alias_span, path, span, external) = match it {
+                Item::Import(im) => (&im.alias, im.alias_span, &im.path, im.span, false),
+                Item::Extern(e) => (&e.alias, e.alias_span, &e.path, e.span, true),
+                _ => return None,
+            };
+            Some(ModuleAlias {
+                alias,
+                alias_span,
+                path,
+                span,
+                external,
+            })
+        })
+    }
+}
+
+/// The alias of an import or extern block.
+pub struct ModuleAlias<'a> {
+    pub alias: &'a str,
+    pub alias_span: Span,
+    /// the module's path as written
+    pub path: &'a str,
+    /// the whole import or extern block
+    pub span: Span,
+    /// an extern block (C code), not an import
+    pub external: bool,
 }
 
 /// Walks over the syntax tree.

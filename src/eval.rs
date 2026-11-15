@@ -120,9 +120,7 @@ pub fn purity(p: &Program) -> Vec<bool> {
             }
             _ => {}
         };
-        for s in &f.body.stmts {
-            flow::visit_stmt(s, &mut visit);
-        }
+        flow::visit_block(&f.body, &mut visit);
         pure[i] = ok && f.body.stmts.iter().all(stmt_pure);
         calls[i] = cs;
     }
@@ -337,17 +335,11 @@ impl<'p> Evaluator<'p> {
         }
         self.fold_each(|f| e.for_each_child_mut(f), locals, consts)?;
         // nested blocks
-        match &mut e.kind {
-            EK::If(i) => {
-                for arm in &mut i.arms {
-                    self.fold_block(&mut arm.body, locals, consts);
-                }
-                self.select_arm(i);
-            }
-            EK::Else(_, Fallback::Block(b, _)) | EK::Catch(_, _, b, _) => {
-                self.fold_block(b, locals, consts);
-            }
-            _ => {}
+        for b in flow::nested_blocks_mut(e) {
+            self.fold_block(b, locals, consts);
+        }
+        if let EK::If(i) = &mut e.kind {
+            self.select_arm(i);
         }
         // this node
         let foldable = match &e.kind {
@@ -440,11 +432,7 @@ impl<'p> Evaluator<'p> {
         let p = self.p;
         // spawned tasks may change globals at any time
         let mut has_async = false;
-        for f in &p.funcs {
-            for s in &f.body.stmts {
-                flow::visit_stmt(s, &mut |e| has_async |= matches!(e.kind, EK::Async(..)));
-            }
-        }
+        flow::visit_program(p, &mut |e| has_async |= matches!(e.kind, EK::Async(..)));
         self.gwrites = global_writes(p);
         let mut funcs = p.funcs.clone();
         for (fi, f) in funcs.iter_mut().enumerate() {
@@ -458,10 +446,7 @@ impl<'p> Evaluator<'p> {
     /// Whether the value of `v` can be tracked: it is not shared with other code.
     fn trackable(&self, f: FuncId, v: VarRef, track_globals: bool) -> bool {
         match v {
-            VarRef::Local(l) => {
-                let local = &self.p.funcs[f].locals[l];
-                matches!(local.kind, LocalKind::Normal | LocalKind::Param) && !local.boxed
-            }
+            VarRef::Local(l) => self.p.funcs[f].locals[l].unshared(),
             VarRef::Global(g) => {
                 track_globals
                     && !matches!(self.p.types.kind(self.p.globals[g].ty), TyKind::Mutex(_))
@@ -478,13 +463,6 @@ impl<'p> Evaluator<'p> {
         }
         let tg = env.track_globals;
         env.forget_globals(|g| !self.trackable(f, VarRef::Global(g), tg));
-    }
-
-    fn var_ty(&self, f: FuncId, v: VarRef) -> TyId {
-        match v {
-            VarRef::Local(l) => self.p.funcs[f].locals[l].ty,
-            VarRef::Global(g) => self.p.globals[g].ty,
-        }
     }
 
     /// The globals that code called by `s` may change; `None` when any global may change.
@@ -617,7 +595,7 @@ impl<'p> Evaluator<'p> {
             if val_size(&val) > MAX_LITERAL {
                 return None;
             }
-            val_expr(&val, self.var_ty(f, v), s.span, &self.p.types)
+            val_expr(&val, self.p.var_ty(f, v), s.span, &self.p.types)
         };
         let assign = |v: VarRef| -> Option<Stmt> {
             Some(Stmt {
