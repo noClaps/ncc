@@ -211,8 +211,7 @@ fn main() -> ExitCode {
             };
             let mut opts = driver::Options::default();
             let mut it = rest.iter();
-            while let Some(a) = it.next() {
-                let a = a.as_str();
+            while let Some(a) = it.next().map(String::as_str) {
                 match a {
                     "-h" | "--help" => return show_help(help),
                     // everything after `--` goes to the program, options included

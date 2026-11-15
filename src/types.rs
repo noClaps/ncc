@@ -210,9 +210,7 @@ impl Types {
             TyKind::Map(k, v) => vec![*k, *v],
             TyKind::Tuple(ts) => ts.clone(),
             TyKind::Fn(ps, r) => ps.iter().chain([r]).copied().collect(),
-            TyKind::Struct(i) => self.structs[*i as usize]
-                .fields
-                .iter()
+            TyKind::Struct(i) => (self.structs[*i as usize].fields.iter())
                 .map(|f| f.1)
                 .collect(),
             TyKind::Enum(i) => (self.enums[*i as usize].variants.iter())
@@ -250,23 +248,16 @@ impl Types {
             TyKind::Opt(i) => self.opt_boxed(t) || self.is_managed(*i),
             TyKind::ErrU(_) => true,
             TyKind::Tuple(ts) => ts.iter().any(|t| self.is_managed(*t)),
-            TyKind::Struct(i) => self.structs[*i as usize]
-                .fields
-                .iter()
-                .any(|(_, t)| self.is_managed(*t)),
+            TyKind::Struct(i) => {
+                (self.structs[*i as usize].fields.iter()).any(|(_, t)| self.is_managed(*t))
+            }
             TyKind::Enum(_) => self.enum_has_payload(t),
             _ => true,
         }
     }
 
     pub fn enum_has_payload(&self, t: TyId) -> bool {
-        match self.kind(t) {
-            TyKind::Enum(i) => self.enums[*i as usize]
-                .variants
-                .iter()
-                .any(|(_, p)| !p.is_empty()),
-            _ => false,
-        }
+        (self.enum_def(t)).is_some_and(|d| d.variants.iter().any(|(_, p)| !p.is_empty()))
     }
 
     /// Optionals of a type that (by value) contains the optional itself are heap allocated.
@@ -349,21 +340,6 @@ impl Types {
 
     pub fn show(&self, t: TyId) -> String {
         match self.kind(t) {
-            TyKind::Void
-            | TyKind::Never
-            | TyKind::Bool
-            | TyKind::Byte
-            | TyKind::Int
-            | TyKind::UInt
-            | TyKind::Float
-            | TyKind::Char
-            | TyKind::Str
-            | TyKind::Error => BUILTIN_TYPES
-                .iter()
-                .find(|(_, b)| *b == t)
-                .unwrap()
-                .0
-                .into(),
             TyKind::Array(e) => format!("{}[]", self.show(*e)),
             TyKind::Fixed(e, n) => format!("{}[{}]", self.show(*e), self.show_size(*n)),
             TyKind::Map(k, v) => format!("[{}]{}", self.show(*k), self.show(*v)),
@@ -384,6 +360,8 @@ impl Types {
             TyKind::Enum(i) => self.enums[*i as usize].name.clone(),
             TyKind::Named(i) => self.named[*i as usize].name.clone(),
             TyKind::Const(_, v) => v.to_string(),
+            // the builtins
+            _ => BUILTIN_TYPES.iter().find(|b| b.1 == t).unwrap().0.into(),
         }
     }
 }
@@ -394,10 +372,11 @@ impl Types {
         use crate::ast::{ConstExpr, TypeExpr as T};
         let sp = crate::diag::Span::default();
         let b = |t: TyId| Box::new(self.to_type_expr(t));
+        let list = |ts: &[TyId]| ts.iter().map(|t| self.to_type_expr(*t)).collect();
         let named = |name: String, args: &[TyId]| T::Named {
             module: None,
             name,
-            args: args.iter().map(|a| self.to_type_expr(*a)).collect(),
+            args: list(args),
             span: sp,
         };
         // an instance of a generic is written with its arguments
@@ -408,22 +387,19 @@ impl Types {
         match self.kind(t) {
             TyKind::Array(e) => T::Array(b(*e), None, sp),
             TyKind::Fixed(e, n) => {
-                let size = match self.show_size(*n).parse() {
+                let size = self.show_size(*n);
+                let size = match size.parse() {
                     Ok(n) => ConstExpr::Int(n, sp),
                     // a size in terms of generic constants
-                    Err(_) => ConstExpr::Name(self.show_size(*n), sp),
+                    Err(_) => ConstExpr::Name(size, sp),
                 };
                 T::Array(b(*e), Some(size), sp)
             }
             TyKind::Map(k, v) => T::Map(b(*k), b(*v), sp),
             TyKind::Opt(i) => T::Optional(b(*i), sp),
             TyKind::ErrU(i) => T::ErrorUnion(b(*i), sp),
-            TyKind::Tuple(ts) => T::Tuple(ts.iter().map(|t| self.to_type_expr(*t)).collect(), sp),
-            TyKind::Fn(ps, r) => T::Fn(
-                ps.iter().map(|t| self.to_type_expr(*t)).collect(),
-                (*r != VOID).then(|| b(*r)),
-                sp,
-            ),
+            TyKind::Tuple(ts) => T::Tuple(list(ts), sp),
+            TyKind::Fn(ps, r) => T::Fn(list(ps), (*r != VOID).then(|| b(*r)), sp),
             TyKind::Fut(i) => T::Fut(b(*i), sp),
             TyKind::Const(_, v) => T::Const(ConstExpr::Int(*v as u128, sp)),
             TyKind::Struct(i) => nominal(&self.structs[*i as usize].generic),

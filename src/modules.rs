@@ -16,6 +16,7 @@ pub struct LoadedModule {
     pub imports: HashMap<String, usize>,
 }
 
+#[derive(Default)]
 pub struct ModuleGraph {
     pub modules: Vec<LoadedModule>,
     /// Modules ordered so that imports come before importers (entry last).
@@ -125,10 +126,7 @@ pub fn load_with(
     let mut loader = Loader {
         sm,
         entry_dir,
-        graph: ModuleGraph {
-            modules: vec![],
-            order: vec![],
-        },
+        graph: ModuleGraph::default(),
         by_path: HashMap::new(),
         root: None,
         overlay,

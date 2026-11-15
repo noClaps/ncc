@@ -55,13 +55,9 @@ impl Checker {
         self.resolve_type(te, m, &tp)
     }
 
-    fn in_throwing_ctx(&self) -> bool {
-        let c = self.ctx_ref();
-        c.is_main || c.is_test || matches!(self.types.kind(c.ret), TyKind::ErrU(_))
-    }
-
     pub fn require_throwing(&self, span: Span, what: &str) -> Result<()> {
-        if !self.in_throwing_ctx() {
+        let c = self.ctx_ref();
+        if !(c.is_main || c.is_test || matches!(self.types.kind(c.ret), TyKind::ErrU(_))) {
             return err_code(
                 span,
                 format!(
@@ -72,10 +68,6 @@ impl Checker {
             );
         }
         Ok(())
-    }
-
-    fn in_test(&self) -> bool {
-        self.fns.iter().any(|f| f.is_test)
     }
 
     /// Declare a variable either as a global (module top level) or a local.
@@ -123,8 +115,7 @@ impl Checker {
                 targets,
                 value,
             } => {
-                if targets.len() == 1 {
-                    let t = &targets[0];
+                if let [t] = targets.as_slice() {
                     let ty = self.resolve_type_here(&t.ty)?;
                     if let TyKind::Fut(_) = self.types.kind(ty) {
                         if *mutable {
@@ -289,27 +280,18 @@ impl Checker {
                     TyKind::ErrU(i) => *i,
                     _ => ret,
                 };
-                match v {
-                    None => {
-                        if target != VOID {
-                            return err(
-                                span,
-                                format!(
-                                    "expected a return value of type `{}`",
-                                    self.types.show(target)
-                                ),
-                            );
-                        }
-                        push(out, SK::Return(None));
+                let x = match v {
+                    None if target != VOID => {
+                        let ty = self.types.show(target);
+                        return err(span, format!("expected a return value of type `{ty}`"));
                     }
-                    Some(v) => {
-                        if target == VOID {
-                            return err(v.span, "this function does not return a value");
-                        }
-                        let x = self.expect_expr(v, target)?;
-                        push(out, SK::Return(Some(x)));
+                    None => None,
+                    Some(v) if target == VOID => {
+                        return err(v.span, "this function does not return a value");
                     }
-                }
+                    Some(v) => Some(self.expect_expr(v, target)?),
+                };
+                push(out, SK::Return(x));
             }
             S::Throw(e) => {
                 self.require_throwing(span, "`throw`")?;
@@ -463,7 +445,7 @@ impl Checker {
                 );
             }
             S::Assert(e) => {
-                if !self.in_test() {
+                if !self.fns.iter().any(|f| f.is_test) {
                     return err(span, "`assert` can only be used inside a `test` block");
                 }
                 let x = self.expect_expr(e, BOOL)?;
@@ -624,27 +606,33 @@ impl Checker {
             }
             E::Index(base, idx) => {
                 let (p, ty) = self.check_place(base)?;
-                match self.types.kind(ty).clone() {
-                    TyKind::Tuple(ts) => {
-                        let i = tuple_index(idx, ts.len())?;
-                        Ok((Place::TupleIndex(Box::new(p), i), ts[i]))
-                    }
-                    TyKind::Map(k, v) => {
-                        let i = self.expect_expr(idx, k)?;
-                        Ok((Place::Index(Box::new(p), Box::new(i)), v))
-                    }
-                    TyKind::Array(_) | TyKind::Fixed(..) | TyKind::Str => {
-                        let el = self.types.elem(ty).unwrap();
-                        let i = self.seq_index(idx, ty)?;
-                        Ok((Place::Index(Box::new(p), Box::new(i)), el))
-                    }
-                    _ => err(
-                        e.span,
-                        format!("cannot index into `{}`", self.types.show(ty)),
-                    ),
-                }
+                Ok(match self.check_index(idx, ty, e.span)? {
+                    (Index::Tuple(i), t) => (Place::TupleIndex(Box::new(p), i), t),
+                    (Index::Key(i), t) => (Place::Index(Box::new(p), Box::new(i)), t),
+                })
             }
             _ => err(e.span, "invalid assignment target"),
+        }
+    }
+
+    /// The index `idx` into a value of type `ty` (at `span`), and the type of the element.
+    pub(super) fn check_index(
+        &mut self,
+        idx: &ast::Expr,
+        ty: TyId,
+        span: Span,
+    ) -> Result<(Index, TyId)> {
+        match self.types.kind(ty).clone() {
+            TyKind::Tuple(ts) => {
+                let i = tuple_index(idx, ts.len())?;
+                Ok((Index::Tuple(i), ts[i]))
+            }
+            TyKind::Map(k, v) => Ok((Index::Key(self.expect_expr(idx, k)?), v)),
+            TyKind::Array(_) | TyKind::Fixed(..) | TyKind::Str => {
+                let el = self.types.elem(ty).unwrap();
+                Ok((Index::Key(self.seq_index(idx, ty)?), el))
+            }
+            _ => err(span, format!("cannot index into `{}`", self.types.show(ty))),
         }
     }
 
@@ -667,7 +655,13 @@ impl Checker {
     }
 }
 
-pub(super) fn tuple_index(idx: &ast::Expr, len: usize) -> Result<usize> {
+/// A checked index: a tuple element, or a key or position.
+pub(super) enum Index {
+    Tuple(usize),
+    Key(Expr),
+}
+
+fn tuple_index(idx: &ast::Expr, len: usize) -> Result<usize> {
     match idx.kind {
         ast::ExprKind::Int(v, _) if (v as usize) < len => Ok(v as usize),
         ast::ExprKind::Int(v, _) => err(

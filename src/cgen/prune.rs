@@ -201,11 +201,8 @@ fn split(src: &str) -> Vec<Item> {
                     if depth == 0 && b[i - 1] == b'}' {
                         // a closing brace ends a function body unless the declaration
                         // continues on the same line (`} name;`, `};`)
-                        let mut j = i;
-                        while j < b.len() && (b[j] == b' ' || b[j] == b'\t') {
-                            j += 1;
-                        }
-                        if j >= b.len() || b[j] == b'\n' || b[j] == b'\r' {
+                        let rest = src[i..].trim_start_matches([' ', '\t']);
+                        if rest.is_empty() || rest.starts_with(['\n', '\r']) {
                             break;
                         }
                     }
@@ -350,46 +347,28 @@ fn decl_names(code: &str) -> Vec<String> {
         }
         i += 1;
     }
-    let first = tokens.first().map_or("", String::as_str);
-    let mut names = Vec::new();
-    if first == "typedef" {
-        if let Some(n) = paren_ident {
-            names.push(n);
-        } else if let Some(n) = tokens.last() {
-            names.push(n.clone());
-        }
+    let tag = tokens.iter().position(|t| t == "struct" || t == "union");
+    if tokens.first().is_some_and(|t| t == "typedef") {
         // `typedef struct tag {...} name;` also defines the tag
-        if let Some(pos) = tokens.iter().position(|t| t == "struct" || t == "union")
-            && let Some(tag) = tokens.get(pos + 1)
-        {
-            names.push(tag.clone());
-        }
-        return names;
+        let tag = tag.and_then(|pos| tokens.get(pos + 1)).cloned();
+        let name = paren_ident.or_else(|| tokens.last().cloned());
+        return name.into_iter().chain(tag).collect();
     }
-    if let Some(pos) = tokens.iter().position(|t| t == "struct" || t == "union") {
-        // `struct tag {...};` or `struct tag;` (no declarator)
-        if tokens.len() == pos + 2 && !first_paren_seen {
-            names.push(tokens[pos + 1].clone());
-            return names;
-        }
+    // `struct tag {...};` or `struct tag;` (no declarator)
+    if let Some(pos) = tag
+        && tokens.len() == pos + 2
+        && !first_paren_seen
+    {
+        return vec![tokens[pos + 1].clone()];
     }
-    if let Some(n) = paren_ident {
-        // function pointer variable: `T (*name)(args) = ...;`
-        names.push(n);
-        return names;
-    }
-    if first_paren_seen {
-        // function definition or prototype
-        if let Some(n) = last_ident_before_paren {
-            names.push(n);
-        }
-        return names;
-    }
-    // variable: the last identifier before `=` / `;`
-    if let Some(n) = tokens.last() {
-        names.push(n.clone());
-    }
-    names
+    // a function pointer variable (`T (*name)(args) = ...;`), a function definition or
+    // prototype, or a variable (the last identifier before `=` / `;`)
+    let name = if first_paren_seen {
+        last_ident_before_paren
+    } else {
+        tokens.last().cloned()
+    };
+    paren_ident.or(name).into_iter().collect()
 }
 
 #[cfg(test)]

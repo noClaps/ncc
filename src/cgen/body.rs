@@ -100,25 +100,16 @@ impl Body {
 
     /// The body's text.
     pub fn take(&mut self) -> String {
-        let mut out = String::new();
-        for l in self.lines.drain(..).flatten() {
-            out.push_str(&l);
-            out.push('\n');
-        }
+        let out = self.lines.drain(..).flatten().map(|l| l + "\n").collect();
         self.clear();
         out
     }
 
-    /// The last line kept, and its index.
-    fn last(&self) -> Option<(usize, &str)> {
-        let i = self.lines.iter().rposition(Option::is_some)?;
-        Some((i, self.lines[i].as_deref()?.trim()))
-    }
-
-    /// The last line kept that runs or labels something (not a brace of a bare block).
-    fn last_solid(&self) -> Option<(usize, &str)> {
+    /// The last line kept, and its index; when `solid`, the last that runs or labels something
+    /// (not a brace of a bare block).
+    fn last(&self, solid: bool) -> Option<(usize, &str)> {
         let i = (self.lines.iter().enumerate())
-            .rposition(|(i, l)| l.is_some() && !self.braces.contains(&i))?;
+            .rposition(|(i, l)| l.is_some() && !(solid && self.braces.contains(&i)))?;
         Some((i, self.lines[i].as_deref()?.trim()))
     }
 
@@ -203,7 +194,7 @@ impl Body {
             return self.push(line);
         }
         if t == "unreachable();"
-            && let Some((_, prev)) = self.last()
+            && let Some((_, prev)) = self.last(false)
             && let Some((name, _)) = prev.split_once('(')
             && prev.ends_with(");")
             && self.noreturn.contains(name)
@@ -223,7 +214,7 @@ impl Body {
         loop {
             // a label after another one: jumps to that one come here, unless statements
             // separated them and nothing jumps here (then this label is the one to go)
-            if let Some((i, prev)) = self.last_solid()
+            if let Some((i, prev)) = self.last(true)
                 && let Some(prev) = label(prev).map(String::from)
                 && !(self.gap && !self.jumps.contains_key(&name))
             {
@@ -236,7 +227,7 @@ impl Body {
                 continue;
             }
             // a jump to right here
-            let Some((i, prev)) = self.last_solid() else {
+            let Some((i, prev)) = self.last(true) else {
                 break;
             };
             if prev != format!("goto {name};") {

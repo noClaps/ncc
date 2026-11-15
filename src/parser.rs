@@ -210,10 +210,7 @@ impl Parser {
     /// Expect `>`, splitting `>>` / `>=` tokens when needed.
     fn expect_gt(&mut self) -> Result<()> {
         match self.peek().clone() {
-            Tok::Gt => {
-                self.bump();
-                Ok(())
-            }
+            Tok::Gt => self.expect(&Tok::Gt).map(drop),
             // keep what follows the `>`: `>>` -> `>`, `>=` -> `=`
             t @ (Tok::Shr | Tok::Ge) => {
                 self.splits.push((self.pos, self.toks[self.pos].clone()));
@@ -417,7 +414,7 @@ impl Parser {
             self.bump();
             return Ok(());
         }
-        if self.at_kw("extern") {
+        let item = if self.at_kw("extern") {
             if public {
                 return err(start, "extern blocks cannot be `pub`");
             }
@@ -440,28 +437,24 @@ impl Parser {
                 self.end_stmt()?;
             }
             let end = self.bump();
-            items.push(Item::Extern(ExternDecl {
+            Item::Extern(ExternDecl {
                 path,
                 alias,
                 fns,
                 span: start.to(end),
                 alias_span,
-            }));
-            return Ok(());
-        }
-        if self.at_kw("struct") {
+            })
+        } else if self.at_kw("struct") {
             let ((name, name_span), type_params, fields, end) = self.type_body(Self::param)?;
-            items.push(Item::Struct(StructDecl {
+            Item::Struct(StructDecl {
                 name,
                 type_params,
                 fields,
                 public,
                 span: start.to(end),
                 name_span,
-            }));
-            return Ok(());
-        }
-        if self.at_kw("enum") {
+            })
+        } else if self.at_kw("enum") {
             let ((name, name_span), type_params, variants, end) = self.type_body(|p| {
                 let (name, span) = p.ident()?;
                 let payload = if p.eat(&Tok::LParen) {
@@ -475,41 +468,35 @@ impl Parser {
                     span,
                 })
             })?;
-            items.push(Item::Enum(EnumDecl {
+            Item::Enum(EnumDecl {
                 name,
                 type_params,
                 variants,
                 public,
                 span: start.to(end),
                 name_span,
-            }));
-            return Ok(());
-        }
-        if self.at_kw("type") {
+            })
+        } else if self.at_kw("type") {
             self.bump();
             let (name, name_span) = self.ident()?;
             self.expect(&Tok::Assign)?;
             let ty = self.parse_type()?;
-            items.push(Item::Type(TypeDecl {
+            Item::Type(TypeDecl {
                 name,
                 ty,
                 public,
                 span: start.to(self.prev_span()),
                 name_span,
-            }));
-            return Ok(());
-        }
-        if self.at_kw("fn")
+            })
+        } else if self.at_kw("fn")
             && matches!(self.peek_n(1), Tok::Ident(_))
             && !matches!(self.peek_n(2), Tok::Assign)
         {
             self.bump();
             let sig = self.fn_sig(false)?;
             let body = self.block()?;
-            items.push(Item::Fn(FnDecl { sig, body, public }));
-            return Ok(());
-        }
-        if self.at_kw("test") {
+            Item::Fn(FnDecl { sig, body, public })
+        } else if self.at_kw("test") {
             if public {
                 return err(start, "tests cannot be `pub`");
             }
@@ -517,19 +504,20 @@ impl Parser {
             let name_span = self.span();
             let name = self.plain_string("test name")?;
             let body = self.block()?;
-            items.push(Item::Test(Test {
+            Item::Test(Test {
                 name,
                 body,
                 span: start.to(self.prev_span()),
                 name_span,
-            }));
-            return Ok(());
-        }
-        let stmt = self.stmt(public)?;
-        if public && !matches!(stmt.kind, StmtKind::VarDecl { .. }) {
-            return err(start, "only declarations can be `pub`");
-        }
-        items.push(Item::Stmt(stmt));
+            })
+        } else {
+            let stmt = self.stmt(public)?;
+            if public && !matches!(stmt.kind, StmtKind::VarDecl { .. }) {
+                return err(start, "only declarations can be `pub`");
+            }
+            Item::Stmt(stmt)
+        };
+        items.push(item);
         Ok(())
     }
 
@@ -655,14 +643,8 @@ impl Parser {
     fn const_atom(&mut self) -> Result<ConstExpr> {
         let start = self.span();
         match self.peek().clone() {
-            Tok::Int(n, _) => {
-                self.bump();
-                Ok(ConstExpr::Int(n, start))
-            }
-            Tok::Ident(n) if !is_keyword(&n) => {
-                self.bump();
-                Ok(ConstExpr::Name(n, start))
-            }
+            Tok::Int(n, _) => Ok(ConstExpr::Int(n, self.bump())),
+            Tok::Ident(n) if !is_keyword(&n) => Ok(ConstExpr::Name(n, self.bump())),
             Tok::Minus => {
                 self.bump();
                 let e = self.const_atom()?;
@@ -757,7 +739,7 @@ impl Parser {
         loop {
             match self.peek() {
                 Tok::LBracket => {
-                    if self.peek_n(1).clone() == Tok::RBracket {
+                    if *self.peek_n(1) == Tok::RBracket {
                         self.bump();
                         self.bump();
                         ty = TypeExpr::Array(Box::new(ty), None, start.to(self.prev_span()));
@@ -894,11 +876,7 @@ impl Parser {
     }
 
     fn break_label(&mut self) -> Result<Option<String>> {
-        Ok(if self.eat(&Tok::Colon) {
-            Some(self.ident()?.0)
-        } else {
-            None
-        })
+        (self.eat(&Tok::Colon).then(|| Ok(self.ident()?.0))).transpose()
     }
 
     fn at_stmt_end(&self) -> bool {
@@ -940,30 +918,25 @@ impl Parser {
                 if self.at_stmt_end() {
                     StmtKind::Return(None)
                 } else {
-                    let e = self.expr()?;
-                    if self.at(&Tok::Comma) {
-                        let mut items = vec![e];
-                        while self.eat(&Tok::Comma) {
-                            items.push(self.expr()?);
-                        }
-                        let sp = items[0].span.to(self.prev_span());
-                        StmtKind::Return(Some(Expr {
-                            kind: ExprKind::Tuple(items),
-                            span: sp,
-                        }))
-                    } else {
-                        StmtKind::Return(Some(e))
+                    let mut items = vec![self.expr()?];
+                    while self.eat(&Tok::Comma) {
+                        items.push(self.expr()?);
                     }
+                    StmtKind::Return(Some(if items.len() == 1 {
+                        items.remove(0)
+                    } else {
+                        Expr {
+                            span: items[0].span.to(self.prev_span()),
+                            kind: ExprKind::Tuple(items),
+                        }
+                    }))
                 }
             }
             _ if self.eat_kw("throw") => StmtKind::Throw(self.expr()?),
             _ if self.eat_kw("break") => {
                 let label = self.break_label()?;
-                let value = if label.is_none() && !self.at_stmt_end() {
-                    Some(self.expr()?)
-                } else {
-                    None
-                };
+                let value = (label.is_none() && !self.at_stmt_end()).then(|| self.expr());
+                let value = value.transpose()?;
                 StmtKind::Break { label, value }
             }
             _ if self.eat_kw("continue") => StmtKind::Continue(self.break_label()?),
@@ -1002,8 +975,8 @@ impl Parser {
             }
             Tok::LBrace => StmtKind::Block(self.block()?),
             Tok::Ident(k) if k == "fn" && matches!(self.peek_n(1), Tok::Ident(_)) => {
-                if matches!(self.peek_n(2), Tok::Assign) {
-                    self.bump();
+                self.bump();
+                if matches!(self.peek_n(1), Tok::Assign) {
                     let (name, name_span) = self.ident()?;
                     self.bump();
                     let value = self.expr()?;
@@ -1013,7 +986,6 @@ impl Parser {
                         value,
                     }
                 } else {
-                    self.bump();
                     let sig = self.fn_sig(false)?;
                     let body = self.block()?;
                     StmtKind::Fn(FnDecl {
@@ -1045,28 +1017,25 @@ impl Parser {
                 // try a declaration first
                 let save = self.pos;
                 if let Ok(targets) = self.decl_targets()
-                    && self.at(&Tok::Assign)
+                    && self.eat(&Tok::Assign)
                 {
-                    self.bump();
                     let value = self.decl_value();
-                    return Ok(Stmt {
-                        kind: StmtKind::VarDecl {
-                            public,
-                            mutable: false,
-                            mutex: false,
-                            targets,
-                            value,
-                        },
-                        span: start.to(self.prev_span()),
-                    });
-                }
-                self.pos = save;
-                let e = self.expr()?;
-                if self.eat(&Tok::Assign) {
-                    let value = self.expr()?;
-                    StmtKind::Assign { target: e, value }
+                    StmtKind::VarDecl {
+                        public,
+                        mutable: false,
+                        mutex: false,
+                        targets,
+                        value,
+                    }
                 } else {
-                    StmtKind::Expr(e)
+                    self.pos = save;
+                    let e = self.expr()?;
+                    if self.eat(&Tok::Assign) {
+                        let value = self.expr()?;
+                        StmtKind::Assign { target: e, value }
+                    } else {
+                        StmtKind::Expr(e)
+                    }
                 }
             }
         };
@@ -1508,9 +1477,7 @@ impl Parser {
                         span: start.to(self.prev_span()),
                     }))
                 }
-                _ if is_keyword(&k) => {
-                    return err(start, format!("unexpected keyword `{k}`"));
-                }
+                _ if is_keyword(&k) => return err(start, format!("unexpected keyword `{k}`")),
                 _ => {
                     self.bump();
                     ExprKind::Ident(k)

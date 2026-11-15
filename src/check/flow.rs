@@ -28,10 +28,6 @@ pub fn visit_program<'a>(p: &'a Program, f: &mut dyn FnMut(&'a Expr)) {
     }
 }
 
-fn visit_pat<'a>(p: &'a Pat, f: &mut dyn FnMut(&'a Expr)) {
-    p.for_each_expr(&mut |e| visit_expr(e, f));
-}
-
 pub fn visit_expr<'a>(e: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
     f(e);
     e.for_each_child(&mut |c| visit_expr(c, f));
@@ -39,7 +35,7 @@ pub fn visit_expr<'a>(e: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
         EK::If(i) => {
             for arm in &i.arms {
                 for p in &arm.patterns {
-                    visit_pat(p, f);
+                    p.for_each_expr(&mut |e| visit_expr(e, f));
                 }
                 visit_block(&arm.body, f);
             }
@@ -77,12 +73,7 @@ pub fn nested_blocks_mut(e: &mut Expr) -> Vec<&mut Block> {
 /// Whether a statement's expressions contain blocks (`if` arms, `catch` and `else` blocks).
 pub fn has_nested_blocks(s: &Stmt) -> bool {
     let mut found = false;
-    visit_stmt(s, &mut |e| {
-        found |= matches!(
-            e.kind,
-            EK::If(_) | EK::Catch(..) | EK::Else(_, Fallback::Block(..))
-        );
-    });
+    visit_stmt(s, &mut |e| found |= !nested_blocks(e).is_empty());
     found
 }
 

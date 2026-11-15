@@ -171,9 +171,9 @@ impl Server {
         let module = self.module_of(&path, &text);
         let aliases: HashSet<&str> = module.aliases().map(|m| m.alias).collect();
         let mut toks: Vec<(usize, usize, u32, u32)> = Vec::new();
-        let (lexed, _) = crate::lexer::lex_all(&text, 0, 0);
+        let (lexed, _, comments) = crate::lexer::lex_with_comments(&text, 0, 0);
         classify(&text, &lexed, &resolved, &aliases, &mut toks);
-        for (s, e) in crate::lexer::comments(&text) {
+        for (s, e) in comments {
             if text[s..e].starts_with("///") {
                 toks.push((s, e, COMMENT, M_DOCUMENTATION));
             }
@@ -200,11 +200,7 @@ impl Server {
                     continue;
                 }
                 let dl = pos.line - pl;
-                let dc = if dl == 0 {
-                    pos.character - pc
-                } else {
-                    pos.character
-                };
+                let dc = pos.character - if dl == 0 { pc } else { 0 };
                 data.push(SemanticToken {
                     delta_line: dl,
                     delta_start: dc,

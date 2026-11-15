@@ -249,20 +249,15 @@ impl Checker {
         match self.types.kind(t) {
             TyKind::Struct(i) => {
                 let d = &self.types.structs[*i as usize];
-                let fields: Vec<String> = d
-                    .fields
-                    .iter()
-                    .map(|(n, ft)| format!("  {} {n}", self.types.show(*ft)))
-                    .collect();
+                let field = |(n, ft): &(String, TyId)| format!("  {} {n}", self.types.show(*ft));
+                let fields: Vec<_> = d.fields.iter().map(field).collect();
                 format!("struct {} {{\n{}\n}}", d.name, fields.join("\n"))
             }
             TyKind::Enum(i) => {
                 let d = &self.types.enums[*i as usize];
-                let vs: Vec<String> = d
-                    .variants
-                    .iter()
-                    .map(|(n, ps)| format!("  {}", self.variant_text(n, ps)))
-                    .collect();
+                let variant =
+                    |(n, ps): &(String, Vec<TyId>)| format!("  {}", self.variant_text(n, ps));
+                let vs: Vec<_> = d.variants.iter().map(variant).collect();
                 format!("enum {} {{\n{}\n}}", d.name, vs.join("\n"))
             }
             TyKind::Named(i) => {
@@ -279,6 +274,11 @@ impl Checker {
         } else {
             format!("{n}({})", self.types.show_list(ps))
         }
+    }
+
+    /// A variant of the enum `d` as hovers show it: `Shape.Circle(float)`
+    pub fn variant_detail(&self, d: &EnumDef, (n, ps): &(String, Vec<TyId>)) -> String {
+        format!("{}.{}", d.name, self.variant_text(n, ps))
     }
 
     /// Record a declaration (unless it is unnamed), returning it to fill in the details.
@@ -405,8 +405,7 @@ impl Checker {
         let loc = &ctx.locals[l];
         let def = self.ix.local_spans.get(&(ctx.func, l)).copied();
         let hover = self.var_detail(&loc.name, loc.ty, loc.mutable);
-        let ty = loc.ty;
-        self.idx_typed_ref(span, def, hover, ty);
+        self.idx_typed_ref(span, def, hover, loc.ty);
     }
 
     pub fn idx_var_ref(&mut self, v: crate::tir::VarRef, span: Span) {
@@ -419,9 +418,8 @@ impl Checker {
     pub fn idx_global_ref(&mut self, g: GlobalId, span: Span) {
         let gl = &self.globals[g];
         let hover = self.var_detail(&gl.name, gl.ty, gl.mutable);
-        let ty = gl.ty;
         let def = self.ix.global_spans.get(&g).copied();
-        self.idx_typed_ref(span, def, hover, ty);
+        self.idx_typed_ref(span, def, hover, gl.ty);
     }
 
     pub fn idx_fn_ref(&mut self, f: FuncId, name: &str, span: Span) {
@@ -443,20 +441,18 @@ impl Checker {
             return;
         };
         let (n, ft) = &def.fields[i];
-        let ft = *ft;
-        let hover = format!("{} {n}", self.types.show(ft));
+        let hover = format!("{} {n}", self.types.show(*ft));
         let d = (self.ix.index.field_spans.get(&t))
             .and_then(|v| v.get(i))
             .copied();
-        self.idx_typed_ref(span, d, hover, ft);
+        self.idx_typed_ref(span, d, hover, *ft);
     }
 
     pub fn idx_variant_ref(&mut self, t: TyId, i: usize, span: Span) {
         let Some(def) = self.types.enum_def(t) else {
             return;
         };
-        let (n, ps) = &def.variants[i];
-        let hover = format!("{}.{}", def.name, self.variant_text(n, ps));
+        let hover = self.variant_detail(def, &def.variants[i]);
         let d = (self.ix.index.variant_spans.get(&t))
             .and_then(|v| v.get(i))
             .copied();
@@ -545,9 +541,7 @@ impl Index {
             }
         }
     }
-}
 
-impl Index {
     /// The members reachable with `.` on values of type `t` (through optionals, mutexes and
     /// futures, which are unwrapped first).
     pub fn members(&self, types: &Types, t: TyId) -> Vec<Member> {

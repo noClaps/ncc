@@ -34,12 +34,9 @@ pub struct SourceFile {
 
 impl SourceFile {
     pub fn new(path: PathBuf, text: String) -> Self {
-        let mut line_starts = vec![0];
-        for (i, b) in text.bytes().enumerate() {
-            if b == b'\n' {
-                line_starts.push(i + 1);
-            }
-        }
+        let line_starts = std::iter::once(0)
+            .chain(text.match_indices('\n').map(|(i, _)| i + 1))
+            .collect();
         Self {
             path,
             text,
@@ -49,10 +46,7 @@ impl SourceFile {
 
     /// 1-based line and column of a byte offset.
     pub fn line_col(&self, offset: usize) -> (usize, usize) {
-        let line = match self.line_starts.binary_search(&offset) {
-            Ok(i) => i,
-            Err(i) => i - 1,
-        };
+        let line = self.line_starts.partition_point(|&s| s <= offset) - 1;
         let col = self.text[self.line_starts[line]..offset.min(self.text.len())]
             .chars()
             .count();
@@ -135,16 +129,10 @@ impl Diag {
         let text = f.line_text(line);
         let width = (self.span.end.saturating_sub(self.span.start) as usize).max(1);
         let width = width.min(text.chars().count().saturating_sub(col - 1).max(1));
+        let (msg, path) = (&self.msg, f.path.display());
+        let (pad, marks) = (" ".repeat(col - 1), "^".repeat(width));
         format!(
-            "{kind}: {}\n  --> {}:{}:{}\n   |\n{:>3}| {}\n   | {}{}",
-            self.msg,
-            f.path.display(),
-            line,
-            col,
-            line,
-            text,
-            " ".repeat(col - 1),
-            "^".repeat(width)
+            "{kind}: {msg}\n  --> {path}:{line}:{col}\n   |\n{line:>3}| {text}\n   | {pad}{marks}"
         )
     }
 }

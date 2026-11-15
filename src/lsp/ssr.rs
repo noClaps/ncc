@@ -79,13 +79,9 @@ fn parse_rule(query: &str) -> Result<(Vec<PTok>, String), String> {
         })
         .collect();
     // every placeholder of the replacement must be bound by the pattern
-    let mut rest = tmpl;
-    while let Some(i) = rest.find('$') {
-        let name = hole_name(&rest[i + 1..]);
-        if !holes.contains(name.as_str()) {
-            return Err(format!("`${name}` is not a placeholder of the pattern"));
-        }
-        rest = &rest[i + 1..];
+    let unbound = (tmpl.split('$').skip(1).map(hole_name)).find(|n| !holes.contains(n.as_str()));
+    if let Some(name) = unbound {
+        return Err(format!("`${name}` is not a placeholder of the pattern"));
     }
     Ok((out, tmpl.to_string()))
 }
@@ -97,7 +93,7 @@ fn hole_name(s: &str) -> String {
         .collect()
 }
 
-/// Tokens of a source range: (start, end, text).
+/// The tokens of a source range: (start, end).
 fn tokens(text: &str, s: usize, e: usize) -> Vec<(usize, usize)> {
     let (toks, _) = crate::lexer::lex_all(&text[s..e], 0, s);
     toks.into_iter()
@@ -127,28 +123,22 @@ impl Matcher<'_> {
                 let (s, e) = self.toks[ti];
                 &self.text[s..e] == t && self.go(pi + 1, ti + 1, binds)
             }
-            PTok::Hole(name) => {
-                for end in ti + 1..=self.toks.len() {
-                    let span = (self.toks[ti].0, self.toks[end - 1].1);
-                    if !self.exprs.contains_key(&span) {
-                        continue;
-                    }
-                    if let Some(prev) = binds.get(name) {
-                        if self.text[prev.0..prev.1] == self.text[span.0..span.1]
-                            && self.go(pi + 1, end, binds)
-                        {
-                            return true;
-                        }
-                        continue;
-                    }
-                    binds.insert(name.clone(), span);
-                    if self.go(pi + 1, end, binds) {
-                        return true;
-                    }
+            PTok::Hole(name) => (ti + 1..=self.toks.len()).any(|end| {
+                let span = (self.toks[ti].0, self.toks[end - 1].1);
+                if !self.exprs.contains_key(&span) {
+                    return false;
+                }
+                if let Some(&(s, e)) = binds.get(name) {
+                    return self.text[s..e] == self.text[span.0..span.1]
+                        && self.go(pi + 1, end, binds);
+                }
+                binds.insert(name.clone(), span);
+                let found = self.go(pi + 1, end, binds);
+                if !found {
                     binds.remove(name);
                 }
-                false
-            }
+                found
+            }),
         }
     }
 }

@@ -5,7 +5,7 @@ use lsp_types::*;
 use super::{BUILTINS, DeclKind, Server, docs, is_ident_byte, markdown};
 use std::collections::HashMap;
 
-use super::complete::{generic_open, tabstops, unclosed};
+use super::complete::{generic_open, qualified, tabstops, unclosed};
 use super::tyexpr;
 use crate::ast::TypeExpr;
 use crate::check::index::Sig;
@@ -93,10 +93,7 @@ impl Server {
                 param_docs = docs::param_docs(&doc);
                 documentation = Some(doc);
             }
-            let shown = match &d.extern_alias {
-                Some(x) => format!("{x}.{}", d.name),
-                None => d.name.clone(),
-            };
+            let shown = qualified(d.extern_alias.as_deref(), &d.name);
             (shown, d.sig.clone()?, d.type_params.clone())
         };
         // `fn map<type I, type O>(I[] arr, ...)` called as `map<int, str>(` shows
@@ -167,10 +164,8 @@ impl Server {
         let Some(c) = self.call_at(uri, off) else {
             return vec![];
         };
-        let Some((ty, _)) = c.sig.params.get(c.arg as usize) else {
-            return vec![];
-        };
-        let Some(fty @ TypeExpr::Fn(ps, ret, _)) = ty else {
+        let Some((Some(fty @ TypeExpr::Fn(ps, ret, _)), _)) = c.sig.params.get(c.arg as usize)
+        else {
             return vec![];
         };
         let ret_part = ret

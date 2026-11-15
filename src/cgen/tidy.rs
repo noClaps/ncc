@@ -22,12 +22,7 @@ pub fn tidy(body: &str) -> String {
     let lines = flatten_blocks(&lines, all);
     let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
     let lines = drop_unused_temps(&strip_empty_blocks(strip_void_markers(&refs)));
-    let mut out = String::with_capacity(body.len());
-    for l in lines {
-        out.push_str(&l);
-        out.push('\n');
-    }
-    out
+    lines.iter().flat_map(|l| [l, "\n"]).collect()
 }
 
 /// The variable a declaration line declares (`T name = ...;`, `T *name = ...;`).

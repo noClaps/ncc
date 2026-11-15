@@ -622,13 +622,9 @@ impl<'p> CGen<'p> {
             self.line("}");
         }
         let body_text = tidy::tidy(&self.body.take());
-        let name = if is_init {
-            "test initialiser".to_string()
-        } else {
-            self.p.funcs[i].name.clone()
-        };
+        let name = if is_init { "test initialiser" } else { &f.name };
         // the C name already carries the source name unless it had to be mangled
-        if !self.c_main && (is_init || c_ident(&name) != name) {
+        if !self.c_main && (is_init || c_ident(name) != name) {
             wl!(self.funcs_out, "/* {} */", name.replace("*/", "* /"));
         }
         wl!(self.funcs_out, "{proto} {{\n{body_text}}}\n");
@@ -735,9 +731,8 @@ impl<'p> CGen<'p> {
             SK::Destructure(targets, e) => {
                 let val = self.expr(e);
                 let tv = self.bind(e.ty, &val);
-                let elems = match self.p.types.kind(e.ty) {
-                    TyKind::Tuple(ts) => ts.clone(),
-                    _ => unreachable!(),
+                let TyKind::Tuple(elems) = self.p.types.kind(e.ty) else {
+                    unreachable!()
                 };
                 for (var, start, count) in targets {
                     let Some(var) = var else { continue };
@@ -1195,13 +1190,8 @@ impl<'p> CGen<'p> {
                 Lit::Char(c) => format!("(uint32_t){c}"),
                 Lit::Str(s) => format!("(&{})", self.lit_str(s)),
             }),
-            EK::None => {
-                if self.p.types.opt_boxed(ty) {
-                    CVal::b("(nc_cell *)NULL")
-                } else {
-                    CVal::b(self.zero(ty))
-                }
-            }
+            EK::None if self.p.types.opt_boxed(ty) => CVal::b("(nc_cell *)NULL"),
+            EK::None => CVal::b(self.zero(ty)),
             EK::Var(v) => CVal::b(self.var_access(*v)),
             EK::FnRef(f) => CVal::b(format!("(nc_fn){{(void *){}, NULL}}", self.fname(*f))),
             EK::Closure(f) => self.closure(*f),
@@ -1242,10 +1232,7 @@ impl<'p> CGen<'p> {
                 CVal::b("")
             }
             EK::Print(to, nl, args) => {
-                let sb = self.new_sb();
-                for a in args {
-                    self.fmt_into(&sb, a);
-                }
+                let sb = self.new_sb(args);
                 self.line(format!(
                     "nc_sb_write(&{sb}, {}, {});",
                     *to == PrintTo::Stderr,
@@ -1259,25 +1246,13 @@ impl<'p> CGen<'p> {
                 self.str_of(x.ty, &v.code)
             }
             EK::Format(parts) => {
-                let sb = self.new_sb();
-                for p in parts {
-                    self.fmt_into(&sb, p);
-                }
+                let sb = self.new_sb(parts);
                 self.temp(STR, &format!("nc_sb_finish(&{sb})"))
             }
             EK::Field(b, i) => {
-                let bt = b.ty;
                 let v = self.expr(b);
-                let fname = field_name(
-                    &self
-                        .p
-                        .types
-                        .struct_def(self.p.types.base(bt))
-                        .unwrap()
-                        .fields[*i]
-                        .0,
-                );
-                CVal::b(format!("({}).{fname}", v.code))
+                let def = self.p.types.struct_def(self.h(b.ty)).unwrap();
+                CVal::b(format!("({}).{}", v.code, field_name(&def.fields[*i].0)))
             }
             EK::TupleIndex(b, i) => {
                 let v = self.expr(b);
@@ -1347,9 +1322,8 @@ impl<'p> CGen<'p> {
                 self.temp(ty, &format!("nc_arr_of(&ti_{eh}, {}, {init})", parts.len()))
             }
             EK::Map(entries) => {
-                let (k, v) = match self.p.types.kind(self.p.types.base(ty)) {
-                    TyKind::Map(k, v) => (*k, *v),
-                    _ => unreachable!(),
+                let TyKind::Map(k, v) = *self.p.types.kind(self.h(ty)) else {
+                    unreachable!()
                 };
                 let (kh, vh) = (self.h(k), self.h(v));
                 let (kc, vc) = (self.ct(k), self.ct(v));
@@ -1375,11 +1349,10 @@ impl<'p> CGen<'p> {
                 let parts = self.owned_all(payload);
                 self.tg.need(ty);
                 let name = self.tg.mangle(ty);
-                let mut init = vec![format!(".tag = {idx}")];
+                let mut init = format!(".tag = {idx}");
                 for (k, p) in parts.iter().enumerate() {
-                    init.push(format!(".u.v{idx}.p{k} = {p}"));
+                    w!(init, ", .u.v{idx}.p{k} = {p}");
                 }
-                let init = init.join(", ");
                 self.temp(
                     ty,
                     &format!("nc_obj(&(nc_{name}){{{init}}}, sizeof(nc_{name}))"),
@@ -1419,13 +1392,14 @@ impl<'p> CGen<'p> {
                 CVal::b(format!("{rv}.val"))
             }
             EK::Async(c, args) => self.async_call(c, args, ty),
-            EK::Args => {
+            EK::Args | EK::Env => {
                 self.tg.need(STR);
-                self.temp(ty, &format!("nc_args(&ti_{STR})"))
-            }
-            EK::Env => {
-                self.tg.need(STR);
-                self.temp(ty, &format!("nc_environ(&ti_{STR})"))
+                let f = if matches!(e.kind, EK::Args) {
+                    "args"
+                } else {
+                    "environ"
+                };
+                self.temp(ty, &format!("nc_{f}(&ti_{STR})"))
             }
             EK::Target => {
                 let (os, cpu) = self
@@ -1471,16 +1445,19 @@ impl<'p> CGen<'p> {
         }
     }
 
-    /// Declare a new string builder.
-    fn new_sb(&mut self) -> String {
+    /// Declare a new string builder holding the string forms of `parts`.
+    fn new_sb(&mut self, parts: &[Expr]) -> String {
         let sb = self.fresh("sb");
         self.line(format!("nc_sb {sb} = nc_sb_new();"));
+        for p in parts {
+            self.fmt_into(&sb, p);
+        }
         sb
     }
 
     /// The string form of a value of type `ty`.
     fn str_of(&mut self, ty: TyId, code: &str) -> CVal {
-        let sb = self.new_sb();
+        let sb = self.new_sb(&[]);
         self.str_into(&sb, ty, code);
         self.temp(STR, &format!("nc_sb_finish(&{sb})"))
     }
@@ -1571,12 +1548,8 @@ impl<'p> CGen<'p> {
     fn call_code(&mut self, c: &Callee, fv: &str, args: Vec<String>) -> String {
         match c {
             Callee::Direct(f) => {
-                let mut all = if self.value_fns.contains(f) {
-                    vec!["NULL".to_string()]
-                } else {
-                    vec![]
-                };
-                all.extend(args);
+                let env = self.value_fns.contains(f).then(|| "NULL".to_string());
+                let all: Vec<String> = env.into_iter().chain(args).collect();
                 format!("{}({})", self.fname(*f), all.join(", "))
             }
             Callee::Extern(x) => format!("{}({})", self.p.externs[*x].symbol, args.join(", ")),
@@ -1696,19 +1669,13 @@ impl<'p> CGen<'p> {
             self.line("}");
             return CVal::b(r);
         }
-        let av = self.expr(a);
-        let bv = self.expr(b);
-        let (x, y) = (av.code, bv.code);
+        let (mut x, mut y) = (self.expr(a).code, self.expr(b).code);
         let ot = self.p.types.base(a.ty);
         // operands of an inline C operator keep their 64-bit type
-        let (x, y) = if s_inline(op, ot) {
-            (
-                typed_int(x, a.ty, &self.p.types),
-                typed_int(y, b.ty, &self.p.types),
-            )
-        } else {
-            (x, y)
-        };
+        if s_inline(op, ot) {
+            x = typed_int(x, a.ty, &self.p.types);
+            y = typed_int(y, b.ty, &self.p.types);
+        }
         let loc = self.loc(span);
         let s = match ot {
             INT => "i64",
@@ -1740,13 +1707,8 @@ impl<'p> CGen<'p> {
             In => {
                 let bt = self.p.types.base(b.ty);
                 match self.p.types.kind(bt) {
-                    TyKind::Str => {
-                        if a.ty == CHAR {
-                            format!("nc_str_has_char({y}, {x})")
-                        } else {
-                            format!("nc_str_has_str({y}, {x})")
-                        }
-                    }
+                    TyKind::Str if a.ty == CHAR => format!("nc_str_has_char({y}, {x})"),
+                    TyKind::Str => format!("nc_str_has_str({y}, {x})"),
                     kind => {
                         let f = match kind {
                             TyKind::Map(..) => "nc_map_has",
@@ -1789,13 +1751,13 @@ impl<'p> CGen<'p> {
         }
         let c = &v.code;
         match (from, tk) {
-            (BOOL, TyKind::Int) => CVal::b(format!("(int64_t)({c} ? 1 : 0)")),
-            (BOOL, TyKind::UInt) => CVal::b(format!("(uint64_t)({c} ? 1 : 0)")),
-            (BYTE, TyKind::Char) => CVal::b(format!("(uint32_t){c}")),
-            (BYTE, TyKind::Int) => CVal::b(format!("(int64_t){c}")),
-            (BYTE, TyKind::UInt) => CVal::b(format!("(uint64_t){c}")),
+            (BOOL, TyKind::Int | TyKind::UInt) => {
+                CVal::b(format!("({})({c} ? 1 : 0)", self.tg.ct(to)))
+            }
+            (BYTE, TyKind::Char | TyKind::Int | TyKind::UInt) | (INT | UINT, TyKind::Float) => {
+                CVal::b(format!("({}){c}", self.tg.ct(to)))
+            }
             (INT, TyKind::UInt) => CVal::b(format!("nc_i64_to_u64({c}, {loc})")),
-            (INT | UINT, TyKind::Float) => CVal::b(format!("(double){c}")),
             (UINT, TyKind::Int) => CVal::b(format!("nc_u64_to_i64({c}, {loc})")),
             (FLOAT, TyKind::Int) => CVal::b(format!("nc_f64_to_i64({c}, {loc})")),
             (FLOAT, TyKind::UInt) => CVal::b(format!("nc_f64_to_u64({c}, {loc})")),
@@ -2367,15 +2329,12 @@ impl<'a> TailScan<'a> {
                 _ => None,
             };
             if let Some(i) = returned_if.or(stmt_if) {
-                if returned_if.is_some() {
-                    self.ifs.push(i.id);
-                }
+                let n = self.ifs.len();
+                self.ifs.extend(returned_if.map(|i| i.id));
                 for arm in &i.arms {
                     self.block(&arm.body, last);
                 }
-                if returned_if.is_some() {
-                    self.ifs.pop();
-                }
+                self.ifs.truncate(n);
                 continue;
             }
             match &s.kind {

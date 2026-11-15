@@ -1,6 +1,6 @@
 //! Expression checking.
 
-use super::stmt::tuple_index;
+use super::stmt::Index;
 use super::*;
 use crate::ast::{BinOp, ExprKind as E, UnOp};
 
@@ -14,9 +14,13 @@ impl Checker {
     /// A reference to the function `f` as a value.
     fn fn_ref(&mut self, f: FuncId, name: &str, span: Span) -> Expr {
         self.idx_fn_ref(f, name, span);
+        Expr::new(EK::FnRef(f), self.fn_ty(f), span)
+    }
+
+    /// The function type of `f`.
+    fn fn_ty(&mut self, f: FuncId) -> TyId {
         let (ps, r) = self.sigs[f].clone();
-        let ty = self.types.intern(TyKind::Fn(ps, r));
-        Expr::new(EK::FnRef(f), ty, span)
+        self.types.intern(TyKind::Fn(ps, r))
     }
 
     pub fn check_expr(&mut self, e: &ast::Expr, expected: Option<TyId>) -> Result<Expr> {
@@ -231,18 +235,17 @@ impl Checker {
                 if let Some(s) = lits {
                     return mk(EK::Lit(Lit::Str(s)), ty);
                 }
-                let mut parts = Vec::new();
-                for seg in segs {
-                    match seg {
+                let parts = (segs.iter())
+                    .map(|seg| match seg {
                         ast::StrSeg::Lit(l) => {
-                            parts.push(Expr::new(EK::Lit(Lit::Str(l.clone())), STR, span))
+                            Ok(Expr::new(EK::Lit(Lit::Str(l.clone())), STR, span))
                         }
                         ast::StrSeg::Expr(x) => {
                             let v = self.check_expr(x, None)?;
-                            parts.push(self.stringify(v)?);
+                            self.stringify(v)
                         }
-                    }
-                }
+                    })
+                    .collect::<Result<_>>()?;
                 mk(EK::Format(parts), ty)
             }
             E::None => match expected {
@@ -290,9 +293,7 @@ impl Checker {
             }
             E::Generic(..) => {
                 if let Some(f) = self.generic_fn_ref(e)? {
-                    let (ps, r) = self.sigs[f].clone();
-                    let ty = self.types.intern(TyKind::Fn(ps, r));
-                    return mk(EK::FnRef(f), ty);
+                    return mk(EK::FnRef(f), self.fn_ty(f));
                 }
                 err(span, "a type cannot be used as a value")
             }
@@ -300,24 +301,9 @@ impl Checker {
             E::Field(base, name) => self.check_field(base, name, span),
             E::Index(base, idx) => {
                 let b = self.check_expr(base, None)?;
-                match self.types.kind(b.ty).clone() {
-                    TyKind::Tuple(ts) => {
-                        let i = tuple_index(idx, ts.len())?;
-                        mk(EK::TupleIndex(Box::new(b), i), ts[i])
-                    }
-                    TyKind::Map(k, v) => {
-                        let i = self.expect_expr(idx, k)?;
-                        mk(EK::Index(Box::new(b), Box::new(i)), v)
-                    }
-                    TyKind::Array(_) | TyKind::Fixed(..) | TyKind::Str => {
-                        let el = self.types.elem(b.ty).unwrap();
-                        let i = self.seq_index(idx, b.ty)?;
-                        mk(EK::Index(Box::new(b), Box::new(i)), el)
-                    }
-                    _ => err(
-                        span,
-                        format!("cannot index into `{}`", self.types.show(b.ty)),
-                    ),
+                match self.check_index(idx, b.ty, span)? {
+                    (Index::Tuple(i), t) => mk(EK::TupleIndex(Box::new(b), i), t),
+                    (Index::Key(i), t) => mk(EK::Index(Box::new(b), Box::new(i)), t),
                 }
             }
             E::Slice(base, lo, hi) => self.check_slice(base, lo, hi, span),
@@ -464,14 +450,7 @@ impl Checker {
                     }
                     ast::ElseFallback::Block(b) => {
                         let id = self.new_jump();
-                        let blk = self.check_jump_block(b, id, JumpKind::Value(inner), None);
-                        if value_needed && flow::block_completes(&blk) {
-                            return err(
-                                b.span,
-                                "the `else` block must provide a value with `break <value>` or leave the scope (`return`, `throw`, ...)",
-                            );
-                        }
-                        Fallback::Block(blk, id)
+                        Fallback::Block(self.value_block(b, id, inner, value_needed, "else")?, id)
                     }
                 };
                 mk(EK::Else(Box::new(o), fallback), inner)
@@ -489,17 +468,12 @@ impl Checker {
                     Some(l)
                 };
                 let blk = if inner == VOID {
-                    self.check_block(b)
+                    Ok(self.check_block(b))
                 } else {
-                    self.check_jump_block(b, id, JumpKind::Value(inner), None)
+                    self.value_block(b, id, inner, value_needed, "catch")
                 };
                 self.pop_scope();
-                if value_needed && inner != VOID && flow::block_completes(&blk) {
-                    return err(
-                        b.span,
-                        "the `catch` block must provide a value with `break <value>` or leave the scope (`return`, `throw`, ...)",
-                    );
-                }
+                let blk = blk?;
                 mk(EK::Catch(Box::new(v), local, blk, id), inner)
             }
             E::Try(x) => {
@@ -508,22 +482,18 @@ impl Checker {
                 mk(EK::Try(Box::new(v)), inner)
             }
             E::Async(call) => {
+                let not_call = || err(call.span, "`async` must be followed by a function call");
                 let E::Call(callee, args) = &call.kind else {
-                    return err(call.span, "`async` must be followed by a function call");
+                    return not_call();
                 };
-                let (target, args) = self.check_call_parts(callee, args)?;
-                match target {
-                    Target::Call(c, _, ret) => {
-                        if ret == NEVER {
-                            return err(span, "cannot run a `never` function asynchronously");
-                        }
-                        let ty = self.types.intern(TyKind::Fut(ret));
-                        mk(EK::Async(c, args), ty)
-                    }
-                    Target::Variant(..) => {
-                        err(call.span, "`async` must be followed by a function call")
-                    }
+                let (Target::Call(c, _, ret), args) = self.check_call_parts(callee, args)? else {
+                    return not_call();
+                };
+                if ret == NEVER {
+                    return err(span, "cannot run a `never` function asynchronously");
                 }
+                let ty = self.types.intern(TyKind::Fut(ret));
+                mk(EK::Async(c, args), ty)
             }
             E::Error => Err(Diag::new(span, String::new())),
             E::Await(x) => {
@@ -551,6 +521,27 @@ impl Checker {
             EK::ToStr(Box::new(v))
         };
         Ok(Expr::new(kind, STR, span))
+    }
+
+    /// The block of `else` or `catch` (`kw`), which gives a value of type `ty` with jump `id`.
+    fn value_block(
+        &mut self,
+        b: &ast::Block,
+        id: JumpId,
+        ty: TyId,
+        value_needed: bool,
+        kw: &str,
+    ) -> Result<Block> {
+        let blk = self.check_jump_block(b, id, JumpKind::Value(ty), None);
+        if value_needed && flow::block_completes(&blk) {
+            return err(
+                b.span,
+                format!(
+                    "the `{kw}` block must provide a value with `break <value>` or leave the scope (`return`, `throw`, ...)"
+                ),
+            );
+        }
+        Ok(blk)
     }
 
     /// Check `e` as the type in `ty`, or, when it is not known yet, infer it from `e`.
@@ -834,7 +825,7 @@ impl Checker {
         callee: &ast::Expr,
         args: &[ast::Expr],
     ) -> Result<(Target, Vec<Expr>)> {
-        let target = self.resolve_target(callee)?;
+        let mut target = self.resolve_target(callee)?;
         let params = match &target {
             Target::Call(_, ps, _) | Target::Variant(_, _, ps) => ps.clone(),
         };
@@ -859,10 +850,10 @@ impl Checker {
             }
             xs.push(x);
         }
-        if let Target::Call(Callee::Direct(f), ..) = target
-            && self.never_funcs.contains(&f)
+        if let Target::Call(Callee::Direct(f), _, ret) = &mut target
+            && self.never_funcs.contains(f)
         {
-            return Ok((Target::Call(Callee::Direct(f), params, NEVER), xs));
+            *ret = NEVER;
         }
         Ok((target, xs))
     }
@@ -931,8 +922,7 @@ impl Checker {
                 match fields.iter().position(|(n, _)| n == name) {
                     Some(idx) => {
                         let ty = fields[idx].1;
-                        let bty = b.ty;
-                        self.idx_field_ref(bty, idx, span);
+                        self.idx_field_ref(b.ty, idx, span);
                         Ok(Expr::new(EK::Field(Box::new(b), idx), ty, span))
                     }
                     None => err(
@@ -1299,12 +1289,11 @@ impl Checker {
             return Ok(x);
         }
         // nominal types and their underlying type
-        let named_ok = match (self.types.kind(t), self.types.kind(x.ty)) {
-            (TyKind::Named(n), _) if self.types.named[*n as usize].underlying == x.ty => true,
-            (_, TyKind::Named(n)) if self.types.named[*n as usize].underlying == t => true,
-            _ => false,
+        let underlying = |a: TyId| match self.types.kind(a) {
+            TyKind::Named(n) => Some(self.types.named[*n as usize].underlying),
+            _ => None,
         };
-        if named_ok {
+        if underlying(t) == Some(x.ty) || underlying(x.ty) == Some(t) {
             return retype(x);
         }
         let from = self.types.kind(x.ty).clone();
@@ -1380,13 +1369,9 @@ impl Checker {
             }
             None => None,
         };
-        let kind = match value_ty {
-            Some(t) => JumpKind::Value(t),
-            None => JumpKind::If,
-        };
         self.ctx().jumps.push(JumpCtx {
             id,
-            kind,
+            kind: value_ty.map_or(JumpKind::If, JumpKind::Value),
             label: ife.label.clone(),
         });
         let r = (|| {
@@ -1395,20 +1380,13 @@ impl Checker {
                 self.push_scope();
                 self.ix.scopes.push(arm.span);
                 let res = (|| {
-                    let mut pats = Vec::new();
-                    for p in &arm.patterns {
-                        let pat = match &scrutinee {
-                            Some(s) => self.check_pattern(p, s.ty, arm.patterns.len() > 1)?,
-                            None => {
-                                if matches!(p.kind, E::Wildcard) {
-                                    Pat::Wild
-                                } else {
-                                    Pat::Cond(self.expect_expr(p, BOOL)?)
-                                }
-                            }
-                        };
-                        pats.push(pat);
-                    }
+                    let pats = (arm.patterns.iter())
+                        .map(|p| match &scrutinee {
+                            Some(s) => self.check_pattern(p, s.ty, arm.patterns.len() > 1),
+                            None if matches!(p.kind, E::Wildcard) => Ok(Pat::Wild),
+                            None => Ok(Pat::Cond(self.expect_expr(p, BOOL)?)),
+                        })
+                        .collect::<Result<_>>()?;
                     let body = self.check_block(&arm.body);
                     if value_ty.is_some() && flow::block_completes(&body) {
                         return err(

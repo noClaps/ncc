@@ -334,12 +334,9 @@ impl<'a> Printer<'a> {
             Item::Import(_) => {
                 let show = |im: &Import| format!("{} as {}", quote(&im.path), im.alias);
                 let imports: Vec<_> = (items.iter())
-                    .filter_map(|it| {
-                        if let Item::Import(im) = it {
-                            Some(im)
-                        } else {
-                            None
-                        }
+                    .filter_map(|it| match it {
+                        Item::Import(im) => Some(im),
+                        _ => None,
                     })
                     .collect();
                 if let [im] = imports[..] {
@@ -478,12 +475,10 @@ impl<'a> Printer<'a> {
                 targets,
                 value,
             } => {
-                let kw = if *mutable {
-                    "mut "
-                } else if *mutex {
-                    "mutex "
-                } else {
-                    ""
+                let kw = match (mutable, mutex) {
+                    (true, _) => "mut ",
+                    (_, true) => "mutex ",
+                    _ => "",
                 };
                 let ts: Vec<String> = (targets.iter())
                     .map(|t| format!("{} {}", t.ty.show(), t.name))
@@ -495,11 +490,8 @@ impl<'a> Printer<'a> {
                 format!("fn {name} = {}", self.expr(value, indent))
             }
             StmtKind::Assign { target, value } => {
-                format!(
-                    "{} = {}",
-                    self.expr(target, indent),
-                    self.expr(value, indent)
-                )
+                let target = self.expr(target, indent);
+                format!("{target} = {}", self.expr(value, indent))
             }
             StmtKind::Discard(e) => format!("_ = {}", self.expr(e, indent)),
             StmtKind::Expr(e) => self.expr(e, indent),
@@ -670,11 +662,8 @@ impl<'a> Printer<'a> {
             }
             ExprKind::Slice(b, lo, hi) => {
                 let base = self.paren(b, indent, prec(b) < POSTFIX);
-                format!(
-                    "{base}[{}:{}]",
-                    self.expr(lo, indent),
-                    self.expr(hi, indent)
-                )
+                let lo = self.expr(lo, indent);
+                format!("{base}[{lo}:{}]", self.expr(hi, indent))
             }
             ExprKind::Tuple(items) => format!("({})", self.list(items, indent)),
             ExprKind::Array(_) | ExprKind::Map(_) | ExprKind::Struct(..) => {

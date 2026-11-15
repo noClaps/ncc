@@ -128,27 +128,27 @@ pub struct Lexer<'a> {
 }
 
 pub fn lex(src: &str, file: u32, base: usize) -> Result<Vec<Token>> {
-    let (toks, mut errors) = lex_all(src, file, base);
-    if errors.is_empty() {
-        Ok(toks)
-    } else {
-        Err(errors.remove(0))
-    }
+    let (toks, errors) = lex_all(src, file, base);
+    errors.into_iter().next().map_or(Ok(toks), Err)
 }
 
 /// Byte ranges of all `//` comments in the source (for the formatter).
 pub fn comments(src: &str) -> Vec<(usize, usize)> {
-    run(src, 0, 0).2
+    lex_with_comments(src, 0, 0).2
 }
 
 /// Tokenize everything, recovering from errors by skipping the offending character.
 pub fn lex_all(src: &str, file: u32, base: usize) -> (Vec<Token>, Vec<Diag>) {
-    let (toks, errors, _) = run(src, file, base);
+    let (toks, errors, _) = lex_with_comments(src, file, base);
     (toks, errors)
 }
 
-/// Tokens, errors and comment ranges of the whole source.
-fn run(src: &str, file: u32, base: usize) -> (Vec<Token>, Vec<Diag>, Vec<(usize, usize)>) {
+/// `lex_all`, also giving the byte ranges of the `//` comments.
+pub fn lex_with_comments(
+    src: &str,
+    file: u32,
+    base: usize,
+) -> (Vec<Token>, Vec<Diag>, Vec<(usize, usize)>) {
     let mut lx = Lexer::new(src, file, base, 0);
     let mut out = Vec::new();
     let mut errors = Vec::new();
@@ -272,15 +272,11 @@ impl<'a> Lexer<'a> {
     }
 
     fn number(&mut self, start: usize) -> Result<Tok> {
-        let radix = if self.peek() == b'0' {
-            match self.peek_at(1) {
-                b'x' | b'X' => 16,
-                b'o' => 8,
-                b'b' => 2,
-                _ => 10,
-            }
-        } else {
-            10
+        let radix = match (self.peek(), self.peek_at(1)) {
+            (b'0', b'x' | b'X') => 16,
+            (b'0', b'o') => 8,
+            (b'0', b'b') => 2,
+            _ => 10,
         };
         if radix != 10 {
             self.pos += 2;
@@ -307,11 +303,7 @@ impl<'a> Lexer<'a> {
         let mant_end = self.pos;
         let mut exp: Option<i64> = None;
         if matches!(self.peek(), b'e' | b'E') {
-            let k = if matches!(self.peek_at(1), b'+' | b'-') {
-                2
-            } else {
-                1
-            };
+            let k = 1 + usize::from(matches!(self.peek_at(1), b'+' | b'-'));
             if self.peek_at(k).is_ascii_digit() {
                 let es = self.pos + 1;
                 self.pos += k;
@@ -384,9 +376,7 @@ impl<'a> Lexer<'a> {
                     )
                 })?
             }
-            _ => {
-                return err(self.span(start), "invalid escape sequence");
-            }
+            _ => return err(self.span(start), "invalid escape sequence"),
         })
     }
 
@@ -523,12 +513,11 @@ impl<'a> Lexer<'a> {
             lines.remove(0);
         }
         let mut indent = 0;
-        if lines.len() > 1 {
-            let last = lines.last().unwrap().1;
-            if last.chars().all(|c| c == ' ' || c == '\t') {
-                indent = last.len();
-                lines.pop();
-            }
+        if let [_, .., (_, last)] = lines[..]
+            && last.chars().all(|c| c == ' ' || c == '\t')
+        {
+            indent = last.len();
+            lines.pop();
         }
         // rebuild the dedented text, keeping track of offsets for interpolations
         let mut parts = Vec::new();

@@ -46,71 +46,56 @@ pub fn race_warnings(p: &Program) -> Vec<Diag> {
     for f in &p.funcs {
         // locals initialised with a closure: lets us resolve `async local_fn()`
         let mut closures: HashMap<LocalId, FuncId> = HashMap::new();
-        let mut asyncs: Vec<(Option<FuncId>, Span)> = Vec::new();
         for s in &f.body.stmts {
-            collect(s, &mut closures, &mut asyncs);
-        }
-        for (target, span) in asyncs {
-            let Some(target) = target else { continue };
-            // transitive closure of reachable functions
-            let mut stack = vec![target];
-            let mut visited = HashSet::new();
-            let mut hit = None;
-            while hit.is_none()
-                && let Some(g) = stack.pop()
+            if let SK::Let(
+                Some(VarRef::Local(l)),
+                Expr {
+                    kind: EK::Closure(f),
+                    ..
+                },
+            ) = &s.kind
             {
-                if visited.insert(g) {
-                    hit = shared_access(p, g);
-                    stack.extend(callees(p, g));
-                }
+                closures.insert(*l, *f);
             }
-            if let Some(name) = hit
-                && seen.insert(span)
-            {
-                warnings.push(Diag::new(
-                        span,
+            flow::visit_stmt(s, &mut |e| {
+                let EK::Async(c, _) = &e.kind else { return };
+                let target = match c {
+                    Callee::Direct(f) => Some(*f),
+                    Callee::Value(v) => match &v.kind {
+                        EK::Closure(f) | EK::FnRef(f) => Some(*f),
+                        EK::Var(VarRef::Local(l)) => closures.get(l).copied(),
+                        _ => None,
+                    },
+                    Callee::Extern(_) => None,
+                };
+                let Some(target) = target else { return };
+                // transitive closure of reachable functions
+                let mut stack = vec![target];
+                let mut visited = HashSet::new();
+                let mut hit = None;
+                while hit.is_none()
+                    && let Some(g) = stack.pop()
+                {
+                    if visited.insert(g) {
+                        hit = shared_access(p, g);
+                        stack.extend(callees(p, g));
+                    }
+                }
+                if let Some(name) = hit
+                    && seen.insert(e.span)
+                {
+                    warnings.push(Diag::new(
+                        e.span,
                         format!(
                             "possible data race: `{}` runs asynchronously and accesses the mutable variable `{name}` without a mutex",
                             p.funcs[target].name
                         ),
                     ));
-            }
+                }
+            });
         }
     }
     warnings
-}
-
-fn collect(
-    s: &Stmt,
-    closures: &mut HashMap<LocalId, FuncId>,
-    asyncs: &mut Vec<(Option<FuncId>, Span)>,
-) {
-    if let SK::Let(
-        Some(VarRef::Local(l)),
-        Expr {
-            kind: EK::Closure(f),
-            ..
-        },
-    ) = &s.kind
-    {
-        closures.insert(*l, *f);
-    }
-    let mut found = Vec::new();
-    flow::visit_stmt(s, &mut |e: &Expr| {
-        if let EK::Async(c, _) = &e.kind {
-            let target = match c {
-                Callee::Direct(f) => Some(*f),
-                Callee::Value(v) => match &v.kind {
-                    EK::Closure(f) | EK::FnRef(f) => Some(*f),
-                    EK::Var(VarRef::Local(l)) => closures.get(l).copied(),
-                    _ => None,
-                },
-                Callee::Extern(_) => None,
-            };
-            found.push((target, e.span));
-        }
-    });
-    asyncs.extend(found);
 }
 
 // ------------------------------------------------------------------ unused code
@@ -284,24 +269,16 @@ impl LoopCx<'_, '_> {
 
     /// Analyse a block; whether it never finishes because of a loop that never ends.
     fn block(&mut self, b: &Block) -> bool {
-        let mut endless = None;
-        for (i, s) in b.stmts.iter().enumerate() {
-            if self.stmt(s) {
-                endless = Some(i);
-                break;
-            }
-        }
-        let Some(i) = endless else {
+        let Some(i) = b.stmts.iter().position(|s| self.stmt(s)) else {
             return false;
         };
         let at = b.stmts[i].span;
-        let rest: Vec<Span> = b.stmts[i + 1..]
+        let mut rest = b.stmts[i + 1..]
             .iter()
             .map(|s| s.span)
-            .filter(|sp| sp.file == at.file && sp.end > sp.start && sp.start >= at.end)
-            .collect();
-        if let (Some(first), Some(last)) = (rest.first(), rest.last()) {
-            let span = first.to(*last);
+            .filter(|sp| sp.file == at.file && sp.end > sp.start && sp.start >= at.end);
+        if let Some(first) = rest.next() {
+            let span = first.to(rest.next_back().unwrap_or(first));
             if self.project(span) && self.seen.insert((false, span)) {
                 self.out.unreachable.push(Diag::new(
                     span,
@@ -315,11 +292,11 @@ impl LoopCx<'_, '_> {
     /// Analyse a statement; whether it never finishes because of a loop that never ends.
     fn stmt(&mut self, s: &Stmt) -> bool {
         // blocks inside expressions (those in loop bodies are seen again: reports are deduplicated)
-        let mut nested = vec![];
-        flow::visit_stmt(s, &mut |e| nested.extend(flow::nested_blocks(e)));
-        for b in nested {
-            self.block(b);
-        }
+        flow::visit_stmt(s, &mut |e| {
+            for b in flow::nested_blocks(e) {
+                self.block(b);
+            }
+        });
         match &s.kind {
             SK::While { id, cond, body } => {
                 self.block(body);

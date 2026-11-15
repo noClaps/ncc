@@ -739,16 +739,12 @@ impl Server {
         // files appearing, going or being renamed change their directory
         let fresh = cache
             .get(dir)
-            .is_some_and(|c| c.dirs.iter().all(|(d, t)| modified(d) == *t));
+            .is_some_and(|c| c.dirs.iter().all(|(t, d)| modified(d) == *t));
         if !fresh {
             let (modules, dirs) = actions::importable_modules(dir);
-            let dirs = dirs.into_iter().map(|d| {
-                let t = modified(&d);
-                (d, t)
-            });
             let scan = ImportableScan {
                 modules: modules.into(),
-                dirs: dirs.collect(),
+                dirs: dirs.into_iter().map(|d| (modified(&d), d)).collect(),
             };
             cache.insert(dir.to_path_buf(), scan);
         }
@@ -1289,15 +1285,8 @@ impl Server {
                     sym(&e.name, K::ENUM, e.span, e.name_span, None, Some(vs))
                 }
                 ast::Item::Type(t) => {
-                    let detail = Some(src(t.ty.span()));
-                    sym(
-                        &t.name,
-                        K::TYPE_PARAMETER,
-                        t.span,
-                        t.name_span,
-                        detail,
-                        None,
-                    )
+                    let d = Some(src(t.ty.span()));
+                    sym(&t.name, K::TYPE_PARAMETER, t.span, t.name_span, d, None)
                 }
                 ast::Item::Test(t) => {
                     let detail = Some("test".into());
@@ -1679,11 +1668,11 @@ impl Server {
 
 /// The extents of the string and character literals and comments of `text`.
 fn literals_and_comments(text: &str) -> Vec<(usize, usize)> {
-    let (toks, _) = crate::lexer::lex_all(text, 0, 0);
+    let (toks, _, comments) = crate::lexer::lex_with_comments(text, 0, 0);
     (toks.iter())
         .filter(|t| matches!(t.tok, Tok::Str(_) | Tok::Char(_)))
         .map(|t| (t.span.start as usize, t.span.end as usize))
-        .chain(crate::lexer::comments(text))
+        .chain(comments)
         .collect()
 }
 
@@ -1822,8 +1811,8 @@ type Importable = std::rc::Rc<[(String, String)]>;
 /// Importable modules found by scanning directories, valid while none of them changes.
 struct ImportableScan {
     modules: Importable,
-    /// the directories scanned, with their modification times when scanned
-    dirs: Vec<(PathBuf, Option<std::time::SystemTime>)>,
+    /// the directories scanned, after their modification times when scanned
+    dirs: Vec<(Option<std::time::SystemTime>, PathBuf)>,
 }
 
 fn modified(dir: &Path) -> Option<std::time::SystemTime> {

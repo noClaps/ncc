@@ -173,44 +173,40 @@ impl<'t> TypeGen<'t> {
             }
             TyKind::Tuple(_) | TyKind::Struct(_) => {
                 let fields = self.c_fields(kind);
-                let mut s = format!("struct nc_{name} {{\n");
+                wl!(self.decls, "struct nc_{name} {{");
                 for (f, x) in &fields {
                     let xc = self.ct(*x);
-                    wl!(s, "  {xc} {f};");
+                    wl!(self.decls, "  {xc} {f};");
                 }
                 if fields.is_empty() {
-                    s.push_str("  char _empty;\n");
+                    self.decls.push_str("  char _empty;\n");
                 }
-                s.push_str("};\n");
-                self.decls.push_str(&s);
+                self.decls.push_str("};\n");
             }
             TyKind::Enum(ei) if self.t.enum_has_payload(t) => {
-                let vars = self.t.enums[*ei as usize].variants.clone();
-                let mut s = format!(
-                    "struct nc_{name} {{\n  _Atomic int64_t rc;\n  uint32_t tag;\n  union {{\n"
+                wl!(
+                    self.late_decls,
+                    "struct nc_{name} {{\n  _Atomic int64_t rc;\n  uint32_t tag;\n  union {{"
                 );
-                for (vi, (vname, ps)) in vars.iter().enumerate() {
+                for (vi, (vname, ps)) in self.t.enums[*ei as usize].variants.iter().enumerate() {
                     if ps.is_empty() {
                         continue;
                     }
-                    s.push_str("    struct {");
-                    for (k, p) in ps.iter().enumerate() {
-                        let pc = self.ct(*p);
-                        w!(s, " {pc} p{k};");
-                    }
-                    wl!(s, " }} v{vi}; /* {vname} */");
+                    let fields: String = (ps.iter().enumerate())
+                        .map(|(k, p)| format!(" {} p{k};", self.ct(*p)))
+                        .collect();
+                    wl!(
+                        self.late_decls,
+                        "    struct {{{fields} }} v{vi}; /* {vname} */"
+                    );
                 }
-                s.push_str("  } u;\n};\n");
-                self.late_decls.push_str(&s);
+                self.late_decls.push_str("  } u;\n};\n");
             }
             TyKind::Fn(ps, r) => {
                 let rc = self.ret_ct(*r);
-                let mut args = vec!["nc_env *".to_string()];
-                for p in ps {
-                    args.push(self.ct(*p));
-                }
+                let args: String = ps.iter().map(|p| format!(", {}", self.ct(*p))).collect();
                 let fp = self.fp_type(t);
-                wl!(self.decls, "typedef {rc} (*{fp})({});", args.join(", "));
+                wl!(self.decls, "typedef {rc} (*{fp})(nc_env *{args});");
             }
             _ => {}
         }
@@ -526,7 +522,7 @@ fn in_header(kind: &TyKind, inner: TyId, name: &str) -> bool {
 
 /// `(void)p; ` for each parameter `p` the body never mentions, to keep C compilers quiet.
 fn unused(body: &str, params: &[&str]) -> String {
-    let words: std::collections::HashSet<&str> = super::idents(body).collect();
+    let words: HashSet<&str> = super::idents(body).collect();
     (params.iter())
         .filter(|p| !words.contains(**p))
         .map(|p| format!("(void){p}; "))

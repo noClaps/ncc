@@ -138,14 +138,10 @@ fn doc_lines(text: &str, span: Span) -> Vec<&str> {
 
 /// The rendered doc comment of the declaration at `span`, if it has one.
 pub fn doc_comment(text: &str, span: Span) -> Option<String> {
-    let lines = doc_lines(text, span);
-    if lines.is_empty() {
-        return None;
-    }
     let mut body = Vec::new();
     let mut params = Vec::new();
     let mut returns = Vec::new();
-    for l in lines {
+    for l in doc_lines(text, span) {
         let t = l.trim_start();
         if let Some(p) = t.strip_prefix("@param") {
             params.push(p.trim().to_string());
@@ -158,23 +154,19 @@ pub fn doc_comment(text: &str, span: Span) -> Option<String> {
             body.push(l.to_string());
         }
     }
-    let mut out = body.join("\n").trim().to_string();
+    let mut parts = vec![body.join("\n").trim().to_string()];
     if !params.is_empty() {
-        if !out.is_empty() {
-            out.push_str("\n\n");
-        }
-        out.push_str("**Parameters**\n");
-        for p in &params {
-            out.push_str(&format!("\n- {}", render_param(p)));
-        }
+        let list: String = params
+            .iter()
+            .map(|p| format!("\n- {}", render_param(p)))
+            .collect();
+        parts.push(format!("**Parameters**\n{list}"));
     }
     if !returns.is_empty() {
-        if !out.is_empty() {
-            out.push_str("\n\n");
-        }
-        out.push_str(&format!("**Returns** {}", returns.join(" ")));
+        parts.push(format!("**Returns** {}", returns.join(" ")));
     }
-    (!out.is_empty()).then_some(out)
+    parts.retain(|p| !p.is_empty());
+    (!parts.is_empty()).then(|| parts.join("\n\n"))
 }
 
 /// `nums The numbers` -> "`nums`: The numbers" when the first word looks like a parameter name.
@@ -182,10 +174,7 @@ fn render_param(p: &str) -> String {
     match p.split_once(' ') {
         Some((name, rest))
             if name.bytes().all(is_ident_byte)
-                && name
-                    .chars()
-                    .next()
-                    .is_some_and(|c| c.is_ascii_lowercase() || c == '_') =>
+                && name.starts_with(|c: char| c.is_ascii_lowercase() || c == '_') =>
         {
             format!("`{name}`: {}", rest.trim())
         }

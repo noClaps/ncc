@@ -112,11 +112,9 @@ pub fn purity(p: &Program) -> Vec<bool> {
                 ok = false
             }
             EK::Call(Callee::Direct(g), _) => cs.push(*g),
-            EK::Var(VarRef::Global(g)) if p.globals[*g].mutable => ok = false,
-            EK::Var(VarRef::Global(g))
-                if matches!(p.types.kind(p.globals[*g].ty), TyKind::Mutex(_)) =>
-            {
-                ok = false;
+            EK::Var(VarRef::Global(g)) => {
+                let g = &p.globals[*g];
+                ok &= !g.mutable && !matches!(p.types.kind(g.ty), TyKind::Mutex(_));
             }
             _ => {}
         };
@@ -250,19 +248,12 @@ impl<'p> Evaluator<'p> {
     }
 
     fn panic_diag(&self, at: Span, msg: &str, inner: Span) -> Diag {
-        let inside = inner.file == at.file && inner.start >= at.start && inner.end <= at.end;
-        if inside {
-            Diag::new(at, format!("this expression always panics: {msg}"))
-        } else {
+        let mut text = format!("this expression always panics: {msg}");
+        if !(inner.file == at.file && inner.start >= at.start && inner.end <= at.end) {
             // the panic happens elsewhere (e.g. inside a called function): say where
-            Diag::new(
-                at,
-                format!(
-                    "this expression always panics: {msg} ({})",
-                    self.sm.location(inner)
-                ),
-            )
+            text += &format!(" ({})", self.sm.location(inner));
         }
+        Diag::new(at, text)
     }
 
     fn fold_block(&mut self, b: &mut Block, locals: &[Local], consts: &mut HashMap<LocalId, Val>) {
@@ -299,22 +290,6 @@ impl<'p> Evaluator<'p> {
         Ok(())
     }
 
-    /// `fold_expr` on each expression `each` passes on, up to the first error.
-    fn fold_each(
-        &mut self,
-        each: impl FnOnce(&mut dyn FnMut(&mut Expr)),
-        locals: &[Local],
-        consts: &mut HashMap<LocalId, Val>,
-    ) -> Result<(), Diag> {
-        let mut res = Ok(());
-        each(&mut |c| {
-            if res.is_ok() {
-                res = self.fold_expr(c, locals, consts);
-            }
-        });
-        res
-    }
-
     /// Fold children first, then this node when all of its inputs are constant.
     fn fold_expr(
         &mut self,
@@ -333,7 +308,14 @@ impl<'p> Evaluator<'p> {
             }
             return Ok(());
         }
-        self.fold_each(|f| e.for_each_child_mut(f), locals, consts)?;
+        // children, up to the first error
+        let mut res = Ok(());
+        e.for_each_child_mut(&mut |c| {
+            if res.is_ok() {
+                res = self.fold_expr(c, locals, consts);
+            }
+        });
+        res?;
         // nested blocks
         for b in flow::nested_blocks_mut(e) {
             self.fold_block(b, locals, consts);
@@ -375,10 +357,10 @@ impl<'p> Evaluator<'p> {
             Some(_) => return,
             None => None,
         };
-        for (k, arm) in i.arms.iter().enumerate() {
-            // Some(true): definitely matches; Some(false): definitely not; None: unknown
-            let mut decided = Some(false);
-            for p in &arm.patterns {
+        for arm in &i.arms {
+            let mut unknown = false;
+            let hit = arm.patterns.iter().any(|p| {
+                // Some(true): definitely matches; Some(false): definitely not; None: unknown
                 let m = match (p, &scrut) {
                     (Pat::Wild, _) => Some(true),
                     (
@@ -388,31 +370,23 @@ impl<'p> Evaluator<'p> {
                         }),
                         None,
                     ) => Some(*b),
-                    (Pat::Value(e), Some(v)) if is_lit_tree(e) => match self.try_const(e) {
-                        Ok(Some(x)) => Some(val_eq(&x, v)),
-                        _ => None,
-                    },
+                    (Pat::Value(e), Some(v)) if is_lit_tree(e) => {
+                        self.try_const(e).ok().flatten().map(|x| val_eq(&x, v))
+                    }
                     _ => None,
                 };
-                match m {
-                    Some(true) => {
-                        decided = Some(true);
-                        break;
-                    }
-                    Some(false) => {}
-                    None => decided = None,
-                }
+                unknown |= m.is_none();
+                m == Some(true)
+            });
+            if hit {
+                let mut arm = arm.clone();
+                arm.patterns = vec![Pat::Wild];
+                i.arms = vec![arm];
+                i.scrutinee = None;
+                return;
             }
-            match decided {
-                Some(true) => {
-                    let mut arm = i.arms[k].clone();
-                    arm.patterns = vec![Pat::Wild];
-                    i.arms = vec![arm];
-                    i.scrutinee = None;
-                    return;
-                }
-                Some(false) => {}
-                None => return,
+            if unknown {
+                return;
             }
         }
     }
@@ -466,29 +440,14 @@ impl<'p> Evaluator<'p> {
     }
 
     /// The globals that code called by `s` may change; `None` when any global may change.
-    fn clobbers(
-        &self,
-        s: &Stmt,
-        gwrites: &[Option<HashSet<GlobalId>>],
-    ) -> Option<HashSet<GlobalId>> {
-        let mut out = Some(HashSet::new());
-        flow::visit_stmts(s, &mut |s| {
-            if matches!(s.kind, SK::Lock { .. }) {
-                out = None;
-            }
+    fn clobbers(&self, s: &Stmt) -> Option<HashSet<GlobalId>> {
+        let mut out = HashSet::new();
+        let mut any = false;
+        let unknown = stmt_calls(s, |f| match &self.gwrites[f] {
+            Some(w) => out.extend(w),
+            None => any = true,
         });
-        flow::visit_stmt(s, &mut |e| match &e.kind {
-            EK::Call(Callee::Direct(f), _) => match (&gwrites[*f], &mut out) {
-                (Some(w), Some(o)) => o.extend(w),
-                (None, _) => out = None,
-                _ => {}
-            },
-            // C code cannot reach NC globals
-            EK::Call(Callee::Extern(_), _) => {}
-            EK::Call(..) | EK::Async(..) | EK::Await(_) => out = None,
-            _ => {}
-        });
-        out
+        (!unknown && !any).then_some(out)
     }
 
     /// Run the interpreter with the fuel for one attempt, taken from the propagation budget.
@@ -557,7 +516,7 @@ impl<'p> Evaluator<'p> {
             }
             env.rollback();
         }
-        let clobbers = self.clobbers(s, &self.gwrites);
+        let clobbers = self.clobbers(s);
         let nested = matches!(s.kind, SK::While { .. } | SK::For { .. } | SK::Lock { .. })
             || flow::has_nested_blocks(s);
         // what is known inside, undone afterwards
@@ -606,10 +565,7 @@ impl<'p> Evaluator<'p> {
         match &s.kind {
             SK::Let(Some(v), _) => Some(SK::Let(Some(*v), lit(*v)?)),
             SK::Let(None, _) => Some(SK::Block(Block { stmts: vec![] })),
-            SK::Assign(pl, _) => {
-                let root = flow::place_root(pl)?;
-                Some(assign(root)?.kind)
-            }
+            SK::Assign(pl, _) => Some(assign(flow::place_root(pl)?)?.kind),
             _ => {
                 let mut outer: Vec<VarRef> = assigned.difference(declared).copied().collect();
                 outer.sort_by_key(|v| match v {
@@ -651,25 +607,20 @@ impl<'p> Evaluator<'p> {
             return;
         }
         e.for_each_child_mut(&mut |c: &mut Expr| self.prop_expr(c, f, env));
-        match &mut e.kind {
-            EK::If(i) => {
-                for arm in &mut i.arms {
-                    for pt in &mut arm.patterns {
-                        self.prop_pat(pt, f, env);
-                    }
-                    self.prop_scoped(&mut arm.body, f, env);
+        // each arm's patterns, then its body
+        if let EK::If(i) = &mut e.kind {
+            for arm in &mut i.arms {
+                for pt in &mut arm.patterns {
+                    pt.for_each_expr_mut(&mut |e| self.prop_expr(e, f, env));
                 }
-                self.select_arm(i);
+                self.prop_scoped(&mut arm.body, f, env);
             }
-            EK::Else(_, Fallback::Block(b, _)) | EK::Catch(_, _, b, _) => {
+            self.select_arm(i);
+        } else {
+            for b in flow::nested_blocks_mut(e) {
                 self.prop_scoped(b, f, env);
             }
-            _ => {}
         }
-    }
-
-    fn prop_pat(&mut self, pt: &mut Pat, f: FuncId, env: &mut Env) {
-        pt.for_each_expr_mut(&mut |e| self.prop_expr(e, f, env));
     }
 
     // ------------------------------------------------------------ interpreter
@@ -946,12 +897,12 @@ impl<'p> Evaluator<'p> {
         Ok(match &e.kind {
             EK::Lit(l) => lit_to_val(l),
             EK::None => Val::None,
-            EK::Var(VarRef::Local(l)) => {
-                if const_only {
-                    return Err(Stop::Unknown);
-                }
-                env.get(*l)?
+            EK::Var(VarRef::Local(_)) | EK::If(_) | EK::Else(..) | EK::Catch(..) | EK::Try(_)
+                if const_only =>
+            {
+                return Err(Stop::Unknown);
             }
+            EK::Var(VarRef::Local(l)) => env.get(*l)?,
             EK::Var(VarRef::Global(g)) => match env.globals.get(g) {
                 Some(v) if !const_only => v.clone(),
                 _ => self.gconst.get(g).cloned().ok_or(Stop::Unknown)?,
@@ -959,25 +910,20 @@ impl<'p> Evaluator<'p> {
             EK::FnRef(f) => Val::Fn(*f, Rc::new(vec![])),
             EK::Closure(f) => {
                 let func = &self.p.funcs[*f];
-                if func.captures.iter().any(|c| c.by_ref) {
+                if func.captures.iter().any(|c| c.by_ref)
+                    || (const_only && !func.captures.is_empty())
+                {
                     return Err(Stop::Unknown);
                 }
-                let mut caps = Vec::new();
-                for c in &func.captures {
-                    if const_only {
-                        return Err(Stop::Unknown);
-                    }
-                    caps.push(env.get(c.outer)?);
-                }
-                Val::Fn(*f, Rc::new(caps))
+                let caps = func.captures.iter().map(|c| env.get(c.outer));
+                Val::Fn(*f, Rc::new(caps.collect::<R<_>>()?))
             }
             EK::Unary(op, a) => {
                 let v = self.expr(a, env, const_only)?;
                 match (op, v) {
-                    (UnOp::Neg, Val::Int(i)) => match i.checked_neg() {
-                        Some(x) => Val::Int(x),
-                        None => return panic("integer overflow", span),
-                    },
+                    (UnOp::Neg, Val::Int(i)) => {
+                        Val::Int(or_panic(i.checked_neg(), "integer overflow", span)?)
+                    }
                     (UnOp::Neg, Val::Float(f)) => Val::Float(-f),
                     (UnOp::Not, Val::Bool(b)) => Val::Bool(!b),
                     (UnOp::BitNot, Val::Int(i)) => Val::Int(!i),
@@ -1044,18 +990,18 @@ impl<'p> Evaluator<'p> {
                 env.dollar.pop();
                 let i = i?;
                 match base {
-                    Val::Map(m) => match m.iter().find(|(k, _)| val_eq(k, &i)) {
-                        Some((_, v)) => v.clone(),
-                        None => return panic("key not found in map", span),
-                    },
-                    Val::Arr(a) => match a.get(idx_checked(&i, idx.span)? as usize) {
-                        Some(v) => v.clone(),
-                        None => return panic("index out of bounds", span),
-                    },
-                    Val::Str(s) => match s.chars().nth(idx_checked(&i, idx.span)? as usize) {
-                        Some(c) => Val::Char(c as u32),
-                        None => return panic("string index out of bounds", span),
-                    },
+                    Val::Map(m) => {
+                        let found = m.iter().find(|(k, _)| val_eq(k, &i));
+                        or_panic(found, "key not found in map", span)?.1.clone()
+                    }
+                    Val::Arr(a) => {
+                        let found = a.get(idx_checked(&i, idx.span)? as usize);
+                        or_panic(found, "index out of bounds", span)?.clone()
+                    }
+                    Val::Str(s) => {
+                        let found = s.chars().nth(idx_checked(&i, idx.span)? as usize);
+                        Val::Char(or_panic(found, "string index out of bounds", span)? as u32)
+                    }
                     _ => return Err(Stop::Unknown),
                 }
             }
@@ -1108,13 +1054,7 @@ impl<'p> Evaluator<'p> {
             EK::Some(x) => Val::Some(Box::new(self.expr(x, env, const_only)?)),
             EK::Retype(x) => self.expr(x, env, const_only)?,
             EK::If(_) | EK::Else(..) | EK::Catch(..) | EK::Try(_) => {
-                if const_only {
-                    return Err(Stop::Unknown);
-                }
-                match self.expr_flow(e, env)? {
-                    Ok(v) => v,
-                    Err(_) => return Err(Stop::Unknown),
-                }
+                self.expr_flow(e, env)?.map_err(|_| Stop::Unknown)?
             }
             EK::Print(..) | EK::Async(..) | EK::Await(_) | EK::Args | EK::Env => {
                 return Err(Stop::Unknown);
@@ -1393,10 +1333,7 @@ impl Env {
     }
 
     fn var(&self, r: VarRef) -> R<Val> {
-        match r {
-            VarRef::Local(l) => self.get(l),
-            VarRef::Global(g) => self.globals.get(&g).cloned().ok_or(Stop::Unknown),
-        }
+        self.raw(r).ok_or(Stop::Unknown)
     }
 
     fn slot(&mut self, r: VarRef) -> R<&mut Val> {
@@ -1426,7 +1363,7 @@ impl Env {
     }
 
     fn get(&self, l: LocalId) -> R<Val> {
-        self.locals.get(l).cloned().flatten().ok_or(Stop::Unknown)
+        self.var(VarRef::Local(l))
     }
 
     fn set(&mut self, l: LocalId, v: Val) {
@@ -1463,11 +1400,8 @@ fn set_path(slot: &mut Val, path: &[PathStep], v: Val) -> R<()> {
         }
         (PathStep::Index(i, isp), Val::Arr(xs)) => {
             let k = idx_checked(i, *isp)? as usize;
-            let xs = Rc::make_mut(xs);
-            if k >= xs.len() {
-                return panic("index out of bounds", *isp);
-            }
-            set_path(&mut xs[k], &path[1..], v)
+            let slot = or_panic(Rc::make_mut(xs).get_mut(k), "index out of bounds", *isp)?;
+            set_path(slot, &path[1..], v)
         }
         (PathStep::Index(k, _), Val::Map(m)) => {
             let m = Rc::make_mut(m);
@@ -1486,10 +1420,8 @@ fn set_path(slot: &mut Val, path: &[PathStep], v: Val) -> R<()> {
                 return Err(Stop::Unknown);
             };
             let mut chars: Vec<char> = s.chars().collect();
-            if k >= chars.len() {
-                return panic("string index out of bounds", *isp);
-            }
-            chars[k] = char::from_u32(c).ok_or(Stop::Unknown)?;
+            let slot = or_panic(chars.get_mut(k), "string index out of bounds", *isp)?;
+            *slot = char::from_u32(c).ok_or(Stop::Unknown)?;
             *s = chars.into_iter().collect::<String>().into();
             Ok(())
         }
@@ -1668,6 +1600,11 @@ fn panic<T>(msg: &str, span: Span) -> R<T> {
     Err(Stop::Panic(msg.to_string(), span))
 }
 
+/// The value in `v`, or a panic with `msg` when there is none.
+fn or_panic<T>(v: Option<T>, msg: &str, span: Span) -> R<T> {
+    v.map_or_else(|| panic(msg, span), Ok)
+}
+
 fn read_path(r: VarRef, path: &[PathStep], env: &Env) -> R<Val> {
     let mut cur = env.var(r)?;
     for st in path {
@@ -1701,20 +1638,17 @@ fn destructure_part(items: &[Val], start: usize, count: usize) -> Val {
     }
 }
 
-/// An operator on integers of `bits` bits in `min..=max`, computed exactly in `i128` and
-/// checked against the range.
+/// An operator on integers of `bits` bits, computed exactly in `i128` and checked against
+/// their range: `mk` makes the value, `None` when it is out of range.
 fn int_op(
     op: BinOp,
     (a, b): (i128, i128),
-    (min, max, bits): (i128, i128, i128),
+    bits: i128,
     span: Span,
-    mk: impl Fn(i128) -> Val,
+    mk: impl Fn(i128) -> Option<Val>,
 ) -> R<Val> {
     use BinOp::*;
-    let fit = |v: Option<i128>| match v {
-        Some(v) if (min..=max).contains(&v) => Ok(v),
-        _ => panic("integer overflow", span),
-    };
+    let fit = |v: Option<i128>| or_panic(v.filter(|v| mk(*v).is_some()), "integer overflow", span);
     if matches!(op, Div | Mod) && b == 0 {
         return panic("division by zero", span);
     }
@@ -1748,7 +1682,7 @@ fn int_op(
         BitXor => Some(a ^ b),
         _ => return ord(op, a, b),
     };
-    fit(v).map(mk)
+    or_panic(v.and_then(&mk), "integer overflow", span)
 }
 
 /// An ordering comparison.
@@ -1786,23 +1720,15 @@ fn binop(op: BinOp, x: Val, y: Val, span: Span) -> R<Val> {
             Val::Bool(char::from_u32(c).is_some_and(|c| s.contains(c)))
         }
         (In, Val::Str(a), Val::Str(s)) => Val::Bool(s.contains(&*a)),
-        (op, Val::Int(a), Val::Int(b)) => {
-            let range = (i64::MIN.into(), i64::MAX.into(), 64);
-            int_op(op, (a.into(), b.into()), range, span, |v| {
-                Val::Int(v as i64)
-            })?
-        }
-        (op, Val::UInt(a), Val::UInt(b)) => {
-            let range = (0, u64::MAX.into(), 64);
-            int_op(op, (a.into(), b.into()), range, span, |v| {
-                Val::UInt(v as u64)
-            })?
-        }
-        (op, Val::Byte(a), Val::Byte(b)) => {
-            int_op(op, (a.into(), b.into()), (0, 255, 8), span, |v| {
-                Val::Byte(v as u8)
-            })?
-        }
+        (op, Val::Int(a), Val::Int(b)) => int_op(op, (a.into(), b.into()), 64, span, |v| {
+            v.try_into().ok().map(Val::Int)
+        })?,
+        (op, Val::UInt(a), Val::UInt(b)) => int_op(op, (a.into(), b.into()), 64, span, |v| {
+            v.try_into().ok().map(Val::UInt)
+        })?,
+        (op, Val::Byte(a), Val::Byte(b)) => int_op(op, (a.into(), b.into()), 8, span, |v| {
+            v.try_into().ok().map(Val::Byte)
+        })?,
         (op, Val::Float(a), Val::Float(b)) => match op {
             Add => Val::Float(a + b),
             Sub => Val::Float(a - b),
@@ -1924,6 +1850,21 @@ fn forget_globals(env: &mut Env, which: &Option<HashSet<GlobalId>>) {
     env.forget_globals(|g| which.as_ref().is_none_or(|gs| gs.contains(&g)));
 }
 
+/// Pass `direct` each function that `s` calls directly; whether `s` may also run unknown code
+/// (through a function value, a task or a lock) that could change any global.
+fn stmt_calls(s: &Stmt, mut direct: impl FnMut(FuncId)) -> bool {
+    let mut unknown = false;
+    flow::visit_stmt(s, &mut |e| match &e.kind {
+        EK::Call(Callee::Direct(g), _) => direct(*g),
+        // C code cannot reach NC globals
+        EK::Call(Callee::Extern(_), _) => {}
+        EK::Call(..) | EK::Async(..) | EK::Await(_) => unknown = true,
+        _ => {}
+    });
+    flow::visit_stmts(s, &mut |s| unknown |= matches!(s.kind, SK::Lock { .. }));
+    unknown
+}
+
 /// Per function, the globals it may change directly or through the functions it calls.
 /// `None` when it calls unknown code (a function value) or spawns tasks.
 fn global_writes(p: &Program) -> Vec<Option<HashSet<GlobalId>>> {
@@ -1935,13 +1876,7 @@ fn global_writes(p: &Program) -> Vec<Option<HashSet<GlobalId>>> {
         let mut unknown = false;
         for s in &f.body.stmts {
             flow::writes_stmt(s, &mut w);
-            flow::visit_stmt(s, &mut |e| match &e.kind {
-                EK::Call(Callee::Direct(g), _) => calls[i].push(*g),
-                EK::Call(Callee::Extern(_), _) => {}
-                EK::Call(..) | EK::Async(..) | EK::Await(_) => unknown = true,
-                _ => {}
-            });
-            flow::visit_stmts(s, &mut |s| unknown |= matches!(s.kind, SK::Lock { .. }));
+            unknown |= stmt_calls(s, |g| calls[i].push(g));
         }
         out[i] = (!unknown).then_some(w);
     }

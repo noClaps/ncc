@@ -107,19 +107,14 @@ impl Server {
                         continue;
                     }
                     let target = if target == &old { &new } else { target };
-                    let dir = if importer == &old {
-                        new.parent()
-                    } else {
-                        importer.parent()
-                    };
-                    let Some(dir) = dir else { continue };
-                    let Some(path) = import_path(dir, target, &im.path) else {
+                    let Some(dir) = (if importer == &old { &new } else { importer }).parent()
+                    else {
                         continue;
                     };
-                    if path == im.path {
-                        continue;
-                    }
-                    if let Some(s) = quoted_at(&text, im.span, &im.path) {
+                    if let Some(path) = import_path(dir, target, &im.path)
+                        && path != im.path
+                        && let Some(s) = quoted_at(&text, im.span, &im.path)
+                    {
                         let edit = TextEdit::new(range(&text, s, s + im.path.len()), path);
                         changes.entry(path_to_uri(importer)).or_default().push(edit);
                     }
@@ -446,16 +441,22 @@ fn link(text: &str, s: usize, e: usize, target: &Path) -> DocumentLink {
     }
 }
 
-/// Resolve `./x`, `../x` or `.../x` (from the project root) like `@embed` does.
-pub fn resolve_relative(dir: &Path, path: &str) -> Option<PathBuf> {
-    let p = if let Some(rel) = path.strip_prefix(".../") {
-        crate::modules::find_root(dir)?.join(rel)
+/// The directory `./x`, `../x` or `.../x` (from the project root) starts from, from a file in
+/// `dir`, and the rest of the path.
+pub(super) fn relative_base<'p>(dir: &Path, path: &'p str) -> Option<(PathBuf, &'p str)> {
+    if let Some(rel) = path.strip_prefix(".../") {
+        Some((crate::modules::find_root(dir)?, rel))
     } else if path.starts_with("./") || path.starts_with("../") {
-        dir.join(path.strip_prefix("./").unwrap_or(path))
+        Some((dir.to_path_buf(), path.strip_prefix("./").unwrap_or(path)))
     } else {
-        return None;
-    };
-    p.is_file().then_some(p)
+        None
+    }
+}
+
+/// Resolve `./x`, `../x` or `.../x` like `@embed` does.
+pub fn resolve_relative(dir: &Path, path: &str) -> Option<PathBuf> {
+    let (base, rel) = relative_base(dir, path)?;
+    Some(base.join(rel)).filter(|p| p.is_file())
 }
 
 #[cfg(test)]

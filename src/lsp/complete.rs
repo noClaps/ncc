@@ -1,7 +1,7 @@
 //! Completion: scope-aware names, members of any typed expression (`a.b[0].c.`), struct literal
 //! fields, enum variants, module members, builtins, import and `@embed` paths, and snippets.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use lsp_types::*;
@@ -191,10 +191,7 @@ impl Server {
         ins: Insert<'_>,
         qualifier: Option<&str>,
     ) -> CompletionItem {
-        let full = match qualifier {
-            Some(q) => format!("{q}.{}", d.name),
-            None => d.name.clone(),
-        };
+        let full = qualified(qualifier, &d.name);
         let kind = match d.kind {
             DeclKind::Function => CompletionItemKind::FUNCTION,
             DeclKind::Struct => CompletionItemKind::STRUCT,
@@ -206,10 +203,8 @@ impl Server {
             DeclKind::Variable => CompletionItemKind::CONSTANT,
         };
         let mut item = CompletionItem {
-            label: full.clone(),
             filter_text: qualifier.map(|_| d.name.clone()),
             insert_text: qualifier.map(|_| full.clone()),
-            kind: Some(kind),
             detail: Some(d.detail.clone()),
             documentation: doc_at(a, d.span),
             sort_text: Some(format!(
@@ -222,14 +217,13 @@ impl Server {
                 },
                 d.name
             )),
-            ..Default::default()
+            ..item(full.clone(), kind)
         };
         // a struct literal with a placeholder for each field: `P{.x = $1, .y = $2}`
         if d.kind == DeclKind::Struct
             && let Some(expected) = ins.literal
             && self.snippets
         {
-            let names: Vec<String> = struct_fields(a, d).into_iter().map(|f| f.0).collect();
             // its type arguments come from the expected type (`Box<int> b = B`) or are
             // placeholders: `Box<${1:T}>{.value = $2}`
             let tps = &d.type_params;
@@ -239,19 +233,14 @@ impl Server {
                     module, name, args, ..
                 }) if !args.is_empty()
                     && !tps.is_empty()
-                    && full
-                        == format!(
-                            "{}{name}",
-                            module.iter().map(|m| format!("{m}.")).collect::<String>()
-                        ) =>
+                    && full == qualified(module.as_deref(), name) =>
                 {
                     format!("<{}>", T::show_list(args))
                 }
                 _ => generic_args(&tps.iter().map(|t| slot(Some(t))).collect::<Vec<_>>()),
             };
-            let fields: Vec<String> = names
-                .iter()
-                .map(|n| format!(".{n} = {}", slot(None)))
+            let fields: Vec<String> = (struct_fields(a, d).into_iter())
+                .map(|(n, ..)| format!(".{n} = {}", slot(None)))
                 .collect();
             if !fields.is_empty() {
                 item.insert_text = Some(format!("{full}{targs}{{{}}}$0", fields.join(", ")));
@@ -297,13 +286,6 @@ impl Server {
                 _ => None,
             },
         };
-        let item = |label: &str, kind, detail: Option<String>, sort_text| CompletionItem {
-            label: label.to_string(),
-            kind: Some(kind),
-            detail,
-            sort_text,
-            ..Default::default()
-        };
         let mut items = Vec::new();
 
         // paths inside `import { "..." }` and `@embed("...")`
@@ -313,11 +295,8 @@ impl Server {
             let in_embed = pre.trim_end().ends_with("@embed(");
             let in_import =
                 (pre.rfind("import")).is_some_and(|i| pre.rfind('}').is_none_or(|c| i > c));
-            return Some(if in_embed || in_import {
-                path_items(&path, typed, in_import)
-            } else {
-                vec![]
-            });
+            let paths = (in_embed || in_import).then(|| path_items(&path, typed, in_import));
+            return Some(paths.unwrap_or_default());
         }
 
         let word_start = before
@@ -393,10 +372,10 @@ impl Server {
                 let module = self.module_of(&path, &text);
                 let edit = super::actions::add_import(&text, &module, &ipath, name);
                 let ftext = self.text_of(&file)?;
-                let mut names: Vec<String> = public_names(&self.module_of(&file, &ftext))
-                    .into_iter()
+                let names: BTreeSet<String> = (self.module_of(&file, &ftext).items.iter())
+                    .flat_map(ast::Item::public_names)
+                    .cloned()
                     .collect();
-                names.sort();
                 let item = |label| CompletionItem {
                     label,
                     detail: Some(format!("import \"{ipath}\"")),
@@ -413,26 +392,18 @@ impl Server {
             for d in visible(a, fid, off) {
                 items.push(self.decl_item(a, d, ins, None));
             }
-            for alias in a.imports.keys() {
-                items.push(item(
-                    alias,
-                    CompletionItemKind::MODULE,
-                    Some("module".into()),
-                    None,
-                ));
-            }
-            // extern blocks
+            // imported modules and extern blocks
             let module = self.module_of(&path, &text);
             let externs: Vec<(&str, &str)> = (module.aliases())
                 .filter_map(|a| a.external.then_some((a.alias, a.path)))
                 .collect();
-            for (alias, file) in &externs {
-                items.push(item(
-                    alias,
-                    CompletionItemKind::MODULE,
-                    Some(format!("extern \"{file}\"")),
-                    None,
-                ));
+            let modules = (a.imports.keys()).map(|m| (m.as_str(), "module".to_string()));
+            let extern_blocks = (externs.iter()).map(|(m, f)| (*m, format!("extern \"{f}\"")));
+            for (alias, detail) in modules.chain(extern_blocks) {
+                items.push(CompletionItem {
+                    detail: Some(detail),
+                    ..item(alias, CompletionItemKind::MODULE)
+                });
             }
             // items reached through a qualifier, found by their own name: `c_` offers
             // `libc.c_exit`, `Ratio` offers `rational.Rational`
@@ -464,12 +435,10 @@ impl Server {
                 }
                 let edit = super::actions::add_import(&text, &module, ipath, name);
                 items.push(CompletionItem {
-                    label: name.clone(),
-                    kind: Some(CompletionItemKind::MODULE),
                     detail: Some(format!("import \"{ipath}\"")),
                     sort_text: Some(format!("5{name}")),
                     additional_text_edits: Some(vec![edit]),
-                    ..Default::default()
+                    ..item(name, CompletionItemKind::MODULE)
                 });
             }
         }
@@ -484,28 +453,27 @@ impl Server {
                 "true" | "false" | "none" => CompletionItemKind::CONSTANT,
                 _ => CompletionItemKind::KEYWORD,
             };
-            item(k, kind, None, Some(format!("3{k}")))
+            CompletionItem {
+                sort_text: Some(format!("3{k}")),
+                ..item(*k, kind)
+            }
         }));
-        items.extend((crate::types::BUILTIN_TYPES.iter()).map(|(t, _)| {
-            let detail = Some("builtin type".into());
-            item(
-                t,
-                CompletionItemKind::KEYWORD,
-                detail,
-                Some(format!("2{t}")),
-            )
-        }));
+        items.extend(
+            (crate::types::BUILTIN_TYPES.iter()).map(|(t, _)| CompletionItem {
+                detail: Some("builtin type".into()),
+                sort_text: Some(format!("2{t}")),
+                ..item(*t, CompletionItemKind::KEYWORD)
+            }),
+        );
         // keyword snippets only at the start of a statement
         if self.snippets && before[..word_start].trim().is_empty() {
             for (label, body, desc) in SNIPPETS {
                 items.push(CompletionItem {
-                    label: label.to_string(),
-                    kind: Some(CompletionItemKind::SNIPPET),
                     detail: Some(desc.to_string()),
                     insert_text: Some(body.to_string()),
                     insert_text_format: Some(InsertTextFormat::SNIPPET),
                     sort_text: Some(format!("4{label}")),
-                    ..Default::default()
+                    ..item(*label, CompletionItemKind::SNIPPET)
                 });
             }
         }
@@ -587,10 +555,10 @@ impl Server {
             // a declaration's, assignment's or struct literal field's value
             Some(Tok::Assign) => {
                 let eq = toks.len() - 1;
-                let mut depth = 0i32;
-                let mut i = eq;
-                while i > 0 {
-                    match toks[i - 1].tok {
+                // back to the start of the left-hand side
+                let mut depth = 0;
+                let i = (toks[..eq].iter()).rposition(|t| {
+                    match t.tok {
                         Tok::RParen | Tok::RBracket => depth += 1,
                         Tok::LParen | Tok::LBracket if depth > 0 => depth -= 1,
                         Tok::Newline
@@ -598,15 +566,12 @@ impl Server {
                         | Tok::RBrace
                         | Tok::LParen
                         | Tok::LBracket
-                        | Tok::Comma
-                            if depth == 0 =>
-                        {
-                            break;
-                        }
+                        | Tok::Comma => return depth == 0,
                         _ => {}
                     }
-                    i -= 1;
-                }
+                    false
+                });
+                let i = i.map_or(0, |j| j + 1);
                 if i == eq {
                     return Slot::Other;
                 }
@@ -733,12 +698,10 @@ impl Server {
         let ty = follow(a, ty, rest)?;
         let fields = (a.members(ty).into_iter())
             .map(|m| CompletionItem {
-                label: m.name.clone(),
-                kind: Some(CompletionItemKind::FIELD),
                 sort_text: Some(format!("0{}", m.name)),
-                detail: Some(m.detail.clone()),
+                detail: Some(m.detail),
                 documentation: m.def.and_then(|def| doc_at(a, def)),
-                ..Default::default()
+                ..item(m.name, CompletionItemKind::FIELD)
             })
             .collect();
         Some((fields, Some(a.types.to_type_expr(ty))))
@@ -762,38 +725,31 @@ impl Server {
             .filter(|d| d.kind == DeclKind::Function)
             .map(|d| (d, None))
             .collect();
-        for d in &a.index.decls {
-            if d.span.file == fid
-                && let Some(alias) = &d.extern_alias
-            {
-                cands.push((d, Some(alias.clone())));
-            }
-        }
+        cands.extend(
+            (a.index.decls.iter())
+                .filter(|d| d.span.file == fid && d.extern_alias.is_some())
+                .map(|d| (d, d.extern_alias.clone())),
+        );
         let mut aliases: Vec<(&String, &std::path::PathBuf)> = a.imports.iter().collect();
         aliases.sort();
         for (alias, mpath) in aliases {
-            for d in public_decls(a, mpath) {
-                if d.kind == DeclKind::Function {
-                    cands.push((d, Some(alias.clone())));
-                }
-            }
+            cands.extend(
+                (public_decls(a, mpath).into_iter())
+                    .filter(|d| d.kind == DeclKind::Function)
+                    .map(|d| (d, Some(alias.clone()))),
+            );
         }
         let mut out = Vec::new();
         for (d, qual) in cands {
-            let Some(ps) = d.sig.as_ref().map(|s| &s.params) else {
-                continue;
-            };
-            let Some((Some(first), _)) = ps.first() else {
+            let Some(ps @ [(Some(first), _), ..]) = d.sig.as_ref().map(|s| s.params.as_slice())
+            else {
                 continue;
             };
             let tps = &d.type_params;
             let Some(binds) = tyexpr::accepts(first, ty, tps) else {
                 continue;
             };
-            let full = match &qual {
-                Some(q) => format!("{q}.{}", d.name),
-                None => d.name.clone(),
-            };
+            let full = qualified(qual.as_deref(), &d.name);
             let mut slot = tabstops();
             let targs: Vec<String> = tps
                 .iter()
@@ -817,8 +773,6 @@ impl Server {
                 )
             };
             out.push(CompletionItem {
-                label: full,
-                kind: Some(CompletionItemKind::FUNCTION),
                 detail: Some(d.detail.clone()),
                 documentation: doc_at(a, d.span),
                 filter_text: Some(format!("{receiver}.{}", d.name)),
@@ -826,7 +780,7 @@ impl Server {
                 insert_text_format: Some(format),
                 text_edit: Some(CompletionTextEdit::Edit(TextEdit::new(*range, new_text))),
                 command: (ps.len() > 1 && self.snippets).then(param_hints),
-                ..Default::default()
+                ..item(full, CompletionItemKind::FUNCTION)
             });
         }
         out
@@ -841,7 +795,6 @@ impl Server {
                 let label = format!("{prefix}{}", b.name);
                 let has_args = !b.params.is_empty();
                 CompletionItem {
-                    kind: Some(CompletionItemKind::FUNCTION),
                     detail: Some(b.label()),
                     documentation: Some(Documentation::String(b.doc.to_string())),
                     filter_text: at.then(|| b.name.to_string()),
@@ -853,8 +806,7 @@ impl Server {
                     insert_text_format: snippet.then_some(InsertTextFormat::SNIPPET),
                     command: (snippet && has_args).then(param_hints),
                     sort_text: at.then(|| format!("7{}", b.name)),
-                    label,
-                    ..Default::default()
+                    ..item(label, CompletionItemKind::FUNCTION)
                 }
             })
             .collect()
@@ -868,11 +820,9 @@ impl Server {
                 let span = spans.and_then(|s| s.get(i)).copied();
                 let payload = arity.get(i).is_some_and(|(_, n)| *n > 0);
                 let mut it = CompletionItem {
-                    label: m.clone(),
-                    kind: Some(CompletionItemKind::ENUM_MEMBER),
                     detail: Some(detail.clone()),
                     documentation: span.and_then(|s| doc_at(a, s)),
-                    ..Default::default()
+                    ..item(m, CompletionItemKind::ENUM_MEMBER)
                 };
                 if payload && self.snippets {
                     it.insert_text = Some(format!("{m}($1)$0"));
@@ -905,6 +855,20 @@ fn public_decls<'a>(a: &'a Analysis, mpath: &Path) -> Vec<&'a SymDecl> {
                 && seen.insert(d.name.clone())
         })
         .collect()
+}
+
+/// A completion with just a label and a kind, for the others to build on.
+fn item(label: impl Into<String>, kind: CompletionItemKind) -> CompletionItem {
+    CompletionItem {
+        label: label.into(),
+        kind: Some(kind),
+        ..Default::default()
+    }
+}
+
+/// `name`, or `qualifier.name`.
+pub(super) fn qualified(qualifier: Option<&str>, name: &str) -> String {
+    qualifier.map_or_else(|| name.to_string(), |q| format!("{q}.{name}"))
 }
 
 /// `<A, B>`, or nothing without generic arguments.
@@ -1155,9 +1119,7 @@ fn enclosing_fn_return(text: &str, toks: &[&Token]) -> Option<T> {
     for &brace in open.iter().rev() {
         // back from the `{` to a `fn` at the same nesting level: `fn name<...>(...) ret {`
         let mut depth = 0i32;
-        let mut i = brace;
-        while i > 0 {
-            i -= 1;
+        for i in (0..brace).rev() {
             match &toks[i].tok {
                 Tok::RParen | Tok::RBracket => depth += 1,
                 Tok::LParen | Tok::LBracket => depth -= 1,
@@ -1223,8 +1185,6 @@ fn postfix_items((receiver, escaped, range): &Receiver) -> Vec<CompletionItem> {
     POSTFIX
         .iter()
         .map(|(label, tmpl, desc)| CompletionItem {
-            label: label.to_string(),
-            kind: Some(CompletionItemKind::SNIPPET),
             detail: Some(
                 tmpl.replace("{r}", receiver)
                     .replace('\t', "  ")
@@ -1238,17 +1198,8 @@ fn postfix_items((receiver, escaped, range): &Receiver) -> Vec<CompletionItem> {
                 *range,
                 tmpl.replace("{r}", escaped),
             ))),
-            ..Default::default()
+            ..item(*label, CompletionItemKind::SNIPPET)
         })
-        .collect()
-}
-
-/// Names a module exports.
-fn public_names(m: &ast::Module) -> HashSet<String> {
-    m.items
-        .iter()
-        .flat_map(ast::Item::public_names)
-        .cloned()
         .collect()
 }
 
@@ -1256,13 +1207,11 @@ fn public_names(m: &ast::Module) -> HashSet<String> {
 fn path_items(file: &Path, typed: &str, modules: bool) -> Vec<CompletionItem> {
     let dir = file.parent().unwrap_or(Path::new("."));
     let mut system = Vec::new();
-    let (base, shown) = if let Some(rel) = typed.strip_prefix(".../") {
-        match crate::modules::find_root(dir) {
-            Some(r) => (r, rel),
-            None => return vec![],
-        }
-    } else if typed.starts_with("./") || typed.starts_with("../") {
-        (dir.to_path_buf(), typed)
+    let (base, shown) = if let Some(base) = super::nav::relative_base(dir, typed) {
+        base
+    } else if typed.starts_with(".../") {
+        // outside a project
+        return vec![];
     } else if modules && crate::modules::is_system_import(typed) {
         match crate::modules::nc_home() {
             Some(h) => (h, typed),
@@ -1276,11 +1225,7 @@ fn path_items(file: &Path, typed: &str, modules: bool) -> Vec<CompletionItem> {
             system = crate::modules::SYSTEM_LIBS
                 .iter()
                 .filter(|lib| home.join(lib).is_dir())
-                .map(|lib| CompletionItem {
-                    label: format!("{lib}/"),
-                    kind: Some(CompletionItemKind::FOLDER),
-                    ..Default::default()
-                })
+                .map(|lib| item(format!("{lib}/"), CompletionItemKind::FOLDER))
                 .collect();
         }
         match crate::modules::find_root(dir) {
@@ -1301,39 +1246,29 @@ fn path_items(file: &Path, typed: &str, modules: bool) -> Vec<CompletionItem> {
     let mut out = system;
     for e in rd.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') {
-            continue;
-        }
-        let is_dir = e.file_type().is_ok_and(|t| t.is_dir());
-        if is_dir {
-            if out.iter().any(|o| o.label == format!("{name}/")) {
-                continue;
-            }
-            out.push(CompletionItem {
-                label: format!("{name}/"),
-                kind: Some(CompletionItemKind::FOLDER),
-                ..Default::default()
-            });
-        } else if !modules {
-            out.push(CompletionItem {
-                label: name,
-                kind: Some(CompletionItemKind::FILE),
-                ..Default::default()
-            });
-        } else if let Some(stem) = name.strip_suffix(".nc") {
-            if file
-                .file_name()
+        // the file being edited is not a module to import
+        let is_self = || {
+            file.file_name()
                 .is_some_and(|f| f.to_string_lossy() == name)
-                && base.join(sub) == dir
-            {
+        };
+        let it = if name.starts_with('.') {
+            continue;
+        } else if e.file_type().is_ok_and(|t| t.is_dir()) {
+            let label = format!("{name}/");
+            if out.iter().any(|o| o.label == label) {
                 continue;
             }
-            out.push(CompletionItem {
-                label: stem.to_string(),
-                kind: Some(CompletionItemKind::MODULE),
-                ..Default::default()
-            });
-        }
+            item(label, CompletionItemKind::FOLDER)
+        } else if !modules {
+            item(name, CompletionItemKind::FILE)
+        } else if let Some(stem) = name.strip_suffix(".nc")
+            && !(is_self() && base.join(sub) == dir)
+        {
+            item(stem, CompletionItemKind::MODULE)
+        } else {
+            continue;
+        };
+        out.push(it);
     }
     out.sort_by(|a, b| a.label.cmp(&b.label));
     out
@@ -1431,11 +1366,9 @@ fn struct_literal_fields(a: &Analysis, text: &str, dot: usize) -> Option<Vec<Com
             .filter(|(n, ..)| !present.contains(n.as_str()))
             .map(|(name, _, detail, def)| CompletionItem {
                 insert_text: Some(format!("{name} = ")),
-                label: name,
-                kind: Some(CompletionItemKind::FIELD),
                 detail: Some(detail),
                 documentation: def.and_then(|def| doc_at(a, def)),
-                ..Default::default()
+                ..item(name, CompletionItemKind::FIELD)
             })
             .collect(),
     )

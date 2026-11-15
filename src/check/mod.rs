@@ -200,11 +200,11 @@ impl Checker {
     }
 
     pub fn report(&mut self, r: Result<()>) {
-        if let Err(d) = r {
-            // empty messages mark errors that were already reported by the parser
-            if !d.msg.is_empty() {
-                self.errors.push(d);
-            }
+        // empty messages mark errors that were already reported by the parser
+        if let Err(d) = r
+            && !d.msg.is_empty()
+        {
+            self.errors.push(d);
         }
     }
 
@@ -322,42 +322,37 @@ impl Checker {
     fn declare_names(&mut self, m: usize) {
         let ast = Rc::clone(&self.mods[m].ast);
         for (i, it) in ast.items.iter().enumerate() {
-            let item_r: Result<()> = (|| {
-                match it {
-                    ast::Item::Fn(f) => self.add_sym(
-                        m,
-                        &f.sig.name,
-                        Sym::Fn {
-                            decl: i,
-                            func: None,
-                        },
-                        f.public,
-                        f.sig.span,
-                    )?,
-                    ast::Item::Struct(s) => {
-                        let ty = (s.type_params.is_empty())
-                            .then(|| self.types.new_struct(s.name.clone(), None));
-                        self.add_sym(m, &s.name, Sym::Struct { decl: i, ty }, s.public, s.span)?;
-                    }
-                    ast::Item::Enum(e) => {
-                        let ty = (e.type_params.is_empty())
-                            .then(|| self.types.new_enum(e.name.clone(), None));
-                        self.add_sym(m, &e.name, Sym::Enum { decl: i, ty }, e.public, e.span)?;
-                    }
-                    ast::Item::Type(t) => {
-                        let ty = self.types.new_named(t.name.clone(), VOID);
-                        self.add_sym(m, &t.name, Sym::Type(ty), t.public, t.span)?;
-                    }
-                    ast::Item::Extern(e) => {
-                        if self.is_alias(m, &e.alias) {
-                            return err(e.span, format!("duplicate alias `{}`", e.alias));
-                        }
-                        self.mods[m].externs.insert(e.alias.clone(), HashMap::new());
-                    }
-                    _ => {}
+            let item_r = match it {
+                ast::Item::Fn(f) => {
+                    let sym = Sym::Fn {
+                        decl: i,
+                        func: None,
+                    };
+                    self.add_sym(m, &f.sig.name, sym, f.public, f.sig.span)
                 }
-                Ok(())
-            })();
+                ast::Item::Struct(s) => {
+                    let ty = (s.type_params.is_empty())
+                        .then(|| self.types.new_struct(s.name.clone(), None));
+                    self.add_sym(m, &s.name, Sym::Struct { decl: i, ty }, s.public, s.span)
+                }
+                ast::Item::Enum(e) => {
+                    let ty = (e.type_params.is_empty())
+                        .then(|| self.types.new_enum(e.name.clone(), None));
+                    self.add_sym(m, &e.name, Sym::Enum { decl: i, ty }, e.public, e.span)
+                }
+                ast::Item::Type(t) => {
+                    let ty = self.types.new_named(t.name.clone(), VOID);
+                    self.add_sym(m, &t.name, Sym::Type(ty), t.public, t.span)
+                }
+                ast::Item::Extern(e) if self.is_alias(m, &e.alias) => {
+                    err(e.span, format!("duplicate alias `{}`", e.alias))
+                }
+                ast::Item::Extern(e) => {
+                    self.mods[m].externs.insert(e.alias.clone(), HashMap::new());
+                    Ok(())
+                }
+                _ => Ok(()),
+            };
             self.report(item_r);
         }
     }
@@ -369,24 +364,32 @@ impl Checker {
     }
 
     /// Index a generic struct or enum (checked only when instantiated) and its type parameters.
-    fn idx_generic_decl(
-        &mut self,
-        name: &str,
-        (span, name_span): (Span, Span),
-        kind: index::DeclKind,
-        tps: &[ast::GenericParam],
-        members: Vec<(String, String)>,
-    ) -> Option<&mut index::SymDecl> {
-        self.idx_type_params(tps);
-        let kw = if kind == index::DeclKind::Struct {
-            "struct"
-        } else {
-            "enum"
+    fn idx_generic_decl(&mut self, it: &ast::Item) {
+        use index::DeclKind as K;
+        let (kw, kind, name, spans, tps, members) = match it {
+            ast::Item::Struct(s) => {
+                // the fields, for struct literal completions
+                let fields = (s.fields.iter())
+                    .map(|f| (f.name.clone(), f.show()))
+                    .collect();
+                let spans = (s.span, s.name_span);
+                ("struct", K::Struct, &s.name, spans, &s.type_params, fields)
+            }
+            ast::Item::Enum(e) => {
+                let spans = (e.span, e.name_span);
+                ("enum", K::Enum, &e.name, spans, &e.type_params, vec![])
+            }
+            _ => return,
         };
+        self.idx_type_params(tps);
         let detail = format!("{kw} {name}{}", ast::GenericParam::list(tps));
-        let d = self.idx_decl(name, span, name_span, kind, detail, members)?;
+        let Some(d) = self.idx_decl(name, spans.0, spans.1, kind, detail, members) else {
+            return;
+        };
         d.type_params = tps.iter().map(|t| t.name.clone()).collect();
-        Some(d)
+        if let ast::Item::Struct(s) = it {
+            d.field_tys = s.fields.iter().map(|f| f.ty.clone()).collect();
+        }
     }
 
     /// Index a struct, enum or named type `ty` declared by `name`.
@@ -460,13 +463,9 @@ impl Checker {
                             return Ok(());
                         };
                         self.fill_enum(ty, e, m, &none)?;
-                        let members = (self.types.enum_def(ty).unwrap().variants.iter())
-                            .map(|(n, ps)| {
-                                (
-                                    n.clone(),
-                                    format!("{}.{}", e.name, self.variant_text(n, ps)),
-                                )
-                            })
+                        let d = self.types.enum_def(ty).unwrap();
+                        let members = (d.variants.iter())
+                            .map(|v| (v.0.clone(), self.variant_detail(d, v)))
                             .collect();
                         let spans = (e.span, e.name_span);
                         self.idx_type_decl(&e.name, spans, index::DeclKind::Enum, ty, members);
@@ -485,11 +484,8 @@ impl Checker {
                         let sig = self.sig_of(&params, ret, &f.sig);
                         self.idx_fn_decl(&f.sig.name, f.sig.span, None, sig, Some(ret));
                         let id = self.reserve_decl(&f.sig, params, ret);
-                        if let Some(SymEntry {
-                            sym: Sym::Fn { func, .. },
-                            ..
-                        }) = self.mods[m].syms.get_mut(&f.sig.name)
-                        {
+                        let entry = self.mods[m].syms.get_mut(&f.sig.name);
+                        if let Some(Sym::Fn { func, .. }) = entry.map(|e| &mut e.sym) {
                             *func = Some(id);
                         }
                         self.pending.push(PendingFn {
@@ -515,19 +511,11 @@ impl Checker {
                         self.idx_type_params(&f.sig.type_params);
                         self.idx_fn_decl(&f.sig.name, f.sig.span, None, sig, None);
                     }
-                    ast::Item::Struct(st) if !st.type_params.is_empty() => {
-                        // the fields, for struct literal completions
-                        let fields = (st.fields.iter()).map(|f| (f.name.clone(), f.show()));
-                        let fields = fields.collect();
-                        let (spans, kind) = ((st.span, st.name_span), index::DeclKind::Struct);
-                        let tps = &st.type_params;
-                        if let Some(d) = self.idx_generic_decl(&st.name, spans, kind, tps, fields) {
-                            d.field_tys = st.fields.iter().map(|f| f.ty.clone()).collect();
-                        }
-                    }
-                    ast::Item::Enum(en) if !en.type_params.is_empty() => {
-                        let (spans, kind) = ((en.span, en.name_span), index::DeclKind::Enum);
-                        self.idx_generic_decl(&en.name, spans, kind, &en.type_params, vec![]);
+                    ast::Item::Struct(ast::StructDecl { type_params, .. })
+                    | ast::Item::Enum(ast::EnumDecl { type_params, .. })
+                        if !type_params.is_empty() =>
+                    {
+                        self.idx_generic_decl(it)
                     }
                     ast::Item::Extern(e) => {
                         let dir = self.mods[m].path.parent().unwrap().to_path_buf();
@@ -535,12 +523,13 @@ impl Checker {
                             let (params, ret) = self.resolve_sig(&f.sig, m, &none)?;
                             let id = self.externs.len();
                             let sig = self.sig_of(&params, ret, &f.sig);
-                            let (detail, _) = sig.label(&format!("{}.{}", e.alias, f.sig.name));
+                            let full = format!("{}.{}", e.alias, f.sig.name);
+                            let (detail, _) = sig.label(&full);
                             let (name, span) = (&f.sig.name, f.sig.span);
                             self.idx_fn_decl(name, span, Some(&e.alias), sig, Some(ret));
                             self.ix.extern_decls.insert(id, (f.sig.span, detail));
                             self.externs.push(Extern {
-                                name: format!("{}.{}", e.alias, f.sig.name),
+                                name: full,
                                 symbol: f.symbol.clone(),
                                 params,
                                 ret,
@@ -548,10 +537,8 @@ impl Checker {
                             });
                             let tab = self.mods[m].externs.get_mut(&e.alias).unwrap();
                             if tab.insert(f.sig.name.clone(), id).is_some() {
-                                return err(
-                                    f.sig.span,
-                                    format!("duplicate extern function `{}`", f.sig.name),
-                                );
+                                let msg = format!("duplicate extern function `{}`", f.sig.name);
+                                return err(f.sig.span, msg);
                             }
                         }
                     }
@@ -596,8 +583,8 @@ impl Checker {
         tp: &HashMap<String, TyId>,
     ) -> Result<()> {
         let mut fields = Vec::new();
-        for f in &s.fields {
-            if fields.iter().any(|(n, _): &(String, TyId)| *n == f.name) {
+        for (k, f) in s.fields.iter().enumerate() {
+            if s.fields[..k].iter().any(|g| g.name == f.name) {
                 return err(f.span, format!("duplicate field `{}`", f.name));
             }
             let t = self.resolve_type(&f.ty, m, tp)?;
@@ -607,10 +594,8 @@ impl Checker {
             }
             fields.push((f.name.clone(), t));
         }
-        self.ix
-            .index
-            .field_spans
-            .insert(ty, s.fields.iter().map(|f| f.span).collect());
+        let spans = s.fields.iter().map(|f| f.span).collect();
+        self.ix.index.field_spans.insert(ty, spans);
         self.ix.type_spans.insert(ty, s.span);
         for ((name, t), f) in fields.iter().zip(&s.fields) {
             let detail = format!("{} {name}", self.types.show(*t));
@@ -630,11 +615,8 @@ impl Checker {
         tp: &HashMap<String, TyId>,
     ) -> Result<()> {
         let mut variants = Vec::new();
-        for v in &e.variants {
-            if variants
-                .iter()
-                .any(|(n, _): &(String, Vec<TyId>)| *n == v.name)
-            {
+        for (k, v) in e.variants.iter().enumerate() {
+            if e.variants[..k].iter().any(|w| w.name == v.name) {
                 return err(v.span, format!("duplicate enum member `{}`", v.name));
             }
             let ts = (v.payload.iter())
@@ -642,10 +624,8 @@ impl Checker {
                 .collect::<Result<_>>()?;
             variants.push((v.name.clone(), ts));
         }
-        self.ix
-            .index
-            .variant_spans
-            .insert(ty, e.variants.iter().map(|v| v.span).collect());
+        let spans = e.variants.iter().map(|v| v.span).collect();
+        self.ix.index.variant_spans.insert(ty, spans);
         self.ix.type_spans.insert(ty, e.span);
         if let TyKind::Enum(i) = *self.types.kind(ty) {
             self.types.enums[i as usize].variants = variants;
@@ -678,10 +658,7 @@ impl Checker {
             }
             params.push(t);
         }
-        let ret = match &sig.ret {
-            Some(t) => self.resolve_type(t, m, tp)?,
-            None => VOID,
-        };
+        let ret = (sig.ret.as_ref()).map_or(Ok(VOID), |t| self.resolve_type(t, m, tp))?;
         let value = match self.types.kind(ret) {
             TyKind::ErrU(i) => *i,
             _ => ret,
@@ -726,7 +703,7 @@ impl Checker {
         body: Block,
         parent: Option<FuncId>,
     ) {
-        let (_, ret) = self.sigs[ctx.func].clone();
+        let ret = self.sigs[ctx.func].1;
         self.funcs[ctx.func] = Some(Func {
             name,
             params,
@@ -963,11 +940,8 @@ impl Checker {
     /// Name the instantiation an error in a generic declaration came from.
     fn in_instance(&self, mut d: Diag, name: &str, args: &[TyId]) -> Diag {
         if !d.msg.contains("(in instantiation") {
-            d.msg = format!(
-                "{} (in instantiation `{}`)",
-                d.msg,
-                self.types_name(name, args)
-            );
+            let inst = self.types_name(name, args);
+            d.msg = format!("{} (in instantiation `{inst}`)", d.msg);
         }
         d
     }
@@ -978,16 +952,11 @@ impl Checker {
     /// discarded: operations that need a real type (`value.x` on a `T`) just aren't indexed.
     fn index_generic_bodies(&mut self) {
         for m in 0..self.mods.len() {
-            for decl in 0..self.mods[m].ast.items.len() {
-                let f = match &self.mods[m].ast.items[decl] {
-                    ast::Item::Fn(f) if !f.sig.type_params.is_empty() => f.clone(),
-                    _ => continue,
-                };
-                if self
-                    .fn_insts
-                    .keys()
-                    .any(|(mm, d, _)| *mm == m && *d == decl)
-                {
+            let ast = Rc::clone(&self.mods[m].ast);
+            for (decl, it) in ast.items.iter().enumerate() {
+                let ast::Item::Fn(f) = it else { continue };
+                let instantiated = self.fn_insts.keys().any(|k| (k.0, k.1) == (m, decl));
+                if f.sig.type_params.is_empty() || instantiated {
                     continue;
                 }
                 let mut tp = HashMap::new();
@@ -997,10 +966,7 @@ impl Checker {
                         None => self.types.new_struct(p.name.clone(), None),
                         Some(k) => {
                             let ty = builtin_type(k).unwrap_or(UINT);
-                            let v = match sym_const(consts.len()) {
-                                Some(v) if ty != BYTE => v,
-                                _ => 64,
-                            };
+                            let v = sym_const(consts.len()).filter(|_| ty != BYTE).unwrap_or(64);
                             consts.push(p.name.clone());
                             self.types.intern(TyKind::Const(ty, v))
                         }
@@ -1132,10 +1098,8 @@ impl Checker {
                         return Ok(b);
                     }
                 }
-                let targs = args
-                    .iter()
-                    .map(|a| self.resolve_targ(a, m, tp))
-                    .collect::<Result<Vec<_>>>()?;
+                let targs = (args.iter()).map(|a| self.resolve_targ(a, m, tp));
+                let targs = targs.collect::<Result<Vec<_>>>()?;
                 let resolved = match self.lookup_sym(m, module.as_deref(), name, *span)? {
                     Some((dm, Sym::Struct { decl, ty: None } | Sym::Enum { decl, ty: None })) => {
                         if targs.is_empty() {
@@ -1212,13 +1176,9 @@ impl Checker {
                 self.types.tuple(out)
             }
             T::Fn(ps, r, _) => {
-                let out = ps
-                    .iter()
-                    .map(|p| self.resolve_type(p, m, tp))
-                    .collect::<Result<_>>()?;
-                let r = r
-                    .as_ref()
-                    .map_or(Ok(VOID), |r| self.resolve_type(r, m, tp))?;
+                let out = (ps.iter()).map(|p| self.resolve_type(p, m, tp));
+                let out = out.collect::<Result<_>>()?;
+                let r = (r.as_ref()).map_or(Ok(VOID), |r| self.resolve_type(r, m, tp))?;
                 self.types.intern(TyKind::Fn(out, r))
             }
             T::Optional(i, sp) | T::ErrorUnion(i, sp) | T::Fut(i, sp) => {
@@ -1414,20 +1374,10 @@ impl Checker {
     /// Resolve a local variable name, capturing through enclosing functions as needed.
     pub fn lookup_local(&mut self, name: &str, span: Span) -> Result<Option<LocalId>> {
         let top = self.fns.len() - 1;
-        let mut found = None;
-        for d in (0..=top).rev() {
-            let ctx = &self.fns[d];
-            if let Some(&(_, id)) = ctx
-                .scopes
-                .iter()
-                .rev()
-                .flat_map(|s| s.iter().rev())
-                .find(|(n, _)| n == name)
-            {
-                found = Some((d, id));
-                break;
-            }
-        }
+        let found = (0..=top).rev().find_map(|d| {
+            let mut names = self.fns[d].scopes.iter().rev().flat_map(|s| s.iter().rev());
+            names.find(|(n, _)| n == name).map(|&(_, id)| (d, id))
+        });
         let Some((d, mut id)) = found else {
             return Ok(None);
         };

@@ -48,7 +48,7 @@ fn pass(p: &mut Program) -> bool {
     };
     let mut changed = false;
     for f in 0..p.funcs.len() {
-        let mut body = std::mem::replace(&mut p.funcs[f].body, Block { stmts: vec![] });
+        let mut body = std::mem::take(&mut p.funcs[f].body);
         let mut pr = Prune {
             p,
             func: f,
@@ -109,8 +109,11 @@ impl Analysis<'_> {
     /// Record the variables `e` reads. Statements in its nested blocks are analysed on their
     /// own, so their reads are not included.
     fn reads(&self, e: &Expr, out: &mut HashSet<Key>) {
-        for c in children(e) {
-            self.reads(c, out);
+        e.for_each_child(&mut |c| self.reads(c, out));
+        if let EK::If(i) = &e.kind {
+            for pt in i.arms.iter().flat_map(|a| &a.patterns) {
+                pt.for_each_expr(&mut |x| self.reads(x, out));
+            }
         }
         if let EK::Var(v) = e.kind {
             out.insert(self.key(v));
@@ -259,21 +262,6 @@ fn pat_pure(p: &Program, pt: &Pat) -> bool {
     }
 }
 
-/// The expressions directly inside `e`, including those in `if` patterns but not the
-/// statements of its nested blocks.
-fn children(e: &Expr) -> Vec<&Expr> {
-    let mut out: Vec<&Expr> = vec![];
-    e.for_each_child(&mut |c| out.push(c));
-    if let EK::If(i) = &e.kind {
-        for a in &i.arms {
-            for pt in &a.patterns {
-                pt.for_each_expr(&mut |x| out.push(x));
-            }
-        }
-    }
-    out
-}
-
 struct Prune<'a> {
     p: &'a Program,
     func: FuncId,
@@ -322,6 +310,7 @@ impl Prune<'_> {
         let mut keep = vec![true; b.stmts.len()];
         // assignments that become the declaration of their variable
         let mut declare = vec![];
+        let key = |v: VarRef| store_key(self.p, self.func, v);
         for (i, s) in b.stmts.iter().enumerate().rev() {
             let simple = matches!(s.kind, SK::Let(..) | SK::Assign(..) | SK::Expr(_))
                 && !crate::check::flow::has_nested_blocks(s);
@@ -343,28 +332,26 @@ impl Prune<'_> {
             // the store happens after the reads of its own value
             match &s.kind {
                 SK::Assign(Place::Var(v), _) => {
-                    if let Some(k) = store_key(self.p, self.func, *v) {
+                    if let Some(k) = key(*v) {
                         over.insert(k, i);
                     }
                 }
                 SK::Let(Some(v), _) => {
-                    if let Some(k) = store_key(self.p, self.func, *v) {
+                    if let Some(k) = key(*v) {
+                        over.remove(&k);
+                    }
+                }
+                // a partial store reads the rest of the variable
+                SK::Assign(pl, _) => {
+                    if let Some(k) = place_root(pl).and_then(key) {
                         over.remove(&k);
                     }
                 }
                 _ => {}
             }
-            // a partial store reads the rest of the variable
-            if let SK::Assign(pl, _) = &s.kind
-                && !matches!(pl, Place::Var(_))
-                && let Some(v) = place_root(pl)
-                && let Some(k) = store_key(self.p, self.func, v)
-            {
-                over.remove(&k);
-            }
             crate::check::flow::visit_stmt(s, &mut |e| match &e.kind {
                 EK::Var(v) => {
-                    if let Some(k) = store_key(self.p, self.func, *v) {
+                    if let Some(k) = key(*v) {
                         over.remove(&k);
                     }
                 }
@@ -385,14 +372,7 @@ impl Prune<'_> {
         for d in declare {
             let s = &mut b.stmts[d];
             if let SK::Assign(Place::Var(v), e) = &mut s.kind {
-                let e = std::mem::replace(
-                    e,
-                    Expr {
-                        kind: EK::None,
-                        ty: e.ty,
-                        span: e.span,
-                    },
-                );
+                let e = std::mem::replace(e, Expr::new(EK::None, e.ty, e.span));
                 s.kind = SK::Let(Some(*v), e);
             }
         }

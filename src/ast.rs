@@ -107,10 +107,8 @@ impl GenericParam {
         if ps.is_empty() {
             return String::new();
         }
-        format!(
-            "<{}>",
-            ps.iter().map(Self::show).collect::<Vec<_>>().join(", ")
-        )
+        let shown: Vec<_> = ps.iter().map(Self::show).collect();
+        format!("<{}>", shown.join(", "))
     }
 }
 
@@ -634,9 +632,7 @@ pub mod visit {
 
     /// Visit every node of a module.
     pub fn walk<'a>(m: &'a Module, out: &mut dyn FnMut(Node<'a>)) {
-        for it in &m.items {
-            item_spans(it, out);
-        }
+        m.items.iter().for_each(|it| item_spans(it, out));
     }
 
     pub fn item_spans<'a>(it: &'a Item, out: &mut dyn FnMut(Node<'a>)) {
@@ -644,9 +640,7 @@ pub mod visit {
             Item::Import(im) => out(Node::Span(im.span)),
             Item::Extern(e) => {
                 out(Node::Span(e.span));
-                for f in &e.fns {
-                    sig_spans(&f.sig, out);
-                }
+                e.fns.iter().for_each(|f| sig_spans(&f.sig, out));
             }
             Item::Struct(s) => {
                 out(Node::Span(s.span));
@@ -682,9 +676,7 @@ pub mod visit {
     fn sig_spans<'a>(s: &'a FnSig, out: &mut dyn FnMut(Node<'a>)) {
         out(Node::Span(s.span));
         params_spans(&s.params, out);
-        if let Some(r) = &s.ret {
-            type_spans(r, out);
-        }
+        s.ret.iter().for_each(|r| type_spans(r, out));
     }
 
     fn params_spans<'a>(ps: &'a [Param], out: &mut dyn FnMut(Node<'a>)) {
@@ -696,17 +688,13 @@ pub mod visit {
 
     fn type_spans<'a>(t: &'a TypeExpr, out: &mut dyn FnMut(Node<'a>)) {
         out(Node::Span(t.span()));
-        for c in t.children() {
-            type_spans(c, out);
-        }
+        t.children().into_iter().for_each(|c| type_spans(c, out));
     }
 
     pub fn block_spans<'a>(b: &'a Block, out: &mut dyn FnMut(Node<'a>)) {
         out(Node::Span(b.span));
         out(Node::Block(b));
-        for s in &b.stmts {
-            stmt_spans(s, out);
-        }
+        b.stmts.iter().for_each(|s| stmt_spans(s, out));
     }
 
     pub fn stmt_spans<'a>(s: &'a Stmt, out: &mut dyn FnMut(Node<'a>)) {
@@ -728,11 +716,7 @@ pub mod visit {
                 expr_spans(target, out);
                 expr_spans(value, out);
             }
-            S::Return(v) | S::Break { value: v, .. } => {
-                if let Some(v) = v {
-                    expr_spans(v, out);
-                }
-            }
+            S::Return(v) | S::Break { value: v, .. } => v.iter().for_each(|v| expr_spans(v, out)),
             S::Continue(_) => {}
             S::While { cond, body, .. } => {
                 expr_spans(cond, out);
@@ -772,29 +756,17 @@ pub mod visit {
             }
             E::Call(c, args) => {
                 expr_spans(c, out);
-                for a in args {
-                    expr_spans(a, out);
-                }
+                args.iter().for_each(|a| expr_spans(a, out));
             }
             E::Generic(x, ts) => {
                 expr_spans(x, out);
-                for t in ts {
-                    type_spans(t, out);
-                }
+                ts.iter().for_each(|t| type_spans(t, out));
             }
             E::Builtin(_, t, args) => {
-                if let Some(t) = t {
-                    type_spans(t, out);
-                }
-                for a in args {
-                    expr_spans(a, out);
-                }
+                t.iter().for_each(|t| type_spans(t, out));
+                args.iter().for_each(|a| expr_spans(a, out));
             }
-            E::Tuple(xs) | E::Array(xs) => {
-                for x in xs {
-                    expr_spans(x, out);
-                }
-            }
+            E::Tuple(xs) | E::Array(xs) => xs.iter().for_each(|x| expr_spans(x, out)),
             E::Map(kvs) => {
                 for (k, v) in kvs {
                     expr_spans(k, out);
@@ -815,14 +787,10 @@ pub mod visit {
             }
             E::If(i) => {
                 out(Node::Span(i.span));
-                if let Some(s) = &i.scrutinee {
-                    expr_spans(s, out);
-                }
+                i.scrutinee.iter().for_each(|s| expr_spans(s, out));
                 for arm in &i.arms {
                     out(Node::Span(arm.span));
-                    for p in &arm.patterns {
-                        expr_spans(p, out);
-                    }
+                    arm.patterns.iter().for_each(|p| expr_spans(p, out));
                     block_spans(&arm.body, out);
                 }
             }

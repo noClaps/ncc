@@ -245,11 +245,9 @@ fn compile(
     }
     let (c_src, header) = cgen::generate(p, sm, mode, &externs);
     if format == Format::C {
-        if let Err(e) = std::fs::write(out, c_src) {
-            eprintln!("error: cannot write `{}`: {e}", out.display());
-            return false;
-        }
-        return true;
+        let r = std::fs::write(out, c_src);
+        let r = r.map_err(|e| eprintln!("error: cannot write `{}`: {e}", out.display()));
+        return r.is_ok();
     }
     let Some(tmp) = TempDir::new() else {
         return false;
@@ -283,8 +281,7 @@ fn compile(
     } else {
         args.extend(["-O0", "-g", "-fno-omit-frame-pointer"].map(String::from));
     }
-    args.push("-w".into());
-    args.push(format!("-I{}", tmp.0.display()));
+    args.extend(["-w".into(), format!("-I{}", tmp.0.display())]);
     // headers the extern files include from their own directories
     for f in &files {
         if let Some(d) = f.parent().filter(|d| !d.as_os_str().is_empty()) {
@@ -294,9 +291,8 @@ fn compile(
     if format == Format::Asm {
         args.push("-S".into());
     }
-    args.push(main_c.display().to_string());
-    args.push("-o".into());
-    args.push(out.display().to_string());
+    let (main_c, out) = (main_c.display().to_string(), out.display().to_string());
+    args.extend([main_c, "-o".into(), out]);
     if format == Format::Exe {
         if release {
             let os = match &p.target {
@@ -309,8 +305,7 @@ fn compile(
                     .map(|f| f.to_string()),
             );
         }
-        args.push("-lm".into());
-        args.push("-lpthread".into());
+        args.extend(["-lm", "-lpthread"].map(String::from));
     }
     match Command::new(&prog).args(&args).status() {
         Ok(s) if s.success() => true,

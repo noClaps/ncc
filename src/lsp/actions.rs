@@ -560,11 +560,7 @@ pub(super) fn add_missing_fields(
             || format!("{}  ", indent_at(text, lit.span.start as usize)),
             |f| indent_at(text, f.2.start as usize).to_string(),
         );
-        let comma = if inner.ends_with(',') || inner.ends_with('{') {
-            ""
-        } else {
-            ","
-        };
+        let comma = if inner.ends_with([',', '{']) { "" } else { "," };
         let body: Vec<String> = missing.iter().map(|m| format!("{indent}{m},")).collect();
         return Some(insert_at(
             text,
@@ -589,36 +585,23 @@ fn missing_variants(a: &Analysis, fid: u32, ife: &ast::IfExpr, text: &str) -> Op
     if decl.kind != DeclKind::Enum || matches!(a.types.kind(ty.ty), TyKind::Array(_)) {
         return None;
     }
-    // variant names a branch matches with `Enum.Variant` or `Enum.Variant(...)`
-    let mut named = HashSet::new();
-    for arm in &ife.arms {
-        for p in &arm.patterns {
-            let mut pe = p;
-            if let E::Call(c, _) = &pe.kind {
-                pe = c;
-            }
-            if let E::Field(_, v) = &pe.kind {
-                named.insert(v.clone());
-            }
-            if matches!(p.kind, E::Wildcard) {
-                return Some(vec![]);
-            }
-        }
+    let patterns = || ife.arms.iter().flat_map(|a| &a.patterns);
+    if patterns().any(|p| matches!(p.kind, E::Wildcard)) {
+        return Some(vec![]);
     }
-    // the enum's name as written in the scrutinee's module (`Status`, `m.Status`)
-    let prefix = ife
-        .arms
-        .iter()
-        .flat_map(|a| &a.patterns)
-        .find_map(|p| {
-            let pe = if let E::Call(c, _) = &p.kind { c } else { p };
-            if let E::Field(b, _) = &pe.kind {
-                Some(text[b.span.start as usize..b.span.end as usize].to_string())
-            } else {
-                None
-            }
+    // the patterns `Enum.Variant` and `Enum.Variant(...)`: the enum as written, and the variant
+    let fields: Vec<_> = (patterns().map(|p| if let E::Call(c, _) = &p.kind { c } else { p }))
+        .filter_map(|p| match &p.kind {
+            E::Field(b, v) => Some((b, v)),
+            _ => None,
         })
-        .unwrap_or_else(|| decl.name.clone());
+        .collect();
+    let named: HashSet<&String> = fields.iter().map(|f| f.1).collect();
+    // the enum's name as written in the scrutinee's module (`Status`, `m.Status`)
+    let prefix = fields.first().map_or_else(
+        || decl.name.clone(),
+        |(b, _)| text[b.span.start as usize..b.span.end as usize].to_string(),
+    );
     Some(
         (a.variants(decl).into_iter())
             .filter(|(m, _)| !named.contains(m))
@@ -747,20 +730,16 @@ fn generate_function(
     })
     .map(|sp| &text[sp.start as usize..sp.end as usize]);
     // after the top-level item containing the call
-    let item_end = super::refactor::item_extent(module, at)
+    let at = super::refactor::item_extent(module, at)
         .map_or(text.len(), |(_, hi)| line_end(text, hi as usize));
     let ret = ret.map(|r| format!(" {r}")).unwrap_or_default();
-    let lead = if text[..item_end].ends_with('\n') {
-        ""
-    } else {
-        "\n"
-    };
+    let lead = if text[..at].ends_with('\n') { "" } else { "\n" };
     let body = format!("{lead}\nfn {name}({}){ret} {{\n}}\n", params.join(", "));
     Some(edit_action(
         format!("Generate function `{name}`"),
         CodeActionKind::QUICKFIX,
         uri,
-        vec![insert_at(text, item_end, body)],
+        vec![insert_at(text, at, body)],
         None,
     ))
 }

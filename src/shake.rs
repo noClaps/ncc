@@ -14,6 +14,7 @@ use crate::check::flow;
 use crate::tir::*;
 
 /// What kept code references, transitively.
+#[derive(Default)]
 pub struct Reach {
     pub funcs: HashSet<FuncId>,
     pub globals: HashSet<GlobalId>,
@@ -39,11 +40,7 @@ pub fn reach(p: &Program, entry_file: u32) -> Reach {
 /// Reachability, and for each statement of `main` whether it is kept.
 fn analyse(p: &Program, entry_file: u32) -> (Reach, Vec<bool>) {
     let stmts = &p.funcs[p.main].body.stmts;
-    let mut r = Reach {
-        funcs: HashSet::new(),
-        globals: HashSet::new(),
-        externs: HashSet::new(),
-    };
+    let mut r = Reach::default();
     let mut work: Vec<FuncId> = p.tests.iter().map(|t| t.func).collect();
     let mut keep: Vec<bool> = stmts.iter().map(|s| s.span.file == entry_file).collect();
     let writes: Vec<HashSet<GlobalId>> = stmts

@@ -219,27 +219,20 @@ fn convert_comment(uri: &Uri, text: &str, off: usize) -> Option<CodeActionOrComm
     } else {
         "Convert to a doc comment"
     };
-    Some(edit_action(
-        title.into(),
-        CodeActionKind::REFACTOR_REWRITE,
-        uri,
-        edits,
-        None,
-    ))
+    Some(rewrite(title, uri, edits))
 }
 
 /// Rewrite the integer literal at the cursor in the other bases.
 fn convert_int(uri: &Uri, text: &str, s: usize, e: usize) -> Vec<CodeActionOrCommand> {
     let (toks, _) = crate::lexer::lex_all(text, 0, 0);
-    let Some(t) = toks.iter().find(|t| {
-        matches!(t.tok, Tok::Int(..)) && t.span.start as usize <= s && e <= t.span.end as usize
+    let Some((v, unsigned, ts, te)) = toks.iter().find_map(|t| match t.tok {
+        Tok::Int(v, u) if t.span.start as usize <= s && e <= t.span.end as usize => {
+            Some((v, u, t.span.start as usize, t.span.end as usize))
+        }
+        _ => None,
     }) else {
         return vec![];
     };
-    let Tok::Int(v, unsigned) = t.tok else {
-        return vec![];
-    };
-    let (ts, te) = (t.span.start as usize, t.span.end as usize);
     let cur = &text[ts..te];
     [
         (10, "decimal"),
@@ -251,13 +244,8 @@ fn convert_int(uri: &Uri, text: &str, s: usize, e: usize) -> Vec<CodeActionOrCom
     .map(|(b, name)| (int_in_base(v, b, unsigned), name))
     .filter(|(lit, _)| lit != cur)
     .map(|(lit, name)| {
-        edit_action(
-            format!("Convert to {name} (`{lit}`)"),
-            CodeActionKind::REFACTOR_REWRITE,
-            uri,
-            vec![TextEdit::new(range(text, ts, te), lit)],
-            None,
-        )
+        let title = format!("Convert to {name} (`{lit}`)");
+        rewrite(title, uri, vec![TextEdit::new(range(text, ts, te), lit)])
     })
     .collect()
 }
@@ -272,27 +260,19 @@ fn interpolate(uri: &Uri, text: &str, s: usize, e: usize) -> Option<CodeActionOr
         return None;
     }
     let (toks, _) = crate::lexer::lex_all(text, 0, 0);
-    let t = toks.iter().find(|t| {
-        matches!(t.tok, Tok::Str(_)) && (t.span.start as usize) < s && e < t.span.end as usize
+    let parts = toks.iter().find_map(|t| match &t.tok {
+        Tok::Str(parts) if (t.span.start as usize) < s && e < t.span.end as usize => Some(parts),
+        _ => None,
     })?;
     // not inside an existing interpolation
-    if let Tok::Str(parts) = &t.tok
-        && parts.iter().any(|p| {
-            matches!(p, crate::lexer::StrPart::Expr(src, off) if *off <= e && s <= off + src.len())
-        })
-    {
+    if parts.iter().any(
+        |p| matches!(p, crate::lexer::StrPart::Expr(src, off) if *off <= e && s <= off + src.len()),
+    ) {
         return None;
     }
-    Some(edit_action(
-        format!("Interpolate `{}`", sel.trim()),
-        CodeActionKind::REFACTOR_REWRITE,
-        uri,
-        vec![TextEdit::new(
-            range(text, s, e),
-            format!("{{{}}}", sel.trim()),
-        )],
-        None,
-    ))
+    let sel = sel.trim();
+    let edit = TextEdit::new(range(text, s, e), format!("{{{sel}}}"));
+    Some(rewrite(format!("Interpolate `{sel}`"), uri, vec![edit]))
 }
 
 /// Extract a selected expression that uses no local variables into a module-level variable.
@@ -318,21 +298,19 @@ fn extract_constant(
     }
     // only inside a function, test or block (at the top level it is "extract variable")
     let (lo, _) = item_extent(module, s32)?;
-    let top_stmt = module.items.iter().any(|it| {
+    if module.items.iter().any(|it| {
         matches!(it, ast::Item::Stmt(st) if st.span.start == lo && !matches!(st.kind, S::Fn(_)))
-    });
-    if top_stmt {
+    }) {
         return None;
     }
     // every name used must be module-level (or a function or type)
-    for r in &a.index.refs {
-        if r.span.file != fid || r.span.start < s32 || r.span.end > e32 {
-            continue;
-        }
-        let d = r.def.and_then(|def| a.decl(def));
-        if d.is_some_and(|d| d.scope.is_some()) {
-            return None;
-        }
+    if a.index.refs.iter().any(|r| {
+        r.span.file == fid
+            && r.span.start >= s32
+            && r.span.end <= e32
+            && (r.def.and_then(|def| a.decl(def))).is_some_and(|d| d.scope.is_some())
+    }) {
+        return None;
     }
     let taken: HashSet<String> = a.index.decls.iter().map(|d| d.name.clone()).collect();
     let mut name = "CONSTANT".to_string();
@@ -385,13 +363,19 @@ fn match_on_call(
     let subject = &text[x.span.start as usize..x.span.end as usize];
     let body = enum_match(a, fid, edecl, subject, indent)?;
     let body = body.trim_start().trim_end_matches('\n').to_string();
-    Some(edit_action(
-        "Match on the result".into(),
+    let edit = TextEdit::new(span_range(text, x.span), body);
+    Some(rewrite("Match on the result", uri, vec![edit]))
+}
+
+/// A rewrite of the document at `uri`.
+fn rewrite(title: impl Into<String>, uri: &Uri, edits: Vec<TextEdit>) -> CodeActionOrCommand {
+    edit_action(
+        title.into(),
         CodeActionKind::REFACTOR_REWRITE,
         uri,
-        vec![TextEdit::new(span_range(text, x.span), body)],
+        edits,
         None,
-    ))
+    )
 }
 
 /// `if <subject> {` with an empty branch per variant of the enum `edecl`, each line (the first
